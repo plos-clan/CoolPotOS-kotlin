@@ -1,15 +1,11 @@
-import kotlinx.cinterop.CPointer
-import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.get
-import kotlinx.cinterop.pointed
-import kotlinx.cinterop.reinterpret
+import kotlinx.cinterop.*
 import natives.framebuffer_request
 import natives.limine_framebuffer
 import org.plos_clan.cpos.driver.Acpi
+import org.plos_clan.cpos.managers.ProcessManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.KernelPageDirectory
-import org.plos_clan.cpos.task.ProcessManager
 import org.plos_clan.cpos.term.Terminal
 import kotlin.experimental.ExperimentalNativeApi
 
@@ -18,11 +14,11 @@ private const val KERNEL_BANNER = "CoolPotOS CP_Kernel-x86_64-v0.0.1_{kotlin_edi
 @ExperimentalNativeApi
 @ExperimentalForeignApi
 @CName("kernel_main")
-fun kernelMain(): Nothing = KernelBoot.start()
+fun kernelMain() = KernelBoot.start()
 
 private object KernelBoot {
     @ExperimentalForeignApi
-    fun start(): Nothing {
+    fun start() {
         framebuffer_request.response
             ?.pointed
             ?.takeIf { it.framebuffer_count > 0u }
@@ -57,7 +53,7 @@ private object KernelBoot {
     }
 }
 
-private fun haltForever(): Nothing {
+private fun haltForever() {
     while (true) {
     }
 }

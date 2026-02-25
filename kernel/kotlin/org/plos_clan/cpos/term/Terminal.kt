@@ -6,8 +6,6 @@ import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.UIntVar
 import kotlinx.cinterop.set
 
-private const val DEFAULT_BACKGROUND_COLOR = 0xFF000000u
-
 private data class TerminalSurface(
     val pixels: CPointer<UIntVar>,
     val width: Int,
@@ -16,6 +14,7 @@ private data class TerminalSurface(
 )
 
 object Terminal {
+    private const val DEFAULT_BACKGROUND_COLOR = 0xFF000000u
     private var surface: TerminalSurface? = null
     private var backgroundColor: UInt = DEFAULT_BACKGROUND_COLOR
 

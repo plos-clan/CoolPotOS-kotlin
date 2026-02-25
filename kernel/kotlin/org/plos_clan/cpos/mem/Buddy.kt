@@ -5,20 +5,11 @@ package org.plos_clan.cpos.mem
 import kotlinx.cinterop.get
 import kotlinx.cinterop.pointed
 import natives.memmap_request
-
-private const val LIMINE_MEMMAP_USABLE = 0uL
-private const val LIMINE_MEMMAP_RESERVED = 1uL
-private const val LIMINE_MEMMAP_ACPI_RECLAIMABLE = 2uL
-private const val LIMINE_MEMMAP_ACPI_NVS = 3uL
-private const val LIMINE_MEMMAP_BAD_MEMORY = 4uL
-private const val LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE = 5uL
-private const val LIMINE_MEMMAP_EXECUTABLE_AND_MODULES = 6uL
-private const val LIMINE_MEMMAP_FRAMEBUFFER = 7uL
-private const val LIMINE_MEMMAP_ACPI_TABLES = 8uL
-
-private const val MAX_BUDDY_ORDER = 30
-private const val BYTES_PER_MIB = 1_048_576uL
-private const val LOW_MEMORY_GUARD = PAGE_SIZE_BYTES
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
+import org.plos_clan.cpos.utils.alignDown
+import org.plos_clan.cpos.utils.alignUp
+import org.plos_clan.cpos.utils.hex64
+import org.plos_clan.cpos.utils.isPageAligned
 
 private data class MemoryRange(
     val base: ULong,
@@ -31,6 +22,20 @@ private data class MemmapDecision(
 )
 
 object BuddyFrameAllocator {
+    private const val LIMINE_MEMMAP_USABLE = 0uL
+    private const val LIMINE_MEMMAP_RESERVED = 1uL
+    private const val LIMINE_MEMMAP_ACPI_RECLAIMABLE = 2uL
+    private const val LIMINE_MEMMAP_ACPI_NVS = 3uL
+    private const val LIMINE_MEMMAP_BAD_MEMORY = 4uL
+    private const val LIMINE_MEMMAP_BOOTLOADER_RECLAIMABLE = 5uL
+    private const val LIMINE_MEMMAP_EXECUTABLE_AND_MODULES = 6uL
+    private const val LIMINE_MEMMAP_FRAMEBUFFER = 7uL
+    private const val LIMINE_MEMMAP_ACPI_TABLES = 8uL
+
+    private const val MAX_BUDDY_ORDER = 30
+    private const val BYTES_PER_MIB = 1_048_576uL
+    private const val LOW_MEMORY_GUARD = PAGE_SIZE_BYTES
+
     private val freeLists = Array(MAX_BUDDY_ORDER + 1) { linkedSetOf<ULong>() }
 
     private var originFrames = 0uL
@@ -290,23 +295,3 @@ object BuddyFrameAllocator {
         return blockStart
     }
 }
-
-private fun ULong.alignUp(alignment: ULong): ULong {
-    if (alignment == 0uL) {
-        return this
-    }
-    val mask = alignment - 1uL
-    return (this + mask) and mask.inv()
-}
-
-private fun ULong.alignDown(alignment: ULong): ULong {
-    if (alignment == 0uL) {
-        return this
-    }
-    val mask = alignment - 1uL
-    return this and mask.inv()
-}
-
-private fun ULong.isPageAligned(): Boolean = (this and (PAGE_SIZE_BYTES - 1uL)) == 0uL
-
-private fun ULong.hex64(): String = toString(16).padStart(16, '0')
