@@ -3,16 +3,13 @@
 package org.plos_clan.cpos.mem
 
 import kotlinx.cinterop.CPointer
-import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set
 import natives.invlpg
 import natives.read_cr3
+import org.plos_clan.cpos.utils.*
 
-const val PAGE_SIZE = 4096L
-const val PTE_COUNT = 512
-const val PAGE_SIZE_BYTES: ULong = 4096uL
 
 val PTE_PRESENT: ULong = 1uL shl 0
 val PTE_WRITABLE: ULong = 1uL shl 1
@@ -122,6 +119,11 @@ data class PageDirectory(
         parentTable[index] = (frameAddress and PTE_ADDR_MASK) or PTE_PARENT_FLAGS
         return tablePointer
     }
+
+    private fun pml4Index(address: ULong): Int = ((address shr 39) and 0x1ffuL).toInt()
+    private fun pdptIndex(address: ULong): Int = ((address shr 30) and 0x1ffuL).toInt()
+    private fun pdIndex(address: ULong): Int = ((address shr 21) and 0x1ffuL).toInt()
+    private fun ptIndex(address: ULong): Int = ((address shr 12) and 0x1ffuL).toInt()
 }
 
 object KernelPageDirectory {
@@ -154,34 +156,3 @@ object KernelPageDirectory {
         byteLength: ULong,
     ): ULong? = (activeDirectory ?: initialize())?.mapMmioRange(physicalAddress, byteLength)
 }
-
-private fun pml4Index(address: ULong): Int = ((address shr 39) and 0x1ffuL).toInt()
-private fun pdptIndex(address: ULong): Int = ((address shr 30) and 0x1ffuL).toInt()
-private fun pdIndex(address: ULong): Int = ((address shr 21) and 0x1ffuL).toInt()
-private fun ptIndex(address: ULong): Int = ((address shr 12) and 0x1ffuL).toInt()
-
-private fun CPointer<ULongVar>.clear() {
-    for (index in 0 until PTE_COUNT) {
-        this[index] = 0uL
-    }
-}
-
-private fun ULong.alignUp(alignment: ULong): ULong {
-    if (alignment == 0uL) {
-        return this
-    }
-    val mask = alignment - 1uL
-    return (this + mask) and mask.inv()
-}
-
-private fun ULong.alignDown(alignment: ULong): ULong {
-    if (alignment == 0uL) {
-        return this
-    }
-    val mask = alignment - 1uL
-    return this and mask.inv()
-}
-
-private fun ULong.isPageAligned(): Boolean = (this and (PAGE_SIZE_BYTES - 1uL)) == 0uL
-
-private fun ULong.hex64(): String = toString(16).padStart(16, '0')

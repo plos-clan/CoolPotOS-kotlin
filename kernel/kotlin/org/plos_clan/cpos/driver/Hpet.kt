@@ -2,28 +2,28 @@
 
 package org.plos_clan.cpos.driver
 
-import kotlinx.cinterop.CPointed
-import kotlinx.cinterop.CPointer
-import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.UIntVar
+import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set
-import kotlinx.cinterop.toCPointer
 import org.plos_clan.cpos.mem.KernelPageDirectory
-
-private const val GAS_SPACE_SYSTEM_MEMORY = 0u
-private const val HPET_MMIO_SIZE = 0x1000uL
-
-private const val FEMTOSECONDS_PER_NANOSECOND = 1_000_000uL
-private const val HPET_ROUTE_IRQ_VECTOR = 20u
-
-private const val COUNTER_PERIOD_OFFSET = 0x4uL
-private const val GENERAL_CONFIGURATION_OFFSET = 0x10uL
-private const val TIMER0_CONFIGURATION_OFFSET = 0x100uL
-private const val TIMER0_COMPARATOR_OFFSET = 0x108uL
-private const val MAIN_COUNTER_OFFSET = 0xF0uL
+import org.plos_clan.cpos.utils.hasBit
+import org.plos_clan.cpos.utils.hex64
+import org.plos_clan.cpos.utils.toPointer
 
 object Hpet {
+    private const val GAS_SPACE_SYSTEM_MEMORY = 0u
+    private const val HPET_MMIO_SIZE = 0x1000uL
+
+    private const val FEMTOSECONDS_PER_NANOSECOND = 1_000_000uL
+    private const val HPET_ROUTE_IRQ_VECTOR = 20u
+
+    private const val COUNTER_PERIOD_OFFSET = 0x4uL
+    private const val GENERAL_CONFIGURATION_OFFSET = 0x10uL
+    private const val TIMER0_CONFIGURATION_OFFSET = 0x100uL
+    private const val TIMER0_COMPARATOR_OFFSET = 0x108uL
+    private const val MAIN_COUNTER_OFFSET = 0xF0uL
+
     private var baseVirtualAddress: ULong = 0uL
     private var fmsPerTick: ULong = 0uL
     private var initialized = false
@@ -133,14 +133,3 @@ object Hpet {
         register[0] = value
     }
 }
-
-private fun ULong.hasBit(index: Int): Boolean {
-    if (index < 0 || index >= ULong.SIZE_BITS) {
-        return false
-    }
-    return ((this shr index) and 1uL) != 0uL
-}
-
-private fun ULong.hex64(): String = toString(16).padStart(16, '0')
-
-private fun <T : CPointed> ULong.toPointer(): CPointer<T>? = toLong().toCPointer()

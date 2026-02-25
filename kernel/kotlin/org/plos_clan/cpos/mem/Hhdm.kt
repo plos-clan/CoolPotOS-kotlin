@@ -5,8 +5,10 @@ package org.plos_clan.cpos.mem
 import kotlinx.cinterop.CPointed
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.pointed
-import kotlinx.cinterop.toCPointer
 import natives.hhdm_request
+import org.plos_clan.cpos.utils.toAddress
+import org.plos_clan.cpos.utils.toHex64
+import org.plos_clan.cpos.utils.toPointer
 
 object Hhdm {
     var offset: ULong = 0u
@@ -38,21 +40,3 @@ object Hhdm {
     fun <T : CPointed> toPhysicalPointer(pointer: CPointer<T>): CPointer<T>? =
         toPhysical(pointer.toAddress()).toPointer()
 }
-
-fun ULong.toVirtualAddress(): ULong = Hhdm.toVirtual(this)
-
-fun ULong.toPhysicalAddress(): ULong = Hhdm.toPhysical(this)
-
-fun <T : CPointed> ULong.toVirtualPointer(): CPointer<T>? = Hhdm.toVirtualPointer(this)
-
-fun <T : CPointed> ULong.toPhysicalPointer(): CPointer<T>? = Hhdm.toPhysicalPointer(this)
-
-fun <T : CPointed> CPointer<T>.toVirtualPointer(): CPointer<T>? = Hhdm.toVirtualPointer(this)
-
-fun <T : CPointed> CPointer<T>.toPhysicalPointer(): CPointer<T>? = Hhdm.toPhysicalPointer(this)
-
-private fun <T : CPointed> CPointer<T>.toAddress(): ULong = rawValue.toLong().toULong()
-
-private fun <T : CPointed> ULong.toPointer(): CPointer<T>? = toLong().toCPointer()
-
-private fun ULong.toHex64(): String = toString(16).padStart(16, '0')

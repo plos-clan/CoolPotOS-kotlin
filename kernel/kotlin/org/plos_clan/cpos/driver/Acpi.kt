@@ -5,7 +5,15 @@ package org.plos_clan.cpos.driver
 import kotlinx.cinterop.*
 import natives.rsdp_request
 import org.plos_clan.cpos.mem.Hhdm
-import org.plos_clan.cpos.mem.toVirtualPointer
+import org.plos_clan.cpos.utils.checksumOk
+import org.plos_clan.cpos.utils.hex32
+import org.plos_clan.cpos.utils.hex64
+import org.plos_clan.cpos.utils.matchesAscii
+import org.plos_clan.cpos.utils.readAscii
+import org.plos_clan.cpos.utils.readU32
+import org.plos_clan.cpos.utils.readU64
+import org.plos_clan.cpos.utils.readU8
+import org.plos_clan.cpos.utils.toVirtualPointer
 
 private const val RSDP_V1_LENGTH = 20
 private const val RSDP_V2_MIN_LENGTH = 36
@@ -268,51 +276,3 @@ private fun tableAt(address: ULong): AcpiTable? {
     }
     return AcpiTable(pointer = pointer, length = length)
 }
-
-private fun CPointer<UByteVar>.readU8(offset: Int): UByte = this[offset]
-
-private fun CPointer<UByteVar>.readU32(offset: Int): UInt {
-    val b0 = readU8(offset).toULong()
-    val b1 = readU8(offset + 1).toULong()
-    val b2 = readU8(offset + 2).toULong()
-    val b3 = readU8(offset + 3).toULong()
-    return (b0 or (b1 shl 8) or (b2 shl 16) or (b3 shl 24)).toUInt()
-}
-
-private fun CPointer<UByteVar>.readU64(offset: Int): ULong {
-    val b0 = readU8(offset).toULong()
-    val b1 = readU8(offset + 1).toULong()
-    val b2 = readU8(offset + 2).toULong()
-    val b3 = readU8(offset + 3).toULong()
-    val b4 = readU8(offset + 4).toULong()
-    val b5 = readU8(offset + 5).toULong()
-    val b6 = readU8(offset + 6).toULong()
-    val b7 = readU8(offset + 7).toULong()
-    return b0 or
-        (b1 shl 8) or
-        (b2 shl 16) or
-        (b3 shl 24) or
-        (b4 shl 32) or
-        (b5 shl 40) or
-        (b6 shl 48) or
-        (b7 shl 56)
-}
-
-private fun CPointer<UByteVar>.matchesAscii(offset: Int, text: String): Boolean =
-    text.indices.all { index -> readU8(offset + index) == text[index].code.toUByte() }
-
-private fun CPointer<UByteVar>.readAscii(offset: Int, length: Int): String =
-    CharArray(length) { index -> readU8(offset + index).toInt().toChar() }.concatToString()
-
-private fun CPointer<UByteVar>.checksumOk(length: Int): Boolean {
-    if (length <= 0) {
-        return false
-    }
-    val sum = (0 until length).fold(0u) { acc, index ->
-        (acc + readU8(index).toUInt()) and 0xffu
-    }
-    return sum == 0u
-}
-
-private fun ULong.hex64(): String = toString(16).padStart(16, '0')
-private fun UInt.hex32(): String = toString(16).padStart(8, '0')
