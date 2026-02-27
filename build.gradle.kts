@@ -141,7 +141,10 @@ kotlin {
 val kernelElf = File(buildDir, "kernel.elf")
 val isoImage = File(buildDir, "CoolPotOS.iso")
 
-val compileC = tasks.register<CompileCSourcesTask>("compileC") {
+val compileC by tasks.register<CompileCSourcesTask>("compileC") {
+    group = "build"
+    description = "Compiles C sources into object files."
+
     sourceFiles.from(cSources)
     inputs.files(cDir.resolve("bridge.h"), cDir.resolve("limine.h"))
         .withPathSensitivity(PathSensitivity.RELATIVE)
@@ -149,7 +152,9 @@ val compileC = tasks.register<CompileCSourcesTask>("compileC") {
     commonArgs.set(cCompilerArgs)
 }
 
-val buildMlibc = tasks.register<Exec>("buildMlibc") {
+val buildMlibc by tasks.register<Exec>("buildMlibc") {
+    group = "build"
+    description = "Builds the mlibc C library."
     inputs.files("build-mlibc", mlibcPatch)
     outputs.dir(mlibcPrefix)
 
@@ -167,7 +172,9 @@ val buildMlibc = tasks.register<Exec>("buildMlibc") {
     commandLine("./build-mlibc")
 }
 
-val linkKernel = tasks.register<Exec>("linkKernel") {
+val linkKernel by tasks.register<Exec>("linkKernel") {
+    group = "build"
+    description = "Links the kernel and runtime libraries into an ELF executable."
     dependsOn("linkDebugStaticNative", compileC, buildMlibc)
 
     inputs.files(linkInputs)
@@ -191,7 +198,9 @@ val linkKernel = tasks.register<Exec>("linkKernel") {
     commandLine(linkCommand)
 }
 
-val stageIso = tasks.register<Sync>("stageIso") {
+val stageIso by tasks.register<Sync>("stageIso") {
+    group = "build"
+    description = "Stages the kernel and limine assets into the ISO directory."
     dependsOn(linkKernel)
 
     into(isoDir)
@@ -201,7 +210,9 @@ val stageIso = tasks.register<Sync>("stageIso") {
     from(kernelElf)
 }
 
-val buildIso = tasks.register<Exec>("buildIso") {
+val buildIso by tasks.register<Exec>("buildIso") {
+    group = "build"
+    description = "Stages the kernel and limine assets into an ISO image."
     dependsOn(stageIso)
 
     inputs.dir(isoDir)
@@ -216,7 +227,9 @@ val buildIso = tasks.register<Exec>("buildIso") {
     )
 }
 
-val runTask = tasks.register("run") {
+val runTask by tasks.register("run") {
+    group = "runCoolPotOS"
+    description = "Runs CoolPotOS in QEMU."
     dependsOn(buildIso)
 
     doLast {
@@ -242,10 +255,14 @@ val runTask = tasks.register("run") {
 }
 
 tasks.register("dev") {
+    group = "runCoolPotOS"
+    description = "Runs CoolPotOS in QEMU."
     dependsOn(runTask)
 }
 
 tasks.register<Delete>("cleanAll") {
+    group = "build"
+    description = "Deletes all build artifacts."
     delete(buildDir)
 }
 
