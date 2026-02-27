@@ -1,7 +1,5 @@
 # Build cache
-build/
 .gradle/
-CMakeLists.txt
 
 # IDE Config
 .idea/

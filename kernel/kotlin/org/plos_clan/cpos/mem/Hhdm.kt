@@ -5,7 +5,7 @@ package org.plos_clan.cpos.mem
 import kotlinx.cinterop.CPointed
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.pointed
-import natives.hhdm_request
+import bridge.hhdm_request
 import org.plos_clan.cpos.utils.toAddress
 import org.plos_clan.cpos.utils.toHex64
 import org.plos_clan.cpos.utils.toPointer

@@ -1,6 +1,7 @@
 import kotlinx.cinterop.*
-import natives.framebuffer_request
-import natives.limine_framebuffer
+import bridge.framebuffer_request
+import bridge.gdt_setup
+import bridge.limine_framebuffer
 import org.plos_clan.cpos.driver.Acpi
 import org.plos_clan.cpos.managers.ProcessManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
@@ -28,7 +29,7 @@ private object KernelBoot {
 
         println("Kernel booting...")
         println(KERNEL_BANNER)
-        natives.gdt_setup()
+        gdt_setup()
         println("Global descriptor table initialized.")
         Hhdm.initialize()
         BuddyFrameAllocator.initialize()

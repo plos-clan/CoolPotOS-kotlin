@@ -1,9 +1,9 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.driver
 
+import bridge.rsdp_request
 import kotlinx.cinterop.*
-import natives.rsdp_request
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.utils.checksumOk
 import org.plos_clan.cpos.utils.hex32

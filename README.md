@@ -1,4 +1,4 @@
-# CoolPotOS Kotlin edition
+# CoolPotOS Kotlin
 
 ## Build
 

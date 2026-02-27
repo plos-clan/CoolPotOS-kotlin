@@ -6,8 +6,8 @@ import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set
-import natives.invlpg
-import natives.read_cr3
+import bridge.invlpg
+import bridge.read_cr3
 import org.plos_clan.cpos.utils.*
 
 

@@ -4,7 +4,7 @@ package org.plos_clan.cpos.mem
 
 import kotlinx.cinterop.get
 import kotlinx.cinterop.pointed
-import natives.memmap_request
+import bridge.memmap_request
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.alignUp
@@ -92,7 +92,7 @@ object BuddyFrameAllocator {
         val targetOrder = requiredOrder(frameCount) ?: return null
         val sourceOrder = firstNonEmptyOrder(targetOrder) ?: return null
 
-        var blockStart = removeFirstBlock(sourceOrder) ?: return null
+        val blockStart = removeFirstBlock(sourceOrder) ?: return null
         var order = sourceOrder
         while (order > targetOrder) {
             order -= 1

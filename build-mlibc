@@ -2,9 +2,8 @@
 
 set -ex
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
-ROOT_DIR="$SCRIPT_DIR"
-BUILD_DIR="$ROOT_DIR/build/mlibc-$ARCH"
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+BUILD_DIR="$ROOT_DIR/.gradle/build/mlibc-$ARCH"
 MLIBC_DIR="$ROOT_DIR/mlibc"
 MLIBC_PATCH="$ROOT_DIR/assets/mlibc.patch"
 
@@ -42,8 +41,8 @@ endian = 'little'
 EOF
 unset ARCH
 
-#git -C "$MLIBC_DIR" apply "$MLIBC_PATCH" 2>/dev/null || \
-#git -C "$MLIBC_DIR" apply -R --check "$MLIBC_PATCH" >/dev/null
+git -C "$MLIBC_DIR" apply "$MLIBC_PATCH" 2>/dev/null || \
+git -C "$MLIBC_DIR" apply -R --check "$MLIBC_PATCH" >/dev/null
 
 meson setup "$MLIBC_DIR" \
     --cross-file cross_file.txt \

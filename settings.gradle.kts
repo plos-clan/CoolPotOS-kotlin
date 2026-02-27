@@ -5,4 +5,4 @@ pluginManagement {
     }
 }
 
-rootProject.name = "CoolPotOS-Kotlin"
+rootProject.name = "CoolPotOS"
