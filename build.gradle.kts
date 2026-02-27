@@ -1,12 +1,3 @@
-import org.gradle.api.DefaultTask
-import org.gradle.api.file.*
-import org.gradle.api.provider.ListProperty
-import org.gradle.api.tasks.*
-import org.gradle.process.ExecOperations
-import org.gradle.work.DisableCachingByDefault
-import org.gradle.workers.*
-import javax.inject.Inject
-
 interface CompileCFileParameters : WorkParameters {
     val sourceFile: RegularFileProperty
     val outputFile: RegularFileProperty
@@ -75,7 +66,6 @@ repositories {
     mavenCentral()
 }
 
-layout.buildDirectory.set(file(".gradle/build"))
 val buildDir = layout.buildDirectory.get().asFile
 val isoDir = File(buildDir, "iso")
 val cDir = file("kernel/c")
@@ -84,22 +74,6 @@ val linkerScript = assetsDir.resolve("linker.ld")
 val bridgeDef = cDir.resolve("bridge.def")
 val mlibcPatch = assetsDir.resolve("mlibc.patch")
 val limineAssetsDir = assetsDir.resolve("limine")
-
-val kotlinProjectPersistentDir = providers
-    .gradleProperty("kotlin.project.persistent.dir")
-    .orNull
-    ?.let(::file)
-    ?: rootDir.resolve(".kotlin")
-val kotlinMetadataDir = kotlinProjectPersistentDir.resolve("metadata")
-
-listOf(
-    "kotlinCInteropLibraries",
-    "kotlinTransformedMetadataLibraries",
-    "kotlinTransformedCInteropMetadataLibraries",
-    "commonizer",
-).forEach { directoryName ->
-    kotlinMetadataDir.resolve(directoryName).mkdirs()
-}
 
 val konanHome = System.getenv("KONAN_HOME") ?: "${System.getProperty("user.home")}/.konan"
 val toolRoot = "$konanHome/dependencies/x86_64-unknown-linux-gnu-gcc-8.3.0-glibc-2.19-kernel-4.9-2"
