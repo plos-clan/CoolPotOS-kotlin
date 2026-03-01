@@ -197,6 +197,8 @@ object Acpi {
         parseIfFound(MadtParser) { madt ->
             println("ACPI: LAPIC address=0x${madt.lapicAddress.hex32()}")
             println("ACPI: IOAPIC address=0x${madt.ioapicAddress.hex32()}")
+
+
         }
 
         parseIfFound(SpcrParser) { uartAddress ->

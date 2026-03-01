@@ -1,5 +1,7 @@
 # Build cache
 .gradle/
+.kotlin/
+build/
 
 # IDE Config
 .idea/

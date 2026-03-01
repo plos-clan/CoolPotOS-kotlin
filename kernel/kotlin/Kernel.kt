@@ -1,12 +1,14 @@
 import kotlinx.cinterop.*
 import bridge.framebuffer_request
 import bridge.gdt_setup
+import bridge.idt_setup
 import bridge.limine_framebuffer
 import org.plos_clan.cpos.driver.Acpi
 import org.plos_clan.cpos.managers.ProcessManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.KernelPageDirectory
+import org.plos_clan.cpos.other.ErrorHandler
 import org.plos_clan.cpos.term.Terminal
 import kotlin.experimental.ExperimentalNativeApi
 
@@ -30,12 +32,15 @@ private object KernelBoot {
         println("Kernel booting...")
         println(KERNEL_BANNER)
         gdt_setup()
-        println("Global descriptor table initialized.")
+        idt_setup()
+        println("Descriptor table initialized.")
+        ErrorHandler.initialize()
         Hhdm.initialize()
         BuddyFrameAllocator.initialize()
         KernelPageDirectory.initialize()
         Acpi.init()
         ProcessManager.initialize()
+        println("Kernel load done!")
         haltForever()
     }
 

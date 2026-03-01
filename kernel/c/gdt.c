@@ -17,12 +17,12 @@ struct tss {
 
 typedef struct tss tss_t;
 typedef uint64_t gdt_entries_t[7];
-typedef uint8_t tss_stack_t[1024];
+typedef uint8_t tss_stack_t[4096];
 
 static gdt_entries_t gdt_entries;
 static struct gdt_register gdt_pointer;
 static tss_t tss0;
-static tss_stack_t tss_stack;
+static tss_stack_t tss_stack __attribute__((aligned(16)));
 
 static __attribute__((naked)) void _setcs_helper() {
     __asm__ volatile("pop %%rax\n\t"
@@ -42,7 +42,7 @@ void tss_setup() {
     gdt_entries[5]       = low_base | mid_base | limit | access_byte;
     gdt_entries[6]       = high_base;
 
-    tss0.ist[0] = (uint64_t)&tss_stack + sizeof(tss_stack_t);
+    tss0.ist[0] = ((uint64_t)&tss_stack + sizeof(tss_stack_t)) & ~0xfULL;
 
     __asm__ volatile("ltr %[offset];" : : [offset] "rm"(0x28U) : "memory");
 }

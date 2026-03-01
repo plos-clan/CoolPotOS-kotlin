@@ -72,6 +72,12 @@ uint64_t read_cr3(void) {
     return value;
 }
 
+uint64_t read_cr2(void) {
+    uint64_t value;
+    __asm__ volatile ("mov %%cr2, %0" : "=r"(value));
+    return value;
+}
+
 void invlpg(uint64_t address) {
     __asm__ volatile ("invlpg (%0)" : : "r"(address) : "memory");
 }

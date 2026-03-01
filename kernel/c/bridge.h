@@ -16,7 +16,10 @@ extern volatile struct limine_rsdp_request rsdp_request;
 extern volatile struct limine_executable_file_request executable_file_request;
 
 extern void gdt_setup();
+extern void idt_setup();
 extern uint64_t read_cr3(void);
+extern uint64_t read_cr2(void);
+extern void register_interrupt_handler(uint16_t vector, void (*handler)(void *interrupt_frame, uint64_t error_code), const uint8_t ist, const uint8_t flags);
 extern void invlpg(uint64_t address);
 
 #ifdef __cplusplus

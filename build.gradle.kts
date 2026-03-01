@@ -82,7 +82,7 @@ val konanGccLibDir = File(toolRoot, "lib/gcc/x86_64-unknown-linux-gnu/8.3.0")
 val konanSysrootLibDir = File(toolRoot, "x86_64-unknown-linux-gnu/sysroot/lib")
 val mlibcLibDir = File(mlibcPrefix, "lib")
 
-val cSources = listOf("boot.c", "shim.c", "gdt.c").map(cDir::resolve)
+val cSources = listOf("boot.c", "shim.c", "gdt.c", "idt.c").map(cDir::resolve)
 val cCompilerArgs = listOf(
     "-target", "x86_64-freestanding",
     "-std=c23", "-ffreestanding", "-nostdinc", "-fno-builtin",
