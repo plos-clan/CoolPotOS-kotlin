@@ -1,11 +1,11 @@
 @file:OptIn(ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.driver
+package org.plos_clan.cpos.drivers
 
 import bridge.rsdp_request
 import kotlinx.cinterop.*
 import org.plos_clan.cpos.mem.Hhdm
-import org.plos_clan.cpos.driver.apic.Apic
+import org.plos_clan.cpos.drivers.apic.Apic
 import org.plos_clan.cpos.utils.*
 
 private const val RSDP_V1_LENGTH = 20

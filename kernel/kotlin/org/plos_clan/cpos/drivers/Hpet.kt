@@ -1,6 +1,6 @@
 @file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.driver
+package org.plos_clan.cpos.drivers
 
 import kotlinx.cinterop.UIntVar
 import kotlinx.cinterop.ULongVar

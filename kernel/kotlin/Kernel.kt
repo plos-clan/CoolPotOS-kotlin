@@ -3,13 +3,13 @@ import bridge.gdt_setup
 import bridge.idt_setup
 import bridge.limine_framebuffer
 import kotlinx.cinterop.*
-import org.plos_clan.cpos.driver.Acpi
+import org.plos_clan.cpos.drivers.Acpi
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.fault.ErrorHandler
-import org.plos_clan.cpos.term.Terminal
+import org.plos_clan.cpos.drivers.term.Terminal
 import kotlin.experimental.ExperimentalNativeApi
 
 private val KERNEL_RUNTIME = "x86_64/kotlin-${KotlinVersion.CURRENT}"
@@ -18,6 +18,7 @@ private const val SUPPORTED_FRAMEBUFFER_BPP = 32
 
 @ExperimentalNativeApi
 @ExperimentalForeignApi
+@Suppress("unused")
 @CName("kernel_main")
 fun kernelMain() {
     initializeTerminal()
