@@ -61,7 +61,6 @@ abstract class CompileCSourcesTask : DefaultTask() {
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
-    alias(libs.plugins.kotlinxSerialization)
 }
 
 group = "org.plos_clan"
@@ -209,9 +208,6 @@ kotlin {
 
     sourceSets.named("nativeMain") {
         kotlin.srcDir(kernelKotlinDir)
-        dependencies {
-            implementation(libs.kotlinxSerializationJson)
-        }
     }
 
     nativeTarget.compilations.getByName("main").cinterops {
