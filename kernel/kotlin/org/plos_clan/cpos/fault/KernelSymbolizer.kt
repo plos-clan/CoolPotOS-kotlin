@@ -1,6 +1,6 @@
 @file:OptIn(ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.other
+package org.plos_clan.cpos.fault
 
 import bridge.executable_file_request
 import kotlinx.cinterop.*

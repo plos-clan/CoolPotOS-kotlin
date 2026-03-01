@@ -1,6 +1,6 @@
 @file:OptIn(ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.other
+package org.plos_clan.cpos.fault
 
 import bridge.read_cr2
 import bridge.read_cr3

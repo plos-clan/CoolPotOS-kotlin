@@ -1,6 +1,4 @@
-package org.plos_clan.cpos.managers
-
-import org.plos_clan.cpos.task.Process
+package org.plos_clan.cpos.tasks
 
 object ProcessManager {
     private var nextProcessId = 0

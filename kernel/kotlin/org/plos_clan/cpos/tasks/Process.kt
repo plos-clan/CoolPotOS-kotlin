@@ -1,4 +1,4 @@
-package org.plos_clan.cpos.task
+package org.plos_clan.cpos.tasks
 
 data class Process(
     val id: Int,

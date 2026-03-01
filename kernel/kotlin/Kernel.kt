@@ -4,11 +4,11 @@ import bridge.idt_setup
 import bridge.limine_framebuffer
 import kotlinx.cinterop.*
 import org.plos_clan.cpos.driver.Acpi
-import org.plos_clan.cpos.managers.ProcessManager
+import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.KernelPageDirectory
-import org.plos_clan.cpos.other.ErrorHandler
+import org.plos_clan.cpos.fault.ErrorHandler
 import org.plos_clan.cpos.term.Terminal
 import kotlin.experimental.ExperimentalNativeApi
 
