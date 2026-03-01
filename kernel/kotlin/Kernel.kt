@@ -1,8 +1,8 @@
-import kotlinx.cinterop.*
 import bridge.framebuffer_request
 import bridge.gdt_setup
 import bridge.idt_setup
 import bridge.limine_framebuffer
+import kotlinx.cinterop.*
 import org.plos_clan.cpos.driver.Acpi
 import org.plos_clan.cpos.managers.ProcessManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
@@ -13,6 +13,7 @@ import org.plos_clan.cpos.term.Terminal
 import kotlin.experimental.ExperimentalNativeApi
 
 private const val KERNEL_BANNER = "CoolPotOS CP_Kernel-x86_64-v0.0.1_{kotlin_edition}"
+private const val SUPPORTED_FRAMEBUFFER_BPP = 32
 
 @ExperimentalNativeApi
 @ExperimentalForeignApi
@@ -22,12 +23,7 @@ fun kernelMain() = KernelBoot.start()
 private object KernelBoot {
     @ExperimentalForeignApi
     fun start() {
-        framebuffer_request.response
-            ?.pointed
-            ?.takeIf { it.framebuffer_count > 0u }
-            ?.framebuffers
-            ?.get(0)
-            ?.let(::initializeTerminal)
+        initializeTerminal()
 
         println("Kernel booting...")
         println(KERNEL_BANNER)
@@ -45,21 +41,32 @@ private object KernelBoot {
     }
 
     @ExperimentalForeignApi
+    private fun initializeTerminal() {
+        framebuffer_request.response
+            ?.pointed
+            ?.takeIf { it.framebuffer_count > 0u }
+            ?.framebuffers
+            ?.get(0)
+            ?.let(::initializeTerminal)
+    }
+
+    @ExperimentalForeignApi
     private fun initializeTerminal(framebufferPointer: CPointer<limine_framebuffer>) {
         val framebuffer = framebufferPointer.pointed
-        if (framebuffer.bpp.toInt() != 32) {
+        if (framebuffer.bpp.toInt() != SUPPORTED_FRAMEBUFFER_BPP) {
             return
         }
 
         val baseAddress = framebuffer.address ?: return
-        val width = framebuffer.width.toInt()
-        val height = framebuffer.height.toInt()
-        val stride = (framebuffer.pitch / 4UL).toInt()
-        Terminal.initialize(baseAddress.reinterpret(), width, height, stride)
+        Terminal.initialize(
+            pixels = baseAddress.reinterpret(),
+            width = framebuffer.width.toInt(),
+            height = framebuffer.height.toInt(),
+            stride = (framebuffer.pitch / UInt.SIZE_BYTES.toULong()).toInt(),
+        )
     }
 }
 
-private fun haltForever() {
-    while (true) {
-    }
+private fun haltForever(): Nothing {
+    while (true) {}
 }

@@ -16,7 +16,6 @@ private data class TerminalSurface(
 object Terminal {
     private const val DEFAULT_BACKGROUND_COLOR = 0xFF000000u
     private var surface: TerminalSurface? = null
-    private var backgroundColor: UInt = DEFAULT_BACKGROUND_COLOR
 
     fun initialize(
         pixels: CPointer<UIntVar>,
@@ -35,10 +34,10 @@ object Terminal {
 
     fun clear() {
         val framebuffer = surface ?: return
-        for (row in 0 until framebuffer.height) {
+        repeat(framebuffer.height) { row ->
             val rowOffset = row * framebuffer.stride
-            for (column in 0 until framebuffer.width) {
-                framebuffer.pixels[rowOffset + column] = backgroundColor
+            repeat(framebuffer.width) { column ->
+                framebuffer.pixels[rowOffset + column] = DEFAULT_BACKGROUND_COLOR
             }
         }
     }

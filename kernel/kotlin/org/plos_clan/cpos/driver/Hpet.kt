@@ -8,7 +8,7 @@ import kotlinx.cinterop.get
 import kotlinx.cinterop.set
 import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.utils.hasBit
-import org.plos_clan.cpos.utils.hex64
+import org.plos_clan.cpos.utils.hex
 import org.plos_clan.cpos.utils.toPointer
 
 object Hpet {
@@ -24,33 +24,28 @@ object Hpet {
     private const val TIMER0_COMPARATOR_OFFSET = 0x108uL
     private const val MAIN_COUNTER_OFFSET = 0xF0uL
 
-    private var baseVirtualAddress: ULong = 0uL
-    private var fmsPerTick: ULong = 0uL
+    private var baseVirtualAddress = 0uL
+    private var fmsPerTick = 0uL
     private var initialized = false
 
     val isReady: Boolean
         get() = initialized && baseVirtualAddress != 0uL && fmsPerTick != 0uL
 
-    fun ticks(): ULong {
-        if (!isReady) {
-            return 0uL
-        }
-        return read64(MAIN_COUNTER_OFFSET)
-    }
+    fun ticks(): ULong = if (isReady) read64(MAIN_COUNTER_OFFSET) else 0uL
 
-    fun nanoTime(): ULong {
-        if (!isReady) {
-            return 0uL
+    fun nanoTime(): ULong =
+        if (isReady) {
+            ticks() * fmsPerTick / FEMTOSECONDS_PER_NANOSECOND
+        } else {
+            0uL
         }
-        return ticks() * fmsPerTick / FEMTOSECONDS_PER_NANOSECOND
-    }
 
-    fun estimate(ns: ULong): ULong {
-        if (!isReady) {
-            return 0uL
+    fun estimate(ns: ULong): ULong =
+        if (isReady) {
+            ticks() + (ns * FEMTOSECONDS_PER_NANOSECOND / fmsPerTick)
+        } else {
+            0uL
         }
-        return ticks() + (ns * FEMTOSECONDS_PER_NANOSECOND / fmsPerTick)
-    }
 
     fun busyWait(ns: ULong) {
         if (!isReady || ns == 0uL) {
@@ -62,10 +57,9 @@ object Hpet {
     }
 
     fun setTimer(value: ULong) {
-        if (!isReady) {
-            return
+        if (isReady) {
+            write64(TIMER0_COMPARATOR_OFFSET, value)
         }
-        write64(TIMER0_COMPARATOR_OFFSET, value)
     }
 
     fun initialize(baseAddress: ULong, spaceId: UInt) {
@@ -76,9 +70,8 @@ object Hpet {
             return
         }
 
-        val mappedBase = KernelPageDirectory.mapMmio(baseAddress, HPET_MMIO_SIZE)
-        if (mappedBase == null) {
-            println("HPET: failed to map MMIO at 0x${baseAddress.hex64()}")
+        val mappedBase = KernelPageDirectory.mapMmio(baseAddress, HPET_MMIO_SIZE) ?: run {
+            println("HPET: failed to map MMIO at ${baseAddress.hex()}")
             return
         }
 
@@ -98,9 +91,7 @@ object Hpet {
         val oldTimerConfig = read64(TIMER0_CONFIGURATION_OFFSET)
         val routeCapabilities = oldTimerConfig shr 32
         if (!routeCapabilities.hasBit(HPET_ROUTE_IRQ_VECTOR.toInt())) {
-            println(
-                "HPET: IRQ route vector $HPET_ROUTE_IRQ_VECTOR unsupported, route_cap=0x${routeCapabilities.hex64()}",
-            )
+            println("HPET: IRQ route vector $HPET_ROUTE_IRQ_VECTOR unsupported, route_cap=${routeCapabilities.hex()}")
         }
 
         val timerConfig = (HPET_ROUTE_IRQ_VECTOR.toULong() shl 9) or (1uL shl 2)
@@ -108,7 +99,7 @@ object Hpet {
 
         initialized = true
         println(
-            "HPET: time=${nanoTime()}ns mapped=0x${mappedBase.hex64()} period=${fmsPerTick}fms/tick",
+            "HPET: time=${nanoTime()}ns mapped=${mappedBase.hex()} period=${fmsPerTick}fms/tick",
         )
     }
 
@@ -118,15 +109,11 @@ object Hpet {
         initialized = false
     }
 
-    private fun read32(offset: ULong): UInt {
-        val register = (baseVirtualAddress + offset).toPointer<UIntVar>() ?: return 0u
-        return register[0]
-    }
+    private fun read32(offset: ULong): UInt =
+        (baseVirtualAddress + offset).toPointer<UIntVar>()?.get(0) ?: 0u
 
-    private fun read64(offset: ULong): ULong {
-        val register = (baseVirtualAddress + offset).toPointer<ULongVar>() ?: return 0uL
-        return register[0]
-    }
+    private fun read64(offset: ULong): ULong =
+        (baseVirtualAddress + offset).toPointer<ULongVar>()?.get(0) ?: 0uL
 
     private fun write64(offset: ULong, value: ULong) {
         val register = (baseVirtualAddress + offset).toPointer<ULongVar>() ?: return

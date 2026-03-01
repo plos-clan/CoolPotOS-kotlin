@@ -2,39 +2,30 @@
 
 package org.plos_clan.cpos.mem
 
+import bridge.invlpg
+import bridge.read_cr3
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set
-import bridge.invlpg
-import bridge.read_cr3
 import org.plos_clan.cpos.utils.*
 
-
-val PTE_PRESENT: ULong = 1uL shl 0
-val PTE_WRITABLE: ULong = 1uL shl 1
-val PTE_USER: ULong = 1uL shl 2
-val PTE_NO_CACHE: ULong = 1uL shl 4
-val PTE_HUGE: ULong = 1uL shl 7
-val PTE_NO_EXECUTE: ULong = 1uL shl 63
-val PTE_ADDR_MASK: ULong = 0x000F_FFFF_FFFF_F000u
-val PTE_PARENT_FLAGS: ULong = PTE_PRESENT or PTE_WRITABLE or PTE_USER
-
-enum class MappingType(val flags: ULong) {
-    UserCode(PTE_PRESENT or PTE_WRITABLE or PTE_USER),
-    UserData(PTE_PRESENT or PTE_WRITABLE or PTE_USER or PTE_NO_EXECUTE),
-    Mmio(PTE_PRESENT or PTE_WRITABLE or PTE_NO_CACHE or PTE_NO_EXECUTE),
-    KernelData(PTE_PRESENT or PTE_WRITABLE or PTE_NO_EXECUTE),
-}
+private const val PTE_PRESENT = 0x001uL
+private const val PTE_WRITABLE = 0x002uL
+private const val PTE_USER = 0x004uL
+private const val PTE_NO_CACHE = 0x010uL
+private const val PTE_HUGE = 0x080uL
+private const val PTE_NO_EXECUTE = 0x8000_0000_0000_0000uL
+private const val PTE_ADDR_MASK = 0x000F_FFFF_FFFF_F000uL
+private val PTE_PARENT_FLAGS = PTE_PRESENT or PTE_WRITABLE or PTE_USER
+private val MMIO_PTE_FLAGS = PTE_PRESENT or PTE_WRITABLE or PTE_NO_CACHE or PTE_NO_EXECUTE
 
 data class PageDirectory(
     val pml4PhysicalAddress: ULong,
 ) {
     fun mapPage(virtualAddress: ULong, physicalAddress: ULong, flags: ULong): Boolean {
         if (!virtualAddress.isPageAligned() || !physicalAddress.isPageAligned()) {
-            println(
-                "Paging: unaligned map request v=0x${virtualAddress.hex64()} p=0x${physicalAddress.hex64()}",
-            )
+            println("Paging: unaligned map request v=${virtualAddress.hex()} p=${physicalAddress.hex()}")
             return false
         }
 
@@ -83,11 +74,10 @@ data class PageDirectory(
         val length = physicalEnd - physicalBase
         val virtualBase = Hhdm.toVirtual(physicalBase)
 
-        return if (mapRange(virtualBase, physicalBase, length, MappingType.Mmio.flags)) {
-            Hhdm.toVirtual(physicalAddress)
-        } else {
-            null
+        if (!mapRange(virtualBase, physicalBase, length, MMIO_PTE_FLAGS)) {
+            return null
         }
+        return Hhdm.toVirtual(physicalAddress)
     }
 
     private fun pml4Table(): CPointer<ULongVar>? = pml4PhysicalAddress.toVirtualPointer()
@@ -97,7 +87,6 @@ data class PageDirectory(
         index: Int,
     ): CPointer<ULongVar>? {
         val entry = parentTable[index]
-
         if (entry and PTE_PRESENT != 0uL) {
             if (entry and PTE_HUGE != 0uL) {
                 println("Paging: huge-page entry blocks split at index=$index")
@@ -110,8 +99,9 @@ data class PageDirectory(
             println("Paging: failed to allocate frame for paging structure")
             return null
         }
+
         val tablePointer = frameAddress.toVirtualPointer<ULongVar>() ?: run {
-            println("Paging: frame to pointer conversion failed for 0x${frameAddress.hex64()}")
+            println("Paging: frame to pointer conversion failed for ${frameAddress.hex()}")
             return null
         }
 
@@ -129,9 +119,6 @@ data class PageDirectory(
 object KernelPageDirectory {
     private var activeDirectory: PageDirectory? = null
 
-    val current: PageDirectory?
-        get() = activeDirectory
-
     fun initialize(): PageDirectory? {
         activeDirectory?.let { return it }
 
@@ -147,7 +134,7 @@ object KernelPageDirectory {
 
         return PageDirectory(pml4PhysicalAddress).also { directory ->
             activeDirectory = directory
-            println("Paging: active PML4=0x${pml4PhysicalAddress.hex64()}")
+            println("Paging: active PML4=${pml4PhysicalAddress.hex()}")
         }
     }
 

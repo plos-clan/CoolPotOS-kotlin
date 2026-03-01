@@ -4,11 +4,7 @@ package org.plos_clan.cpos.other
 
 import bridge.executable_file_request
 import kotlinx.cinterop.*
-import org.plos_clan.cpos.utils.hex64
-import org.plos_clan.cpos.utils.readAscii
-import org.plos_clan.cpos.utils.readU32
-import org.plos_clan.cpos.utils.readU64
-import org.plos_clan.cpos.utils.readU8
+import org.plos_clan.cpos.utils.*
 
 private const val ELF64_HEADER_SIZE = 64uL
 private const val ELF64_SECTION_HEADER_SIZE = 64uL
@@ -80,7 +76,7 @@ object KernelSymbolizer {
     }
 
     fun describe(address: ULong): String {
-        val rawAddress = "0x${address.hex64()}"
+        val rawAddress = address.hex()
         val symbol = symbolize(address) ?: return rawAddress
         return "$rawAddress <$symbol>"
     }
@@ -142,7 +138,11 @@ object KernelSymbolizer {
         val sectionHeaderSize = image.readU16(ELF_E_SHENTSIZE_OFFSET).toULong()
         val sectionCount = image.readU16(ELF_E_SHNUM_OFFSET).toInt()
 
-        if (sectionTableOffset == 0uL || sectionHeaderSize < ELF64_SECTION_HEADER_SIZE || sectionCount <= 0) {
+        if (
+            sectionTableOffset == 0uL ||
+            sectionHeaderSize < ELF64_SECTION_HEADER_SIZE ||
+            sectionCount <= 0
+        ) {
             return emptyList()
         }
 
@@ -283,16 +283,8 @@ private fun isInRange(offset: ULong, size: ULong, limit: ULong): Boolean {
     if (offset > limit) {
         return false
     }
-    return size <= (limit - offset)
+    return size <= limit - offset
 }
 
 private fun ULong.toIntOrNull(): Int? =
     if (this <= Int.MAX_VALUE.toULong()) this.toInt() else null
-
-private fun ULong.isCanonicalKernelAddress(): Boolean = (this shr 48) == 0xFFFFuL
-
-private fun CPointer<UByteVar>.readU16(offset: Int): UShort {
-    val low = readU8(offset).toUInt()
-    val high = readU8(offset + 1).toUInt()
-    return (low or (high shl 8)).toUShort()
-}

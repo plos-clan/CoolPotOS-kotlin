@@ -12,17 +12,16 @@
 - `./gradlew build`: Build kernel ELF (equivalent to `make kernel`)
 - `./gradlew buildIso`: Build the UEFI ISO image (equivalent to `make iso`)
 - `./gradlew run`: Run the ISO image in QEMU (equivalent to `make run`)
-- `./gradlew clean`: Clean build outputs (equivalent to `make clean`)
+- `./gradlew clean`: Clean kernel build outputs (equivalent to `make clean`)
 - `./gradlew cleanAll`: Remove entire build directory (equivalent to `make distclean`)
 - `./gradlew buildMlibc`: Build bundled mlibc (equivalent to `make mlibc`)
-- `./gradlew dev`: Build and run in one command (development workflow)
 
 **Quick start:**
 
 **Build and run in one command**
 
 ```shell
-./gradlew dev
+./gradlew run
 ```
 
 **Or step by step**

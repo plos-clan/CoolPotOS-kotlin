@@ -1,4 +1,5 @@
 interface CompileCFileParameters : WorkParameters {
+    val compiler: Property<String>
     val sourceFile: RegularFileProperty
     val outputFile: RegularFileProperty
     val commonArgs: ListProperty<String>
@@ -13,7 +14,7 @@ abstract class CompileCFileWork @Inject constructor(
 
         execOperations.exec {
             commandLine(
-                "clang",
+                parameters.compiler.get(),
                 *parameters.commonArgs.get().toTypedArray(),
                 "-c",
                 source.absolutePath,
@@ -24,7 +25,7 @@ abstract class CompileCFileWork @Inject constructor(
     }
 }
 
-@DisableCachingByDefault(because = "Invokes external clang processes")
+@DisableCachingByDefault(because = "Invokes external compiler processes")
 abstract class CompileCSourcesTask : DefaultTask() {
     @get:InputFiles
     @get:PathSensitive(PathSensitivity.RELATIVE)
@@ -32,6 +33,9 @@ abstract class CompileCSourcesTask : DefaultTask() {
 
     @get:OutputDirectory
     abstract val outputDirectory: DirectoryProperty
+
+    @get:Input
+    abstract val compiler: Property<String>
 
     @get:Input
     abstract val commonArgs: ListProperty<String>
@@ -46,6 +50,7 @@ abstract class CompileCSourcesTask : DefaultTask() {
         val queue = workerExecutor.noIsolation()
         sourceFiles.files.forEach { source ->
             queue.submit(CompileCFileWork::class.java) {
+                compiler.set(this@CompileCSourcesTask.compiler)
                 sourceFile.set(source)
                 outputFile.set(outputDir.resolve("${source.nameWithoutExtension}.o"))
                 commonArgs.set(this@CompileCSourcesTask.commonArgs)
@@ -66,45 +71,126 @@ repositories {
     mavenCentral()
 }
 
-val buildDir = layout.buildDirectory.get().asFile
-val isoDir = File(buildDir, "iso")
-val cDir = file("kernel/c")
+val targetArch = "x86_64"
+val runGroup = "runCoolPotOS"
+val projectName = "CoolPotOS"
+val buildRootDir = layout.buildDirectory.get().asFile
+val mlibcBuildDirName = "mlibc-$targetArch"
+
+fun setting(propName: String, envName: String, defaultValue: String): String {
+    val propValue = (findProperty(propName) as String?)?.takeIf(String::isNotBlank)
+    val envValue = System.getenv(envName)?.takeIf(String::isNotBlank)
+    return propValue ?: envValue ?: defaultValue
+}
+
+fun combineFlags(vararg groups: List<String>): List<String> = buildList {
+    groups.forEach(::addAll)
+}
+
+val crossCc = setting("crossCc", "CROSS_CC", "clang")
+val crossCxx = setting("crossCxx", "CROSS_CXX", "clang++")
+val linker = setting("linker", "LINKER", "ld.lld")
+val xorriso = setting("xorriso", "XORRISO", "xorriso")
+val qemu = setting("qemu", "QEMU", "qemu-system-x86_64")
+
+val isoDir = buildRootDir.resolve("iso")
+val kernelCDir = file("kernel/c")
+val kernelKotlinDir = file("kernel/kotlin")
 val assetsDir = file("assets")
+
 val linkerScript = assetsDir.resolve("linker.ld")
-val bridgeDef = cDir.resolve("bridge.def")
+val bridgeDef = kernelCDir.resolve("bridge.def")
 val mlibcPatch = assetsDir.resolve("mlibc.patch")
 val limineAssetsDir = assetsDir.resolve("limine")
 
 val konanHome = System.getenv("KONAN_HOME") ?: "${System.getProperty("user.home")}/.konan"
-val toolRoot = "$konanHome/dependencies/x86_64-unknown-linux-gnu-gcc-8.3.0-glibc-2.19-kernel-4.9-2"
-val mlibcPrefix = File(buildDir, "mlibc-x86_64/prefix")
-val konanGccLibDir = File(toolRoot, "lib/gcc/x86_64-unknown-linux-gnu/8.3.0")
-val konanSysrootLibDir = File(toolRoot, "x86_64-unknown-linux-gnu/sysroot/lib")
-val mlibcLibDir = File(mlibcPrefix, "lib")
+val defaultToolRoot = "$konanHome/dependencies/$targetArch-unknown-linux-gnu-gcc-8.3.0-glibc-2.19-kernel-4.9-2"
+val toolRoot = setting("konanToolRoot", "KONAN_TOOLROOT", defaultToolRoot)
 
-val cSources = listOf("boot.c", "shim.c", "gdt.c", "idt.c").map(cDir::resolve)
-val cCompilerArgs = listOf(
-    "-target", "x86_64-freestanding",
-    "-std=c23", "-ffreestanding", "-nostdinc", "-fno-builtin",
-    "-m64", "-mno-red-zone", "-mcmodel=kernel", "-fno-stack-protector",
-    "-mno-80387", "-mno-mmx", "-mno-sse", "-mno-sse2",
-    "-Wall", "-Wextra", "-Wpedantic", "-Werror",
-    "-I${cDir.path}", "-O2"
+val defaultMlibcPrefix = buildRootDir.resolve("$mlibcBuildDirName/prefix").path
+val mlibcPrefix = file(setting("mlibcPrefix", "MLIBC_PREFIX", defaultMlibcPrefix))
+val konanGccLibDir = File(toolRoot, "lib/gcc/$targetArch-unknown-linux-gnu/8.3.0")
+val konanSysrootLibDir = File(toolRoot, "$targetArch-unknown-linux-gnu/sysroot/lib")
+val mlibcLibDir = mlibcPrefix.resolve("lib")
+
+val cSourceNames = listOf("boot.c", "shim.c", "gdt.c", "idt.c")
+val cSources = cSourceNames.map(kernelCDir::resolve)
+
+val cFlagsTarget = listOf("-target", "$targetArch-freestanding")
+val cFlagsLanguage = listOf("-std=c23", "-ffreestanding", "-nostdinc", "-fno-builtin")
+val cFlagsMachine = listOf("-m64", "-mno-red-zone", "-mcmodel=kernel", "-fno-stack-protector")
+val cFlagsNoSimd = listOf("-mno-80387", "-mno-mmx", "-mno-sse", "-mno-sse2")
+val cFlagsWarnings = listOf("-Wall", "-Wextra", "-Wpedantic", "-Werror")
+val cFlagsIncludes = listOf("-I${kernelCDir.path}", "-I${buildRootDir.path}")
+val cFlagsOptimization = listOf("-O2")
+val cCompilerArgs = combineFlags(
+    cFlagsTarget,
+    cFlagsLanguage,
+    cFlagsMachine,
+    cFlagsNoSimd,
+    cFlagsWarnings,
+    cFlagsIncludes,
+    cFlagsOptimization
 )
-val cObjectsDir = File(buildDir, "c-objects")
-val cObjectFiles = cSources.map { cObjectsDir.resolve("${it.nameWithoutExtension}.o") }
+
+val cObjectsDir = buildRootDir.resolve("c-objects")
+val cObjectFiles = cSources.map { source -> cObjectsDir.resolve("${source.nameWithoutExtension}.o") }
+
 val mlibcArtifacts = listOf("libc.a", "libm.a", "libpthread.a").map(mlibcLibDir::resolve)
-val kotlinStaticLib = File(buildDir, "bin/native/debugStatic/libkernel.a")
-val runtimeLibs = mlibcArtifacts +
-    konanSysrootLibDir.resolve("libstdc++.a") +
-    listOf("libgcc.a", "libgcc_eh.a").map(konanGccLibDir::resolve)
-val freestandingFlags = listOf(
-    "-g -O2 -pipe -Wall -Wextra -nostdinc -ffreestanding",
-    "-fno-stack-protector -fno-stack-check -fno-lto -fno-PIC",
-    "-ffunction-sections -fdata-sections -m64 -march=x86-64",
-    "-mno-red-zone -mcmodel=kernel -D__thread='' -D_Thread_local='' -D_GNU_SOURCE"
-).joinToString(" ")
+val kotlinStaticLib = buildRootDir.resolve("bin/native/debugStatic/libkernel.a")
+val runtimeLibs = buildList {
+    addAll(mlibcArtifacts)
+    add(konanSysrootLibDir.resolve("libstdc++.a"))
+    addAll(listOf("libgcc.a", "libgcc_eh.a").map(konanGccLibDir::resolve))
+}
+
+val ldFlagsFormat = listOf("-m", "elf_$targetArch")
+val ldFlagsRuntime = listOf("-nostdlib")
+val ldFlagsPaging = listOf("-z", "max-page-size=0x1000")
+val ldFlagsSections = listOf("--gc-sections")
+val ldFlagsScript = listOf("-T", linkerScript.absolutePath)
+val ldFlags = combineFlags(
+    ldFlagsFormat,
+    ldFlagsRuntime,
+    ldFlagsPaging,
+    ldFlagsSections,
+    ldFlagsScript
+)
+
+val xorrisoFlagsMode = listOf("-as", "mkisofs")
+val xorrisoFlagsBoot = listOf("--efi-boot", "limine/limine-uefi-cd.bin", "-efi-boot-part", "--efi-boot-image")
+val xorrisoFlags = combineFlags(xorrisoFlagsMode, xorrisoFlagsBoot)
+
+val qemuMemory = setting("qemuMemory", "QEMU_MEMORY", "256m")
+val qemuFlagsMachine = listOf("-m", qemuMemory, "-M", "q35", "-cpu", "qemu64,+x2apic")
+val qemuFlagsControl = listOf("-no-reboot", "-daemonize")
+val qemuFlagsFirmware = listOf("-drive", "if=pflash,format=raw,readonly=on,file=assets/ovmf-code.fd")
+val qemuBaseFlags = combineFlags(qemuFlagsMachine, qemuFlagsControl, qemuFlagsFirmware)
+
+val mlibcTarget = "$targetArch-unknown-none"
+val mlibcCc = "$crossCc -target $mlibcTarget"
+val mlibcCxx = "$crossCxx -target $mlibcTarget"
+val mlibcCFlagsBase = listOf("-g", "-O2", "-pipe")
+val mlibcCFlagsWarnings = listOf("-Wall", "-Wextra", "-nostdinc", "-ffreestanding")
+val mlibcCFlagsSafety = listOf("-fno-stack-protector", "-fno-stack-check", "-fno-lto", "-fno-PIC")
+val mlibcCFlagsSections = listOf("-ffunction-sections", "-fdata-sections")
+val mlibcCFlagsArch = listOf("-m64", "-march=x86-64", "-mno-red-zone", "-mcmodel=kernel")
+val mlibcCFlagsDefines = listOf("-D__thread=''", "-D_Thread_local=''", "-D_GNU_SOURCE")
+val mlibcCxxOnlyFlags = listOf("-fno-rtti", "-fno-exceptions", "-fno-sized-deallocation")
+val mlibcCFlagArgs = combineFlags(
+    mlibcCFlagsBase,
+    mlibcCFlagsWarnings,
+    mlibcCFlagsSafety,
+    mlibcCFlagsSections,
+    mlibcCFlagsArch,
+    mlibcCFlagsDefines
+)
+val mlibcCxxFlagArgs = mlibcCFlagArgs + mlibcCxxOnlyFlags
+val mlibcCFlags = mlibcCFlagArgs.joinToString(" ")
+val mlibcCxxFlags = mlibcCxxFlagArgs.joinToString(" ")
 val linkInputs = cObjectFiles + kotlinStaticLib + runtimeLibs
+
+fun Iterable<File>.absolutePaths(): List<String> = map(File::getAbsolutePath)
 
 kotlin {
     val hostOs = System.getProperty("os.name")
@@ -123,7 +209,7 @@ kotlin {
     nativeTarget.binaries.staticLib { baseName = "kernel" }
 
     sourceSets.named("nativeMain") {
-        kotlin.srcDir("kernel/kotlin")
+        kotlin.srcDir(kernelKotlinDir)
         dependencies {
             implementation(libs.kotlinxSerializationJson)
         }
@@ -133,21 +219,23 @@ kotlin {
         create("bridge") {
             defFile(bridgeDef)
             packageName("bridge")
-            includeDirs(cDir)
+            includeDirs(kernelCDir)
         }
     }
 }
 
-val kernelElf = File(buildDir, "kernel.elf")
-val isoImage = File(buildDir, "CoolPotOS.iso")
+val kernelElf = buildRootDir.resolve("kernel.elf")
+val isoImage = buildRootDir.resolve("$projectName.iso")
+val qemuSerialLog = buildRootDir.resolve("qemu-serial.log")
 
 val compileC by tasks.register<CompileCSourcesTask>("compileC") {
     group = "build"
     description = "Compiles C sources into object files."
 
     sourceFiles.from(cSources)
-    inputs.files(cDir.resolve("bridge.h"), cDir.resolve("limine.h"))
+    inputs.files(kernelCDir.resolve("bridge.h"), kernelCDir.resolve("limine.h"))
         .withPathSensitivity(PathSensitivity.RELATIVE)
+    compiler.set(crossCc)
     outputDirectory.set(cObjectsDir)
     commonArgs.set(cCompilerArgs)
 }
@@ -160,11 +248,11 @@ val buildMlibc by tasks.register<Exec>("buildMlibc") {
 
     environment(
         mapOf(
-            "ARCH" to "x86_64",
-            "CC" to "clang -target x86_64-unknown-none",
-            "CXX" to "clang++ -target x86_64-unknown-none",
-            "CFLAGS" to freestandingFlags,
-            "CXXFLAGS" to "$freestandingFlags -fno-rtti -fno-exceptions -fno-sized-deallocation"
+            "ARCH" to targetArch,
+            "CC" to mlibcCc,
+            "CXX" to mlibcCxx,
+            "CFLAGS" to mlibcCFlags,
+            "CXXFLAGS" to mlibcCxxFlags
         )
     )
     commandLine("./build-mlibc")
@@ -179,21 +267,22 @@ val linkKernel by tasks.register<Exec>("linkKernel") {
     inputs.file(linkerScript)
     outputs.file(kernelElf)
 
-    val linkCommand = listOf(
-            "ld.lld",
-            "-m", "elf_x86_64",
-            "-nostdlib",
-            "-z", "max-page-size=0x1000",
-            "--gc-sections",
-            "-T", linkerScript.absolutePath,
-            "-o", kernelElf.absolutePath
-        ) +
-        cObjectFiles.map(File::getAbsolutePath) +
-        kotlinStaticLib.absolutePath +
-        "--start-group" +
-        runtimeLibs.map(File::getAbsolutePath) +
-        "--end-group"
+    val linkCommand = buildList {
+        add(linker)
+        addAll(ldFlags)
+        add("-o")
+        add(kernelElf.absolutePath)
+        addAll(cObjectFiles.absolutePaths())
+        add(kotlinStaticLib.absolutePath)
+        add("--start-group")
+        addAll(runtimeLibs.absolutePaths())
+        add("--end-group")
+    }
     commandLine(linkCommand)
+}
+
+tasks.named("build") {
+    dependsOn(linkKernel)
 }
 
 val stageIso by tasks.register<Sync>("stageIso") {
@@ -210,60 +299,57 @@ val stageIso by tasks.register<Sync>("stageIso") {
 
 val buildIso by tasks.register<Exec>("buildIso") {
     group = "build"
-    description = "Stages the kernel and limine assets into an ISO image."
+    description = "Builds the UEFI ISO image from staged assets."
     dependsOn(stageIso)
 
     inputs.dir(isoDir)
     outputs.file(isoImage)
 
-    commandLine(
-        "xorriso", "-as", "mkisofs",
-        "--efi-boot", "limine/limine-uefi-cd.bin",
-        "-efi-boot-part", "--efi-boot-image",
-        "-o", isoImage.absolutePath,
-        isoDir.absolutePath
-    )
+    val isoCommand = buildList {
+        add(xorriso)
+        addAll(xorrisoFlags)
+        add(isoDir.absolutePath)
+        add("-o")
+        add(isoImage.absolutePath)
+    }
+    commandLine(isoCommand)
 }
 
-val runTask by tasks.register("run") {
-    group = "runCoolPotOS"
+tasks.register<Exec>("run") {
+    group = runGroup
     description = "Runs CoolPotOS in QEMU."
     dependsOn(buildIso)
 
+    doFirst {
+        qemuSerialLog.parentFile.mkdirs()
+    }
+
+    val runCommand = buildList {
+        add(qemu)
+        addAll(qemuBaseFlags)
+        add("-serial")
+        add("file:${qemuSerialLog.absolutePath}")
+        add(isoImage.absolutePath)
+    }
+    commandLine(runCommand)
+
     doLast {
-        val serialLog = File(buildDir, "qemu-serial.log")
-        serialLog.parentFile.mkdirs()
-
-        ProcessBuilder(
-            "qemu-system-x86_64",
-            "-daemonize",
-            "-m", "2G",
-            "-M", "q35",
-            "-cpu", "qemu64,+x2apic",
-            "-drive", "if=pflash,format=raw,readonly=on,file=assets/ovmf-code.fd",
-            "-serial", "file:${serialLog.absolutePath}",
-            isoImage.absolutePath
-        )
-            .directory(project.projectDir)
-            .start()
-
         println("QEMU started in background.")
-        println("Serial log: ${serialLog.absolutePath}")
+        println("Serial log: ${qemuSerialLog.absolutePath}")
     }
 }
 
-tasks.register("dev") {
-    group = "runCoolPotOS"
-    description = "Runs CoolPotOS in QEMU."
-    dependsOn(runTask)
+tasks.named<Delete>("clean") {
+    description = "Deletes kernel build artifacts while preserving mlibc build outputs."
+    setDelete(
+        fileTree(buildRootDir) {
+            exclude(mlibcBuildDirName, "$mlibcBuildDirName/**")
+        }
+    )
 }
 
 tasks.register<Delete>("cleanAll") {
     group = "build"
-    description = "Deletes all build artifacts."
-    delete(buildDir)
-}
-
-tasks.named("build") {
-    dependsOn(linkKernel)
+    description = "Deletes all build artifacts, including mlibc."
+    delete(buildRootDir)
 }

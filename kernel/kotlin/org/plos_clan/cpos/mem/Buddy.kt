@@ -2,14 +2,10 @@
 
 package org.plos_clan.cpos.mem
 
+import bridge.memmap_request
 import kotlinx.cinterop.get
 import kotlinx.cinterop.pointed
-import bridge.memmap_request
-import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
-import org.plos_clan.cpos.utils.alignDown
-import org.plos_clan.cpos.utils.alignUp
-import org.plos_clan.cpos.utils.hex64
-import org.plos_clan.cpos.utils.isPageAligned
+import org.plos_clan.cpos.utils.*
 
 private data class MemoryRange(
     val base: ULong,
@@ -38,7 +34,6 @@ object BuddyFrameAllocator {
 
     private val freeLists = Array(MAX_BUDDY_ORDER + 1) { linkedSetOf<ULong>() }
 
-    private var originFrames = 0uL
     private var usableFrames = 0uL
     private var initialized = false
 
@@ -51,8 +46,7 @@ object BuddyFrameAllocator {
     fun initialize(): Boolean {
         reset()
 
-        val decision = analyzeMemmap()
-        if (decision == null) {
+        val decision = analyzeMemmap() ?: run {
             println("Buddy: memmap response unavailable")
             return false
         }
@@ -70,7 +64,6 @@ object BuddyFrameAllocator {
                 return@forEach
             }
             addRange(range.base / PAGE_SIZE_BYTES, frameCount)
-            originFrames += frameCount
             usableFrames += frameCount
         }
 
@@ -217,13 +210,12 @@ object BuddyFrameAllocator {
             return
         }
 
-        val sortedEntries = totalsByType.entries.sortedBy { it.key.toLong() }
-        sortedEntries.forEach { entry ->
-            val type = entry.key
-            val bytes = entry.value
-            val mib = bytes / BYTES_PER_MIB
-            println("Buddy: memmap ${memmapTypeName(type)} = ${mib} MiB (0x${bytes.hex64()} bytes)")
-        }
+        totalsByType.entries
+            .sortedBy { it.key.toLong() }
+            .forEach { (type, bytes) ->
+                val mib = bytes / BYTES_PER_MIB
+                println("Buddy: memmap ${memmapTypeName(type)} = ${mib} MiB (${bytes.hex()} bytes)")
+            }
     }
 
     private fun memmapTypeName(type: ULong): String =
@@ -242,7 +234,6 @@ object BuddyFrameAllocator {
 
     private fun reset() {
         freeLists.forEach { it.clear() }
-        originFrames = 0uL
         usableFrames = 0uL
         initialized = false
     }

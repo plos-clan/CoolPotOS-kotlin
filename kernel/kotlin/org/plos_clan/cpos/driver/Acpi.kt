@@ -5,19 +5,16 @@ package org.plos_clan.cpos.driver
 import bridge.rsdp_request
 import kotlinx.cinterop.*
 import org.plos_clan.cpos.mem.Hhdm
-import org.plos_clan.cpos.utils.checksumOk
-import org.plos_clan.cpos.utils.hex32
-import org.plos_clan.cpos.utils.hex64
-import org.plos_clan.cpos.utils.matchesAscii
-import org.plos_clan.cpos.utils.readAscii
-import org.plos_clan.cpos.utils.readU32
-import org.plos_clan.cpos.utils.readU64
-import org.plos_clan.cpos.utils.readU8
-import org.plos_clan.cpos.utils.toVirtualPointer
+import org.plos_clan.cpos.utils.*
 
 private const val RSDP_V1_LENGTH = 20
 private const val RSDP_V2_MIN_LENGTH = 36
+private const val RSDP_REVISION_OFFSET = 15
+private const val RSDP_RSDT_ADDRESS_OFFSET = 16
+private const val RSDP_LENGTH_OFFSET = 20
+private const val RSDP_XSDT_ADDRESS_OFFSET = 24
 private const val SDT_HEADER_LENGTH = 36
+private const val SDT_LENGTH_OFFSET = 4
 private const val MCFG_HEADER_LENGTH = SDT_HEADER_LENGTH + 8
 private const val MCFG_ENTRY_LENGTH = 16
 private const val MADT_HEADER_LENGTH = SDT_HEADER_LENGTH + 8
@@ -145,46 +142,42 @@ object Acpi {
             return
         }
 
-        val revision = rsdp.readU8(15).toUInt()
+        val revision = rsdp.readU8(RSDP_REVISION_OFFSET).toUInt()
         if (!rsdp.checksumOk(RSDP_V1_LENGTH)) {
             println("ACPI: RSDP v1 checksum failed")
         }
         if (revision >= 2u) {
-            val rsdpLength = rsdp.readU32(20).toInt()
+            val rsdpLength = rsdp.readU32(RSDP_LENGTH_OFFSET).toInt()
             if (rsdpLength >= RSDP_V2_MIN_LENGTH && !rsdp.checksumOk(rsdpLength)) {
                 println("ACPI: RSDP v2 checksum failed")
             }
         }
 
         val useXsdt = revision != 0u
-        val rootAddress = if (useXsdt) rsdp.readU64(24) else rsdp.readU32(16).toULong()
+        val rootAddress = if (useXsdt) {
+            rsdp.readU64(RSDP_XSDT_ADDRESS_OFFSET)
+        } else {
+            rsdp.readU32(RSDP_RSDT_ADDRESS_OFFSET).toULong()
+        }
         if (rootAddress == 0uL) {
             println("ACPI: root SDT address is zero")
             return
         }
 
-        val rootTable = tableAt(rootAddress)
-        if (rootTable == null) {
-            println("ACPI: cannot access root SDT at 0x${rootAddress.hex64()}")
+        val rootTable = tableAt(rootAddress) ?: run {
+            println("ACPI: cannot access root SDT at ${rootAddress.hex()}")
             return
         }
-
-        root = RootSdt(
-            table = rootTable,
-            entrySize = if (useXsdt) 8 else 4,
-        )
+        root = RootSdt(rootTable, if (useXsdt) 8 else 4)
+        val rootSignature = rootTable.pointer.readAscii(0, 4)
 
         println("ACPI revision: $revision")
-        println(
-            "ACPI root SDT: ${rootTable.pointer.readAscii(0, 4)} at 0x${rootAddress.hex64()} length=${rootTable.length}",
-        )
+        println("ACPI root SDT: $rootSignature at ${rootAddress.hex()} length=${rootTable.length}")
 
         rebuildTableIndex()
 
         parseIfFound(HpetParser) { hpetGasAddress ->
-            println(
-                "ACPI: HPET GAS space_id=${hpetGasAddress.spaceId} address=0x${hpetGasAddress.address.hex64()}",
-            )
+            println("ACPI: HPET GAS space_id=${hpetGasAddress.spaceId} address=${hpetGasAddress.address.hex()}")
             Hpet.initialize(
                 baseAddress = hpetGasAddress.address,
                 spaceId = hpetGasAddress.spaceId,
@@ -195,14 +188,12 @@ object Acpi {
             println("ACPI: MCFG region count=$regionCount")
         }
         parseIfFound(MadtParser) { madt ->
-            println("ACPI: LAPIC address=0x${madt.lapicAddress.hex32()}")
-            println("ACPI: IOAPIC address=0x${madt.ioapicAddress.hex32()}")
-
-
+            println("ACPI: LAPIC address=${madt.lapicAddress.hex()}")
+            println("ACPI: IOAPIC address=${madt.ioapicAddress.hex()}")
         }
 
         parseIfFound(SpcrParser) { uartAddress ->
-            println("ACPI: UART base=0x${uartAddress.hex64()}")
+            println("ACPI: UART base=${uartAddress.hex()}")
         }
     }
 
@@ -225,7 +216,7 @@ object Acpi {
         onParsed: (T) -> Unit,
     ) {
         val tableAddress = findSdt(parser.signature) ?: return
-        println("ACPI: found ${parser.signature} at 0x${tableAddress.hex64()}")
+        println("ACPI: found ${parser.signature} at ${tableAddress.hex()}")
         val table = tableAt(tableAddress) ?: return
         parser.parse(table)?.let(onParsed)
     }
@@ -272,7 +263,7 @@ object Acpi {
 private fun tableAt(address: ULong): AcpiTable? {
     val pointer = address.toVirtualPointer<UByteVar>() ?: return null
 
-    val length = pointer.readU32(4).toInt()
+    val length = pointer.readU32(SDT_LENGTH_OFFSET).toInt()
     if (length < SDT_HEADER_LENGTH) {
         return null
     }
