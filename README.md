@@ -5,7 +5,6 @@
 This project uses Gradle for kernel build, ISO packaging, and QEMU run.
 
 - Supports kernel build, ISO packaging, and QEMU run
-- Assets (Limine and OVMF) are not fetched from the internet
 - Cross-platform compatible (Linux/macOS/Windows)
 
 **Available Gradle tasks:**

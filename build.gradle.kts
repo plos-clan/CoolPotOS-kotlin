@@ -1,3 +1,7 @@
+import java.io.InputStream
+import java.io.OutputStream
+import java.net.URI
+
 interface CompileCFileParameters : WorkParameters {
     val compiler: Property<String>
     val sourceFile: RegularFileProperty
@@ -59,6 +63,29 @@ abstract class CompileCSourcesTask : DefaultTask() {
     }
 }
 
+@DisableCachingByDefault(because = "Downloads third-party artifacts")
+abstract class DownloadFileTask : DefaultTask() {
+    @get:Input
+    abstract val sourceUrl: Property<String>
+
+    @get:OutputFile
+    abstract val destinationFile: RegularFileProperty
+
+    @TaskAction
+    fun download() {
+        val target = destinationFile.get().asFile
+        target.parentFile.mkdirs()
+
+        val connection = URI.create(sourceUrl.get()).toURL().openConnection()
+        connection.setRequestProperty("User-Agent", "Gradle")
+        connection.getInputStream().use { input: InputStream ->
+            target.outputStream().use { output: OutputStream ->
+                input.copyTo(output)
+            }
+        }
+    }
+}
+
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
 }
@@ -96,11 +123,29 @@ val isoDir = buildRootDir.resolve("iso")
 val kernelCDir = file("kernel/c")
 val kernelKotlinDir = file("kernel/kotlin")
 val assetsDir = file("assets")
+val limineConfigFile = assetsDir.resolve("limine.conf")
 
 val linkerScript = assetsDir.resolve("linker.ld")
 val bridgeDef = kernelCDir.resolve("bridge.def")
 val mlibcPatch = assetsDir.resolve("mlibc.patch")
-val limineAssetsDir = assetsDir.resolve("limine")
+
+val limineRef = "v10.x-binary"
+val limineArchiveUrl = "https://codeberg.org/Limine/Limine/archive/$limineRef.tar.gz"
+val limineProtocolArchiveUrl = "https://codeberg.org/Limine/limine-protocol/archive/trunk.tar.gz"
+val limineDir = buildRootDir.resolve("limine")
+val downloadsDir = buildRootDir.resolve("downloads")
+val limineArchive = downloadsDir.resolve("limine-$limineRef.tar.gz")
+val limineProtocolArchive = downloadsDir.resolve("limine-protocol-trunk.tar.gz")
+val limineIncludeDir = limineDir.resolve("include")
+val limineBootDir = limineDir.resolve("boot")
+val limineHeader = limineIncludeDir.resolve("limine.h")
+val limineUefiCdBin = limineBootDir.resolve("limine-uefi-cd.bin")
+
+val freestndHeadersRef = "trunk"
+val freestndHeadersArchiveUrl = "https://codeberg.org/OSDev/freestnd-c-hdrs-0bsd/archive/$freestndHeadersRef.tar.gz"
+val freestndHeadersDir = buildRootDir.resolve("freestnd-c-hdrs")
+val freestndHeadersArchive = downloadsDir.resolve("freestnd-c-hdrs-0bsd-$freestndHeadersRef.tar.gz")
+val freestndHeadersIncludeDir = freestndHeadersDir.resolve("include")
 
 val konanHome = System.getenv("KONAN_HOME") ?: "${System.getProperty("user.home")}/.konan"
 val defaultToolRoot = "$konanHome/dependencies/$targetArch-unknown-linux-gnu-gcc-8.3.0-glibc-2.19-kernel-4.9-2"
@@ -120,7 +165,12 @@ val cFlagsLanguage = listOf("-std=c23", "-ffreestanding", "-nostdinc", "-fno-bui
 val cFlagsMachine = listOf("-m64", "-mno-red-zone", "-mcmodel=kernel", "-fno-stack-protector")
 val cFlagsNoSimd = listOf("-mno-80387", "-mno-mmx", "-mno-sse", "-mno-sse2")
 val cFlagsWarnings = listOf("-Wall", "-Wextra", "-Wpedantic", "-Werror")
-val cFlagsIncludes = listOf("-I${kernelCDir.path}", "-I${buildRootDir.path}")
+val cFlagsIncludes = listOf(
+    "-I${kernelCDir.path}",
+    "-I${buildRootDir.path}",
+    "-I${limineIncludeDir.path}",
+    "-I${freestndHeadersIncludeDir.path}"
+)
 val cFlagsOptimization = listOf("-O2")
 val cCompilerArgs = combineFlags(
     cFlagsTarget,
@@ -214,7 +264,7 @@ kotlin {
         create("bridge") {
             defFile(bridgeDef)
             packageName("bridge")
-            includeDirs(kernelCDir)
+            includeDirs(kernelCDir, limineIncludeDir, freestndHeadersIncludeDir)
         }
     }
 }
@@ -222,12 +272,87 @@ kotlin {
 val kernelElf = buildRootDir.resolve("kernel.elf")
 val isoImage = buildRootDir.resolve("$projectName.iso")
 
+val downloadLimine by tasks.register<DownloadFileTask>("downloadLimine") {
+    group = "build"
+    description = "Downloads Limine 10.x bootloader assets from Codeberg."
+    sourceUrl.set(limineArchiveUrl)
+    destinationFile.set(limineArchive)
+}
+
+val downloadLimineProtocol by tasks.register<DownloadFileTask>("downloadLimineProtocol") {
+    group = "build"
+    description = "Downloads limine-protocol headers from Codeberg."
+    sourceUrl.set(limineProtocolArchiveUrl)
+    destinationFile.set(limineProtocolArchive)
+}
+
+val downloadFreestndHeaders by tasks.register<DownloadFileTask>("downloadFreestndHeaders") {
+    group = "build"
+    description = "Downloads freestanding C headers from Codeberg."
+    sourceUrl.set(freestndHeadersArchiveUrl)
+    destinationFile.set(freestndHeadersArchive)
+}
+
+val prepareFreestndHeaders by tasks.register<Sync>("prepareFreestndHeaders") {
+    group = "build"
+    description = "Extracts all freestanding C headers."
+    dependsOn(downloadFreestndHeaders)
+
+    into(freestndHeadersDir)
+    from({
+        tarTree(resources.gzip(freestndHeadersArchive))
+    }) {
+        include("*/include/**")
+        eachFile {
+            path = path.substringAfter('/')
+        }
+        includeEmptyDirs = false
+    }
+}
+
+val prepareLimine by tasks.register<Sync>("prepareLimine") {
+    group = "build"
+    description = "Extracts Limine boot binary and protocol header."
+    dependsOn(downloadLimine, downloadLimineProtocol)
+
+    into(limineDir)
+    from({
+        tarTree(resources.gzip(limineArchive))
+    }) {
+        include("*/limine-uefi-cd.bin")
+        eachFile {
+            if (name == "limine-uefi-cd.bin") {
+                path = "boot/limine-uefi-cd.bin"
+            }
+        }
+        includeEmptyDirs = false
+    }
+    from({
+        tarTree(resources.gzip(limineProtocolArchive))
+    }) {
+        include("*/include/limine.h")
+        eachFile {
+            if (name == "limine.h") {
+                path = "include/limine.h"
+            }
+        }
+        includeEmptyDirs = false
+    }
+}
+
+tasks.matching { it.name == "cinteropBridgeNative" }.configureEach {
+    dependsOn(prepareLimine, prepareFreestndHeaders)
+}
+
 val compileC by tasks.register<CompileCSourcesTask>("compileC") {
     group = "build"
     description = "Compiles C sources into object files."
+    dependsOn(prepareLimine, prepareFreestndHeaders)
 
     sourceFiles.from(cSources)
-    inputs.files(kernelCDir.resolve("bridge.h"), kernelCDir.resolve("limine.h"))
+    inputs.files(kernelCDir.resolve("bridge.h"), limineHeader)
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.dir(freestndHeadersIncludeDir)
         .withPathSensitivity(PathSensitivity.RELATIVE)
     compiler.set(crossCc)
     outputDirectory.set(cObjectsDir)
@@ -282,12 +407,11 @@ tasks.named("build") {
 val stageIso by tasks.register<Sync>("stageIso") {
     group = "build"
     description = "Stages the kernel and limine assets into the ISO directory."
-    dependsOn(linkKernel)
+    dependsOn(linkKernel, prepareLimine)
 
     into(isoDir)
-    from(limineAssetsDir) {
-        into("limine")
-    }
+    from(limineConfigFile) { into("limine") }
+    from(limineUefiCdBin) { into("limine") }
     from(kernelElf)
 }
 
