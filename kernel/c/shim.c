@@ -82,6 +82,19 @@ void invlpg(uint64_t address) {
     __asm__ volatile ("invlpg (%0)" : : "r"(address) : "memory");
 }
 
+uint64_t rdmsr(uint32_t msr) {
+    uint32_t eax;
+    uint32_t edx;
+    __asm__ volatile ("rdmsr" : "=a"(eax), "=d"(edx) : "c"(msr) : "memory");
+    return ((uint64_t)edx << 32) | eax;
+}
+
+void wrmsr(uint32_t msr, uint64_t value) {
+    uint32_t eax = (uint32_t)value;
+    uint32_t edx = (uint32_t)(value >> 32);
+    __asm__ volatile ("wrmsr" : : "a"(eax), "d"(edx), "c"(msr) : "memory");
+}
+
 enum {
     serial_com1 = 0x3F8,
     serial_line_status = 5,
@@ -90,6 +103,10 @@ enum {
 
 static inline void outb(uint16_t port, uint8_t value) {
     __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+void io_out8(uint16_t port, uint8_t value) {
+    outb(port, value);
 }
 
 static inline uint8_t inb(uint16_t port) {

@@ -21,6 +21,9 @@ extern void idt_setup();
 extern uint64_t read_cr3(void);
 extern uint64_t read_cr2(void);
 extern void invlpg(uint64_t address);
+extern uint64_t rdmsr(uint32_t msr);
+extern void wrmsr(uint32_t msr, uint64_t value);
+extern void io_out8(uint16_t port, uint8_t value);
 
 extern void register_interrupt_handler(
     uint16_t vector,

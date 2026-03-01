@@ -34,6 +34,7 @@ volatile struct limine_memmap_request memmap_request = {
 __attribute__((used, section(".limine_requests")))
 volatile struct limine_mp_request mp_request = {
     .id = LIMINE_MP_REQUEST_ID,
+    .flags = LIMINE_MP_REQUEST_X86_64_X2APIC,
 };
 
 __attribute__((used, section(".limine_requests")))

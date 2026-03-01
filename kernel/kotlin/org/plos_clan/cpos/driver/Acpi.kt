@@ -5,6 +5,7 @@ package org.plos_clan.cpos.driver
 import bridge.rsdp_request
 import kotlinx.cinterop.*
 import org.plos_clan.cpos.mem.Hhdm
+import org.plos_clan.cpos.driver.apic.Apic
 import org.plos_clan.cpos.utils.*
 
 private const val RSDP_V1_LENGTH = 20
@@ -124,7 +125,7 @@ object Acpi {
     private var root: RootSdt? = null
     private val tableIndex = linkedMapOf<String, ULong>()
 
-    fun init() {
+    fun initialize() {
         reset()
 
         if (!Hhdm.isReady && Hhdm.initialize() == null) {
@@ -190,6 +191,14 @@ object Acpi {
         parseIfFound(MadtParser) { madt ->
             println("ACPI: LAPIC address=${madt.lapicAddress.hex()}")
             println("ACPI: IOAPIC address=${madt.ioapicAddress.hex()}")
+            if (madt.lapicAddress == 0u) {
+                println("ACPI: LAPIC address is invalid, skip APIC init")
+            } else {
+                Apic.initialize(
+                    lapicPhysicalAddress = madt.lapicAddress,
+                    ioapicPhysicalAddress = madt.ioapicAddress,
+                )
+            }
         }
 
         parseIfFound(SpcrParser) { uartAddress ->

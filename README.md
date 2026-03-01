@@ -2,7 +2,7 @@
 
 ## Build
 
-**The build system is now migrated to Gradle for better maintainability and modern tooling support:**
+This project uses Gradle for kernel build, ISO packaging, and QEMU run.
 
 - Supports kernel build, ISO packaging, and QEMU run
 - Assets (Limine and OVMF) are not fetched from the internet
@@ -38,8 +38,6 @@ You need to install:
 - `xorriso` (for ISO creation)
 - `qemu-system-x86_64` (for emulation)
 - Git and Gradle (included with Kotlin/Native)
-
-**Note:** The Gradle build system replaces the Makefile completely while maintaining all existing functionality.
 
 ## License
 

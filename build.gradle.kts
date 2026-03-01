@@ -162,10 +162,9 @@ val xorrisoFlagsBoot = listOf("--efi-boot", "limine/limine-uefi-cd.bin", "-efi-b
 val xorrisoFlags = combineFlags(xorrisoFlagsMode, xorrisoFlagsBoot)
 
 val qemuMemory = setting("qemuMemory", "QEMU_MEMORY", "256m")
-val qemuFlagsMachine = listOf("-m", qemuMemory, "-M", "q35", "-cpu", "qemu64,+x2apic")
-val qemuFlagsControl = listOf("-no-reboot", "-daemonize")
+val qemuFlagsMachine = listOf("-m", qemuMemory, "-M", "q35", "-cpu", "qemu64,+x2apic", "-no-reboot")
 val qemuFlagsFirmware = listOf("-drive", "if=pflash,format=raw,readonly=on,file=assets/ovmf-code.fd")
-val qemuBaseFlags = combineFlags(qemuFlagsMachine, qemuFlagsControl, qemuFlagsFirmware)
+val qemuBaseFlags = combineFlags(qemuFlagsMachine, qemuFlagsFirmware)
 
 val mlibcTarget = "$targetArch-unknown-none"
 val mlibcCc = "$crossCc -target $mlibcTarget"
@@ -226,7 +225,6 @@ kotlin {
 
 val kernelElf = buildRootDir.resolve("kernel.elf")
 val isoImage = buildRootDir.resolve("$projectName.iso")
-val qemuSerialLog = buildRootDir.resolve("qemu-serial.log")
 
 val compileC by tasks.register<CompileCSourcesTask>("compileC") {
     group = "build"
@@ -317,26 +315,17 @@ val buildIso by tasks.register<Exec>("buildIso") {
 
 tasks.register<Exec>("run") {
     group = runGroup
-    description = "Runs CoolPotOS in QEMU."
+    description = "Runs CoolPotOS in QEMU with serial on stdio."
     dependsOn(buildIso)
-
-    doFirst {
-        qemuSerialLog.parentFile.mkdirs()
-    }
 
     val runCommand = buildList {
         add(qemu)
         addAll(qemuBaseFlags)
         add("-serial")
-        add("file:${qemuSerialLog.absolutePath}")
+        add("mon:stdio")
         add(isoImage.absolutePath)
     }
     commandLine(runCommand)
-
-    doLast {
-        println("QEMU started in background.")
-        println("Serial log: ${qemuSerialLog.absolutePath}")
-    }
 }
 
 tasks.named<Delete>("clean") {

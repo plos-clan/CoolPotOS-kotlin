@@ -146,15 +146,9 @@ object BuddyFrameAllocator {
         }
 
         val selectedRanges = when {
-            usableRanges.isNotEmpty() -> {
-                println("Buddy: using LIMINE_MEMMAP_USABLE")
-                mergeRanges(usableRanges)
-            }
+            usableRanges.isNotEmpty() -> mergeRanges(usableRanges)
 
-            reclaimableRanges.isNotEmpty() -> {
-                println("Buddy: usable unavailable, fallback to BOOTLOADER_RECLAIMABLE")
-                mergeRanges(reclaimableRanges)
-            }
+            reclaimableRanges.isNotEmpty() -> mergeRanges(reclaimableRanges)
 
             else -> emptyList()
         }

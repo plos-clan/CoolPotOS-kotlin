@@ -16,8 +16,8 @@ fun ULong.hasBit(index: Int): Boolean =
 
 fun ULong.hex64(): String = toString(HEX_RADIX).padStart(16, '0')
 fun UInt.hex32(): String = toString(HEX_RADIX).padStart(8, '0')
-fun ULong.hex(): String = "$HEX_PREFIX${hex64()}"
-fun UInt.hex(): String = "$HEX_PREFIX${hex32()}"
+fun ULong.hex(): String = "$HEX_PREFIX${toString(HEX_RADIX)}"
+fun UInt.hex(): String = "$HEX_PREFIX${toString(HEX_RADIX)}"
 
 fun ULong.isCanonicalKernelAddress(): Boolean = (this shr 48) == 0xFFFFuL
 
