@@ -23,7 +23,11 @@ typedef struct interrupt_frame {
     uint64_t ss;
 } __attribute__((packed)) interrupt_frame_t;
 
-typedef void (*kotlin_interrupt_handler_t)(interrupt_frame_t *frame, uint64_t error_code);
+typedef void (*kotlin_interrupt_handler_t)(
+    interrupt_frame_t *frame,
+    uint64_t error_code,
+    uint64_t rbp
+);
 
 static struct idt_register idt_pointer;
 static struct idt_entry idt_entries[256];
@@ -33,15 +37,22 @@ __attribute__((noinline, force_align_arg_pointer))
 static void dispatch_kotlin_handler(
     kotlin_interrupt_handler_t handler,
     interrupt_frame_t *frame,
-    uint64_t error_code
+    uint64_t error_code,
+    uint64_t rbp
 ) {
-    handler(frame, error_code);
+    handler(frame, error_code, rbp);
 }
 
 static __attribute__((noreturn)) void halt_forever(void) {
     for (;;) {
         __asm__ volatile("cli; hlt");
     }
+}
+
+static inline __attribute__((always_inline)) uint64_t read_rbp(void) {
+    uint64_t rbp;
+    __asm__ volatile ("movq (%%rbp), %0" : "=r"(rbp));
+    return rbp;
 }
 
 static void set_idt_gate(uint16_t vector, void *handler, uint8_t ist, uint8_t flags) {
@@ -69,7 +80,7 @@ static void set_idt_gate(uint16_t vector, void *handler, uint8_t ist, uint8_t fl
         if (!handler) { \
             halt_forever(); \
         } \
-        dispatch_kotlin_handler(handler, frame, 0); \
+        dispatch_kotlin_handler(handler, frame, 0, read_rbp()); \
     }
 EXCEPTION_NO_ERROR_CODE_LIST
 #undef X
@@ -81,7 +92,7 @@ EXCEPTION_NO_ERROR_CODE_LIST
             (void)error_code; \
             halt_forever(); \
         } \
-        dispatch_kotlin_handler(handler, frame, error_code); \
+        dispatch_kotlin_handler(handler, frame, error_code, read_rbp()); \
     }
 EXCEPTION_WITH_ERROR_CODE_LIST
 #undef X
@@ -115,7 +126,7 @@ void idt_setup() {
 
 void register_interrupt_handler(
     uint16_t vector,
-    void (*handler)(void *interrupt_frame, uint64_t error_code),
+    void (*handler)(void *interrupt_frame, uint64_t error_code, uint64_t rbp),
     const uint8_t ist,
     const uint8_t flags
 ) {
