@@ -9,12 +9,12 @@
 - Cross-platform compatible (Linux/macOS/Windows)
 
 **Available Gradle tasks:**
-- `./gradlew build`: Build kernel ELF (equivalent to `make kernel`)
-- `./gradlew buildIso`: Build the UEFI ISO image (equivalent to `make iso`)
-- `./gradlew run`: Run the ISO image in QEMU (equivalent to `make run`)
-- `./gradlew clean`: Clean kernel build outputs (equivalent to `make clean`)
-- `./gradlew cleanAll`: Remove entire build directory (equivalent to `make distclean`)
-- `./gradlew buildMlibc`: Build bundled mlibc (equivalent to `make mlibc`)
+- `./gradlew build`: Build kernel ELF
+- `./gradlew buildIso`: Build the UEFI ISO image
+- `./gradlew run`: Run the ISO image in QEMU
+- `./gradlew clean`: Clean kernel build outputs
+- `./gradlew cleanAll`: Remove entire build directory
+- `./gradlew buildMlibc`: Build bundled mlibc
 
 **Quick start:**
 
