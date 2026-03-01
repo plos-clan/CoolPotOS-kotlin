@@ -158,8 +158,6 @@ val buildMlibc by tasks.register<Exec>("buildMlibc") {
     inputs.files("build-mlibc", mlibcPatch)
     outputs.dir(mlibcPrefix)
 
-    onlyIf { mlibcArtifacts.any { !it.exists() } }
-
     environment(
         mapOf(
             "ARCH" to "x86_64",
