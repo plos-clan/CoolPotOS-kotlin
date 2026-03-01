@@ -126,8 +126,6 @@ object Acpi {
     private val tableIndex = linkedMapOf<String, ULong>()
 
     fun initialize() {
-        reset()
-
         if (!Hhdm.isReady && Hhdm.initialize() == null) {
             println("ACPI: HHDM is unavailable")
             return
@@ -173,12 +171,12 @@ object Acpi {
         val rootSignature = rootTable.pointer.readAscii(0, 4)
 
         println("ACPI revision: $revision")
-        println("ACPI root SDT: $rootSignature at ${rootAddress.hex()} length=${rootTable.length}")
+        println("ACPI root SDT: $rootSignature at ${rootAddress.hex()}")
 
         rebuildTableIndex()
 
         parseIfFound(HpetParser) { hpetGasAddress ->
-            println("ACPI: HPET GAS space_id=${hpetGasAddress.spaceId} address=${hpetGasAddress.address.hex()}")
+            println("ACPI: HPET address=${hpetGasAddress.address.hex()}")
             Hpet.initialize(
                 baseAddress = hpetGasAddress.address,
                 spaceId = hpetGasAddress.spaceId,
@@ -188,6 +186,7 @@ object Acpi {
         parseIfFound(McfgParser) { regionCount ->
             println("ACPI: MCFG region count=$regionCount")
         }
+
         parseIfFound(MadtParser) { madt ->
             println("ACPI: LAPIC address=${madt.lapicAddress.hex()}")
             println("ACPI: IOAPIC address=${madt.ioapicAddress.hex()}")
@@ -204,11 +203,6 @@ object Acpi {
         parseIfFound(SpcrParser) { uartAddress ->
             println("ACPI: UART base=${uartAddress.hex()}")
         }
-    }
-
-    private fun reset() {
-        root = null
-        tableIndex.clear()
     }
 
     private fun rebuildTableIndex() {

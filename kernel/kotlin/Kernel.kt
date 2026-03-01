@@ -1,6 +1,4 @@
 import bridge.framebuffer_request
-import bridge.gdt_setup
-import bridge.idt_setup
 import bridge.limine_framebuffer
 import kotlinx.cinterop.*
 import org.plos_clan.cpos.drivers.Acpi
@@ -24,8 +22,8 @@ fun kernelMain() {
     initializeTerminal()
     println("Kernel booting...")
     println(KERNEL_BANNER)
-    gdt_setup()
-    idt_setup()
+    bridge.gdt_setup()
+    bridge.idt_setup()
     println("Descriptor table initialized.")
     ErrorHandler.initialize()
     Hhdm.initialize()
