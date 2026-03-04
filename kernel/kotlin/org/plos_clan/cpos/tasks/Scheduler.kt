@@ -7,6 +7,7 @@ import org.plos_clan.cpos.fault.IrqType
 import org.plos_clan.cpos.utils.PtraceRegisters
 
 object Scheduler {
+
     fun scheduler(regs: PtraceRegisters, irqNum: ULong) {
     }
 

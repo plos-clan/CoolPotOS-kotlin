@@ -18,6 +18,10 @@ private const val SDT_HEADER_LENGTH = 36
 private const val SDT_LENGTH_OFFSET = 4
 private const val MCFG_HEADER_LENGTH = SDT_HEADER_LENGTH + 8
 private const val MCFG_ENTRY_LENGTH = 16
+private const val MCFG_ENTRY_BASE_ADDRESS_OFFSET = 0
+private const val MCFG_ENTRY_SEGMENT_GROUP_OFFSET = 8
+private const val MCFG_ENTRY_START_BUS_OFFSET = 10
+private const val MCFG_ENTRY_END_BUS_OFFSET = 11
 private const val MADT_HEADER_LENGTH = SDT_HEADER_LENGTH + 8
 private const val HPET_GAS_SPACE_ID_OFFSET = SDT_HEADER_LENGTH + 4
 private const val HPET_GAS_ADDRESS_OFFSET = SDT_HEADER_LENGTH + 8
@@ -38,6 +42,11 @@ private data class MadtInfo(
     val ioapicAddress: UInt,
 )
 
+private data class McfgInfo(
+    val totalRegionCount: Int,
+    val regions: List<PcieEcamRegion>,
+)
+
 private data class HpetGasAddress(
     val spaceId: UInt,
     val address: ULong,
@@ -48,16 +57,49 @@ private interface AcpiTableParser<out T> {
     fun parse(table: AcpiTable): T?
 }
 
-private object McfgParser : AcpiTableParser<Int> {
+private object McfgParser : AcpiTableParser<McfgInfo> {
     override val signature: String = "MCFG"
 
-    override fun parse(table: AcpiTable): Int? {
+    override fun parse(table: AcpiTable): McfgInfo? {
         if (table.length < MCFG_HEADER_LENGTH) {
             println("ACPI: invalid MCFG length=${table.length}")
             return null
         }
+
         val payloadSize = table.length - MCFG_HEADER_LENGTH
-        return payloadSize / MCFG_ENTRY_LENGTH
+        val totalRegionCount = payloadSize / MCFG_ENTRY_LENGTH
+        if (payloadSize % MCFG_ENTRY_LENGTH != 0) {
+            println("ACPI: malformed MCFG payload size=$payloadSize")
+        }
+
+        val regions = buildList {
+            var offset = MCFG_HEADER_LENGTH
+            repeat(totalRegionCount) { index ->
+                val baseAddress = table.pointer.readU64(offset + MCFG_ENTRY_BASE_ADDRESS_OFFSET)
+                val segmentGroup = table.pointer.readU16(offset + MCFG_ENTRY_SEGMENT_GROUP_OFFSET).toUInt()
+                val startBus = table.pointer.readU8(offset + MCFG_ENTRY_START_BUS_OFFSET).toUInt()
+                val endBus = table.pointer.readU8(offset + MCFG_ENTRY_END_BUS_OFFSET).toUInt()
+
+                if (baseAddress == 0uL || endBus < startBus) {
+                    println(
+                        "ACPI: ignore MCFG region#$index seg=$segmentGroup bus=$startBus-$endBus base=${baseAddress.hex()}",
+                    )
+                } else {
+                    add(
+                        PcieEcamRegion(
+                            baseAddress = baseAddress,
+                            segmentGroup = segmentGroup,
+                            startBus = startBus,
+                            endBus = endBus,
+                        ),
+                    )
+                }
+
+                offset += MCFG_ENTRY_LENGTH
+            }
+        }
+
+        return McfgInfo(totalRegionCount = totalRegionCount, regions = regions)
     }
 }
 
@@ -183,8 +225,9 @@ object Acpi {
             )
         }
 
-        parseIfFound(McfgParser) { regionCount ->
-            println("ACPI: MCFG region count=$regionCount")
+        parseIfFound(McfgParser) { mcfg ->
+            println("ACPI: MCFG region count=${mcfg.totalRegionCount} usable=${mcfg.regions.size}")
+            Pcie.initialize(mcfg.regions)
         }
 
         parseIfFound(MadtParser) { madt ->
