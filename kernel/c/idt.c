@@ -1,5 +1,12 @@
 #include "bridge.h"
 
+enum {
+    idt_vector_count = 256,
+    irq_vector_base = 32,
+    irq_stub_size = 10,
+    irq_stub_count = idt_vector_count - irq_vector_base
+};
+
 struct idt_register {
     uint16_t size;
     void *ptr;
@@ -23,15 +30,45 @@ typedef struct interrupt_frame {
     uint64_t ss;
 } __attribute__((packed)) interrupt_frame_t;
 
+struct pt_regs {
+    uint64_t r15;
+    uint64_t r14;
+    uint64_t r13;
+    uint64_t r12;
+    uint64_t r11;
+    uint64_t r10;
+    uint64_t r9;
+    uint64_t r8;
+    uint64_t rbx;
+    uint64_t rcx;
+    uint64_t rdx;
+    uint64_t rsi;
+    uint64_t rdi;
+    uint64_t rbp;
+    uint64_t ds;
+    uint64_t es;
+    uint64_t rax;
+    uint64_t func;
+    uint64_t errcode;
+    uint64_t rip;
+    uint64_t cs;
+    uint64_t rflags;
+    uint64_t rsp;
+    uint64_t ss;
+} __attribute__((packed));
+
 typedef void (*kotlin_interrupt_handler_t)(
     interrupt_frame_t *frame,
     uint64_t error_code,
     uint64_t rbp
 );
 
+extern void do_irq(void *regs, uint64_t irq_num);
+extern uint8_t irq_stub_base[];
+
 static struct idt_register idt_pointer;
-static struct idt_entry idt_entries[256];
-static kotlin_interrupt_handler_t kotlin_handle[256];
+static struct idt_entry idt_entries[idt_vector_count];
+static kotlin_interrupt_handler_t kotlin_handle[idt_vector_count];
 
 __attribute__((noinline, force_align_arg_pointer))
 static void dispatch_kotlin_handler(
@@ -97,7 +134,7 @@ EXCEPTION_NO_ERROR_CODE_LIST
 EXCEPTION_WITH_ERROR_CODE_LIST
 #undef X
 
-static void *const exception_entry_stub[32] = {
+static void *const exception_entry_stub[irq_vector_base] = {
 #define X(vector) [vector] = (void *)isr_no_error_##vector,
     EXCEPTION_NO_ERROR_CODE_LIST
 #undef X
@@ -106,17 +143,112 @@ static void *const exception_entry_stub[32] = {
 #undef X
 };
 
+__asm__(
+".global irq_common_entry\n"
+"irq_common_entry:\n"
+"    subq $192, %rsp\n"
+"    movq %r15, 0(%rsp)\n"
+"    movq %r14, 8(%rsp)\n"
+"    movq %r13, 16(%rsp)\n"
+"    movq %r12, 24(%rsp)\n"
+"    movq %r11, 32(%rsp)\n"
+"    movq %r10, 40(%rsp)\n"
+"    movq %r9, 48(%rsp)\n"
+"    movq %r8, 56(%rsp)\n"
+"    movq %rbx, 64(%rsp)\n"
+"    movq %rcx, 72(%rsp)\n"
+"    movq %rdx, 80(%rsp)\n"
+"    movq %rsi, 88(%rsp)\n"
+"    movq %rdi, 96(%rsp)\n"
+"    movq %rbp, 104(%rsp)\n"
+"    movq %rax, 128(%rsp)\n"
+"    xorq %rax, %rax\n"
+"    movw %ds, %ax\n"
+"    movq %rax, 112(%rsp)\n"
+"    xorq %rax, %rax\n"
+"    movw %es, %ax\n"
+"    movq %rax, 120(%rsp)\n"
+"    xorq %rax, %rax\n"
+"    leaq 192(%rsp), %rdx\n"
+"    movq (%rdx), %rax\n"
+"    movq %rax, 136(%rsp)\n"
+"    xorq %rax, %rax\n"
+"    movq %rax, 144(%rsp)\n"
+"    movq 8(%rdx), %rax\n"
+"    movq %rax, 152(%rsp)\n"
+"    movq 16(%rdx), %rax\n"
+"    movq %rax, 160(%rsp)\n"
+"    movq 24(%rdx), %rax\n"
+"    movq %rax, 168(%rsp)\n"
+"    testb $0x3, 16(%rdx)\n"
+"    jnz 1f\n"
+"    leaq 32(%rdx), %rax\n"
+"    movq %rax, 176(%rsp)\n"
+"    xorq %rax, %rax\n"
+"    movw %ss, %ax\n"
+"    movq %rax, 184(%rsp)\n"
+"    jmp 2f\n"
+"1:\n"
+"    movq 32(%rdx), %rax\n"
+"    movq %rax, 176(%rsp)\n"
+"    movq 40(%rdx), %rax\n"
+"    movq %rax, 184(%rsp)\n"
+"2:\n"
+"    movq %rsp, %rdi\n"
+"    movq (%rdx), %rsi\n"
+"    call do_irq\n"
+"    movq 0(%rsp), %r15\n"
+"    movq 8(%rsp), %r14\n"
+"    movq 16(%rsp), %r13\n"
+"    movq 24(%rsp), %r12\n"
+"    movq 32(%rsp), %r11\n"
+"    movq 40(%rsp), %r10\n"
+"    movq 48(%rsp), %r9\n"
+"    movq 56(%rsp), %r8\n"
+"    movq 64(%rsp), %rbx\n"
+"    movq 72(%rsp), %rcx\n"
+"    movq 80(%rsp), %rdx\n"
+"    movq 88(%rsp), %rsi\n"
+"    movq 96(%rsp), %rdi\n"
+"    movq 104(%rsp), %rbp\n"
+"    movq 128(%rsp), %rax\n"
+"    addq $200, %rsp\n"
+"    iretq\n"
+);
+
+__asm__(
+".global irq_stub_base\n"
+"irq_stub_base:\n"
+".set irq_num, 1\n"
+".rept 224\n"
+"    .byte 0x68\n"
+"    .long irq_num\n"
+"    jmp irq_common_entry\n"
+"    .set irq_num, irq_num + 1\n"
+".endr\n"
+);
+
 void idt_setup() {
-    for (uint16_t vector = 0; vector < 256; vector++) {
+    for (uint16_t vector = 0; vector < idt_vector_count; vector++) {
         idt_entries[vector] = (struct idt_entry){0};
         kotlin_handle[vector] = 0;
     }
 
-    for (uint16_t vector = 0; vector < 32; vector++) {
+    for (uint16_t vector = 0; vector < irq_vector_base; vector++) {
         if (!exception_entry_stub[vector]) {
             continue;
         }
         set_idt_gate(vector, exception_entry_stub[vector], vector == 8 ? 1 : 0, 0x8e);
+    }
+
+    for (uint16_t vector = irq_vector_base; vector < idt_vector_count; vector++) {
+        const uint16_t irq_index = (uint16_t)(vector - irq_vector_base);
+        if (irq_index >= irq_stub_count) {
+            continue;
+        }
+
+        uint8_t *stub = irq_stub_base + ((uint64_t)irq_index * irq_stub_size);
+        set_idt_gate(vector, stub, 0, 0x8e);
     }
 
     idt_pointer.size = (uint16_t)(sizeof(idt_entries) - 1u);
@@ -130,7 +262,7 @@ void register_interrupt_handler(
     const uint8_t ist,
     const uint8_t flags
 ) {
-    if (vector >= 32 || !exception_entry_stub[vector]) {
+    if (vector >= irq_vector_base || !exception_entry_stub[vector]) {
         return;
     }
 

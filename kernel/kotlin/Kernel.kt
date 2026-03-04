@@ -8,6 +8,8 @@ import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.fault.ErrorHandler
 import org.plos_clan.cpos.drivers.term.Terminal
+import org.plos_clan.cpos.fault.IrqController
+import org.plos_clan.cpos.tasks.Scheduler
 import kotlin.experimental.ExperimentalNativeApi
 
 private val KERNEL_RUNTIME = "x86_64/kotlin-${KotlinVersion.CURRENT}"
@@ -19,6 +21,7 @@ private const val SUPPORTED_FRAMEBUFFER_BPP = 32
 @Suppress("unused")
 @CName("kernel_main")
 fun kernelMain() {
+    bridge.disable_interrupt()
     initializeTerminal()
     println("Kernel booting...")
     println(KERNEL_BANNER)
@@ -30,8 +33,11 @@ fun kernelMain() {
     BuddyFrameAllocator.initialize()
     KernelPageDirectory.initialize()
     Acpi.initialize()
+    IrqController.initialize()
     ProcessManager.initialize()
+    Scheduler.initialize()
     println("Kernel load done!")
+    bridge.enable_interrupt()
     while (true) {}
 }
 

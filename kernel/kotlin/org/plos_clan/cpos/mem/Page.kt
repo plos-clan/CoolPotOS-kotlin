@@ -20,9 +20,8 @@ private const val PTE_ADDR_MASK = 0x000F_FFFF_FFFF_F000uL
 private val PTE_PARENT_FLAGS = PTE_PRESENT or PTE_WRITABLE or PTE_USER
 private val MMIO_PTE_FLAGS = PTE_PRESENT or PTE_WRITABLE or PTE_NO_CACHE or PTE_NO_EXECUTE
 
-data class PageDirectory(
-    val pml4PhysicalAddress: ULong,
-) {
+data class PageDirectory(val pml4PhysicalAddress: ULong) {
+
     fun mapPage(virtualAddress: ULong, physicalAddress: ULong, flags: ULong): Boolean {
         if (!virtualAddress.isPageAligned() || !physicalAddress.isPageAligned()) {
             println("Paging: unaligned map request v=${virtualAddress.hex()} p=${physicalAddress.hex()}")
@@ -137,6 +136,8 @@ object KernelPageDirectory {
             println("Paging: active PML4=${pml4PhysicalAddress.hex()}")
         }
     }
+
+    fun getDirectory() : PageDirectory = activeDirectory!!
 
     fun mapMmio(
         physicalAddress: ULong,

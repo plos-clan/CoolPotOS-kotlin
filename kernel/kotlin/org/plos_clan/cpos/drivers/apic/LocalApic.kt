@@ -79,7 +79,7 @@ object LocalApic {
             configurePeriodicTimer(
                 vector = timerVector.toUByte(),
                 initialCount = timerInitialCount,
-                masked = true,
+                masked = false,
             )
         }
 
@@ -107,6 +107,7 @@ object LocalApic {
         write(LAPIC_REG_TIMER_DIV, LAPIC_TIMER_DIVIDE_BY_1)
         write(LAPIC_REG_TIMER, timerConfig)
         write(LAPIC_REG_TIMER_INITCNT, initialCount)
+        println("APIC: LAPIC timer vector=${vector.toUInt()} initial_count=$initialCount masked=$masked")
     }
 
     private fun enableController() {

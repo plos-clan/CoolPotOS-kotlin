@@ -109,6 +109,17 @@ fun setting(propName: String, envName: String, defaultValue: String): String {
     return propValue ?: envValue ?: defaultValue
 }
 
+fun settingBoolean(propName: String, envName: String, defaultValue: Boolean): Boolean {
+    val rawValue = (findProperty(propName) as String?)?.takeIf(String::isNotBlank)
+        ?: System.getenv(envName)?.takeIf(String::isNotBlank)
+        ?: return defaultValue
+    return when (rawValue.lowercase()) {
+        "1", "true", "yes", "on" -> true
+        "0", "false", "no", "off" -> false
+        else -> throw GradleException("Expected boolean for $propName/$envName, got '$rawValue'.")
+    }
+}
+
 fun combineFlags(vararg groups: List<String>): List<String> = buildList {
     groups.forEach(::addAll)
 }
@@ -118,6 +129,7 @@ val crossCxx = setting("crossCxx", "CROSS_CXX", "clang++")
 val linker = setting("linker", "LINKER", "ld.lld")
 val xorriso = setting("xorriso", "XORRISO", "xorriso")
 val qemu = setting("qemu", "QEMU", "qemu-system-x86_64")
+val debugMode = settingBoolean("debugMode", "DEBUG_MODE", false)
 
 val isoDir = buildRootDir.resolve("iso")
 val kernelCDir = file("kernel/c")
@@ -171,7 +183,7 @@ val cFlagsIncludes = listOf(
     "-I${limineIncludeDir.path}",
     "-I${freestndHeadersIncludeDir.path}"
 )
-val cFlagsOptimization = listOf("-O2")
+val cFlagsOptimization = listOf(if (debugMode) "-Og" else "-O2")
 val cCompilerArgs = combineFlags(
     cFlagsTarget,
     cFlagsLanguage,
@@ -213,7 +225,12 @@ val xorrisoFlags = combineFlags(xorrisoFlagsMode, xorrisoFlagsBoot)
 val qemuMemory = setting("qemuMemory", "QEMU_MEMORY", "256m")
 val qemuFlagsMachine = listOf("-m", qemuMemory, "-M", "q35", "-cpu", "qemu64,+x2apic", "-no-reboot")
 val qemuFlagsFirmware = listOf("-drive", "if=pflash,format=raw,readonly=on,file=assets/ovmf-code.fd")
-val qemuBaseFlags = combineFlags(qemuFlagsMachine, qemuFlagsFirmware)
+val qemuFlagsDebug = listOf("-s", "-S")
+val qemuBaseFlags = combineFlags(
+    qemuFlagsMachine,
+    qemuFlagsFirmware,
+    if (debugMode) qemuFlagsDebug else emptyList()
+)
 
 val mlibcTarget = "$targetArch-unknown-none"
 val mlibcCc = "$crossCc -target $mlibcTarget"
@@ -254,7 +271,12 @@ kotlin {
         else -> throw GradleException("Host OS is not supported in Kotlin/Native.")
     }
 
-    nativeTarget.binaries.staticLib { baseName = "kernel" }
+    nativeTarget.binaries.staticLib {
+        baseName = "kernel"
+        if (debugMode) {
+            freeCompilerArgs += "-g"
+        }
+    }
 
     sourceSets.named("nativeMain") {
         kotlin.srcDir(kernelKotlinDir)
@@ -442,7 +464,7 @@ tasks.register<Exec>("run") {
         add(qemu)
         addAll(qemuBaseFlags)
         add("-serial")
-        add("mon:stdio")
+        add("stdio")
         add(isoImage.absolutePath)
     }
     commandLine(runCommand)
