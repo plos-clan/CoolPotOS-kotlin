@@ -27,6 +27,7 @@ extern void io_out8(uint16_t port, uint8_t value);
 
 extern void enable_interrupt();
 extern void disable_interrupt();
+extern uint64_t get_kernel_idle_entry_address(void);
 
 extern void register_interrupt_handler(
     uint16_t vector,

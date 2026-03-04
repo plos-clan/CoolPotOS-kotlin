@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 extern void free(void *);
+void serial_print(const char *buffer, size_t size);
 
 int get_nprocs(void) {
     return 1;
@@ -115,6 +116,16 @@ void enable_interrupt() {
 
 void disable_interrupt() {
     __asm__ volatile("cli");
+}
+
+static __attribute__((noreturn)) void kernel_idle_thread_entry(void) {
+    for (;;) {
+        __asm__ volatile("hlt");
+    }
+}
+
+uint64_t get_kernel_idle_entry_address(void) {
+    return (uint64_t)(uintptr_t)&kernel_idle_thread_entry;
 }
 
 static inline uint8_t inb(uint16_t port) {

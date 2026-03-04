@@ -37,6 +37,7 @@ fun kernelMain() {
     ProcessManager.initialize()
     Scheduler.initialize()
     println("Kernel load done!")
+    Scheduler.enableScheduler()
     bridge.enable_interrupt()
     while (true) {}
 }

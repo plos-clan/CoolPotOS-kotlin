@@ -17,6 +17,7 @@ private const val PTE_NO_CACHE = 0x010uL
 private const val PTE_HUGE = 0x080uL
 private const val PTE_NO_EXECUTE = 0x8000_0000_0000_0000uL
 private const val PTE_ADDR_MASK = 0x000F_FFFF_FFFF_F000uL
+private const val PAGE_TABLE_LEVELS = 4
 private val PTE_PARENT_FLAGS = PTE_PRESENT or PTE_WRITABLE or PTE_USER
 private val MMIO_PTE_FLAGS = PTE_PRESENT or PTE_WRITABLE or PTE_NO_CACHE or PTE_NO_EXECUTE
 
@@ -79,6 +80,37 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
         return Hhdm.toVirtual(physicalAddress)
     }
 
+    fun duplicate(): PageDirectory? {
+        if (!BuddyFrameAllocator.isReady && !BuddyFrameAllocator.initialize()) {
+            println("Paging: allocator is unavailable for page table duplication")
+            return null
+        }
+
+        val sourcePml4 = pml4Table() ?: run {
+            println("Paging: source PML4 is unavailable")
+            return null
+        }
+
+        val allocatedFrames = mutableListOf<ULong>()
+        val duplicatedPml4Physical = allocateTableFrame(allocatedFrames) ?: run {
+            println("Paging: failed to allocate duplicate PML4")
+            return null
+        }
+        val duplicatedPml4 = duplicatedPml4Physical.toVirtualPointer<ULongVar>() ?: run {
+            println("Paging: failed to access duplicate PML4 at ${duplicatedPml4Physical.hex()}")
+            rollbackAllocatedFrames(allocatedFrames)
+            return null
+        }
+
+        if (!duplicateTableRecursive(sourcePml4, duplicatedPml4, PAGE_TABLE_LEVELS, allocatedFrames)) {
+            rollbackAllocatedFrames(allocatedFrames)
+            println("Paging: page table duplication failed")
+            return null
+        }
+
+        return PageDirectory(duplicatedPml4Physical)
+    }
+
     private fun pml4Table(): CPointer<ULongVar>? = pml4PhysicalAddress.toVirtualPointer()
 
     private fun ensureChildTable(
@@ -107,6 +139,69 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
         tablePointer.clear()
         parentTable[index] = (frameAddress and PTE_ADDR_MASK) or PTE_PARENT_FLAGS
         return tablePointer
+    }
+
+    private fun allocateTableFrame(allocatedFrames: MutableList<ULong>): ULong? {
+        val frameAddress = BuddyFrameAllocator.allocateFrames(1uL) ?: return null
+        allocatedFrames += frameAddress
+
+        val tablePointer = frameAddress.toVirtualPointer<ULongVar>() ?: run {
+            println("Paging: frame to pointer conversion failed for ${frameAddress.hex()}")
+            return null
+        }
+        tablePointer.clear()
+        return frameAddress
+    }
+
+    private fun duplicateTableRecursive(
+        sourceTable: CPointer<ULongVar>,
+        targetTable: CPointer<ULongVar>,
+        level: Int,
+        allocatedFrames: MutableList<ULong>,
+    ): Boolean {
+        for (index in 0 until PTE_COUNT) {
+            val entry = sourceTable[index]
+            if (entry and PTE_PRESENT == 0uL) {
+                targetTable[index] = 0uL
+                continue
+            }
+
+            if (level == 1 || entry and PTE_HUGE != 0uL) {
+                targetTable[index] = entry
+                continue
+            }
+
+            val childSourceTable = (entry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: run {
+                println("Paging: failed to access child table at level=$level index=$index")
+                return false
+            }
+            val childTargetPhysical = allocateTableFrame(allocatedFrames) ?: run {
+                println("Paging: failed to allocate child table at level=$level index=$index")
+                return false
+            }
+            val childTargetTable = childTargetPhysical.toVirtualPointer<ULongVar>() ?: run {
+                println(
+                    "Paging: failed to access duplicated child table at level=$level index=$index",
+                )
+                return false
+            }
+
+            if (!duplicateTableRecursive(childSourceTable, childTargetTable, level - 1, allocatedFrames)) {
+                return false
+            }
+
+            val preservedFlags = entry and PTE_ADDR_MASK.inv()
+            targetTable[index] = (childTargetPhysical and PTE_ADDR_MASK) or preservedFlags
+        }
+        return true
+    }
+
+    private fun rollbackAllocatedFrames(allocatedFrames: List<ULong>) {
+        for (frame in allocatedFrames.asReversed()) {
+            if (!BuddyFrameAllocator.freeFrames(frame, 1uL)) {
+                println("Paging: rollback failed for frame ${frame.hex()}")
+            }
+        }
     }
 
     private fun pml4Index(address: ULong): Int = ((address shr 39) and 0x1ffuL).toInt()
@@ -138,6 +233,8 @@ object KernelPageDirectory {
     }
 
     fun getDirectory() : PageDirectory = activeDirectory!!
+
+    fun duplicateDirectory(): PageDirectory? = activeDirectory!!.duplicate()
 
     fun mapMmio(
         physicalAddress: ULong,
