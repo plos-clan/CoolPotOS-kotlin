@@ -157,6 +157,31 @@ object ProcessManager {
         stackPages = stackPages,
     )
 
+    fun createThreadFromContext(
+        name: String,
+        entryPoint: ULong,
+        stackPointer: ULong,
+        argument: ULong = 0uL,
+    ): Thread? {
+        val process = systemProcess ?: return null
+        if (entryPoint == 0uL || stackPointer == 0uL) {
+            return null
+        }
+
+        val thread = Thread(
+            id = nextThreadId++,
+            processId = process.id,
+            name = name,
+            stackBasePhysical = 0uL,
+            stackSizeBytes = 0uL,
+        )
+        thread.initializeContext(entryPoint, stackPointer, argument)
+
+        process.addThread(thread)
+        Scheduler.enqueueThread(thread)
+        return thread
+    }
+
     fun getBootstrapThread(): Thread? = bootstrapThread
 
     fun getIdleThread(): Thread? = idleThread

@@ -10,6 +10,9 @@ import org.plos_clan.cpos.fault.ErrorHandler
 import org.plos_clan.cpos.drivers.term.Terminal
 import org.plos_clan.cpos.fault.IrqController
 import org.plos_clan.cpos.tasks.Scheduler
+import org.plos_clan.cpos.utils.SysCloneTrace
+import org.plos_clan.cpos.utils.hex
+import org.plos_clan.cpos.utils.toPointer
 import kotlin.experimental.ExperimentalNativeApi
 
 private val KERNEL_RUNTIME = "x86_64/kotlin-${KotlinVersion.CURRENT}"
@@ -35,11 +38,31 @@ fun kernelMain() {
     Acpi.initialize()
     IrqController.initialize()
     ProcessManager.initialize()
+    startCapturedCloneThreads()
     Scheduler.initialize()
     println("Kernel load done!")
     Scheduler.enableScheduler()
     bridge.enable_interrupt()
     while (true) {}
+}
+
+@ExperimentalForeignApi
+private fun startCapturedCloneThreads() {
+    val threadCount = minOf(2, SysCloneTrace.recordedCount().toInt())
+    for (index in 0 until threadCount) {
+        val trace = SysCloneTrace.getOrNull(index.toULong()) ?: continue
+        val stackPointer = trace.stack.toPointer<ULongVar>() ?: continue
+        val argument = stackPointer[1]
+        val thread = ProcessManager.createThreadFromContext(
+            name = "gc-thread-$index",
+            entryPoint = trace.entry,
+            stackPointer = trace.stack,
+            argument = argument,
+        ) ?: continue
+        println(
+            "gc-thread[$index] loaded tid=${thread.id} entry=${trace.entry.hex()} stack=${trace.stack.hex()} arg=${argument.hex()}",
+        )
+    }
 }
 
 @ExperimentalForeignApi

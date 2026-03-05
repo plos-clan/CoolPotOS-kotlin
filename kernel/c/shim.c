@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+extern void *realloc(void *ptr, size_t size);
 extern void free(void *);
 void serial_print(const char *buffer, size_t size);
 
@@ -116,6 +117,89 @@ void enable_interrupt() {
 
 void disable_interrupt() {
     __asm__ volatile("cli");
+}
+
+struct clone_context_record {
+    uint64_t stack;
+    uint64_t entry;
+};
+
+static struct clone_context_record *sys_clone_records = 0;
+static uint64_t sys_clone_recorded_count = 0;
+static uint64_t sys_clone_capacity = 0;
+static uint64_t clone_call_count = 0;
+
+static int ensure_sys_clone_record_capacity(uint64_t needed_count) {
+    if (needed_count <= sys_clone_capacity) {
+        return 1;
+    }
+
+    uint64_t new_capacity = sys_clone_capacity ? sys_clone_capacity : 64;
+    while (new_capacity < needed_count) {
+        if (new_capacity > (UINT64_MAX / 2)) {
+            return 0;
+        }
+        new_capacity *= 2;
+    }
+
+    const size_t bytes = (size_t)(new_capacity * sizeof(struct clone_context_record));
+    if (bytes / sizeof(struct clone_context_record) != new_capacity) {
+        return 0;
+    }
+
+    void *new_memory = realloc(sys_clone_records, bytes);
+    if (!new_memory) {
+        return 0;
+    }
+
+    sys_clone_records = (struct clone_context_record *)new_memory;
+    sys_clone_capacity = new_capacity;
+    return 1;
+}
+
+void capture_sys_clone_context(uint64_t stack, uint64_t entry) {
+    if (ensure_sys_clone_record_capacity(sys_clone_recorded_count + 1)) {
+        const uint64_t index = sys_clone_recorded_count++;
+        sys_clone_records[index].stack = stack;
+        sys_clone_records[index].entry = entry;
+    }
+    clone_call_count += 1;
+}
+
+uint64_t get_last_sys_clone_stack(void) {
+    if (!sys_clone_recorded_count) {
+        return 0;
+    }
+    return sys_clone_records[sys_clone_recorded_count - 1].stack;
+}
+
+uint64_t get_last_sys_clone_entry(void) {
+    if (!sys_clone_recorded_count) {
+        return 0;
+    }
+    return sys_clone_records[sys_clone_recorded_count - 1].entry;
+}
+
+uint64_t get_sys_clone_call_count(void) {
+    return clone_call_count;
+}
+
+uint64_t get_sys_clone_recorded_count(void) {
+    return sys_clone_recorded_count;
+}
+
+uint64_t get_sys_clone_stack_at(uint64_t index) {
+    if (index >= sys_clone_recorded_count) {
+        return 0;
+    }
+    return sys_clone_records[index].stack;
+}
+
+uint64_t get_sys_clone_entry_at(uint64_t index) {
+    if (index >= sys_clone_recorded_count) {
+        return 0;
+    }
+    return sys_clone_records[index].entry;
 }
 
 static __attribute__((noreturn)) void kernel_idle_thread_entry(void) {

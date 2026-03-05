@@ -27,6 +27,12 @@ extern void io_out8(uint16_t port, uint8_t value);
 
 extern void enable_interrupt();
 extern void disable_interrupt();
+extern uint64_t get_last_sys_clone_stack(void);
+extern uint64_t get_last_sys_clone_entry(void);
+extern uint64_t get_sys_clone_call_count(void);
+extern uint64_t get_sys_clone_recorded_count(void);
+extern uint64_t get_sys_clone_stack_at(uint64_t index);
+extern uint64_t get_sys_clone_entry_at(uint64_t index);
 extern uint64_t get_kernel_idle_entry_address(void);
 
 extern void register_interrupt_handler(
