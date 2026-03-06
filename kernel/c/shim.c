@@ -16,11 +16,6 @@ int __fxstat(int version, int fd, void *statbuf) {
     return -1;
 }
 
-long syscall(long number, ...) {
-    (void)number;
-    return -1;
-}
-
 int isnan(double x) {
     union {
         double f64;

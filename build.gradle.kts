@@ -2,67 +2,6 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.URI
 
-interface CompileCFileParameters : WorkParameters {
-    val compiler: Property<String>
-    val sourceFile: RegularFileProperty
-    val outputFile: RegularFileProperty
-    val commonArgs: ListProperty<String>
-}
-
-abstract class CompileCFileWork @Inject constructor(
-    private val execOperations: ExecOperations
-) : WorkAction<CompileCFileParameters> {
-    override fun execute() {
-        val source = parameters.sourceFile.asFile.get()
-        val output = parameters.outputFile.asFile.get()
-
-        execOperations.exec {
-            commandLine(
-                parameters.compiler.get(),
-                *parameters.commonArgs.get().toTypedArray(),
-                "-c",
-                source.absolutePath,
-                "-o",
-                output.absolutePath
-            )
-        }
-    }
-}
-
-@DisableCachingByDefault(because = "Invokes external compiler processes")
-abstract class CompileCSourcesTask : DefaultTask() {
-    @get:InputFiles
-    @get:PathSensitive(PathSensitivity.RELATIVE)
-    abstract val sourceFiles: ConfigurableFileCollection
-
-    @get:OutputDirectory
-    abstract val outputDirectory: DirectoryProperty
-
-    @get:Input
-    abstract val compiler: Property<String>
-
-    @get:Input
-    abstract val commonArgs: ListProperty<String>
-
-    @get:Inject
-    abstract val workerExecutor: WorkerExecutor
-
-    @TaskAction
-    fun compileAll() {
-        val outputDir = outputDirectory.get().asFile.apply { mkdirs() }
-
-        val queue = workerExecutor.noIsolation()
-        sourceFiles.files.forEach { source ->
-            queue.submit(CompileCFileWork::class.java) {
-                compiler.set(this@CompileCSourcesTask.compiler)
-                sourceFile.set(source)
-                outputFile.set(outputDir.resolve("${source.nameWithoutExtension}.o"))
-                commonArgs.set(this@CompileCSourcesTask.commonArgs)
-            }
-        }
-    }
-}
-
 @DisableCachingByDefault(because = "Downloads third-party artifacts")
 abstract class DownloadFileTask : DefaultTask() {
     @get:Input
@@ -90,15 +29,7 @@ plugins {
     alias(libs.plugins.kotlinMultiplatform)
 }
 
-group = "org.plos_clan"
-version = "0.0.1"
-
-repositories {
-    mavenCentral()
-}
-
 val targetArch = "x86_64"
-val runGroup = "runCoolPotOS"
 val projectName = "CoolPotOS"
 val buildRootDir = layout.buildDirectory.get().asFile
 val mlibcBuildDirName = "mlibc-$targetArch"
@@ -118,10 +49,6 @@ fun settingBoolean(propName: String, envName: String, defaultValue: Boolean): Bo
         "0", "false", "no", "off" -> false
         else -> throw GradleException("Expected boolean for $propName/$envName, got '$rawValue'.")
     }
-}
-
-fun combineFlags(vararg groups: List<String>): List<String> = buildList {
-    groups.forEach(::addAll)
 }
 
 val crossCc = setting("crossCc", "CROSS_CC", "clang")
@@ -169,7 +96,7 @@ val konanGccLibDir = File(toolRoot, "lib/gcc/$targetArch-unknown-linux-gnu/8.3.0
 val konanSysrootLibDir = File(toolRoot, "$targetArch-unknown-linux-gnu/sysroot/lib")
 val mlibcLibDir = mlibcPrefix.resolve("lib")
 
-val cSourceNames = listOf("boot.c", "shim.c", "gdt.c", "idt.c")
+val cSourceNames = listOf("boot.c", "shim.c", "syscall.c", "gdt.c", "idt.c")
 val cSources = cSourceNames.map(kernelCDir::resolve)
 
 val cFlagsTarget = listOf("-target", "$targetArch-freestanding")
@@ -184,15 +111,14 @@ val cFlagsIncludes = listOf(
     "-I${freestndHeadersIncludeDir.path}"
 )
 val cFlagsOptimization = listOf(if (debugMode) "-Og" else "-O2")
-val cCompilerArgs = combineFlags(
-    cFlagsTarget,
-    cFlagsLanguage,
-    cFlagsMachine,
-    cFlagsNoSimd,
-    cFlagsWarnings,
-    cFlagsIncludes,
+val cCompilerArgs =
+    cFlagsTarget +
+    cFlagsLanguage +
+    cFlagsMachine +
+    cFlagsNoSimd +
+    cFlagsWarnings +
+    cFlagsIncludes +
     cFlagsOptimization
-)
 
 val cObjectsDir = buildRootDir.resolve("c-objects")
 val cObjectFiles = cSources.map { source -> cObjectsDir.resolve("${source.nameWithoutExtension}.o") }
@@ -210,27 +136,25 @@ val ldFlagsRuntime = listOf("-nostdlib")
 val ldFlagsPaging = listOf("-z", "max-page-size=0x1000")
 val ldFlagsSections = listOf("--gc-sections")
 val ldFlagsScript = listOf("-T", linkerScript.absolutePath)
-val ldFlags = combineFlags(
-    ldFlagsFormat,
-    ldFlagsRuntime,
-    ldFlagsPaging,
-    ldFlagsSections,
+val ldFlags =
+    ldFlagsFormat +
+    ldFlagsRuntime +
+    ldFlagsPaging +
+    ldFlagsSections +
     ldFlagsScript
-)
 
 val xorrisoFlagsMode = listOf("-as", "mkisofs")
 val xorrisoFlagsBoot = listOf("--efi-boot", "limine/limine-uefi-cd.bin", "-efi-boot-part", "--efi-boot-image")
-val xorrisoFlags = combineFlags(xorrisoFlagsMode, xorrisoFlagsBoot)
+val xorrisoFlags = xorrisoFlagsMode + xorrisoFlagsBoot
 
 val qemuMemory = setting("qemuMemory", "QEMU_MEMORY", "256m")
 val qemuFlagsMachine = listOf("-m", qemuMemory, "-M", "q35", "-cpu", "qemu64,+x2apic", "-no-reboot")
 val qemuFlagsFirmware = listOf("-drive", "if=pflash,format=raw,readonly=on,file=assets/ovmf-code.fd")
 val qemuFlagsDebug = listOf("-s", "-S")
-val qemuBaseFlags = combineFlags(
-    qemuFlagsMachine,
-    qemuFlagsFirmware,
-    if (debugMode) qemuFlagsDebug else emptyList()
-)
+val qemuBaseFlags =
+    qemuFlagsMachine +
+    qemuFlagsFirmware +
+    (if (debugMode) qemuFlagsDebug else emptyList())
 
 val mlibcTarget = "$targetArch-unknown-none"
 val mlibcCc = "$crossCc -target $mlibcTarget"
@@ -242,20 +166,38 @@ val mlibcCFlagsSections = listOf("-ffunction-sections", "-fdata-sections")
 val mlibcCFlagsArch = listOf("-m64", "-march=x86-64", "-mno-red-zone", "-mcmodel=kernel")
 val mlibcCFlagsDefines = listOf("-D__thread=''", "-D_Thread_local=''", "-D_GNU_SOURCE")
 val mlibcCxxOnlyFlags = listOf("-fno-rtti", "-fno-exceptions", "-fno-sized-deallocation")
-val mlibcCFlagArgs = combineFlags(
-    mlibcCFlagsBase,
-    mlibcCFlagsWarnings,
-    mlibcCFlagsSafety,
-    mlibcCFlagsSections,
-    mlibcCFlagsArch,
+val mlibcCFlagArgs =
+    mlibcCFlagsBase +
+    mlibcCFlagsWarnings +
+    mlibcCFlagsSafety +
+    mlibcCFlagsSections +
+    mlibcCFlagsArch +
     mlibcCFlagsDefines
-)
 val mlibcCxxFlagArgs = mlibcCFlagArgs + mlibcCxxOnlyFlags
 val mlibcCFlags = mlibcCFlagArgs.joinToString(" ")
 val mlibcCxxFlags = mlibcCxxFlagArgs.joinToString(" ")
 val linkInputs = cObjectFiles + kotlinStaticLib + runtimeLibs
 
 fun Iterable<File>.absolutePaths(): List<String> = map(File::getAbsolutePath)
+
+fun runProcess(
+    command: List<String>,
+    workingDir: File? = null,
+    path: String? = null,
+    quiet: Boolean = false
+): Boolean {
+    val process = ProcessBuilder(command).apply {
+        workingDir?.let(::directory)
+        path?.let { environment()["PATH"] = it }
+        if (quiet) {
+            redirectOutput(ProcessBuilder.Redirect.DISCARD)
+            redirectError(ProcessBuilder.Redirect.DISCARD)
+        } else {
+            inheritIO()
+        }
+    }.start()
+    return process.waitFor() == 0
+}
 
 kotlin {
     val hostOs = System.getProperty("os.name")
@@ -296,21 +238,21 @@ val isoImage = buildRootDir.resolve("$projectName.iso")
 
 val downloadLimine by tasks.register<DownloadFileTask>("downloadLimine") {
     group = "build"
-    description = "Downloads Limine 10.x bootloader assets from Codeberg."
+    description = "Downloads Limine bootloader assets."
     sourceUrl.set(limineArchiveUrl)
     destinationFile.set(limineArchive)
 }
 
 val downloadLimineProtocol by tasks.register<DownloadFileTask>("downloadLimineProtocol") {
     group = "build"
-    description = "Downloads limine-protocol headers from Codeberg."
+    description = "Downloads limine-protocol headers."
     sourceUrl.set(limineProtocolArchiveUrl)
     destinationFile.set(limineProtocolArchive)
 }
 
 val downloadFreestndHeaders by tasks.register<DownloadFileTask>("downloadFreestndHeaders") {
     group = "build"
-    description = "Downloads freestanding C headers from Codeberg."
+    description = "Downloads freestanding C headers."
     sourceUrl.set(freestndHeadersArchiveUrl)
     destinationFile.set(freestndHeadersArchive)
 }
@@ -366,37 +308,132 @@ tasks.matching { it.name == "cinteropBridgeNative" }.configureEach {
     dependsOn(prepareLimine, prepareFreestndHeaders)
 }
 
-val compileC by tasks.register<CompileCSourcesTask>("compileC") {
+val compileC by tasks.register("compileC") {
     group = "build"
     description = "Compiles C sources into object files."
-    dependsOn(prepareLimine, prepareFreestndHeaders)
+    dependsOn(prepareLimine, prepareFreestndHeaders, buildMlibc)
+    notCompatibleWithConfigurationCache("Uses ProcessBuilder from build script.")
 
-    sourceFiles.from(cSources)
+    inputs.files(cSources)
+        .withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.files(kernelCDir.resolve("bridge.h"), limineHeader)
         .withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.dir(freestndHeadersIncludeDir)
         .withPathSensitivity(PathSensitivity.RELATIVE)
-    compiler.set(crossCc)
-    outputDirectory.set(cObjectsDir)
-    commonArgs.set(cCompilerArgs)
+    inputs.file(buildRootDir.resolve("syscall.h"))
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    outputs.dir(cObjectsDir)
+
+    doLast {
+        cObjectsDir.mkdirs()
+        cSources.forEach { source ->
+            val output = cObjectsDir.resolve("${source.nameWithoutExtension}.o")
+            val command = buildList {
+                add(crossCc)
+                addAll(cCompilerArgs)
+                add("-c")
+                add(source.absolutePath)
+                add("-o")
+                add(output.absolutePath)
+            }
+            check(runProcess(command)) {
+                "Failed to compile ${source.name}"
+            }
+        }
+    }
 }
 
 val buildMlibc by tasks.register<Exec>("buildMlibc") {
     group = "build"
     description = "Builds the mlibc C library."
-    inputs.files("build-mlibc", mlibcPatch)
+    notCompatibleWithConfigurationCache("Uses ProcessBuilder from build script.")
+
+    inputs.files(mlibcPatch)
+    inputs.dir("mlibc")
     outputs.dir(mlibcPrefix)
 
-    environment(
-        mapOf(
-            "ARCH" to targetArch,
-            "CC" to mlibcCc,
-            "CXX" to mlibcCxx,
-            "CFLAGS" to mlibcCFlags,
-            "CXXFLAGS" to mlibcCxxFlags
+    val mlibcBuildDir = buildRootDir.resolve(mlibcBuildDirName)
+    val mlibcDir = file("mlibc")
+    val mlibcSyscallH = mlibcDir.resolve("sysdeps/template/include/sys/syscall.h")
+    val crossFile = mlibcBuildDir.resolve("cross_file.txt")
+    val buildPath = "${mlibcBuildDir.absolutePath}:${System.getenv("PATH") ?: ""}"
+
+    doFirst {
+        delete(mlibcBuildDir)
+        mlibcBuildDir.mkdirs()
+
+        fun createWrapper(name: String, compiler: String, flags: String) =
+            mlibcBuildDir.resolve(name).apply {
+                writeText("#!/bin/sh\n$compiler $flags \"\$@\"\n")
+                setExecutable(true)
+            }
+        createWrapper("cc", mlibcCc, mlibcCFlags)
+        createWrapper("c++", mlibcCxx, mlibcCxxFlags)
+
+        crossFile.writeText(
+            """
+            [binaries]
+            c = 'cc'
+            cpp = 'c++'
+
+            [host_machine]
+            system = 'template'
+            cpu_family = '$targetArch'
+            cpu = '$targetArch'
+            endian = 'little'
+            """.trimIndent()
         )
+
+        val gitApplyCommand = listOf("git", "-C", mlibcDir.absolutePath, "apply")
+
+        if (!runProcess(
+            gitApplyCommand + mlibcPatch.absolutePath,
+            workingDir = mlibcBuildDir,
+            path = buildPath,
+            quiet = true
+        )) {
+            val patchResult = runProcess(
+                gitApplyCommand + listOf("-R", "--check", mlibcPatch.absolutePath),
+                workingDir = mlibcBuildDir,
+                path = buildPath,
+                quiet = true
+            )
+            check(patchResult) { "Failed to apply ${mlibcPatch.name}" }
+        }
+
+        val syscallPath = buildRootDir.resolve("syscall.h").toPath()
+        val fileSystemProvider = syscallPath.fileSystem.provider()
+        fileSystemProvider.deleteIfExists(syscallPath)
+        fileSystemProvider.createSymbolicLink(syscallPath, mlibcSyscallH.toPath())
+    }
+
+    workingDir(mlibcBuildDir)
+    environment("PATH", buildPath)
+    commandLine(
+        "meson",
+        "setup",
+        mlibcDir.absolutePath,
+        "--cross-file",
+        crossFile.absolutePath,
+        "--buildtype=debug",
+        "--prefix=${mlibcBuildDir.absolutePath}/prefix",
+        "-Ddefault_library=static",
+        "-Dlibgcc_dependency=false",
+        "-Duse_freestnd_hdrs=enabled"
     )
-    commandLine("./build-mlibc")
+
+    doLast {
+        fun runNinja(vararg args: String, errorMsg: String) {
+            val ninjaResult = runProcess(
+                args.toList(),
+                workingDir = mlibcBuildDir,
+                path = buildPath
+            )
+            check(ninjaResult) { errorMsg }
+        }
+        runNinja("ninja", "-v", errorMsg = "ninja build failed")
+        runNinja("ninja", "install", errorMsg = "ninja install failed")
+    }
 }
 
 val linkKernel by tasks.register<Exec>("linkKernel") {
@@ -456,7 +493,7 @@ val buildIso by tasks.register<Exec>("buildIso") {
 }
 
 tasks.register<Exec>("run") {
-    group = runGroup
+    group = "build"
     description = "Runs CoolPotOS in QEMU with serial on stdio."
     dependsOn(buildIso)
 
