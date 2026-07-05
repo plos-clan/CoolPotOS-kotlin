@@ -206,7 +206,6 @@ kotlin {
 
     val nativeTarget = when {
         hostOs == "Mac OS X" && isArm64 -> macosArm64("native")
-        hostOs == "Mac OS X" && !isArm64 -> macosX64("native")
         hostOs == "Linux" && isArm64 -> linuxArm64("native")
         hostOs == "Linux" && !isArm64 -> linuxX64("native")
         isMingwX64 -> mingwX64("native")
@@ -236,28 +235,28 @@ kotlin {
 val kernelElf = buildRootDir.resolve("kernel.elf")
 val isoImage = buildRootDir.resolve("$projectName.iso")
 
-val downloadLimine by tasks.register<DownloadFileTask>("downloadLimine") {
+val downloadLimine = tasks.register<DownloadFileTask>("downloadLimine") {
     group = "build"
     description = "Downloads Limine bootloader assets."
     sourceUrl.set(limineArchiveUrl)
     destinationFile.set(limineArchive)
 }
 
-val downloadLimineProtocol by tasks.register<DownloadFileTask>("downloadLimineProtocol") {
+val downloadLimineProtocol = tasks.register<DownloadFileTask>("downloadLimineProtocol") {
     group = "build"
     description = "Downloads limine-protocol headers."
     sourceUrl.set(limineProtocolArchiveUrl)
     destinationFile.set(limineProtocolArchive)
 }
 
-val downloadFreestndHeaders by tasks.register<DownloadFileTask>("downloadFreestndHeaders") {
+val downloadFreestndHeaders = tasks.register<DownloadFileTask>("downloadFreestndHeaders") {
     group = "build"
     description = "Downloads freestanding C headers."
     sourceUrl.set(freestndHeadersArchiveUrl)
     destinationFile.set(freestndHeadersArchive)
 }
 
-val prepareFreestndHeaders by tasks.register<Sync>("prepareFreestndHeaders") {
+val prepareFreestndHeaders = tasks.register<Sync>("prepareFreestndHeaders") {
     group = "build"
     description = "Extracts all freestanding C headers."
     dependsOn(downloadFreestndHeaders)
@@ -274,7 +273,7 @@ val prepareFreestndHeaders by tasks.register<Sync>("prepareFreestndHeaders") {
     }
 }
 
-val prepareLimine by tasks.register<Sync>("prepareLimine") {
+val prepareLimine = tasks.register<Sync>("prepareLimine") {
     group = "build"
     description = "Extracts Limine boot binary and protocol header."
     dependsOn(downloadLimine, downloadLimineProtocol)
@@ -308,7 +307,7 @@ tasks.matching { it.name == "cinteropBridgeNative" }.configureEach {
     dependsOn(prepareLimine, prepareFreestndHeaders)
 }
 
-val compileC by tasks.register("compileC") {
+val compileC = tasks.register("compileC") {
     group = "build"
     description = "Compiles C sources into object files."
     dependsOn(prepareLimine, prepareFreestndHeaders, buildMlibc)
@@ -343,7 +342,7 @@ val compileC by tasks.register("compileC") {
     }
 }
 
-val buildMlibc by tasks.register<Exec>("buildMlibc") {
+val buildMlibc = tasks.register<Exec>("buildMlibc") {
     group = "build"
     description = "Builds the mlibc C library."
     notCompatibleWithConfigurationCache("Uses ProcessBuilder from build script.")
@@ -436,7 +435,7 @@ val buildMlibc by tasks.register<Exec>("buildMlibc") {
     }
 }
 
-val linkKernel by tasks.register<Exec>("linkKernel") {
+val linkKernel = tasks.register<Exec>("linkKernel") {
     group = "build"
     description = "Links the kernel and runtime libraries into an ELF executable."
     dependsOn("linkDebugStaticNative", compileC, buildMlibc)
@@ -463,7 +462,7 @@ tasks.named("build") {
     dependsOn(linkKernel)
 }
 
-val stageIso by tasks.register<Sync>("stageIso") {
+val stageIso = tasks.register<Sync>("stageIso") {
     group = "build"
     description = "Stages the kernel and limine assets into the ISO directory."
     dependsOn(linkKernel, prepareLimine)
@@ -474,7 +473,7 @@ val stageIso by tasks.register<Sync>("stageIso") {
     from(kernelElf)
 }
 
-val buildIso by tasks.register<Exec>("buildIso") {
+val buildIso = tasks.register<Exec>("buildIso") {
     group = "build"
     description = "Builds the UEFI ISO image from staged assets."
     dependsOn(stageIso)
