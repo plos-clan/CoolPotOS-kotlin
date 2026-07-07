@@ -5,6 +5,8 @@ extern void *realloc(void *ptr, size_t size);
 extern void free(void *);
 void serial_print(const char *buffer, size_t size);
 
+uint64_t kernel_runtime_fs_base = 0;
+
 int get_nprocs(void) {
     return 1;
 }
@@ -116,13 +118,12 @@ void disable_interrupt() {
 
 struct clone_context_record {
     uint64_t stack;
-    uint64_t entry;
+    uint64_t tls;
 };
 
 static struct clone_context_record *sys_clone_records = 0;
 static uint64_t sys_clone_recorded_count = 0;
 static uint64_t sys_clone_capacity = 0;
-static uint64_t clone_call_count = 0;
 
 static int ensure_sys_clone_record_capacity(uint64_t needed_count) {
     if (needed_count <= sys_clone_capacity) {
@@ -152,31 +153,12 @@ static int ensure_sys_clone_record_capacity(uint64_t needed_count) {
     return 1;
 }
 
-void capture_sys_clone_context(uint64_t stack, uint64_t entry) {
+void capture_sys_clone_context(uint64_t stack, uint64_t tls) {
     if (ensure_sys_clone_record_capacity(sys_clone_recorded_count + 1)) {
         const uint64_t index = sys_clone_recorded_count++;
         sys_clone_records[index].stack = stack;
-        sys_clone_records[index].entry = entry;
+        sys_clone_records[index].tls = tls;
     }
-    clone_call_count += 1;
-}
-
-uint64_t get_last_sys_clone_stack(void) {
-    if (!sys_clone_recorded_count) {
-        return 0;
-    }
-    return sys_clone_records[sys_clone_recorded_count - 1].stack;
-}
-
-uint64_t get_last_sys_clone_entry(void) {
-    if (!sys_clone_recorded_count) {
-        return 0;
-    }
-    return sys_clone_records[sys_clone_recorded_count - 1].entry;
-}
-
-uint64_t get_sys_clone_call_count(void) {
-    return clone_call_count;
 }
 
 uint64_t get_sys_clone_recorded_count(void) {
@@ -190,11 +172,11 @@ uint64_t get_sys_clone_stack_at(uint64_t index) {
     return sys_clone_records[index].stack;
 }
 
-uint64_t get_sys_clone_entry_at(uint64_t index) {
+uint64_t get_sys_clone_tls_at(uint64_t index) {
     if (index >= sys_clone_recorded_count) {
         return 0;
     }
-    return sys_clone_records[index].entry;
+    return sys_clone_records[index].tls;
 }
 
 static __attribute__((noreturn)) void kernel_idle_thread_entry(void) {
@@ -205,6 +187,29 @@ static __attribute__((noreturn)) void kernel_idle_thread_entry(void) {
 
 uint64_t get_kernel_idle_entry_address(void) {
     return (uint64_t)(uintptr_t)&kernel_idle_thread_entry;
+}
+
+void pthread_exit(void *ret_val) __attribute__((noreturn));
+int pthread_key_create(uintptr_t *key, void (*destructor)(void *));
+
+static __attribute__((naked, noreturn)) void kernel_clone_thread_entry(void) {
+    __asm__ volatile(
+        "popq %rax\n"
+        "popq %rdi\n"
+        "addq $8, %rsp\n"
+        "call *%rax\n"
+        "movq %rax, %rdi\n"
+        "call pthread_exit\n"
+        "ud2\n"
+    );
+}
+
+uint64_t get_kernel_clone_thread_entry_address(void) {
+    return (uint64_t)(uintptr_t)&kernel_clone_thread_entry;
+}
+
+int __pthread_key_create(uintptr_t *key, void (*destructor)(void *)) {
+    return pthread_key_create(key, destructor);
 }
 
 static inline uint8_t inb(uint16_t port) {

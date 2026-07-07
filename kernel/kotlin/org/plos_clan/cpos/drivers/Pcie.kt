@@ -13,11 +13,15 @@ private const val PCI_INVALID_VENDOR_ID = 0xFFFFu
 private const val PCI_VENDOR_DEVICE_OFFSET = 0x00
 private const val PCI_CLASS_REVISION_OFFSET = 0x08
 private const val PCI_HEADER_TYPE_OFFSET = 0x0C
+private const val PCI_BRIDGE_BUS_NUMBERS_OFFSET = 0x18
 private const val PCI_INTERRUPT_OFFSET = 0x3C
 private const val PCI_BUS_SHIFT = 20
 private const val PCI_DEVICE_SHIFT = 15
 private const val PCI_FUNCTION_SHIFT = 12
+private const val PCI_FUNCTION_CONFIG_SIZE = 0x1000uL
 private const val PCI_CLASS_SUBCLASS_MASK = 0xFFFF00u
+private const val PCI_CLASS_PCI_BRIDGE = 0x060400u
+private const val PCI_CLASS_SUBTRACTIVE_PCI_BRIDGE = 0x060900u
 
 private val PCI_CLASS_NAMES = linkedMapOf(
     0x000000u to "Non-VGA-Compatible Unclassified Device",
@@ -157,9 +161,10 @@ data class PciDeviceInfo(
 object Pcie {
     private data class MappedRegion(
         val descriptor: PcieEcamRegion,
-        val virtualBase: ULong,
         val busStart: Int,
         val busEnd: Int,
+        val scannedBuses: MutableSet<Int> = hashSetOf(),
+        val mappedFunctions: MutableMap<ULong, ULong> = hashMapOf(),
     )
 
     private val devices = mutableListOf<PciDeviceInfo>()
@@ -200,31 +205,25 @@ object Pcie {
             return null
         }
 
-        val busCount = busEnd - busStart + 1
-        val sizeBytes = busCount.toULong() shl PCI_BUS_SHIFT
-        val virtualBase = KernelPageDirectory.mapMmio(region.baseAddress, sizeBytes) ?: run {
-            println("PCIe: failed to map ECAM seg=${region.segmentGroup} base=${region.baseAddress.hex()}")
-            return null
-        }
-
         println(
-            "PCIe: ECAM seg=${region.segmentGroup} bus=$busStart-$busEnd base=${region.baseAddress.hex()} mapped=${virtualBase.hex()}",
+            "PCIe: ECAM seg=${region.segmentGroup} bus=$busStart-$busEnd base=${region.baseAddress.hex()}",
         )
         return MappedRegion(
             descriptor = region,
-            virtualBase = virtualBase,
             busStart = busStart,
             busEnd = busEnd,
         )
     }
 
     private fun scanRegion(region: MappedRegion) {
-        for (bus in region.busStart..region.busEnd) {
-            scanBus(region, bus)
-        }
+        scanBus(region, region.busStart)
     }
 
     private fun scanBus(region: MappedRegion, bus: Int) {
+        if (!region.scannedBuses.add(bus)) {
+            return
+        }
+
         for (device in 0 until 32) {
             if (readVendorId(region, bus, device, 0) == PCI_INVALID_VENDOR_ID) {
                 continue
@@ -281,6 +280,14 @@ object Pcie {
             "PCIe: dev seg=${deviceInfo.segmentGroup} BSF=${deviceInfo.bus}:${deviceInfo.device}:${deviceInfo.function} " +
                 "vid=${deviceInfo.vendorId.hex()} did=${deviceInfo.deviceId.hex()} class=${deviceInfo.classCode.hex()} name=${deviceInfo.className}",
         )
+
+        if (classCode == PCI_CLASS_PCI_BRIDGE || classCode == PCI_CLASS_SUBTRACTIVE_PCI_BRIDGE) {
+            val busNumbers = readConfig32(region, bus, device, function, PCI_BRIDGE_BUS_NUMBERS_OFFSET)
+            val secondaryBus = ((busNumbers shr 8) and 0xFFu).toInt()
+            if (secondaryBus in region.busStart..region.busEnd && secondaryBus != bus) {
+                scanBus(region, secondaryBus)
+            }
+        }
     }
 
     private fun readVendorId(region: MappedRegion, bus: Int, device: Int, function: Int): UInt =
@@ -303,8 +310,17 @@ object Pcie {
             return UInt.MAX_VALUE
         }
 
-        val registerAddress = region.virtualBase + functionOffset(region, bus, device, function, offset)
+        val functionBase = region.descriptor.baseAddress + functionOffset(region, bus, device, function, 0)
+        val virtualBase = mapFunction(region, functionBase) ?: return UInt.MAX_VALUE
+        val registerAddress = virtualBase + offset.toULong()
         return registerAddress.toPointer<UIntVar>()?.get(0) ?: UInt.MAX_VALUE
+    }
+
+    private fun mapFunction(region: MappedRegion, physicalAddress: ULong): ULong? {
+        region.mappedFunctions[physicalAddress]?.let { return it }
+        val virtualAddress = KernelPageDirectory.mapMmio(physicalAddress, PCI_FUNCTION_CONFIG_SIZE) ?: return null
+        region.mappedFunctions[physicalAddress] = virtualAddress
+        return virtualAddress
     }
 
     private fun functionOffset(

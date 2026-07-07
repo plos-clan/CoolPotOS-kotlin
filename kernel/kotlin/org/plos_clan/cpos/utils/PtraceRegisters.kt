@@ -5,7 +5,6 @@ import kotlinx.cinterop.*
 @ExperimentalForeignApi
 class PtraceRegisters(private val registers: CPointer<ULongVar>) {
     companion object {
-        const val REGISTER_COUNT = 24
         const val IDX_R15 = 0
         const val IDX_R14 = 1
         const val IDX_R13 = 2
@@ -22,14 +21,16 @@ class PtraceRegisters(private val registers: CPointer<ULongVar>) {
         const val IDX_RBP = 13
         const val IDX_DS = 14
         const val IDX_ES = 15
-        const val IDX_RAX = 16
-        const val IDX_FUNC = 17
-        const val IDX_ERRCODE = 18
-        const val IDX_RIP = 19
-        const val IDX_CS = 20
-        const val IDX_RFLAGS = 21
-        const val IDX_RSP = 22
-        const val IDX_SS = 23
+        const val IDX_FS_BASE = 16
+        const val IDX_RAX = 17
+        const val IDX_FUNC = 18
+        const val IDX_ERRCODE = 19
+        const val IDX_RIP = 20
+        const val IDX_CS = 21
+        const val IDX_RFLAGS = 22
+        const val IDX_RSP = 23
+        const val IDX_SS = 24
+        const val REGISTER_COUNT = IDX_SS + 1
     }
 
     operator fun get(index: Int): ULong =
@@ -59,31 +60,32 @@ class PtraceRegisters(private val registers: CPointer<ULongVar>) {
         }
     }
 
-    val r15: ULong get() = registers[0]
-    val r14: ULong get() = registers[1]
-    val r13: ULong get() = registers[2]
-    val r12: ULong get() = registers[3]
-    val r11: ULong get() = registers[4]
-    val r10: ULong get() = registers[5]
-    val r9: ULong get() = registers[6]
-    val r8: ULong get() = registers[7]
-    val rbx: ULong get() = registers[8]
-    val rcx: ULong get() = registers[9]
-    val rdx: ULong get() = registers[10]
-    val rsi: ULong get() = registers[11]
-    val rdi: ULong get() = registers[12]
-    val rbp: ULong get() = registers[13]
+    val r15: ULong get() = registers[IDX_R15]
+    val r14: ULong get() = registers[IDX_R14]
+    val r13: ULong get() = registers[IDX_R13]
+    val r12: ULong get() = registers[IDX_R12]
+    val r11: ULong get() = registers[IDX_R11]
+    val r10: ULong get() = registers[IDX_R10]
+    val r9: ULong get() = registers[IDX_R9]
+    val r8: ULong get() = registers[IDX_R8]
+    val rbx: ULong get() = registers[IDX_RBX]
+    val rcx: ULong get() = registers[IDX_RCX]
+    val rdx: ULong get() = registers[IDX_RDX]
+    val rsi: ULong get() = registers[IDX_RSI]
+    val rdi: ULong get() = registers[IDX_RDI]
+    val rbp: ULong get() = registers[IDX_RBP]
 
-    val ds: ULong get() = registers[14]
-    val es: ULong get() = registers[15]
+    val ds: ULong get() = registers[IDX_DS]
+    val es: ULong get() = registers[IDX_ES]
 
-    val rax: ULong get() = registers[16]
-    val func: ULong get() = registers[17]
-    val errcode: ULong get() = registers[18]
+    val fsBase: ULong get() = registers[IDX_FS_BASE]
+    val rax: ULong get() = registers[IDX_RAX]
+    val func: ULong get() = registers[IDX_FUNC]
+    val errcode: ULong get() = registers[IDX_ERRCODE]
 
-    val rip: ULong get() = registers[19]
-    val cs: ULong get() = registers[20]
-    val rflags: ULong get() = registers[21]
-    val rsp: ULong get() = registers[22]
-    val ss: ULong get() = registers[23]
+    val rip: ULong get() = registers[IDX_RIP]
+    val cs: ULong get() = registers[IDX_CS]
+    val rflags: ULong get() = registers[IDX_RFLAGS]
+    val rsp: ULong get() = registers[IDX_RSP]
+    val ss: ULong get() = registers[IDX_SS]
 }

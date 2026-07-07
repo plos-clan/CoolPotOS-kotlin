@@ -101,7 +101,6 @@ fun generalProtectionFault(frame: COpaquePointer?, ecode: ULong, interruptedRbp:
 
 object ErrorHandler {
     fun initialize() {
-        KernelSymbolizer.initialize()
         register_interrupt_handler(DIVIDE_ERROR_VECTOR, staticCFunction(::divideError), 0u, 142u)
         register_interrupt_handler(GENERAL_PROTECTION_VECTOR, staticCFunction(::generalProtectionFault), 0u, 142u)
         register_interrupt_handler(PAGE_FAULT_VECTOR, staticCFunction(::pageFault), 0u, 142u)

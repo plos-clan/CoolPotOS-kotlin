@@ -1,23 +1,21 @@
-import bridge.framebuffer_request
-import bridge.limine_framebuffer
 import kotlinx.cinterop.*
+import bridge.get_kernel_clone_thread_entry_address
+import bridge.get_sys_clone_recorded_count
+import bridge.get_sys_clone_stack_at
+import bridge.get_sys_clone_tls_at
 import org.plos_clan.cpos.drivers.Acpi
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.fault.ErrorHandler
-import org.plos_clan.cpos.drivers.term.Terminal
 import org.plos_clan.cpos.fault.IrqController
 import org.plos_clan.cpos.tasks.Scheduler
-import org.plos_clan.cpos.utils.SysCloneTrace
 import org.plos_clan.cpos.utils.hex
-import org.plos_clan.cpos.utils.toPointer
 import kotlin.experimental.ExperimentalNativeApi
 
 private val KERNEL_RUNTIME = "x86_64/kotlin-${KotlinVersion.CURRENT}"
 private val KERNEL_BANNER = "CoolPotOS Kernel v0.0.1 [$KERNEL_RUNTIME]"
-private const val SUPPORTED_FRAMEBUFFER_BPP = 32
 
 @ExperimentalNativeApi
 @ExperimentalForeignApi
@@ -25,7 +23,6 @@ private const val SUPPORTED_FRAMEBUFFER_BPP = 32
 @CName("kernel_main")
 fun kernelMain() {
     bridge.disable_interrupt()
-    initializeTerminal()
     println("Kernel booting...")
     println(KERNEL_BANNER)
     bridge.gdt_setup()
@@ -35,11 +32,14 @@ fun kernelMain() {
     Hhdm.initialize()
     BuddyFrameAllocator.initialize()
     KernelPageDirectory.initialize()
-    Acpi.initialize()
+    if (!Acpi.initialize()) {
+        return
+    }
     IrqController.initialize()
     ProcessManager.initialize()
     startCapturedCloneThreads()
     Scheduler.initialize()
+    Acpi.enumerateDevices()
     println("Kernel load done!")
     Scheduler.enableScheduler()
     bridge.enable_interrupt()
@@ -48,45 +48,23 @@ fun kernelMain() {
 
 @ExperimentalForeignApi
 private fun startCapturedCloneThreads() {
-    val threadCount = minOf(2, SysCloneTrace.recordedCount().toInt())
-    for (index in 0 until threadCount) {
-        val trace = SysCloneTrace.getOrNull(index.toULong()) ?: continue
-        val stackPointer = trace.stack.toPointer<ULongVar>() ?: continue
-        val argument = stackPointer[1]
+    val entryPoint = get_kernel_clone_thread_entry_address()
+    val threadCount = get_sys_clone_recorded_count()
+    var index = 0uL
+    while (index < threadCount) {
+        val stack = get_sys_clone_stack_at(index)
+        val tls = get_sys_clone_tls_at(index)
         val thread = ProcessManager.createThreadFromContext(
-            name = "gc-thread-$index",
-            entryPoint = trace.entry,
-            stackPointer = trace.stack,
-            argument = argument,
-        ) ?: continue
-        println(
-            "gc-thread[$index] loaded tid=${thread.id} entry=${trace.entry.hex()} stack=${trace.stack.hex()} arg=${argument.hex()}",
+            name = "runtime-thread-$index",
+            entryPoint = entryPoint,
+            stackPointer = stack,
+            fsBase = tls,
         )
+        if (thread != null) {
+            println(
+                "runtime-thread[$index] loaded tid=${thread.id} stack=${stack.hex()} tls=${tls.hex()}",
+            )
+        }
+        index++
     }
-}
-
-@ExperimentalForeignApi
-private fun initializeTerminal() {
-    framebuffer_request.response
-        ?.pointed
-        ?.takeIf { it.framebuffer_count > 0u }
-        ?.framebuffers
-        ?.get(0)
-        ?.let(::initializeTerminal)
-}
-
-@ExperimentalForeignApi
-private fun initializeTerminal(framebufferPointer: CPointer<limine_framebuffer>) {
-    val framebuffer = framebufferPointer.pointed
-    if (framebuffer.bpp.toInt() != SUPPORTED_FRAMEBUFFER_BPP) {
-        return
-    }
-
-    val baseAddress = framebuffer.address ?: return
-    Terminal.initialize(
-        pixels = baseAddress.reinterpret(),
-        width = framebuffer.width.toInt(),
-        height = framebuffer.height.toInt(),
-        stride = (framebuffer.pitch / UInt.SIZE_BYTES.toULong()).toInt(),
-    )
 }

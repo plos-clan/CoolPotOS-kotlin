@@ -4,7 +4,8 @@
 #include <stdint.h>
 #include "syscall.h"
 
-extern void capture_sys_clone_context(uint64_t stack, uint64_t entry);
+extern void capture_sys_clone_context(uint64_t stack, uint64_t tls);
+extern uint64_t kernel_runtime_fs_base;
 
 #define EAGAIN 11
 #define EBADF 9
@@ -276,10 +277,11 @@ long syscall(long number, ...) {
         SKIP_ARG(uint64_t);
         void *stack = ARG(void *);
         int *parent_tid = ARG(int *);
+        SKIP_ARG(void *);
+        void *tls = ARG(void *);
         if(stack) {
             uint64_t stack_addr = (uint64_t)(uintptr_t)stack;
-            uint64_t entry_addr = *(const uint64_t *)(uintptr_t)stack_addr;
-            capture_sys_clone_context(stack_addr, entry_addr);
+            capture_sys_clone_context(stack_addr, (uint64_t)(uintptr_t)tls);
         }
 
         if(stack && parent_tid) {
@@ -296,6 +298,7 @@ long syscall(long number, ...) {
 #if defined(__x86_64__)
         if(code == ARCH_SET_FS) {
             wrmsr(IA32_FS_BASE, pointer);
+            kernel_runtime_fs_base = pointer;
             ret = 0;
         } else {
             ret = -EINVAL;

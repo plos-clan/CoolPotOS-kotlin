@@ -55,7 +55,12 @@ class Thread(
     var hasSavedContext: Boolean = false
         private set
 
-    fun initializeContext(entryPoint: ULong, stackTop: ULong, argument: ULong = 0uL) {
+    fun initializeContext(
+        entryPoint: ULong,
+        stackTop: ULong,
+        argument: ULong = 0uL,
+        fsBase: ULong = 0uL,
+    ) {
         context.fill(0uL)
         context[PtraceRegisters.IDX_RIP] = entryPoint
         context[PtraceRegisters.IDX_RSP] = stackTop
@@ -65,6 +70,7 @@ class Thread(
         context[PtraceRegisters.IDX_SS] = KERNEL_DATA_SELECTOR
         context[PtraceRegisters.IDX_DS] = KERNEL_DATA_SELECTOR
         context[PtraceRegisters.IDX_ES] = KERNEL_DATA_SELECTOR
+        context[PtraceRegisters.IDX_FS_BASE] = fsBase
         context[PtraceRegisters.IDX_RDI] = argument
         hasSavedContext = true
         state = ThreadState.READY
@@ -161,7 +167,7 @@ object ProcessManager {
         name: String,
         entryPoint: ULong,
         stackPointer: ULong,
-        argument: ULong = 0uL,
+        fsBase: ULong = 0uL,
     ): Thread? {
         val process = systemProcess ?: return null
         if (entryPoint == 0uL || stackPointer == 0uL) {
@@ -175,7 +181,7 @@ object ProcessManager {
             stackBasePhysical = 0uL,
             stackSizeBytes = 0uL,
         )
-        thread.initializeContext(entryPoint, stackPointer, argument)
+        thread.initializeContext(entryPoint, stackPointer, fsBase = fsBase)
 
         process.addThread(thread)
         Scheduler.enqueueThread(thread)

@@ -167,20 +167,67 @@ object Acpi {
     private var root: RootSdt? = null
     private val tableIndex = linkedMapOf<String, ULong>()
 
-    fun initialize() {
+    fun initialize(): Boolean {
+        if (!initializeRoot()) {
+            return false
+        }
+
+        parseIfFound(HpetParser) { hpetGasAddress ->
+            println("ACPI: HPET address=${hpetGasAddress.address.hex()}")
+            Hpet.initialize(
+                baseAddress = hpetGasAddress.address,
+                spaceId = hpetGasAddress.spaceId,
+            )
+        }
+
+        parseIfFound(MadtParser) { madt ->
+            println("ACPI: LAPIC address=${madt.lapicAddress.hex()}")
+            println("ACPI: IOAPIC address=${madt.ioapicAddress.hex()}")
+            if (madt.lapicAddress == 0u) {
+                println("ACPI: LAPIC address is invalid, skip APIC init")
+            } else {
+                Apic.initialize(
+                    lapicPhysicalAddress = madt.lapicAddress,
+                    ioapicPhysicalAddress = madt.ioapicAddress,
+                )
+            }
+        }
+
+        parseIfFound(SpcrParser) { uartAddress ->
+            println("ACPI: UART base=${uartAddress.hex()}")
+        }
+
+        return true
+    }
+
+    fun enumerateDevices() {
+        if (root == null && !initializeRoot()) {
+            return
+        }
+
+        parseIfFound(McfgParser) { mcfg ->
+            println("ACPI: MCFG region count=${mcfg.totalRegionCount} usable=${mcfg.regions.size}")
+            Pcie.initialize(mcfg.regions)
+        }
+    }
+
+    private fun initializeRoot(): Boolean {
+        if (root != null) {
+            return true
+        }
         if (!Hhdm.isReady && Hhdm.initialize() == null) {
             println("ACPI: HHDM is unavailable")
-            return
+            return false
         }
 
         val rsdp = rsdp_request.response?.pointed?.address?.reinterpret<UByteVar>()
         if (rsdp == null) {
             println("ACPI: limine did not provide RSDP")
-            return
+            return false
         }
         if (!rsdp.matchesAscii(0, "RSD PTR ")) {
             println("ACPI: invalid RSDP signature")
-            return
+            return false
         }
 
         val revision = rsdp.readU8(RSDP_REVISION_OFFSET).toUInt()
@@ -202,12 +249,12 @@ object Acpi {
         }
         if (rootAddress == 0uL) {
             println("ACPI: root SDT address is zero")
-            return
+            return false
         }
 
         val rootTable = tableAt(rootAddress) ?: run {
             println("ACPI: cannot access root SDT at ${rootAddress.hex()}")
-            return
+            return false
         }
         root = RootSdt(rootTable, if (useXsdt) 8 else 4)
         val rootSignature = rootTable.pointer.readAscii(0, 4)
@@ -216,36 +263,7 @@ object Acpi {
         println("ACPI root SDT: $rootSignature at ${rootAddress.hex()}")
 
         rebuildTableIndex()
-
-        parseIfFound(HpetParser) { hpetGasAddress ->
-            println("ACPI: HPET address=${hpetGasAddress.address.hex()}")
-            Hpet.initialize(
-                baseAddress = hpetGasAddress.address,
-                spaceId = hpetGasAddress.spaceId,
-            )
-        }
-
-        parseIfFound(McfgParser) { mcfg ->
-            println("ACPI: MCFG region count=${mcfg.totalRegionCount} usable=${mcfg.regions.size}")
-            Pcie.initialize(mcfg.regions)
-        }
-
-        parseIfFound(MadtParser) { madt ->
-            println("ACPI: LAPIC address=${madt.lapicAddress.hex()}")
-            println("ACPI: IOAPIC address=${madt.ioapicAddress.hex()}")
-            if (madt.lapicAddress == 0u) {
-                println("ACPI: LAPIC address is invalid, skip APIC init")
-            } else {
-                Apic.initialize(
-                    lapicPhysicalAddress = madt.lapicAddress,
-                    ioapicPhysicalAddress = madt.ioapicAddress,
-                )
-            }
-        }
-
-        parseIfFound(SpcrParser) { uartAddress ->
-            println("ACPI: UART base=${uartAddress.hex()}")
-        }
+        return true
     }
 
     private fun rebuildTableIndex() {
