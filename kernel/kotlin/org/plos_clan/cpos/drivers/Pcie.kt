@@ -9,7 +9,11 @@ import org.plos_clan.cpos.utils.hasBit
 import org.plos_clan.cpos.utils.hex
 import org.plos_clan.cpos.utils.toPointer
 
-private const val PCI_INVALID_VENDOR_ID = 0xFFFFu
+private const val PCI_BYTE_MASK = 0xFFu
+private const val PCI_HEADER_TYPE_MASK = 0x7Fu
+private const val PCI_WORD_MASK = 0xFFFFu
+private const val PCI_CLASS_CODE_MASK = 0x00FF_FFFFu
+private const val PCI_INVALID_VENDOR_ID = PCI_WORD_MASK
 private const val PCI_VENDOR_DEVICE_OFFSET = 0x00
 private const val PCI_CLASS_REVISION_OFFSET = 0x08
 private const val PCI_HEADER_TYPE_OFFSET = 0x0C
@@ -19,11 +23,24 @@ private const val PCI_BUS_SHIFT = 20
 private const val PCI_DEVICE_SHIFT = 15
 private const val PCI_FUNCTION_SHIFT = 12
 private const val PCI_FUNCTION_CONFIG_SIZE = 0x1000uL
+private const val PCI_CONFIG_REGISTER_MAX_OFFSET = 0xFFC
+private const val PCI_CONFIG_REGISTER_ALIGNMENT = UInt.SIZE_BYTES
 private const val PCI_CLASS_SUBCLASS_MASK = 0xFFFF00u
 private const val PCI_CLASS_PCI_BRIDGE = 0x060400u
 private const val PCI_CLASS_SUBTRACTIVE_PCI_BRIDGE = 0x060900u
+private val PCI_INVALID_CONFIG_VALUE = UInt.MAX_VALUE
 
-private val PCI_CLASS_NAMES = linkedMapOf(
+private val PCI_CONFIG_REGISTER_RANGE = 0..PCI_CONFIG_REGISTER_MAX_OFFSET
+private val PCI_BUS_RANGE = 0..255
+private val PCI_DEVICE_RANGE = 0..31
+private val PCI_FUNCTION_RANGE = 0..7
+private val PCI_SECONDARY_FUNCTION_RANGE = 1..7
+private val PCI_BRIDGE_CLASS_CODES = setOf(
+    PCI_CLASS_PCI_BRIDGE,
+    PCI_CLASS_SUBTRACTIVE_PCI_BRIDGE,
+)
+
+private val PCI_CLASS_NAMES = mapOf(
     0x000000u to "Non-VGA-Compatible Unclassified Device",
     0x000100u to "VGA-Compatible Unclassified Device",
     0x010000u to "SCSI Bus Controller",
@@ -141,7 +158,22 @@ data class PcieEcamRegion(
     val segmentGroup: UInt,
     val startBus: UInt,
     val endBus: UInt,
-)
+) {
+    val busStart: Int
+        get() = startBus.toInt()
+
+    val busEnd: Int
+        get() = endBus.toInt()
+
+    val busRange: IntRange
+        get() = busStart..busEnd
+
+    val isUsable: Boolean
+        get() = baseAddress != 0uL &&
+            busStart in PCI_BUS_RANGE &&
+            busEnd in PCI_BUS_RANGE &&
+            !busRange.isEmpty()
+}
 
 data class PciDeviceInfo(
     val segmentGroup: UInt,
@@ -158,17 +190,35 @@ data class PciDeviceInfo(
     val interruptPin: UInt,
 )
 
+private data class PciFunctionAddress(
+    val segmentGroup: UInt,
+    val bus: Int,
+    val device: Int,
+    val function: Int,
+) {
+    val bsf: String
+        get() = "$bus:$device:$function"
+
+    fun offsetFrom(busStart: Int): ULong =
+        ((bus - busStart).toULong() shl PCI_BUS_SHIFT) +
+            (device.toULong() shl PCI_DEVICE_SHIFT) +
+            (function.toULong() shl PCI_FUNCTION_SHIFT)
+}
+
 object Pcie {
     private data class MappedRegion(
         val descriptor: PcieEcamRegion,
-        val busStart: Int,
-        val busEnd: Int,
         val scannedBuses: MutableSet<Int> = hashSetOf(),
         val mappedFunctions: MutableMap<ULong, ULong> = hashMapOf(),
-    )
+    ) {
+        fun contains(address: PciFunctionAddress): Boolean =
+            address.bus in descriptor.busRange &&
+                address.device in PCI_DEVICE_RANGE &&
+                address.function in PCI_FUNCTION_RANGE
+    }
 
     private val devices = mutableListOf<PciDeviceInfo>()
-    private val enumeratedLocations = hashSetOf<ULong>()
+    private val enumeratedLocations = hashSetOf<PciFunctionAddress>()
 
     val enumeratedDevices: List<PciDeviceInfo>
         get() = devices.toList()
@@ -193,30 +243,19 @@ object Pcie {
             return
         }
 
-        mappedRegions.forEach(::scanRegion)
+        mappedRegions.forEach { region -> scanBus(region, region.descriptor.busStart) }
         println("PCIe: enumeration complete devices=${devices.size}")
     }
 
     private fun mapRegion(region: PcieEcamRegion): MappedRegion? {
-        val busStart = region.startBus.toInt()
-        val busEnd = region.endBus.toInt()
-        if (busStart !in 0..255 || busEnd !in 0..255 || busEnd < busStart) {
-            println("PCIe: ignore invalid region seg=${region.segmentGroup} bus=$busStart-$busEnd")
+        if (!region.isUsable) {
+            println("PCIe: ignore invalid region seg=${region.segmentGroup} bus=${region.busStart}-${region.busEnd}")
             return null
         }
 
-        println(
-            "PCIe: ECAM seg=${region.segmentGroup} bus=$busStart-$busEnd base=${region.baseAddress.hex()}",
-        )
-        return MappedRegion(
-            descriptor = region,
-            busStart = busStart,
-            busEnd = busEnd,
-        )
-    }
-
-    private fun scanRegion(region: MappedRegion) {
-        scanBus(region, region.busStart)
+        val busRange = "${region.busStart}-${region.busEnd}"
+        println("PCIe: ECAM seg=${region.segmentGroup} bus=$busRange base=${region.baseAddress.hex()}")
+        return MappedRegion(descriptor = region)
     }
 
     private fun scanBus(region: MappedRegion, bus: Int) {
@@ -224,121 +263,97 @@ object Pcie {
             return
         }
 
-        for (device in 0 until 32) {
-            if (readVendorId(region, bus, device, 0) == PCI_INVALID_VENDOR_ID) {
+        for (device in PCI_DEVICE_RANGE) {
+            val firstFunction = PciFunctionAddress(region.descriptor.segmentGroup, bus, device, 0)
+            val firstVendorId = readConfig32(region, firstFunction, PCI_VENDOR_DEVICE_OFFSET) and PCI_WORD_MASK
+            if (firstVendorId == PCI_INVALID_VENDOR_ID) {
                 continue
             }
 
-            scanFunction(region, bus, device, 0)
+            scanFunction(region, firstFunction)
 
-            val headerType = readHeaderType(region, bus, device, 0)
+            val headerType = (readConfig32(region, firstFunction, PCI_HEADER_TYPE_OFFSET) shr 16) and PCI_BYTE_MASK
             if (headerType.toULong().hasBit(7)) {
-                for (function in 1 until 8) {
-                    if (readVendorId(region, bus, device, function) == PCI_INVALID_VENDOR_ID) {
+                for (function in PCI_SECONDARY_FUNCTION_RANGE) {
+                    val address = firstFunction.copy(function = function)
+                    val vendorId = readConfig32(region, address, PCI_VENDOR_DEVICE_OFFSET) and PCI_WORD_MASK
+                    if (vendorId == PCI_INVALID_VENDOR_ID) {
                         continue
                     }
-                    scanFunction(region, bus, device, function)
+                    scanFunction(region, address)
                 }
             }
         }
     }
 
-    private fun scanFunction(region: MappedRegion, bus: Int, device: Int, function: Int) {
-        val locationKey = makeLocationKey(region.descriptor.segmentGroup, bus, device, function)
-        if (!enumeratedLocations.add(locationKey)) {
+    private fun scanFunction(region: MappedRegion, address: PciFunctionAddress) {
+        if (!enumeratedLocations.add(address)) {
             return
         }
 
-        val idRegister = readConfig32(region, bus, device, function, PCI_VENDOR_DEVICE_OFFSET)
-        val vendorId = idRegister and 0xFFFFu
+        val idRegister = readConfig32(region, address, PCI_VENDOR_DEVICE_OFFSET)
+        val vendorId = idRegister and PCI_WORD_MASK
         if (vendorId == PCI_INVALID_VENDOR_ID) {
             return
         }
 
-        val classRegister = readConfig32(region, bus, device, function, PCI_CLASS_REVISION_OFFSET)
-        val headerRegister = readConfig32(region, bus, device, function, PCI_HEADER_TYPE_OFFSET)
-        val interruptRegister = readConfig32(region, bus, device, function, PCI_INTERRUPT_OFFSET)
-        val classCode = (classRegister shr 8) and 0x00FF_FFFFu
+        val classRegister = readConfig32(region, address, PCI_CLASS_REVISION_OFFSET)
+        val headerRegister = readConfig32(region, address, PCI_HEADER_TYPE_OFFSET)
+        val interruptRegister = readConfig32(region, address, PCI_INTERRUPT_OFFSET)
+        val classCode = (classRegister shr 8) and PCI_CLASS_CODE_MASK
 
         val deviceInfo = PciDeviceInfo(
-            segmentGroup = region.descriptor.segmentGroup,
-            bus = bus.toUInt(),
-            device = device.toUInt(),
-            function = function.toUInt(),
+            segmentGroup = address.segmentGroup,
+            bus = address.bus.toUInt(),
+            device = address.device.toUInt(),
+            function = address.function.toUInt(),
             vendorId = vendorId,
-            deviceId = (idRegister shr 16) and 0xFFFFu,
+            deviceId = (idRegister shr 16) and PCI_WORD_MASK,
             classCode = classCode,
             className = classNameOf(classCode),
-            revisionId = classRegister and 0xFFu,
-            headerType = (headerRegister shr 16) and 0x7Fu,
-            interruptLine = interruptRegister and 0xFFu,
-            interruptPin = (interruptRegister shr 8) and 0xFFu,
+            revisionId = classRegister and PCI_BYTE_MASK,
+            headerType = (headerRegister shr 16) and PCI_HEADER_TYPE_MASK,
+            interruptLine = interruptRegister and PCI_BYTE_MASK,
+            interruptPin = (interruptRegister shr 8) and PCI_BYTE_MASK,
         )
         devices += deviceInfo
 
         println(
-            "PCIe: dev seg=${deviceInfo.segmentGroup} BSF=${deviceInfo.bus}:${deviceInfo.device}:${deviceInfo.function} " +
-                "vid=${deviceInfo.vendorId.hex()} did=${deviceInfo.deviceId.hex()} class=${deviceInfo.classCode.hex()} name=${deviceInfo.className}",
+            "PCIe: dev seg=${deviceInfo.segmentGroup} BSF=${address.bsf} " +
+                "vid=${deviceInfo.vendorId.hex()} did=${deviceInfo.deviceId.hex()} " +
+                "class=${deviceInfo.classCode.hex()} name=${deviceInfo.className}",
         )
 
-        if (classCode == PCI_CLASS_PCI_BRIDGE || classCode == PCI_CLASS_SUBTRACTIVE_PCI_BRIDGE) {
-            val busNumbers = readConfig32(region, bus, device, function, PCI_BRIDGE_BUS_NUMBERS_OFFSET)
-            val secondaryBus = ((busNumbers shr 8) and 0xFFu).toInt()
-            if (secondaryBus in region.busStart..region.busEnd && secondaryBus != bus) {
+        if (classCode in PCI_BRIDGE_CLASS_CODES) {
+            val busNumbers = readConfig32(region, address, PCI_BRIDGE_BUS_NUMBERS_OFFSET)
+            val secondaryBus = ((busNumbers shr 8) and PCI_BYTE_MASK).toInt()
+            if (secondaryBus in region.descriptor.busRange && secondaryBus != address.bus) {
                 scanBus(region, secondaryBus)
             }
         }
     }
 
-    private fun readVendorId(region: MappedRegion, bus: Int, device: Int, function: Int): UInt =
-        readConfig32(region, bus, device, function, PCI_VENDOR_DEVICE_OFFSET) and 0xFFFFu
-
-    private fun readHeaderType(region: MappedRegion, bus: Int, device: Int, function: Int): UInt =
-        (readConfig32(region, bus, device, function, PCI_HEADER_TYPE_OFFSET) shr 16) and 0xFFu
-
     private fun readConfig32(
         region: MappedRegion,
-        bus: Int,
-        device: Int,
-        function: Int,
+        address: PciFunctionAddress,
         offset: Int,
     ): UInt {
-        if (offset !in 0..0xFFC || offset and 0x3 != 0) {
-            return UInt.MAX_VALUE
+        if (offset !in PCI_CONFIG_REGISTER_RANGE || offset % PCI_CONFIG_REGISTER_ALIGNMENT != 0) {
+            return PCI_INVALID_CONFIG_VALUE
         }
-        if (bus !in region.busStart..region.busEnd || device !in 0..31 || function !in 0..7) {
-            return UInt.MAX_VALUE
+        if (!region.contains(address)) {
+            return PCI_INVALID_CONFIG_VALUE
         }
 
-        val functionBase = region.descriptor.baseAddress + functionOffset(region, bus, device, function, 0)
-        val virtualBase = mapFunction(region, functionBase) ?: return UInt.MAX_VALUE
+        val functionBase = region.descriptor.baseAddress + address.offsetFrom(region.descriptor.busStart)
+        val virtualBase = mapFunction(region, functionBase) ?: return PCI_INVALID_CONFIG_VALUE
         val registerAddress = virtualBase + offset.toULong()
-        return registerAddress.toPointer<UIntVar>()?.get(0) ?: UInt.MAX_VALUE
+        return registerAddress.toPointer<UIntVar>()?.get(0) ?: PCI_INVALID_CONFIG_VALUE
     }
 
     private fun mapFunction(region: MappedRegion, physicalAddress: ULong): ULong? {
-        region.mappedFunctions[physicalAddress]?.let { return it }
-        val virtualAddress = KernelPageDirectory.mapMmio(physicalAddress, PCI_FUNCTION_CONFIG_SIZE) ?: return null
-        region.mappedFunctions[physicalAddress] = virtualAddress
-        return virtualAddress
+        return region.mappedFunctions.getOrPut(physicalAddress) {
+            KernelPageDirectory.mapMmio(physicalAddress, PCI_FUNCTION_CONFIG_SIZE) ?: return null
+        }
     }
-
-    private fun functionOffset(
-        region: MappedRegion,
-        bus: Int,
-        device: Int,
-        function: Int,
-        offset: Int,
-    ): ULong {
-        val busOffset = (bus - region.busStart).toULong() shl PCI_BUS_SHIFT
-        val deviceOffset = device.toULong() shl PCI_DEVICE_SHIFT
-        val functionOffset = function.toULong() shl PCI_FUNCTION_SHIFT
-        return busOffset + deviceOffset + functionOffset + offset.toULong()
-    }
-
-    private fun makeLocationKey(segmentGroup: UInt, bus: Int, device: Int, function: Int): ULong =
-        (segmentGroup.toULong() shl 24) or
-            (bus.toULong() shl 16) or
-            (device.toULong() shl 8) or
-            function.toULong()
 }

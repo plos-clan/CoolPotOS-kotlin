@@ -17,6 +17,8 @@ private const val IOAPIC_IOWIN_OFFSET = 0x10uL
 private const val IOAPIC_REG_VERSION = 0x01u
 private const val IOAPIC_REG_TABLE_BASE = 0x10u
 
+private const val IOAPIC_BYTE_MASK = 0xFFu
+private const val IOAPIC_DESTINATION_SHIFT = 24
 private const val IOAPIC_POLARITY_LOW_BIT = 0x2000uL
 private const val IOAPIC_TRIGGER_LEVEL_BIT = 0x8000uL
 private const val IOAPIC_MASK_BIT = 0x1_0000uL
@@ -34,10 +36,9 @@ object IoApic {
         mmioBaseVirtualAddress = mappedBase
 
         val version = read(IOAPIC_REG_VERSION)
-        redirectionEntryCount = ((version shr 16) and 0xFFu) + 1u
-        println(
-            "APIC: IOAPIC mapped=${mappedBase.hex()} version=${(version and 0xFFu).hex()} entries=$redirectionEntryCount",
-        )
+        redirectionEntryCount = ((version shr 16) and IOAPIC_BYTE_MASK) + 1u
+        val versionId = (version and IOAPIC_BYTE_MASK).hex()
+        println("APIC: IOAPIC mapped=${mappedBase.hex()} version=$versionId entries=$redirectionEntryCount")
         return true
     }
 
@@ -62,24 +63,17 @@ object IoApic {
         }
 
         val tableRegister = IOAPIC_REG_TABLE_BASE + irq * 2u
-        var low = vector.toULong()
-        if (masked) {
-            low = low or IOAPIC_MASK_BIT
-        }
-        if (levelTriggered) {
-            low = low or IOAPIC_TRIGGER_LEVEL_BIT
-        }
-        if (activeLow) {
-            low = low or IOAPIC_POLARITY_LOW_BIT
-        }
+        val low = vector.toULong() or
+            (if (masked) IOAPIC_MASK_BIT else 0uL) or
+            (if (levelTriggered) IOAPIC_TRIGGER_LEVEL_BIT else 0uL) or
+            (if (activeLow) IOAPIC_POLARITY_LOW_BIT else 0uL)
 
-        val high = (destinationApicId and 0xFFu).toULong() shl 24
+        val destination = destinationApicId and IOAPIC_BYTE_MASK
+        val high = destination.toULong() shl IOAPIC_DESTINATION_SHIFT
         write(tableRegister, low.toUInt())
         write(tableRegister + 1u, high.toUInt())
 
-        println(
-            "APIC: route irq=$irq vector=$vector dst_apic_id=${destinationApicId and 0xFFu} masked=$masked",
-        )
+        println("APIC: route irq=$irq vector=$vector dst_apic_id=$destination masked=$masked")
     }
 
     private fun read(register: UInt): UInt {

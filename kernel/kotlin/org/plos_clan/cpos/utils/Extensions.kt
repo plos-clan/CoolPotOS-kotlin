@@ -25,21 +25,19 @@ fun <T : CPointed> ULong.toPointer(): CPointer<T>? = toLong().toCPointer()
 
 fun CPointer<UByteVar>.readU8(offset: Int): UByte = this[offset]
 
-fun CPointer<UByteVar>.readU16(offset: Int): UShort {
-    val low = readU8(offset).toUInt()
-    val high = readU8(offset + 1).toUInt()
-    return (low or (high shl 8)).toUShort()
-}
-
-fun CPointer<UByteVar>.readU32(offset: Int): UInt =
-    (0 until UInt.SIZE_BYTES).fold(0uL) { value, byteIndex ->
-        value or (readU8(offset + byteIndex).toULong() shl (byteIndex * Byte.SIZE_BITS))
-    }.toUInt()
-
-fun CPointer<UByteVar>.readU64(offset: Int): ULong =
-    (0 until ULong.SIZE_BYTES).fold(0uL) { value, byteIndex ->
+private fun CPointer<UByteVar>.readLittleEndian(offset: Int, byteCount: Int): ULong =
+    (0 until byteCount).fold(0uL) { value, byteIndex ->
         value or (readU8(offset + byteIndex).toULong() shl (byteIndex * Byte.SIZE_BITS))
     }
+
+fun CPointer<UByteVar>.readU16(offset: Int): UShort =
+    readLittleEndian(offset, UShort.SIZE_BYTES).toUShort()
+
+fun CPointer<UByteVar>.readU32(offset: Int): UInt =
+    readLittleEndian(offset, UInt.SIZE_BYTES).toUInt()
+
+fun CPointer<UByteVar>.readU64(offset: Int): ULong =
+    readLittleEndian(offset, ULong.SIZE_BYTES)
 
 fun CPointer<UByteVar>.matchesAscii(offset: Int, text: String): Boolean =
     text.indices.all { index -> readU8(offset + index) == text[index].code.toUByte() }
@@ -48,10 +46,7 @@ fun CPointer<UByteVar>.readAscii(offset: Int, length: Int): String =
     CharArray(length) { index -> readU8(offset + index).toInt().toChar() }.concatToString()
 
 fun CPointer<UByteVar>.checksumOk(length: Int): Boolean {
-    if (length <= 0) {
-        return false
-    }
-    return (0 until length)
+    return length > 0 && (0 until length)
         .fold(0u) { sum, index -> (sum + readU8(index).toUInt()) and 0xffu } == 0u
 }
 

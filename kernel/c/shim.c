@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 extern void *realloc(void *ptr, size_t size);
 extern void free(void *);
@@ -18,23 +19,23 @@ int __fxstat(int version, int fd, void *statbuf) {
     return -1;
 }
 
-int isnan(double x) {
-    union {
-        double f64;
-        unsigned long long u64;
-    } bits;
-    bits.f64 = x;
+union double_bits {
+    double f64;
+    unsigned long long u64;
+};
+
+static int is_nan_bits(union double_bits bits) {
     return (bits.u64 & 0x7ff0000000000000ULL) == 0x7ff0000000000000ULL
         && (bits.u64 & 0x000fffffffffffffULL) != 0;
 }
 
+int isnan(double x) {
+    return is_nan_bits((union double_bits){.f64 = x});
+}
+
 int __unorddf2(double a, double b) {
-    union { double f; unsigned long long u; } ua = {a}, ub = {b};
-    unsigned long long ea = (ua.u >> 52) & 0x7ff;
-    unsigned long long ma = ua.u & 0x000fffffffffffffULL;
-    unsigned long long eb = (ub.u >> 52) & 0x7ff;
-    unsigned long long mb = ub.u & 0x000fffffffffffffULL;
-    return (ea == 0x7ff && ma) || (eb == 0x7ff && mb);
+    return is_nan_bits((union double_bits){.f64 = a})
+        || is_nan_bits((union double_bits){.f64 = b});
 }
 
 void _ZdlPv(void *ptr) {
@@ -156,8 +157,10 @@ static int ensure_sys_clone_record_capacity(uint64_t needed_count) {
 void capture_sys_clone_context(uint64_t stack, uint64_t tls) {
     if (ensure_sys_clone_record_capacity(sys_clone_recorded_count + 1)) {
         const uint64_t index = sys_clone_recorded_count++;
-        sys_clone_records[index].stack = stack;
-        sys_clone_records[index].tls = tls;
+        sys_clone_records[index] = (struct clone_context_record){
+            .stack = stack,
+            .tls = tls,
+        };
     }
 }
 
@@ -166,17 +169,11 @@ uint64_t get_sys_clone_recorded_count(void) {
 }
 
 uint64_t get_sys_clone_stack_at(uint64_t index) {
-    if (index >= sys_clone_recorded_count) {
-        return 0;
-    }
-    return sys_clone_records[index].stack;
+    return index < sys_clone_recorded_count ? sys_clone_records[index].stack : 0;
 }
 
 uint64_t get_sys_clone_tls_at(uint64_t index) {
-    if (index >= sys_clone_recorded_count) {
-        return 0;
-    }
-    return sys_clone_records[index].tls;
+    return index < sys_clone_recorded_count ? sys_clone_records[index].tls : 0;
 }
 
 static __attribute__((noreturn)) void kernel_idle_thread_entry(void) {
@@ -234,14 +231,14 @@ static void serial_write_byte(uint8_t value) {
 }
 
 void serial_print(const char *buffer, size_t size) {
-    static int initialized = 0;
+    static bool initialized;
 
-    if (!initialized) {
-        serial_init();
-        initialized = 1;
-    }
     if (!buffer) {
         return;
+    }
+    if (!initialized) {
+        serial_init();
+        initialized = true;
     }
 
     for (size_t i = 0; i < size; i++) {

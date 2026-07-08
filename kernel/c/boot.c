@@ -204,5 +204,8 @@ void _start(void) {
         halt_forever();
     }
 
-    setup_simd(); __dlapi_enter(entry_stack); kernel_main(); halt_forever();
+    setup_simd();
+    __dlapi_enter(entry_stack);
+    kernel_main();
+    halt_forever();
 }

@@ -31,61 +31,29 @@ class PtraceRegisters(private val registers: CPointer<ULongVar>) {
         const val IDX_RSP = 23
         const val IDX_SS = 24
         const val REGISTER_COUNT = IDX_SS + 1
+        private val VALID_REGISTER_INDEXES = 0 until REGISTER_COUNT
     }
 
     operator fun get(index: Int): ULong =
-        if (index in 0 until REGISTER_COUNT) {
+        if (index in VALID_REGISTER_INDEXES) {
             registers[index]
         } else {
             0uL
         }
 
     operator fun set(index: Int, value: ULong) {
-        if (index in 0 until REGISTER_COUNT) {
+        if (index in VALID_REGISTER_INDEXES) {
             registers[index] = value
         }
     }
 
-    fun copyInto(destination: ULongArray) {
-        val count = minOf(destination.size, REGISTER_COUNT)
-        for (index in 0 until count) {
+    fun copyInto(destination: ULongArray) =
+        repeat(minOf(destination.size, REGISTER_COUNT)) { index ->
             destination[index] = registers[index]
         }
-    }
 
-    fun restoreFrom(source: ULongArray) {
-        val count = minOf(source.size, REGISTER_COUNT)
-        for (index in 0 until count) {
+    fun restoreFrom(source: ULongArray) =
+        repeat(minOf(source.size, REGISTER_COUNT)) { index ->
             registers[index] = source[index]
         }
-    }
-
-    val r15: ULong get() = registers[IDX_R15]
-    val r14: ULong get() = registers[IDX_R14]
-    val r13: ULong get() = registers[IDX_R13]
-    val r12: ULong get() = registers[IDX_R12]
-    val r11: ULong get() = registers[IDX_R11]
-    val r10: ULong get() = registers[IDX_R10]
-    val r9: ULong get() = registers[IDX_R9]
-    val r8: ULong get() = registers[IDX_R8]
-    val rbx: ULong get() = registers[IDX_RBX]
-    val rcx: ULong get() = registers[IDX_RCX]
-    val rdx: ULong get() = registers[IDX_RDX]
-    val rsi: ULong get() = registers[IDX_RSI]
-    val rdi: ULong get() = registers[IDX_RDI]
-    val rbp: ULong get() = registers[IDX_RBP]
-
-    val ds: ULong get() = registers[IDX_DS]
-    val es: ULong get() = registers[IDX_ES]
-
-    val fsBase: ULong get() = registers[IDX_FS_BASE]
-    val rax: ULong get() = registers[IDX_RAX]
-    val func: ULong get() = registers[IDX_FUNC]
-    val errcode: ULong get() = registers[IDX_ERRCODE]
-
-    val rip: ULong get() = registers[IDX_RIP]
-    val cs: ULong get() = registers[IDX_CS]
-    val rflags: ULong get() = registers[IDX_RFLAGS]
-    val rsp: ULong get() = registers[IDX_RSP]
-    val ss: ULong get() = registers[IDX_SS]
 }

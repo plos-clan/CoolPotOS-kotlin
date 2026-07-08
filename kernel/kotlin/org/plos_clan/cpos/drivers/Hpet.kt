@@ -21,24 +21,15 @@ object Hpet {
     private const val COUNTER_PERIOD_OFFSET = 0x4uL
     private const val GENERAL_CONFIGURATION_OFFSET = 0x10uL
     private const val TIMER0_CONFIGURATION_OFFSET = 0x100uL
-    private const val TIMER0_COMPARATOR_OFFSET = 0x108uL
     private const val MAIN_COUNTER_OFFSET = 0xF0uL
 
     private var baseVirtualAddress = 0uL
     private var fmsPerTick = 0uL
-    private var initialized = false
 
     val isReady: Boolean
-        get() = initialized && baseVirtualAddress != 0uL && fmsPerTick != 0uL
+        get() = baseVirtualAddress != 0uL && fmsPerTick != 0uL
 
-    fun ticks(): ULong = if (isReady) read64(MAIN_COUNTER_OFFSET) else 0uL
-
-    fun nanoTime(): ULong =
-        if (isReady) {
-            ticks() * fmsPerTick / FEMTOSECONDS_PER_NANOSECOND
-        } else {
-            0uL
-        }
+    fun nanoTime(): ULong = if (isReady) ticks() * fmsPerTick / FEMTOSECONDS_PER_NANOSECOND else 0uL
 
     fun estimate(ns: ULong): ULong =
         if (isReady) {
@@ -46,21 +37,6 @@ object Hpet {
         } else {
             0uL
         }
-
-    fun busyWait(ns: ULong) {
-        if (!isReady || ns == 0uL) {
-            return
-        }
-        val deadline = estimate(ns)
-        while (ticks() < deadline) {
-        }
-    }
-
-    fun setTimer(value: ULong) {
-        if (isReady) {
-            write64(TIMER0_COMPARATOR_OFFSET, value)
-        }
-    }
 
     fun initialize(baseAddress: ULong, spaceId: UInt) {
         reset()
@@ -97,17 +73,15 @@ object Hpet {
         val timerConfig = (HPET_ROUTE_IRQ_VECTOR.toULong() shl 9) or (1uL shl 2)
         write64(TIMER0_CONFIGURATION_OFFSET, timerConfig)
 
-        initialized = true
-        println(
-            "HPET: time=${nanoTime()}ns mapped=${mappedBase.hex()} period=${fmsPerTick}fms/tick",
-        )
+        println("HPET: time=${nanoTime()}ns mapped=${mappedBase.hex()} period=${fmsPerTick}fms/tick")
     }
 
     private fun reset() {
         baseVirtualAddress = 0uL
         fmsPerTick = 0uL
-        initialized = false
     }
+
+    private fun ticks(): ULong = if (isReady) read64(MAIN_COUNTER_OFFSET) else 0uL
 
     private fun read32(offset: ULong): UInt =
         (baseVirtualAddress + offset).toPointer<UIntVar>()?.get(0) ?: 0u

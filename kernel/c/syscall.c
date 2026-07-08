@@ -6,6 +6,7 @@
 
 extern void capture_sys_clone_context(uint64_t stack, uint64_t tls);
 extern uint64_t kernel_runtime_fs_base;
+extern void serial_print(const char *buffer, size_t size);
 
 #define EAGAIN 11
 #define EBADF 9
@@ -52,8 +53,8 @@ static void cpu_relax(void) {
 }
 
 static void spin_lock(int *lock) {
-    while(__atomic_test_and_set(lock, __ATOMIC_ACQUIRE)) {
-        while(__atomic_load_n(lock, __ATOMIC_RELAXED)) {
+    while (__atomic_test_and_set(lock, __ATOMIC_ACQUIRE)) {
+        while (__atomic_load_n(lock, __ATOMIC_RELAXED)) {
             cpu_relax();
         }
     }
@@ -68,14 +69,14 @@ static inline size_t align_up(size_t n) {
 }
 
 static void *vm_alloc_locked(size_t size) {
-    for(struct vm_block **link = &vm_free_list; *link; link = &(*link)->next) {
+    for (struct vm_block **link = &vm_free_list; *link; link = &(*link)->next) {
         struct vm_block *block = *link;
-        if(block->size < size)
+        if (block->size < size)
             continue;
 
         size_t remaining = block->size - size;
         struct vm_block *next = block->next;
-        if(remaining >= PAGE_SIZE) {
+        if (remaining >= PAGE_SIZE) {
             next = (struct vm_block *)((uint64_t)block + size);
             next->size = remaining;
             next->next = block->next;
@@ -84,7 +85,7 @@ static void *vm_alloc_locked(size_t size) {
         return block;
     }
 
-    if(vm_bump > VM_ARENA_SIZE - size)
+    if (vm_bump > VM_ARENA_SIZE - size)
         return NULL;
 
     void *result = vm_arena + vm_bump;
@@ -97,7 +98,7 @@ static void vm_free_locked(void *pointer, size_t size) {
     struct vm_block *previous = NULL;
     struct vm_block **link = &vm_free_list;
 
-    while(*link && *link < block) {
+    while (*link && *link < block) {
         previous = *link;
         link = &(*link)->next;
     }
@@ -106,60 +107,61 @@ static void vm_free_locked(void *pointer, size_t size) {
     block->next = *link;
     *link = block;
 
-    if(block->next && (uint64_t)block + block->size == (uint64_t)block->next) {
+    if (block->next && (uint64_t)block + block->size == (uint64_t)block->next) {
         block->size += block->next->size;
         block->next = block->next->next;
     }
 
-    if(previous && (uint64_t)previous + previous->size == (uint64_t)block) {
+    if (previous && (uint64_t)previous + previous->size == (uint64_t)block) {
         previous->size += block->size;
         previous->next = block->next;
     }
 }
 
 static long futex_budget(const struct timespec_arg *time, uint64_t *budget) {
-    if(time->tv_nsec < 0 || time->tv_nsec >= (int64_t)NS_PER_SEC)
+    if (time->tv_sec < 0 || time->tv_nsec < 0 || time->tv_nsec >= (int64_t)NS_PER_SEC)
         return -EINVAL;
-    if(time->tv_sec == 0 && time->tv_nsec == 0)
+    if (time->tv_sec == 0 && time->tv_nsec == 0)
         return -ETIMEDOUT;
 
     uint64_t sec = (uint64_t)time->tv_sec;
     uint64_t timeout_ns = UINT64_MAX;
-    if(sec <= UINT64_MAX / NS_PER_SEC) {
+    if (sec <= UINT64_MAX / NS_PER_SEC) {
         uint64_t nsec = (uint64_t)time->tv_nsec;
         timeout_ns = sec * NS_PER_SEC;
-        if(nsec > UINT64_MAX - timeout_ns)
+        if (nsec > UINT64_MAX - timeout_ns)
             timeout_ns = UINT64_MAX;
         else
             timeout_ns += nsec;
     }
 
     *budget = timeout_ns / FUTEX_SPIN_SLICE;
-    if(*budget != UINT64_MAX) (*budget)++;
+    if (*budget != UINT64_MAX)
+        (*budget)++;
     return 0;
 }
 
 static long futex_call(int *pointer, int operation, int expected, const struct timespec_arg *time) {
-    if(!pointer)
+    if (!pointer)
         return -EINVAL;
 
     int command = operation & 0x7f;
-    if(command == FUTEX_WAKE) return 0;
-    if(command != FUTEX_WAIT) return -ENOSYS;
-    if(__atomic_load_n(pointer, __ATOMIC_ACQUIRE) != expected)
+    if (command == FUTEX_WAKE) return 0;
+    if (command != FUTEX_WAIT) return -ENOSYS;
+    if (__atomic_load_n(pointer, __ATOMIC_ACQUIRE) != expected)
         return -EAGAIN;
 
     uint64_t spin_budget = 0;
-    if(time) {
+    if (time) {
         long e = futex_budget(time, &spin_budget);
-        if(e)
+        if (e)
             return e;
     }
 
-    while(__atomic_load_n(pointer, __ATOMIC_ACQUIRE) == expected) {
+    while (__atomic_load_n(pointer, __ATOMIC_ACQUIRE) == expected) {
         cpu_relax();
-        if(time) {
-            if(!spin_budget) return -ETIMEDOUT;
+        if (time) {
+            if (!spin_budget) return -ETIMEDOUT;
             spin_budget--;
         }
     }
@@ -168,25 +170,25 @@ static long futex_call(int *pointer, int operation, int expected, const struct t
 }
 
 static long mmap_call(void *hint, size_t size, int prot, int flags, int fd, int64_t offset) {
-    if(!size) return -EINVAL;
-    if(size >= (size_t)__PTRDIFF_MAX__) return -ENOMEM;
-    if(offset < 0 || ((uint64_t)offset & (PAGE_SIZE - 1)))
+    if (!size) return -EINVAL;
+    if (size >= (size_t)__PTRDIFF_MAX__) return -ENOMEM;
+    if (offset < 0 || ((uint64_t)offset & (PAGE_SIZE - 1)))
         return -EINVAL;
 
     int map_type = flags & (MAP_SHARED | MAP_PRIVATE);
-    if(map_type != MAP_SHARED && map_type != MAP_PRIVATE)
+    if (map_type != MAP_SHARED && map_type != MAP_PRIVATE)
         return -EINVAL;
 
     bool fixed_noreplace = (flags & MAP_FIXED_NOREPLACE) != 0;
     bool fixed = (flags & MAP_FIXED) || fixed_noreplace;
-    if(!(flags & MAP_ANONYMOUS)) {
-        if(fd < 0) return -EBADF;
+    if (!(flags & MAP_ANONYMOUS)) {
+        if (fd < 0) return -EBADF;
         return -ENOSYS;
     }
 
     (void)prot;
     size = align_up(size);
-    if(!size) return -ENOMEM;
+    if (!size) return -ENOMEM;
 
     void *result = NULL;
     long err = 0;
@@ -194,31 +196,31 @@ static long mmap_call(void *hint, size_t size, int prot, int flags, int fd, int6
 
     spin_lock(&vm_lock);
 
-    if(!fixed) {
+    if (!fixed) {
         result = vm_alloc_locked(size);
-        if(!result) {
+        if (!result) {
             err = -ENOMEM;
             goto unlock;
         }
     } else {
         uint64_t address = (uint64_t)hint;
-        if(address & (PAGE_SIZE - 1)) {
+        if (address & (PAGE_SIZE - 1)) {
             err = -EINVAL;
             goto unlock;
         }
 
         size_t arena_offset = (size_t)(address - arena_base);
-        if(arena_offset > VM_ARENA_SIZE - size) {
+        if (arena_offset > VM_ARENA_SIZE - size) {
             err = -ENOMEM;
             goto unlock;
         }
-        if(fixed_noreplace && arena_offset < vm_bump) {
+        if (fixed_noreplace && arena_offset < vm_bump) {
             err = -EEXIST;
             goto unlock;
         }
 
         size_t map_end = arena_offset + size;
-        if(map_end > vm_bump)
+        if (map_end > vm_bump)
             vm_bump = map_end;
 
         result = (void *)address;
@@ -226,27 +228,65 @@ static long mmap_call(void *hint, size_t size, int prot, int flags, int fd, int6
 
 unlock:
     spin_unlock(&vm_lock);
-    if(err) return err;
+    if (err) return err;
     __builtin_memset(result, 0, size);
     return (long)(uint64_t)result;
 }
 
 static long munmap_call(void *pointer, size_t size) {
-    if(!pointer) return 0;
-    if(!(size = align_up(size))) return -EINVAL;
+    if (!pointer) return 0;
+    if (!(size = align_up(size))) return -EINVAL;
 
     uint64_t start = (uint64_t)vm_arena;
     uint64_t end = start + VM_ARENA_SIZE;
     uint64_t address = (uint64_t)pointer;
 
-    if(address < start || address > end || size > end - address)
+    if (address < start || address > end || size > end - address)
         return -EINVAL;
-    if(address & (PAGE_SIZE - 1))
+    if (address & (PAGE_SIZE - 1))
         return -EINVAL;
 
     spin_lock(&vm_lock);
     vm_free_locked(pointer, size);
     spin_unlock(&vm_lock);
+    return 0;
+}
+
+static long write_call(int fd, const void *buffer, size_t count) {
+    if (fd < 0)
+        return -EBADF;
+    if (fd < 2)
+        serial_print(buffer, count);
+    return (long)count;
+}
+
+static long clone_call(void *stack, int *parent_tid, void *tls) {
+    if (!stack || !parent_tid)
+        return -EINVAL;
+
+    capture_sys_clone_context((uint64_t)(uintptr_t)stack, (uint64_t)(uintptr_t)tls);
+    *parent_tid = 2;
+    return 2;
+}
+
+static long arch_prctl_call(int code, uint64_t pointer) {
+#if defined(__x86_64__)
+    if (code != ARCH_SET_FS)
+        return -EINVAL;
+    wrmsr(IA32_FS_BASE, pointer);
+    kernel_runtime_fs_base = pointer;
+    return 0;
+#else
+    (void)code;
+    (void)pointer;
+    return -EINVAL;
+#endif
+}
+
+static long clock_gettime_call(struct timespec_arg *tp) {
+    if (!tp)
+        return -EINVAL;
+    tp->tv_sec = tp->tv_nsec = 0;
     return 0;
 }
 
@@ -258,52 +298,31 @@ long syscall(long number, ...) {
     va_start(args, number);
     long ret = -ENOSYS;
 
-    switch(number) {
+    switch (number) {
     case SYS_write: {
         int fd = ARG(int);
         const void* buffer = ARG(const void *);
         size_t count = ARG(size_t);
-        ret = fd < 0 ? -EBADF : (long)count;
-        if(fd < 2) {
-            extern void serial_print(const char *buffer, size_t size);
-            serial_print(buffer,count);
-        }
+        ret = write_call(fd, buffer, count);
         break;
     }
     case SYS_exit:
     case SYS_exit_group:
-        for(;;) __asm__ volatile("hlt");
+        for (;;)
+            __asm__ volatile("hlt");
     case SYS_clone: {
         SKIP_ARG(uint64_t);
         void *stack = ARG(void *);
         int *parent_tid = ARG(int *);
         SKIP_ARG(void *);
         void *tls = ARG(void *);
-        if(stack) {
-            uint64_t stack_addr = (uint64_t)(uintptr_t)stack;
-            capture_sys_clone_context(stack_addr, (uint64_t)(uintptr_t)tls);
-        }
-
-        if(stack && parent_tid) {
-            *parent_tid = 2;
-            ret = 2;
-        } else {
-            ret = -EINVAL;
-        }
+        ret = clone_call(stack, parent_tid, tls);
         break;
     }
     case SYS_arch_prctl: {
         int code = ARG(int);
         uint64_t pointer = (uint64_t)ARG(void *);
-#if defined(__x86_64__)
-        if(code == ARCH_SET_FS) {
-            wrmsr(IA32_FS_BASE, pointer);
-            kernel_runtime_fs_base = pointer;
-            ret = 0;
-        } else {
-            ret = -EINVAL;
-        }
-#endif
+        ret = arch_prctl_call(code, pointer);
         break;
     }
     case SYS_futex: {
@@ -330,13 +349,7 @@ long syscall(long number, ...) {
     }
     case SYS_clock_gettime: {
         SKIP_ARG(int);
-        struct timespec_arg *tp = ARG(struct timespec_arg *);
-        if(tp) {
-            tp->tv_sec = tp->tv_nsec = 0;
-            ret = 0;
-        } else {
-            ret = -EINVAL;
-        }
+        ret = clock_gettime_call(ARG(struct timespec_arg *));
         break;
     }
     case SYS_rt_sigaction:

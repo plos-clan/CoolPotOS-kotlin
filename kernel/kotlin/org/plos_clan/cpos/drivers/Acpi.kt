@@ -30,12 +30,50 @@ private const val SPCR_GAS_ADDRESS_OFFSET = SDT_HEADER_LENGTH + 8
 private data class AcpiTable(
     val pointer: CPointer<UByteVar>,
     val length: Int,
-)
+) {
+    val signature: String
+        get() = pointer.readAscii(0, 4)
+
+    fun hasLength(requiredLength: Int): Boolean =
+        (length >= requiredLength).also { valid ->
+            if (!valid) {
+                println("ACPI: invalid $signature length=$length required=$requiredLength")
+            }
+        }
+}
+
+private enum class RootSdtKind(val entrySize: Int) {
+    RSDT(UInt.SIZE_BYTES),
+    XSDT(ULong.SIZE_BYTES);
+
+    fun entryAddressAt(table: AcpiTable, offset: Int): ULong =
+        when (this) {
+            RSDT -> table.pointer.readU32(offset).toULong()
+            XSDT -> table.pointer.readU64(offset)
+        }
+
+    fun rootAddressAt(rsdp: CPointer<UByteVar>): ULong =
+        when (this) {
+            RSDT -> rsdp.readU32(RSDP_RSDT_ADDRESS_OFFSET).toULong()
+            XSDT -> rsdp.readU64(RSDP_XSDT_ADDRESS_OFFSET)
+        }
+
+    companion object {
+        fun forRevision(revision: UInt): RootSdtKind =
+            if (revision == 0u) RSDT else XSDT
+    }
+}
 
 private data class RootSdt(
     val table: AcpiTable,
-    val entrySize: Int,
-)
+    val kind: RootSdtKind,
+) {
+    fun entryAddressAt(offset: Int): ULong =
+        kind.entryAddressAt(table, offset)
+
+    val entrySize: Int
+        get() = kind.entrySize
+}
 
 private data class MadtInfo(
     val lapicAddress: UInt,
@@ -61,8 +99,7 @@ private object McfgParser : AcpiTableParser<McfgInfo> {
     override val signature: String = "MCFG"
 
     override fun parse(table: AcpiTable): McfgInfo? {
-        if (table.length < MCFG_HEADER_LENGTH) {
-            println("ACPI: invalid MCFG length=${table.length}")
+        if (!table.hasLength(MCFG_HEADER_LENGTH)) {
             return null
         }
 
@@ -73,29 +110,26 @@ private object McfgParser : AcpiTableParser<McfgInfo> {
         }
 
         val regions = buildList {
-            var offset = MCFG_HEADER_LENGTH
             repeat(totalRegionCount) { index ->
+                val offset = MCFG_HEADER_LENGTH + index * MCFG_ENTRY_LENGTH
                 val baseAddress = table.pointer.readU64(offset + MCFG_ENTRY_BASE_ADDRESS_OFFSET)
                 val segmentGroup = table.pointer.readU16(offset + MCFG_ENTRY_SEGMENT_GROUP_OFFSET).toUInt()
                 val startBus = table.pointer.readU8(offset + MCFG_ENTRY_START_BUS_OFFSET).toUInt()
                 val endBus = table.pointer.readU8(offset + MCFG_ENTRY_END_BUS_OFFSET).toUInt()
+                val region = PcieEcamRegion(
+                    baseAddress = baseAddress,
+                    segmentGroup = segmentGroup,
+                    startBus = startBus,
+                    endBus = endBus,
+                )
 
-                if (baseAddress == 0uL || endBus < startBus) {
-                    println(
-                        "ACPI: ignore MCFG region#$index seg=$segmentGroup bus=$startBus-$endBus base=${baseAddress.hex()}",
-                    )
+                if (region.isUsable) {
+                    add(region)
                 } else {
-                    add(
-                        PcieEcamRegion(
-                            baseAddress = baseAddress,
-                            segmentGroup = segmentGroup,
-                            startBus = startBus,
-                            endBus = endBus,
-                        ),
-                    )
+                    val busRange = "${region.busStart}-${region.busEnd}"
+                    val base = baseAddress.hex()
+                    println("ACPI: ignore MCFG region#$index seg=$segmentGroup bus=$busRange base=$base")
                 }
-
-                offset += MCFG_ENTRY_LENGTH
             }
         }
 
@@ -107,8 +141,7 @@ private object MadtParser : AcpiTableParser<MadtInfo> {
     override val signature: String = "APIC"
 
     override fun parse(table: AcpiTable): MadtInfo? {
-        if (table.length < MADT_HEADER_LENGTH) {
-            println("ACPI: invalid MADT length=${table.length}")
+        if (!table.hasLength(MADT_HEADER_LENGTH)) {
             return null
         }
 
@@ -141,8 +174,7 @@ private object HpetParser : AcpiTableParser<HpetGasAddress> {
     override val signature: String = "HPET"
 
     override fun parse(table: AcpiTable): HpetGasAddress? {
-        if (table.length < HPET_GAS_ADDRESS_OFFSET + 8) {
-            println("ACPI: invalid HPET length=${table.length}")
+        if (!table.hasLength(HPET_GAS_ADDRESS_OFFSET + ULong.SIZE_BYTES)) {
             return null
         }
         val spaceId = table.pointer.readU8(HPET_GAS_SPACE_ID_OFFSET).toUInt()
@@ -155,8 +187,7 @@ private object SpcrParser : AcpiTableParser<ULong> {
     override val signature: String = "SPCR"
 
     override fun parse(table: AcpiTable): ULong? {
-        if (table.length < SPCR_GAS_ADDRESS_OFFSET + 8) {
-            println("ACPI: invalid SPCR length=${table.length}")
+        if (!table.hasLength(SPCR_GAS_ADDRESS_OFFSET + ULong.SIZE_BYTES)) {
             return null
         }
         return table.pointer.readU64(SPCR_GAS_ADDRESS_OFFSET)
@@ -165,7 +196,7 @@ private object SpcrParser : AcpiTableParser<ULong> {
 
 object Acpi {
     private var root: RootSdt? = null
-    private val tableIndex = linkedMapOf<String, ULong>()
+    private val tableIndex = mutableMapOf<String, ULong>()
 
     fun initialize(): Boolean {
         if (!initializeRoot()) {
@@ -220,8 +251,7 @@ object Acpi {
             return false
         }
 
-        val rsdp = rsdp_request.response?.pointed?.address?.reinterpret<UByteVar>()
-        if (rsdp == null) {
+        val rsdp = rsdp_request.response?.pointed?.address?.reinterpret<UByteVar>() ?: run {
             println("ACPI: limine did not provide RSDP")
             return false
         }
@@ -241,12 +271,8 @@ object Acpi {
             }
         }
 
-        val useXsdt = revision != 0u
-        val rootAddress = if (useXsdt) {
-            rsdp.readU64(RSDP_XSDT_ADDRESS_OFFSET)
-        } else {
-            rsdp.readU32(RSDP_RSDT_ADDRESS_OFFSET).toULong()
-        }
+        val rootKind = RootSdtKind.forRevision(revision)
+        val rootAddress = rootKind.rootAddressAt(rsdp)
         if (rootAddress == 0uL) {
             println("ACPI: root SDT address is zero")
             return false
@@ -256,11 +282,9 @@ object Acpi {
             println("ACPI: cannot access root SDT at ${rootAddress.hex()}")
             return false
         }
-        root = RootSdt(rootTable, if (useXsdt) 8 else 4)
-        val rootSignature = rootTable.pointer.readAscii(0, 4)
-
+        root = RootSdt(rootTable, rootKind)
         println("ACPI revision: $revision")
-        println("ACPI root SDT: $rootSignature at ${rootAddress.hex()}")
+        println("ACPI root SDT: ${rootTable.signature} at ${rootAddress.hex()}")
 
         rebuildTableIndex()
         return true
@@ -269,9 +293,7 @@ object Acpi {
     private fun rebuildTableIndex() {
         tableIndex.clear()
         scanRootEntries { signature, address ->
-            if (signature !in tableIndex) {
-                tableIndex[signature] = address
-            }
+            tableIndex.getOrPut(signature) { address }
         }
     }
 
@@ -307,11 +329,7 @@ object Acpi {
         val count = payloadLength / currentRoot.entrySize
         var offset = SDT_HEADER_LENGTH
         repeat(count) {
-            val tableAddress = if (currentRoot.entrySize == 8) {
-                currentRoot.table.pointer.readU64(offset)
-            } else {
-                currentRoot.table.pointer.readU32(offset).toULong()
-            }
+            val tableAddress = currentRoot.entryAddressAt(offset)
             offset += currentRoot.entrySize
 
             if (tableAddress == 0uL) {
@@ -319,7 +337,7 @@ object Acpi {
             }
 
             val table = tableAt(tableAddress) ?: return@repeat
-            consume(table.pointer.readAscii(0, 4), tableAddress)
+            consume(table.signature, tableAddress)
         }
     }
 }
@@ -328,8 +346,5 @@ private fun tableAt(address: ULong): AcpiTable? {
     val pointer = address.toVirtualPointer<UByteVar>() ?: return null
 
     val length = pointer.readU32(SDT_LENGTH_OFFSET).toInt()
-    if (length < SDT_HEADER_LENGTH) {
-        return null
-    }
-    return AcpiTable(pointer = pointer, length = length)
+    return AcpiTable(pointer = pointer, length = length).takeIf { length >= SDT_HEADER_LENGTH }
 }

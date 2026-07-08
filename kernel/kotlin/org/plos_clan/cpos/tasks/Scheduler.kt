@@ -4,7 +4,6 @@ package org.plos_clan.cpos.tasks
 
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fault.IrqController
-import org.plos_clan.cpos.fault.IrqType
 import org.plos_clan.cpos.utils.PtraceRegisters
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -13,18 +12,14 @@ object Scheduler {
     private val readyQueue = ArrayDeque<Thread>()
     private var currentThread: Thread? = null
     private var initialized = false
-    private var scheduled : AtomicBoolean = AtomicBoolean(false)
+    private val scheduled = AtomicBoolean(false)
 
-    fun enableScheduler() {
-        scheduled.store(true)
-    }
+    fun enableScheduler() = scheduled.store(true)
 
-    fun disableScheduler() {
-        scheduled.store(false)
-    }
+    fun disableScheduler() = scheduled.store(false)
 
     fun enqueueThread(thread: Thread) {
-        if (thread.state == ThreadState.TERMINATED || thread.isQueued) {
+        if (thread.isQueued) {
             return
         }
         thread.state = ThreadState.READY
@@ -40,8 +35,7 @@ object Scheduler {
 
         val running = currentThread ?: run {
             val initial = dequeueNextRunnable() ?: return
-            initial.state = ThreadState.RUNNING
-            currentThread = initial
+            switchTo(initial)
             if (!initial.restoreTo(regs)) {
                 println("Scheduler: thread ${initial.id} has no context")
             }
@@ -55,21 +49,17 @@ object Scheduler {
         }
 
         val next = dequeueNextRunnable() ?: run {
-            running.state = ThreadState.RUNNING
-            currentThread = running
+            switchTo(running)
             running.restoreTo(regs)
             return
         }
 
-        currentThread = next
-        next.state = ThreadState.RUNNING
-
+        switchTo(next)
         if (!next.restoreTo(regs)) {
             println("Scheduler: restore failed for thread ${next.id}, stay on ${running.id}")
             next.state = ThreadState.READY
             enqueueThread(next)
-            running.state = ThreadState.RUNNING
-            currentThread = running
+            switchTo(running)
             running.restoreTo(regs)
         }
     }
@@ -83,21 +73,17 @@ object Scheduler {
             thread.state = ThreadState.RUNNING
         }
 
-        ProcessManager.allThreads().forEach { thread ->
-            if (thread !== currentThread && thread.state == ThreadState.READY) {
-                enqueueThread(thread)
-            }
-        }
+        ProcessManager.allThreads()
+            .filter { thread -> thread !== currentThread && thread.state == ThreadState.READY }
+            .forEach(::enqueueThread)
 
-        if (!IrqController.registerAction(1, ::scheduler, IrqType.IO_APIC)) {
+        if (!IrqController.registerAction(1, ::scheduler)) {
             println("Scheduler: failed to register timer IRQ action")
             return
         }
 
         initialized = true
-        println(
-            "Scheduler: initialized policy=RRS current=${currentThread?.id ?: -1} queue=${readyQueue.size}",
-        )
+        println("Scheduler: initialized policy=RRS current=${currentThread?.id ?: -1} queue=${readyQueue.size}")
     }
 
     private fun dequeueNextRunnable(): Thread? {
@@ -109,5 +95,10 @@ object Scheduler {
             }
         }
         return null
+    }
+
+    private fun switchTo(thread: Thread) {
+        currentThread = thread
+        thread.state = ThreadState.RUNNING
     }
 }

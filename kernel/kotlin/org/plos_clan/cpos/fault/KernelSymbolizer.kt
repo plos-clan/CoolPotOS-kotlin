@@ -44,35 +44,56 @@ private const val MAX_SYMBOL_NAME_LENGTH = 512uL
 private data class SymbolEntry(
     val address: ULong,
     val size: ULong,
-    val strtabOffset: ULong,
-    val strtabSize: ULong,
-    val nameOffset: UInt,
+    val nameOffset: Int,
+    val maxNameLength: Int,
+) {
+    fun contains(targetAddress: ULong, nextAddress: ULong?): Boolean =
+        when {
+            targetAddress < address -> false
+            nextAddress != null -> targetAddress < nextAddress
+            size == 0uL -> false
+            else -> (targetAddress - address) < size
+        }
+}
+
+private data class SymbolTable(
+    val imageBase: CPointer<UByteVar>?,
+    val symbols: List<SymbolEntry>,
 )
 
+private data class ElfSection(
+    val type: UInt,
+    val offset: ULong,
+    val size: ULong,
+    val link: Int,
+    val entrySize: ULong,
+) {
+    val isSymbolTable: Boolean get() = type == ELF_SHT_SYMTAB || type == ELF_SHT_DYNSYM
+    val isStringTable: Boolean get() = type == ELF_SHT_STRTAB
+
+    fun isIn(imageSize: ULong): Boolean = isInRange(offset, size, imageSize)
+
+    fun symbolCount(imageSize: ULong, sectionCount: Int): Int? {
+        if (!isSymbolTable || entrySize < ELF64_SYMBOL_SIZE || size < entrySize) {
+            return null
+        }
+        if (!isIn(imageSize) || link !in 0 until sectionCount) {
+            return null
+        }
+        return (size / entrySize).toIntOrNull()
+    }
+
+    fun canServeStrings(imageSize: ULong): Boolean =
+        isStringTable && size != 0uL && isIn(imageSize)
+}
+
 object KernelSymbolizer {
-    private var imageBase: CPointer<UByteVar>? = null
-    private var symbols: List<SymbolEntry> = emptyList()
-    private var initialized = false
+    private val symbolTable: SymbolTable by lazy(LazyThreadSafetyMode.NONE) {
+        loadSymbolTable()
+    }
 
     fun initialize() {
-        if (initialized) {
-            return
-        }
-
-        val executableFile = executable_file_request.response
-            ?.pointed
-            ?.executable_file
-            ?.pointed
-
-        val image = executableFile?.address?.reinterpret<UByteVar>()
-        val imageSize = executableFile?.size
-
-        if (image != null && imageSize != null && isValidElf(image, imageSize)) {
-            imageBase = image
-            symbols = parseSymbols(image, imageSize)
-        }
-
-        initialized = true
+        symbolTable
     }
 
     fun describe(address: ULong): String {
@@ -81,13 +102,26 @@ object KernelSymbolizer {
         return "$rawAddress <$symbol>"
     }
 
-    private fun symbolize(address: ULong): String? {
-        if (!initialized) {
-            initialize()
-        }
+    private fun loadSymbolTable(): SymbolTable {
+        val executableFile = executable_file_request.response
+            ?.pointed
+            ?.executable_file
+            ?.pointed
 
-        val symbol = findSymbol(address) ?: return null
-        val name = readSymbolName(symbol) ?: return null
+        val image = executableFile?.address?.reinterpret<UByteVar>()
+        val imageSize = executableFile?.size
+
+        return if (image != null && imageSize != null && isValidElf(image, imageSize)) {
+            SymbolTable(imageBase = image, symbols = parseSymbols(image, imageSize))
+        } else {
+            SymbolTable(imageBase = null, symbols = emptyList())
+        }
+    }
+
+    private fun symbolize(address: ULong): String? {
+        val table = symbolTable
+        val symbol = findSymbol(table.symbols, address) ?: return null
+        val name = readSymbolName(table.imageBase, symbol) ?: return null
         val offset = address - symbol.address
         if (offset == 0uL) {
             return name
@@ -95,42 +129,15 @@ object KernelSymbolizer {
         return "$name+0x${offset.toString(16)}"
     }
 
-    private fun findSymbol(address: ULong): SymbolEntry? {
-        val entries = symbols
-        if (entries.isEmpty()) {
-            return null
+    private fun findSymbol(entries: List<SymbolEntry>, address: ULong): SymbolEntry? {
+        var index = entries.binarySearch { entry -> entry.address.compareTo(address) }
+            .let { result -> if (result >= 0) result else -result - 2 }
+        while (entries.getOrNull(index + 1)?.address == address) {
+            index += 1
         }
-
-        var low = 0
-        var high = entries.size
-        while (low < high) {
-            val mid = (low + high) ushr 1
-            if (entries[mid].address <= address) {
-                low = mid + 1
-            } else {
-                high = mid
-            }
-        }
-
-        val index = low - 1
-        if (index < 0) {
-            return null
-        }
-
-        val candidate = entries[index]
-        if (address < candidate.address) {
-            return null
-        }
-
+        val candidate = entries.getOrNull(index) ?: return null
         val nextAddress = entries.getOrNull(index + 1)?.address
-        if (nextAddress != null) {
-            return if (address < nextAddress) candidate else null
-        }
-
-        if (candidate.size == 0uL) {
-            return null
-        }
-        return if ((address - candidate.address) < candidate.size) candidate else null
+        return candidate.takeIf { it.contains(address, nextAddress) }
     }
 
     private fun parseSymbols(image: CPointer<UByteVar>, imageSize: ULong): List<SymbolEntry> {
@@ -151,112 +158,97 @@ object KernelSymbolizer {
             return emptyList()
         }
 
-        val result = mutableListOf<SymbolEntry>()
-        for (sectionIndex in 0 until sectionCount) {
-            val sectionOffset = sectionTableOffset + sectionHeaderSize * sectionIndex.toULong()
-            val sectionOffsetInt = sectionOffset.toIntOrNull() ?: continue
-            val sectionType = image.readU32(sectionOffsetInt + ELF_SH_TYPE_OFFSET)
-            if (sectionType != ELF_SHT_SYMTAB && sectionType != ELF_SHT_DYNSYM) {
-                continue
-            }
+        return buildList {
+            for (sectionIndex in 0 until sectionCount) {
+                val symbolSection = readSection(
+                    image = image,
+                    sectionTableOffset = sectionTableOffset,
+                    sectionHeaderSize = sectionHeaderSize,
+                    sectionIndex = sectionIndex,
+                ) ?: continue
+                val symbolCount = symbolSection.symbolCount(imageSize, sectionCount) ?: continue
 
-            val symbolTableOffset = image.readU64(sectionOffsetInt + ELF_SH_OFFSET_OFFSET)
-            val symbolTableSize = image.readU64(sectionOffsetInt + ELF_SH_SIZE_OFFSET)
-            val symbolEntrySize = image.readU64(sectionOffsetInt + ELF_SH_ENTSIZE_OFFSET)
-            val linkedStrtabIndex = image.readU32(sectionOffsetInt + ELF_SH_LINK_OFFSET).toInt()
-
-            if (symbolEntrySize < ELF64_SYMBOL_SIZE || symbolTableSize < symbolEntrySize) {
-                continue
-            }
-            if (!isInRange(symbolTableOffset, symbolTableSize, imageSize)) {
-                continue
-            }
-            if (linkedStrtabIndex !in 0 until sectionCount) {
-                continue
-            }
-
-            val strtabSectionOffset = sectionTableOffset + sectionHeaderSize * linkedStrtabIndex.toULong()
-            val strtabSectionOffsetInt = strtabSectionOffset.toIntOrNull() ?: continue
-            val strtabType = image.readU32(strtabSectionOffsetInt + ELF_SH_TYPE_OFFSET)
-            if (strtabType != ELF_SHT_STRTAB) {
-                continue
-            }
-
-            val strtabOffset = image.readU64(strtabSectionOffsetInt + ELF_SH_OFFSET_OFFSET)
-            val strtabSize = image.readU64(strtabSectionOffsetInt + ELF_SH_SIZE_OFFSET)
-            if (strtabSize == 0uL || !isInRange(strtabOffset, strtabSize, imageSize)) {
-                continue
-            }
-
-            val symbolCount = (symbolTableSize / symbolEntrySize).toIntOrNull() ?: continue
-            for (symbolIndex in 0 until symbolCount) {
-                val symbolOffset = symbolTableOffset + symbolEntrySize * symbolIndex.toULong()
-                val symbolOffsetInt = symbolOffset.toIntOrNull() ?: continue
-
-                val nameOffset = image.readU32(symbolOffsetInt + ELF_SYM_NAME_OFFSET)
-                val info = image.readU8(symbolOffsetInt + ELF_SYM_INFO_OFFSET).toUInt()
-                val type = info and 0xFu
-                val sectionRef = image.readU16(symbolOffsetInt + ELF_SYM_SHNDX_OFFSET)
-                val value = image.readU64(symbolOffsetInt + ELF_SYM_VALUE_OFFSET)
-                val size = image.readU64(symbolOffsetInt + ELF_SYM_SIZE_OFFSET)
-
-                if (nameOffset == 0u || value == 0uL || sectionRef.toInt() == ELF_SHN_UNDEF) {
-                    continue
-                }
-                if (!value.isCanonicalKernelAddress()) {
-                    continue
-                }
-                if (type != ELF_STT_FUNC && type != ELF_STT_NOTYPE) {
-                    continue
-                }
-                if (nameOffset.toULong() >= strtabSize) {
-                    continue
-                }
-                val nameStart = (strtabOffset + nameOffset.toULong()).toIntOrNull() ?: continue
-                val nameFirstByte = image.readU8(nameStart)
-                if (nameFirstByte == '.'.code.toUByte() || nameFirstByte == '$'.code.toUByte()) {
+                val stringSection = readSection(
+                    image = image,
+                    sectionTableOffset = sectionTableOffset,
+                    sectionHeaderSize = sectionHeaderSize,
+                    sectionIndex = symbolSection.link,
+                ) ?: continue
+                if (!stringSection.canServeStrings(imageSize)) {
                     continue
                 }
 
-                result += SymbolEntry(
-                    address = value,
-                    size = size,
-                    strtabOffset = strtabOffset,
-                    strtabSize = strtabSize,
-                    nameOffset = nameOffset,
-                )
+                for (symbolIndex in 0 until symbolCount) {
+                    val symbolOffset = symbolSection.offset + symbolSection.entrySize * symbolIndex.toULong()
+                    val symbolOffsetInt = symbolOffset.toIntOrNull() ?: continue
+                    parseSymbol(image, symbolOffsetInt, stringSection)?.let(::add)
+                }
             }
         }
-
-        return result
-            .distinctBy { Triple(it.address, it.strtabOffset, it.nameOffset) }
+            .distinctBy { it.address to it.nameOffset }
             .sortedBy { it.address }
     }
 
-    private fun readSymbolName(symbol: SymbolEntry): String? {
-        val image = imageBase ?: return null
-        val relativeOffset = symbol.nameOffset.toULong()
-        if (relativeOffset >= symbol.strtabSize) {
+    private fun parseSymbol(
+        image: CPointer<UByteVar>,
+        symbolOffset: Int,
+        stringSection: ElfSection,
+    ): SymbolEntry? {
+        val nameOffset = image.readU32(symbolOffset + ELF_SYM_NAME_OFFSET)
+        val info = image.readU8(symbolOffset + ELF_SYM_INFO_OFFSET).toUInt()
+        val type = info and 0xFu
+        val sectionRef = image.readU16(symbolOffset + ELF_SYM_SHNDX_OFFSET)
+        val address = image.readU64(symbolOffset + ELF_SYM_VALUE_OFFSET)
+        val size = image.readU64(symbolOffset + ELF_SYM_SIZE_OFFSET)
+
+        if (nameOffset == 0u || address == 0uL || sectionRef.toInt() == ELF_SHN_UNDEF) {
+            return null
+        }
+        if (!address.isCanonicalKernelAddress() || (type != ELF_STT_FUNC && type != ELF_STT_NOTYPE)) {
             return null
         }
 
-        val start = symbol.strtabOffset + relativeOffset
-        val startInt = start.toIntOrNull() ?: return null
-        val available = symbol.strtabSize - relativeOffset
-        val maxLength = minOf(available, MAX_SYMBOL_NAME_LENGTH).toIntOrNull() ?: return null
-        if (maxLength <= 0) {
+        val relativeNameOffset = nameOffset.toULong().takeIf { it < stringSection.size } ?: return null
+        val nameStart = (stringSection.offset + relativeNameOffset).toIntOrNull() ?: return null
+        val maxNameLength = minOf(
+            stringSection.size - relativeNameOffset,
+            MAX_SYMBOL_NAME_LENGTH,
+        ).toIntOrNull() ?: return null
+        if (maxNameLength <= 0) {
             return null
         }
 
-        var length = 0
-        while (length < maxLength && image.readU8(startInt + length) != 0.toUByte()) {
-            length++
-        }
-        if (length <= 0) {
-            return null
-        }
+        return SymbolEntry(
+            address = address,
+            size = size,
+            nameOffset = nameStart,
+            maxNameLength = maxNameLength,
+        ).takeUnless { image.readU8(nameStart).isHiddenSymbolPrefix() }
+    }
 
-        return image.readAscii(startInt, length)
+    private fun readSection(
+        image: CPointer<UByteVar>,
+        sectionTableOffset: ULong,
+        sectionHeaderSize: ULong,
+        sectionIndex: Int,
+    ): ElfSection? {
+        val sectionOffset = sectionTableOffset + sectionHeaderSize * sectionIndex.toULong()
+        val offset = sectionOffset.toIntOrNull() ?: return null
+        return ElfSection(
+            type = image.readU32(offset + ELF_SH_TYPE_OFFSET),
+            offset = image.readU64(offset + ELF_SH_OFFSET_OFFSET),
+            size = image.readU64(offset + ELF_SH_SIZE_OFFSET),
+            link = image.readU32(offset + ELF_SH_LINK_OFFSET).toInt(),
+            entrySize = image.readU64(offset + ELF_SH_ENTSIZE_OFFSET),
+        )
+    }
+
+    private fun readSymbolName(image: CPointer<UByteVar>?, symbol: SymbolEntry): String? {
+        image ?: return null
+        val length = (0 until symbol.maxNameLength)
+            .firstOrNull { index -> image.readU8(symbol.nameOffset + index) == 0.toUByte() }
+            ?: symbol.maxNameLength
+        return length.takeIf { it > 0 }?.let { image.readAscii(symbol.nameOffset, it) }
     }
 
     private fun isValidElf(image: CPointer<UByteVar>, imageSize: ULong): Boolean {
@@ -280,11 +272,11 @@ object KernelSymbolizer {
 }
 
 private fun isInRange(offset: ULong, size: ULong, limit: ULong): Boolean {
-    if (offset > limit) {
-        return false
-    }
-    return size <= limit - offset
+    return offset <= limit && size <= limit - offset
 }
 
 private fun ULong.toIntOrNull(): Int? =
     if (this <= Int.MAX_VALUE.toULong()) this.toInt() else null
+
+private fun UByte.isHiddenSymbolPrefix(): Boolean =
+    this == '.'.code.toUByte() || this == '$'.code.toUByte()

@@ -1,5 +1,3 @@
-import java.io.InputStream
-import java.io.OutputStream
 import java.net.URI
 
 @DisableCachingByDefault(because = "Downloads third-party artifacts")
@@ -17,8 +15,8 @@ abstract class DownloadFileTask : DefaultTask() {
 
         val connection = URI.create(sourceUrl.get()).toURL().openConnection()
         connection.setRequestProperty("User-Agent", "Gradle")
-        connection.getInputStream().use { input: InputStream ->
-            target.outputStream().use { output: OutputStream ->
+        connection.getInputStream().use { input ->
+            target.outputStream().use { output ->
                 input.copyTo(output)
             }
         }
@@ -35,19 +33,18 @@ val buildRootDir = layout.buildDirectory.get().asFile
 val mlibcBuildDirName = "mlibc-$targetArch"
 
 fun setting(propName: String, envName: String, defaultValue: String): String {
-    val propValue = (findProperty(propName) as String?)?.takeIf(String::isNotBlank)
-    val envValue = System.getenv(envName)?.takeIf(String::isNotBlank)
-    return propValue ?: envValue ?: defaultValue
+    return listOfNotNull(
+        (findProperty(propName) as String?)?.takeIf(String::isNotBlank),
+        System.getenv(envName)?.takeIf(String::isNotBlank),
+    ).firstOrNull() ?: defaultValue
 }
 
 fun settingBoolean(propName: String, envName: String, defaultValue: Boolean): Boolean {
-    val rawValue = (findProperty(propName) as String?)?.takeIf(String::isNotBlank)
-        ?: System.getenv(envName)?.takeIf(String::isNotBlank)
-        ?: return defaultValue
-    return when (rawValue.lowercase()) {
+    val value = setting(propName, envName, defaultValue.toString())
+    return when (value.lowercase()) {
         "1", "true", "yes", "on" -> true
         "0", "false", "no", "off" -> false
-        else -> throw GradleException("Expected boolean for $propName/$envName, got '$rawValue'.")
+        else -> throw GradleException("Expected boolean for $propName/$envName, got '$value'.")
     }
 }
 

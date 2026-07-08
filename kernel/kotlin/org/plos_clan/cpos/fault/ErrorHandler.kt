@@ -18,8 +18,13 @@ private const val DIVIDE_ERROR_VECTOR: UShort = 0u
 private const val GENERAL_PROTECTION_VECTOR: UShort = 13u
 private const val PAGE_FAULT_VECTOR: UShort = 14u
 
-private fun isInStackWindow(address: ULong, stackBottom: ULong): Boolean =
-    address >= stackBottom && (address - stackBottom) <= MAX_STACK_WINDOW_BYTES
+private data class StackWindow(val rsp: ULong) {
+    val isBounded: Boolean
+        get() = rsp.isCanonicalKernelAddress()
+
+    operator fun contains(address: ULong): Boolean =
+        !isBounded || (address >= rsp && (address - rsp) <= MAX_STACK_WINDOW_BYTES)
+}
 
 private fun printCallStack(frame: InterruptFrame, interruptedRbp: ULong) {
     println("callStack:")
@@ -30,7 +35,7 @@ private fun printCallStack(frame: InterruptFrame, interruptedRbp: ULong) {
         return
     }
 
-    val hasRspBoundary = frame.rsp.isCanonicalKernelAddress()
+    val stackWindow = StackWindow(frame.rsp)
     var rbp = interruptedRbp
     var depth = 1
 
@@ -38,7 +43,7 @@ private fun printCallStack(frame: InterruptFrame, interruptedRbp: ULong) {
         if ((rbp and 0x7uL) != 0uL || !rbp.isCanonicalKernelAddress()) {
             break
         }
-        if (hasRspBoundary && !isInStackWindow(rbp, frame.rsp)) {
+        if (rbp !in stackWindow) {
             break
         }
 
@@ -57,7 +62,7 @@ private fun printCallStack(frame: InterruptFrame, interruptedRbp: ULong) {
         if ((nextRbp - rbp) > MAX_STACK_FRAME_STEP_BYTES) {
             break
         }
-        if (hasRspBoundary && !isInStackWindow(nextRbp, frame.rsp)) {
+        if (nextRbp !in stackWindow) {
             break
         }
 
@@ -102,7 +107,12 @@ fun generalProtectionFault(frame: COpaquePointer?, ecode: ULong, interruptedRbp:
 object ErrorHandler {
     fun initialize() {
         register_interrupt_handler(DIVIDE_ERROR_VECTOR, staticCFunction(::divideError), 0u, 142u)
-        register_interrupt_handler(GENERAL_PROTECTION_VECTOR, staticCFunction(::generalProtectionFault), 0u, 142u)
+        register_interrupt_handler(
+            GENERAL_PROTECTION_VECTOR,
+            staticCFunction(::generalProtectionFault),
+            0u,
+            142u,
+        )
         register_interrupt_handler(PAGE_FAULT_VECTOR, staticCFunction(::pageFault), 0u, 142u)
     }
 }

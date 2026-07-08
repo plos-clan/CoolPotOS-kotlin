@@ -9,7 +9,6 @@ import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.fault.ErrorHandler
-import org.plos_clan.cpos.fault.IrqController
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.hex
 import kotlin.experimental.ExperimentalNativeApi
@@ -35,7 +34,6 @@ fun kernelMain() {
     if (!Acpi.initialize()) {
         return
     }
-    IrqController.initialize()
     ProcessManager.initialize()
     startCapturedCloneThreads()
     Scheduler.initialize()
@@ -50,21 +48,15 @@ fun kernelMain() {
 private fun startCapturedCloneThreads() {
     val entryPoint = get_kernel_clone_thread_entry_address()
     val threadCount = get_sys_clone_recorded_count()
-    var index = 0uL
-    while (index < threadCount) {
+    for (index in 0uL until threadCount) {
         val stack = get_sys_clone_stack_at(index)
         val tls = get_sys_clone_tls_at(index)
-        val thread = ProcessManager.createThreadFromContext(
-            name = "runtime-thread-$index",
+        ProcessManager.createThreadFromContext(
             entryPoint = entryPoint,
             stackPointer = stack,
             fsBase = tls,
-        )
-        if (thread != null) {
-            println(
-                "runtime-thread[$index] loaded tid=${thread.id} stack=${stack.hex()} tls=${tls.hex()}",
-            )
+        )?.let { thread ->
+            println("runtime-thread[$index] loaded tid=${thread.id} stack=${stack.hex()} tls=${tls.hex()}")
         }
-        index++
     }
 }

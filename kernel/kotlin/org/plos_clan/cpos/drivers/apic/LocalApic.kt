@@ -33,6 +33,9 @@ private const val LAPIC_TIMER_MASK_BIT = 0x1_0000uL
 private const val LAPIC_TIMER_PERIODIC_BIT = 0x2_0000uL
 private const val LAPIC_TIMER_DIVIDE_BY_1 = 0b1011uL
 private const val LAPIC_TIMER_CALIBRATION_NS = 1_000_000uL
+private const val LAPIC_ID_MASK = 0xFFu
+private const val LAPIC_ID_MASK_LONG = 0xFFuL
+private val LAPIC_TIMER_MAX_INITIAL_COUNT = UInt.MAX_VALUE.toULong()
 
 object LocalApic {
     private var x2ApicMode = false
@@ -45,15 +48,11 @@ object LocalApic {
     val localApicId: UInt
         get() {
             val rawId = read(LAPIC_REG_ID)
-            return if (x2ApicMode) {
-                rawId.toUInt()
-            } else {
-                ((rawId shr 24) and 0xFFuL).toUInt()
-            }
+            return if (x2ApicMode) rawId.toUInt() else ((rawId shr 24) and LAPIC_ID_MASK_LONG).toUInt()
         }
 
     val destinationApicId: UInt
-        get() = localApicId and 0xFFu
+        get() = localApicId and LAPIC_ID_MASK
 
     fun initialize(
         physicalAddress: ULong,
@@ -99,10 +98,9 @@ object LocalApic {
             return
         }
 
-        var timerConfig = vector.toULong() or LAPIC_TIMER_PERIODIC_BIT
-        if (masked) {
-            timerConfig = timerConfig or LAPIC_TIMER_MASK_BIT
-        }
+        val timerConfig = vector.toULong() or
+            LAPIC_TIMER_PERIODIC_BIT or
+            (if (masked) LAPIC_TIMER_MASK_BIT else 0uL)
 
         write(LAPIC_REG_TIMER_DIV, LAPIC_TIMER_DIVIDE_BY_1)
         write(LAPIC_REG_TIMER, timerConfig)
@@ -115,23 +113,23 @@ object LocalApic {
     }
 
     private fun calibrateTimer(timerFrequencyHz: UInt): ULong {
-        if (Hpet.estimate(1uL) == 0uL) {
-            println("APIC: HPET unavailable, skip LAPIC timer calibration")
+        if (timerFrequencyHz == 0u) {
             return 0uL
         }
-        if (timerFrequencyHz == 0u) {
+        if (Hpet.estimate(1uL) == 0uL) {
+            println("APIC: HPET unavailable, skip LAPIC timer calibration")
             return 0uL
         }
 
         write(LAPIC_REG_TIMER_DIV, LAPIC_TIMER_DIVIDE_BY_1)
         write(LAPIC_REG_TIMER, LAPIC_TIMER_MASK_BIT)
-        write(LAPIC_REG_TIMER_INITCNT, UInt.MAX_VALUE.toULong())
+        write(LAPIC_REG_TIMER_INITCNT, LAPIC_TIMER_MAX_INITIAL_COUNT)
 
         val start = Hpet.nanoTime()
         while (Hpet.nanoTime() - start < LAPIC_TIMER_CALIBRATION_NS) {
         }
 
-        val elapsedTicks = UInt.MAX_VALUE.toULong() - read(LAPIC_REG_TIMER_CURCNT)
+        val elapsedTicks = LAPIC_TIMER_MAX_INITIAL_COUNT - read(LAPIC_REG_TIMER_CURCNT)
         if (elapsedTicks == 0uL) {
             println("APIC: LAPIC timer calibration produced zero ticks")
             return 0uL
