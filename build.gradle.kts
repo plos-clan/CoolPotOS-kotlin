@@ -93,7 +93,7 @@ val konanGccLibDir = File(toolRoot, "lib/gcc/$targetArch-unknown-linux-gnu/8.3.0
 val konanSysrootLibDir = File(toolRoot, "$targetArch-unknown-linux-gnu/sysroot/lib")
 val mlibcLibDir = mlibcPrefix.resolve("lib")
 
-val cSourceNames = listOf("boot.c", "shim.c", "syscall.c", "gdt.c", "idt.c")
+val cSourceNames = listOf("boot.c", "shim.c", "syscall.c", "gdt.c", "idt.c", "smp.c")
 val cSources = cSourceNames.map(kernelCDir::resolve)
 
 val cFlagsTarget = listOf("-target", "$targetArch-freestanding")
@@ -145,7 +145,7 @@ val xorrisoFlagsBoot = listOf("--efi-boot", "limine/limine-uefi-cd.bin", "-efi-b
 val xorrisoFlags = xorrisoFlagsMode + xorrisoFlagsBoot
 
 val qemuMemory = setting("qemuMemory", "QEMU_MEMORY", "256m")
-val qemuFlagsMachine = listOf("-m", qemuMemory, "-M", "q35", "-cpu", "qemu64,+x2apic", "-no-reboot")
+val qemuFlagsMachine = listOf("-m", qemuMemory, "-M", "q35", "-cpu", "qemu64,+x2apic", "-no-reboot", "-smp", "4")
 val qemuFlagsFirmware = listOf("-drive", "if=pflash,format=raw,readonly=on,file=assets/ovmf-code.fd")
 val qemuFlagsDebug = listOf("-s", "-S")
 val qemuBaseFlags =

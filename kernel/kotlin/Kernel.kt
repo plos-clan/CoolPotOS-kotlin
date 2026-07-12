@@ -9,6 +9,7 @@ import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.fault.ErrorHandler
+import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.hex
 import kotlin.experimental.ExperimentalNativeApi
@@ -35,6 +36,7 @@ fun kernelMain() {
         return
     }
     ProcessManager.initialize()
+    SMProcessor.initialize()
     startCapturedCloneThreads()
     Scheduler.initialize()
     Acpi.enumerateDevices()

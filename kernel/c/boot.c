@@ -120,7 +120,7 @@ static void write_cr4(uint64_t value) {
     __asm__ volatile ("mov %0, %%cr4" : : "r"(value) : "memory");
 }
 
-static void setup_simd(void) {
+void setup_simd(void) {
     uint64_t cr0 = read_cr0();
     uint64_t cr4 = read_cr4();
 
@@ -191,6 +191,10 @@ static bool setup_entry_stack(boot_uptr_t *entry_stack) {
     entry_stack[20] = at_null;     entry_stack[21] = 0;
 
     return true;
+}
+
+void wait_for_interrupt() {
+    __asm__ volatile ("hlt");
 }
 
 void _start(void) {
