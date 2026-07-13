@@ -34,6 +34,7 @@ extern uint64_t get_kernel_idle_entry_address(void);
 extern uint64_t get_kernel_clone_thread_entry_address(void);
 extern void wait_for_interrupt();
 extern void (*ap_start_ptr)(struct limine_mp_info *);
+extern void *__rtld_allocateTcb();
 
 extern void register_interrupt_handler(
     uint16_t vector,

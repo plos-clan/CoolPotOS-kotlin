@@ -39,10 +39,12 @@ object SMProcessor {
             if(entry.lapic_id == smp.bsp_lapic_id) {
                 continue
             }
+            val tls = bridge.__rtld_allocateTcb()
+            entry.extra_argument = tls.toLong().toULong()
             entry.goto_address = bridge.ap_start_ptr
         }
 
-       // while (load_done.load().toULong() < cpu_count);
+        while (load_done.load().toULong() < cpu_count);
 
         println("MultiProcessor: loaded $cpu_count cores")
     }
