@@ -1,9 +1,9 @@
 #include <bridge.h>
 
-extern void setup_simd(void);
-extern void kt_ap_start(void);
-
-static _Atomic uint64_t tid = 4;
+struct idt_register {
+    uint16_t size;
+    void *ptr;
+} __attribute__((packed));
 
 struct Tcb {
     struct Tcb *selfPointer;
@@ -13,8 +13,16 @@ struct Tcb {
     int didExit;
 };
 
+extern void setup_simd(void);
+extern void kt_ap_start(void);
+
+extern struct idt_register idt_pointer;
+
+static _Atomic uint64_t tid = 4;
+
 void _ap_start(struct limine_mp_info *info) {
     disable_interrupt();
+    __asm__ volatile("lidt %0" : : "m"(idt_pointer) : "memory");
     setup_simd();
     wrmsr(0xC0000100, info->extra_argument); // write fs tls
 

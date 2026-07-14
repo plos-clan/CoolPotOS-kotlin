@@ -68,7 +68,7 @@ extern void do_irq(void *regs, uint64_t irq_num);
 extern uint8_t irq_stub_base[];
 extern uint64_t kernel_runtime_fs_base;
 
-static struct idt_register idt_pointer;
+struct idt_register idt_pointer;
 static struct idt_entry idt_entries[idt_vector_count];
 static kotlin_interrupt_handler_t kotlin_handle[idt_vector_count];
 

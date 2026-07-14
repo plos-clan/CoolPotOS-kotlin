@@ -78,6 +78,10 @@ uint64_t read_cr2(void) {
     return value;
 }
 
+void write_cr3(uint64_t value) {
+    __asm__ volatile("mov %0, %%cr3" : : "r"(value) : "memory");
+}
+
 void invlpg(uint64_t address) {
     __asm__ volatile ("invlpg (%0)" : : "r"(address) : "memory");
 }
@@ -228,6 +232,10 @@ static void serial_init(void) {
 static void serial_write_byte(uint8_t value) {
     while (!(inb(serial_com1 + serial_line_status) & serial_tx_empty)) {}
     outb(serial_com1, value);
+}
+
+void asm_pause(void){
+    __asm__ volatile("pause");
 }
 
 void serial_print(const char *buffer, size_t size) {

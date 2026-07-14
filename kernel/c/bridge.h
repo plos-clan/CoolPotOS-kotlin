@@ -20,6 +20,7 @@ extern void idt_setup();
 
 extern uint64_t read_cr3(void);
 extern uint64_t read_cr2(void);
+extern void write_cr3(uint64_t value);
 extern void invlpg(uint64_t address);
 extern uint64_t rdmsr(uint32_t msr);
 extern void wrmsr(uint32_t msr, uint64_t value);
@@ -33,6 +34,7 @@ extern uint64_t get_sys_clone_tls_at(uint64_t index);
 extern uint64_t get_kernel_idle_entry_address(void);
 extern uint64_t get_kernel_clone_thread_entry_address(void);
 extern void wait_for_interrupt();
+extern void asm_pause(void);
 extern void (*ap_start_ptr)(struct limine_mp_info *);
 extern void *__rtld_allocateTcb();
 

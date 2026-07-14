@@ -10,8 +10,8 @@ private const val PIC_MASK_ALL: UByte = 0xFFu
 
 private const val HPET_TIMER_GSI = 20u
 private const val HPET_TIMER_INTERRUPT_VECTOR = 52u
-private const val LAPIC_TIMER_INTERRUPT_VECTOR = 32u
-private const val LAPIC_TIMER_FREQUENCY_HZ = 250u
+const val LAPIC_TIMER_INTERRUPT_VECTOR = 32u
+const val LAPIC_TIMER_FREQUENCY_HZ = 250u
 
 object Apic {
     fun initialize(

@@ -42,6 +42,8 @@ object LocalApic {
     private var mmioBaseVirtualAddress = 0uL
     private var timerInitialCount = 0uL
 
+    private var is_bsp = false
+
     val isX2ApicMode: Boolean
         get() = x2ApicMode
 
@@ -81,7 +83,7 @@ object LocalApic {
                 masked = false,
             )
         }
-
+        is_bsp = true
         return true
     }
 
@@ -99,20 +101,20 @@ object LocalApic {
         }
 
         val timerConfig = vector.toULong() or
-            LAPIC_TIMER_PERIODIC_BIT or
-            (if (masked) LAPIC_TIMER_MASK_BIT else 0uL)
+                LAPIC_TIMER_PERIODIC_BIT or
+                (if (masked) LAPIC_TIMER_MASK_BIT else 0uL)
 
         write(LAPIC_REG_TIMER_DIV, LAPIC_TIMER_DIVIDE_BY_1)
         write(LAPIC_REG_TIMER, timerConfig)
         write(LAPIC_REG_TIMER_INITCNT, initialCount)
-        println("APIC: LAPIC timer vector=${vector.toUInt()} initial_count=$initialCount masked=$masked")
+        if (!is_bsp) println("APIC: LAPIC timer vector=${vector.toUInt()} initial_count=$initialCount masked=$masked")
     }
 
-    private fun enableController() {
+    fun enableController() {
         write(LAPIC_REG_SPURIOUS, LAPIC_SPURIOUS_VECTOR.toULong() or LAPIC_SPURIOUS_ENABLE_BIT)
     }
 
-    private fun calibrateTimer(timerFrequencyHz: UInt): ULong {
+    fun calibrateTimer(timerFrequencyHz: UInt): ULong {
         if (timerFrequencyHz == 0u) {
             return 0uL
         }
@@ -136,7 +138,7 @@ object LocalApic {
         }
 
         val calibratedInitialCount = elapsedTicks * 1_000uL / timerFrequencyHz.toULong()
-        println("APIC: calibrated LAPIC timer initial_count=$calibratedInitialCount")
+        if (!is_bsp) println("APIC: calibrated LAPIC timer initial_count=$calibratedInitialCount")
         return calibratedInitialCount
     }
 
@@ -150,7 +152,8 @@ object LocalApic {
             return rdmsr(X2APIC_MSR_BASE + (register shr 4))
         }
 
-        val pointer = (mmioBaseVirtualAddress + register.toULong()).toPointer<UIntVar>() ?: return 0uL
+        val pointer =
+            (mmioBaseVirtualAddress + register.toULong()).toPointer<UIntVar>() ?: return 0uL
         return pointer[0].toULong()
     }
 

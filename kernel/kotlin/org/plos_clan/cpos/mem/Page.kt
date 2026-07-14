@@ -89,6 +89,10 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
         return Hhdm.toVirtual(physicalAddress)
     }
 
+    fun activate() {
+        bridge.write_cr3(pml4PhysicalAddress)
+    }
+
     private fun pml4Table(): CPointer<ULongVar>? = pml4PhysicalAddress.toVirtualPointer()
 
     private fun ensureChildTable(

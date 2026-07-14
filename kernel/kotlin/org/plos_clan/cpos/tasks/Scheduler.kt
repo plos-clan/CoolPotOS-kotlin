@@ -8,10 +8,14 @@ import org.plos_clan.cpos.utils.PtraceRegisters
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
+class PerCpuScheduler {
+    val readyQueue = ArrayDeque<Thread>()
+    var currentThread: Thread? = null
+    val scheduled = AtomicBoolean(false)
+    var initialized = false
+}
+
 object Scheduler {
-    private val readyQueue = ArrayDeque<Thread>()
-    private var currentThread: Thread? = null
-    private var initialized = false
     private val scheduled = AtomicBoolean(false)
 
     fun enableScheduler() = scheduled.store(true)
@@ -24,16 +28,16 @@ object Scheduler {
         }
         thread.state = ThreadState.READY
         thread.isQueued = true
-        readyQueue.addLast(thread)
+        SMProcessor.currentLocal().scheduler.readyQueue.addLast(thread)
     }
 
     @OptIn(ExperimentalAtomicApi::class)
     fun scheduler(regs: PtraceRegisters, irqNum: ULong) {
-        if (!initialized || irqNum != 1uL || !scheduled.load()) {
+        if (!SMProcessor.currentLocal().scheduler.initialized || irqNum != 1uL || !scheduled.load()) {
             return
         }
 
-        val running = currentThread ?: run {
+        val running = SMProcessor.currentLocal().scheduler.currentThread ?: run {
             val initial = dequeueNextRunnable() ?: return
             switchTo(initial)
             if (!initial.restoreTo(regs)) {
@@ -64,17 +68,22 @@ object Scheduler {
         }
     }
 
+    fun apInitialize() {
+
+    }
+
     fun initialize() {
-        if (initialized) {
+        if (SMProcessor.currentLocal().scheduler.initialized) {
             return
         }
 
-        currentThread = ProcessManager.getBootstrapThread()?.also { thread ->
-            thread.state = ThreadState.RUNNING
-        }
+        SMProcessor.currentLocal().scheduler.currentThread =
+            ProcessManager.getBootstrapThread()?.also { thread ->
+                thread.state = ThreadState.RUNNING
+            }
 
         ProcessManager.allThreads()
-            .filter { thread -> thread !== currentThread && thread.state == ThreadState.READY }
+            .filter { thread -> thread !== SMProcessor.currentLocal().scheduler.currentThread && thread.state == ThreadState.READY }
             .forEach(::enqueueThread)
 
         if (!IrqController.registerAction(1, ::scheduler)) {
@@ -82,13 +91,13 @@ object Scheduler {
             return
         }
 
-        initialized = true
-        println("Scheduler: initialized policy=RRS current=${currentThread?.id ?: -1} queue=${readyQueue.size}")
+        SMProcessor.currentLocal().scheduler.initialized = true
+        println("Scheduler: initialized policy=RRS core=${SMProcessor.currentLocal().lapicId} queue=${SMProcessor.currentLocal().scheduler.readyQueue.size}")
     }
 
     private fun dequeueNextRunnable(): Thread? {
-        while (readyQueue.isNotEmpty()) {
-            val thread = readyQueue.removeFirst()
+        while (SMProcessor.currentLocal().scheduler.readyQueue.isNotEmpty()) {
+            val thread = SMProcessor.currentLocal().scheduler.readyQueue.removeFirst()
             thread.isQueued = false
             if (thread.state == ThreadState.READY) {
                 return thread
@@ -98,7 +107,7 @@ object Scheduler {
     }
 
     private fun switchTo(thread: Thread) {
-        currentThread = thread
+        SMProcessor.currentLocal().scheduler.currentThread = thread
         thread.state = ThreadState.RUNNING
     }
 }

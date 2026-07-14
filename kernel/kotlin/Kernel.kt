@@ -35,10 +35,10 @@ fun kernelMain() {
     if (!Acpi.initialize()) {
         return
     }
-    ProcessManager.initialize()
     SMProcessor.initialize()
-    startCapturedCloneThreads()
     Scheduler.initialize()
+    ProcessManager.initialize()
+    startCapturedCloneThreads()
     Acpi.enumerateDevices()
     println("Kernel load done!")
     Scheduler.enableScheduler()
