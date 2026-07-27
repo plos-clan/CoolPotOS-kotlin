@@ -1,4 +1,7 @@
 #include <bridge.h>
+#include "native.h"
+
+cpu_local_t locals[256];
 
 struct idt_register {
     uint16_t size;

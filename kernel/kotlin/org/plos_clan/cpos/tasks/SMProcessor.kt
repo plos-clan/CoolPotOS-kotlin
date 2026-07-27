@@ -24,6 +24,7 @@ fun apStart() {
     bridge.disable_interrupt()
     val lapicId = LocalApic.destinationApicId
     SMProcessor.locals[lapicId] = CpuLocal(lapicId.toLong())
+    bridge.ap_gdt_setup(lapicId.toULong())
     LocalApic.enableController()
     val timerInitialCount = calibrateTimer(LAPIC_TIMER_FREQUENCY_HZ)
     if (timerInitialCount != 0uL && LAPIC_TIMER_INTERRUPT_VECTOR <= UByte.MAX_VALUE.toUInt()) {
@@ -34,7 +35,6 @@ fun apStart() {
         )
     }
     SMProcessor.load_done.incrementAndFetch()
-    Scheduler.apInitialize()
    // bridge.enable_interrupt()
     while(true) bridge.wait_for_interrupt()
 }

@@ -18,6 +18,8 @@ extern volatile struct limine_executable_file_request executable_file_request;
 extern void gdt_setup();
 extern void idt_setup();
 
+extern void ap_gdt_setup(uint64_t lapic_id);
+
 extern uint64_t read_cr3(void);
 extern uint64_t read_cr2(void);
 extern void write_cr3(uint64_t value);
