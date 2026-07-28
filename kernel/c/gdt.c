@@ -89,8 +89,8 @@ void gdt_setup() {
     tss_setup();
 }
 
-void set_kernel_stack(uint64_t lapic_id,uint64_t rsp) {
-    if(lapic_id == 0) {
+void set_kernel_stack(uint64_t lapic_id,uint64_t rsp, uint8_t is_bsp) {
+    if(is_bsp) {
         tss0.rsp[0] = rsp;
         return;
     }

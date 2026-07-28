@@ -67,6 +67,7 @@ typedef void (*kotlin_interrupt_handler_t)(
 extern void do_irq(void *regs, uint64_t irq_num);
 extern uint8_t irq_stub_base[];
 extern uint64_t kernel_runtime_fs_base;
+extern uint64_t kernel_runtime_fs_bases[256];
 
 struct idt_register idt_pointer;
 static struct idt_entry idt_entries[idt_vector_count];
@@ -192,14 +193,23 @@ __attribute__((naked)) void irq_common_entry(void) {
         "movq %rax, 192(%rsp)\n"
         "movq %rsp, %rdi\n"
         "movq (%rdx), %rsi\n"
-        "movq kernel_runtime_fs_base(%rip), %rax\n"
+        "movl $1, %eax\n"
+        "xorl %ecx, %ecx\n"
+        "cpuid\n"
+        "shrl $24, %ebx\n"
+        "leaq kernel_runtime_fs_bases(%rip), %rax\n"
+        "movq (%rax,%rbx,8), %rax\n"
         "testq %rax, %rax\n"
-        "jz 1f\n"
+        "jnz 1f\n"
+        "movq kernel_runtime_fs_base(%rip), %rax\n"
+        "1:\n"
+        "testq %rax, %rax\n"
+        "jz 2f\n"
         "movq %rax, %rdx\n"
         "shrq $32, %rdx\n"
         "movl $0xc0000100, %ecx\n"
         "wrmsr\n"
-        "1:\n"
+        "2:\n"
         "call do_irq\n"
         "movq %rsp, %r13\n"
         "movq 184(%r13), %rdx\n"

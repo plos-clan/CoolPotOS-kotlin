@@ -5,7 +5,7 @@
 #include "syscall.h"
 
 extern void capture_sys_clone_context(uint64_t stack, uint64_t tls);
-extern uint64_t kernel_runtime_fs_base;
+extern void set_kernel_runtime_fs_base(uint64_t pointer);
 extern void serial_print(const char *buffer, size_t size);
 
 #define EAGAIN 11
@@ -274,7 +274,7 @@ static long arch_prctl_call(int code, uint64_t pointer) {
     if (code != ARCH_SET_FS)
         return -EINVAL;
     wrmsr(IA32_FS_BASE, pointer);
-    kernel_runtime_fs_base = pointer;
+    set_kernel_runtime_fs_base(pointer);
     return 0;
 #else
     (void)code;
@@ -359,6 +359,11 @@ long syscall(long number, ...) {
 
     va_end(args);
     return ret;
+}
+
+int sched_yield(void) {
+    __asm__ volatile("pause");
+    return 0;
 }
 
 #undef ARG

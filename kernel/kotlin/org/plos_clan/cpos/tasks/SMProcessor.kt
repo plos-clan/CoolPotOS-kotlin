@@ -13,7 +13,7 @@ import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.concurrent.atomics.incrementAndFetch
 import kotlin.experimental.ExperimentalNativeApi
 
-class CpuLocal(val lapicId: Long) {
+class CpuLocal(val lapicId: Long, val isBsp: Boolean) {
     var scheduler = PerCpuScheduler()
 }
 
@@ -23,7 +23,6 @@ class CpuLocal(val lapicId: Long) {
 fun apStart() {
     bridge.disable_interrupt()
     val lapicId = LocalApic.destinationApicId
-    SMProcessor.locals[lapicId] = CpuLocal(lapicId.toLong())
     bridge.ap_gdt_setup(lapicId.toULong())
     LocalApic.enableController()
     val timerInitialCount = calibrateTimer(LAPIC_TIMER_FREQUENCY_HZ)
@@ -35,7 +34,9 @@ fun apStart() {
         )
     }
     SMProcessor.load_done.incrementAndFetch()
-   // bridge.enable_interrupt()
+    SMProcessor.currentLocal().scheduler.waitUntilEnabled()
+    Scheduler.apInitialize()
+    bridge.enable_interrupt()
     while(true) bridge.wait_for_interrupt()
 }
 
@@ -65,16 +66,26 @@ object SMProcessor {
             return
         }
 
-        locals[smp.bsp_lapic_id] = CpuLocal(smp.bsp_lapic_id.toLong())
+        for (index in 0 until cpu_count.toLong()) {
+            val entry = (cpus[index] ?: continue).pointed
+            locals[entry.lapic_id] =
+                CpuLocal(entry.lapic_id.toLong(), entry.lapic_id == smp.bsp_lapic_id)
+        }
 
         for (index in 0 until cpu_count.toLong()) {
             val entry = (cpus[index] ?: continue).pointed
             if(entry.lapic_id == smp.bsp_lapic_id) {
                 continue
             }
+
+            val expectedLoaded = load_done.load() + 1
             val tls = bridge.__rtld_allocateTcb()
             entry.extra_argument = tls.toLong().toULong()
             entry.goto_address = bridge.ap_start_ptr
+
+            while (load_done.load() < expectedLoaded) {
+                bridge.asm_pause()
+            }
         }
 
         while (load_done.load().toULong() < cpu_count) {
@@ -82,5 +93,12 @@ object SMProcessor {
         }
 
         println("MultiProcessor: loaded $cpu_count cores")
+    }
+
+    fun setKernelStack(stack: ULong) {
+        val local = currentLocal()
+        bridge.set_kernel_stack(local.lapicId.toULong(), stack,
+            (if (local.isBsp) {1} else {0}).toUByte()
+        )
     }
 }

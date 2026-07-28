@@ -19,7 +19,7 @@ extern void gdt_setup();
 extern void idt_setup();
 
 extern void ap_gdt_setup(uint64_t lapic_id);
-extern void set_kernel_stack(uint64_t lapic_id,uint64_t rsp);
+extern void set_kernel_stack(uint64_t lapic_id,uint64_t rsp, uint8_t is_bsp);
 
 extern uint64_t read_cr3(void);
 extern uint64_t read_cr2(void);

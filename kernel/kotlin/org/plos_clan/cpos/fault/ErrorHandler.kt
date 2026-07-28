@@ -6,6 +6,8 @@ import bridge.read_cr2
 import bridge.read_cr3
 import bridge.register_interrupt_handler
 import kotlinx.cinterop.*
+import org.plos_clan.cpos.drivers.apic.LocalApic
+import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.utils.InterruptFrame
 import org.plos_clan.cpos.utils.hex
 import org.plos_clan.cpos.utils.isCanonicalKernelAddress
@@ -77,7 +79,7 @@ private fun printFaultContext(
     errorCode: ULong,
     interruptedRbp: ULong,
 ) {
-    println("name=$name errorCode=${errorCode.hex()}")
+    println("name=$name errorCode=${errorCode.hex()} cpu=${SMProcessor.currentLocal().lapicId}")
     println("rip=${frame.rip.hex()} cs=${frame.cs.hex()} rflags=${frame.rflags.hex()}")
     println("rsp=${frame.rsp.hex()} rbp=${interruptedRbp.hex()} ss=${frame.ss.hex()}")
     println("cr2=${read_cr2().hex()} cr3=${read_cr3().hex()}")

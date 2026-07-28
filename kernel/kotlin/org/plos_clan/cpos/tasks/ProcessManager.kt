@@ -1,4 +1,4 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class, ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.tasks
 
@@ -8,6 +8,8 @@ import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PtraceRegisters
 import org.plos_clan.cpos.utils.alignDown
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 private const val DEFAULT_THREAD_STACK_PAGES = 8uL
 private const val KERNEL_CODE_SELECTOR = 0x08uL
@@ -78,8 +80,8 @@ class Process(val id: Int, val name: String) {
 }
 
 object ProcessManager {
-    private var nextThreadId = 0
-    private var nextProcessId = 0
+    private var nextThreadId = AtomicInt(0)
+    private var nextProcessId = AtomicInt(0)
     private val threads = mutableListOf<Thread>()
     private val process = mutableListOf<Process>()
     private var bootstrapThread: Thread? = null
@@ -124,6 +126,10 @@ object ProcessManager {
 
     fun getBootstrapThread(): Thread? = bootstrapThread
 
+    fun getNewApIdleThread(): Thread = newThread().also { thread ->
+        thread.state = TaskState.READY
+    }
+
     fun allThreads(): List<Thread> = threads
 
     private fun createKernelThread(
@@ -157,8 +163,8 @@ object ProcessManager {
     }
 
     private fun newProcess(name: String): Process =
-        Process(nextProcessId++, name).also { process += it }
+        Process(nextProcessId.fetchAndAdd(1), name).also { process += it }
 
     private fun newThread(): Thread =
-        Thread(nextThreadId++).also { threads += it }
+        Thread(nextThreadId.fetchAndAdd(1)).also { threads += it }
 }

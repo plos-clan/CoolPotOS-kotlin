@@ -7,6 +7,24 @@ extern void free(void *);
 void serial_print(const char *buffer, size_t size);
 
 uint64_t kernel_runtime_fs_base = 0;
+uint64_t kernel_runtime_fs_bases[256] = {0};
+
+void set_kernel_runtime_fs_base(uint64_t pointer) {
+    uint32_t eax = 1;
+    uint32_t ebx;
+    uint32_t ecx = 0;
+    uint32_t edx;
+
+    __asm__ volatile(
+        "cpuid"
+        : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx)
+        :
+        : "memory"
+    );
+
+    kernel_runtime_fs_base = pointer;
+    kernel_runtime_fs_bases[(ebx >> 24) & 0xffu] = pointer;
+}
 
 int get_nprocs(void) {
     return 1;

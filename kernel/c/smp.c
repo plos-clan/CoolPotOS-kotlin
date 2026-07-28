@@ -18,6 +18,7 @@ struct Tcb {
 
 extern void setup_simd(void);
 extern void kt_ap_start(void);
+extern uint64_t kernel_runtime_fs_bases[256];
 
 extern struct idt_register idt_pointer;
 
@@ -28,6 +29,7 @@ void _ap_start(struct limine_mp_info *info) {
     __asm__ volatile("lidt %0" : : "m"(idt_pointer) : "memory");
     setup_simd();
     wrmsr(0xC0000100, info->extra_argument); // write fs tls
+    kernel_runtime_fs_bases[info->lapic_id & 0xffu] = info->extra_argument;
 
     struct Tcb *tcb = (struct Tcb*)info->extra_argument;
     tcb->tid = tid++;
