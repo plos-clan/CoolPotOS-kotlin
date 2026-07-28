@@ -26,7 +26,7 @@ object Scheduler {
         if (thread.isQueued) {
             return
         }
-        thread.state = ThreadState.READY
+        thread.state = TaskState.READY
         thread.isQueued = true
         SMProcessor.currentLocal().scheduler.readyQueue.addLast(thread)
     }
@@ -47,8 +47,8 @@ object Scheduler {
         }
 
         running.saveFrom(regs)
-        if (running.state == ThreadState.RUNNING) {
-            running.state = ThreadState.READY
+        if (running.state == TaskState.RUNNING) {
+            running.state = TaskState.READY
             enqueueThread(running)
         }
 
@@ -61,7 +61,7 @@ object Scheduler {
         switchTo(next)
         if (!next.restoreTo(regs)) {
             println("Scheduler: restore failed for thread ${next.id}, stay on ${running.id}")
-            next.state = ThreadState.READY
+            next.state = TaskState.READY
             enqueueThread(next)
             switchTo(running)
             running.restoreTo(regs)
@@ -79,11 +79,11 @@ object Scheduler {
 
         SMProcessor.currentLocal().scheduler.currentThread =
             ProcessManager.getBootstrapThread()?.also { thread ->
-                thread.state = ThreadState.RUNNING
+                thread.state = TaskState.RUNNING
             }
 
         ProcessManager.allThreads()
-            .filter { thread -> thread !== SMProcessor.currentLocal().scheduler.currentThread && thread.state == ThreadState.READY }
+            .filter { thread -> thread !== SMProcessor.currentLocal().scheduler.currentThread && thread.state == TaskState.READY }
             .forEach(::enqueueThread)
 
         if (!IrqController.registerAction(1, ::scheduler)) {
@@ -99,7 +99,7 @@ object Scheduler {
         while (SMProcessor.currentLocal().scheduler.readyQueue.isNotEmpty()) {
             val thread = SMProcessor.currentLocal().scheduler.readyQueue.removeFirst()
             thread.isQueued = false
-            if (thread.state == ThreadState.READY) {
+            if (thread.state == TaskState.READY) {
                 return thread
             }
         }
@@ -108,6 +108,6 @@ object Scheduler {
 
     private fun switchTo(thread: Thread) {
         SMProcessor.currentLocal().scheduler.currentThread = thread
-        thread.state = ThreadState.RUNNING
+        thread.state = TaskState.RUNNING
     }
 }

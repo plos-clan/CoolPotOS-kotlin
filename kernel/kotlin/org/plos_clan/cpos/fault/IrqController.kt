@@ -31,6 +31,7 @@ object IrqController {
 
         val handler = irqHandlers[irqIndex] ?: run {
             println("empty irq action: $irqNum")
+            LocalApic.endOfInterrupt()
             bridge.disable_interrupt()
             return
         }

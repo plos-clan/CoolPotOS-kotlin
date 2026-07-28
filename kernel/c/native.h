@@ -1,4 +1,6 @@
-#include <stdint.h>
+#pragma once
+
+#include <bridge.h>
 
 typedef uint64_t gdt_entries_t[7];
 typedef uint8_t tss_stack_t[4096];
@@ -24,6 +26,7 @@ typedef struct cpu_local {
     struct gdt_register gdt_pointer;
     tss_t tss0;
     tss_stack_t tss_stack __attribute__((aligned(16)));
+    _Alignas(16) uint8_t irq_stack[16384];
 }cpu_local_t;
 
 extern cpu_local_t locals[256];

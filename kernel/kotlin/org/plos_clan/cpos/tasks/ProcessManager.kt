@@ -18,7 +18,7 @@ private val idleThreadEntryPoint: ULong by lazy(LazyThreadSafetyMode.NONE) {
     get_kernel_idle_entry_address()
 }
 
-enum class ThreadState {
+enum class TaskState {
     READY,
     RUNNING,
 }
@@ -27,7 +27,7 @@ class Thread(
     val id: Int,
     private val context: ULongArray = ULongArray(PtraceRegisters.REGISTER_COUNT),
 ) {
-    var state: ThreadState = ThreadState.READY
+    var state: TaskState = TaskState.READY
     var isQueued: Boolean = false
     var hasSavedContext: Boolean = false
         private set
@@ -52,7 +52,7 @@ class Thread(
             this[PtraceRegisters.IDX_RDI] = argument
         }
         hasSavedContext = true
-        state = ThreadState.READY
+        state = TaskState.READY
     }
 
     fun saveFrom(registers: PtraceRegisters) {
@@ -68,19 +68,37 @@ class Thread(
     }
 }
 
+class Process(val id: Int, val name: String) {
+    val threads = mutableListOf<Thread>()
+    var state: TaskState = TaskState.READY
+
+    fun addThread(thread: Thread) {
+        threads += thread
+    }
+}
+
 object ProcessManager {
     private var nextThreadId = 0
+    private var nextProcessId = 0
     private val threads = mutableListOf<Thread>()
+    private val process = mutableListOf<Process>()
     private var bootstrapThread: Thread? = null
 
+    private var kernelProcess: Process? = null
+
     fun initialize() {
-        if (threads.isNotEmpty()) {
+        if (process.isNotEmpty()) {
             return
         }
 
         bootstrapThread = newThread().also { thread ->
-            thread.state = ThreadState.RUNNING
+            thread.state = TaskState.RUNNING
         }
+
+        kernelProcess = newProcess("{system}").also { process ->
+            process.state = TaskState.RUNNING
+        }
+        kernelProcess?.addThread(bootstrapThread!!)
 
         createKernelThread(
             name = "idle",
@@ -133,8 +151,13 @@ object ProcessManager {
 
         return newThread().also { thread ->
             thread.initializeContext(entryPoint, stackTopVirtual, argument)
-        }.also(Scheduler::enqueueThread)
+        }.also(Scheduler::enqueueThread).also { thread ->
+            kernelProcess?.addThread(thread)
+        }
     }
+
+    private fun newProcess(name: String): Process =
+        Process(nextProcessId++, name).also { process += it }
 
     private fun newThread(): Thread =
         Thread(nextThreadId++).also { threads += it }

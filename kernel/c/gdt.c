@@ -88,3 +88,12 @@ void gdt_setup() {
 
     tss_setup();
 }
+
+void set_kernel_stack(uint64_t lapic_id,uint64_t rsp) {
+    if(lapic_id == 0) {
+        tss0.rsp[0] = rsp;
+        return;
+    }
+    cpu_local_t *local = &locals[lapic_id];
+    local->tss0.rsp[0] = rsp;
+}
