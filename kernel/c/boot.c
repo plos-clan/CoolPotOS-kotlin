@@ -7,45 +7,24 @@ typedef __UINTPTR_TYPE__ boot_uptr_t;
 extern void kernel_main(void);
 extern void __dlapi_enter(boot_uptr_t *entry_stack);
 
+#define LIMINE_REQUEST(type, name, ...) \
+    __attribute__((used, section(".limine_requests"))) \
+    volatile struct type name = {__VA_ARGS__}
+
 __attribute__((used, section(".limine_requests")))
 static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(4);
-
-__attribute__((used, section(".limine_requests")))
-volatile struct limine_framebuffer_request framebuffer_request = {
-    .id = LIMINE_FRAMEBUFFER_REQUEST_ID,
-};
-
-__attribute__((used, section(".limine_requests")))
-volatile struct limine_stack_size_request stack_size_request = {
-    .id = LIMINE_STACK_SIZE_REQUEST_ID,
-    .stack_size = 1024 * 1024,
-};
-
-__attribute__((used, section(".limine_requests")))
-volatile struct limine_hhdm_request hhdm_request = {
-    .id = LIMINE_HHDM_REQUEST_ID,
-};
-
-__attribute__((used, section(".limine_requests")))
-volatile struct limine_memmap_request memmap_request = {
-    .id = LIMINE_MEMMAP_REQUEST_ID,
-};
-
-__attribute__((used, section(".limine_requests")))
-volatile struct limine_mp_request mp_request = {
-    .id = LIMINE_MP_REQUEST_ID,
-    .flags = LIMINE_MP_REQUEST_X86_64_X2APIC,
-};
-
-__attribute__((used, section(".limine_requests")))
-volatile struct limine_rsdp_request rsdp_request = {
-    .id = LIMINE_RSDP_REQUEST_ID,
-};
-
-__attribute__((used, section(".limine_requests")))
-volatile struct limine_executable_file_request executable_file_request = {
-    .id = LIMINE_EXECUTABLE_FILE_REQUEST_ID,
-};
+LIMINE_REQUEST(limine_framebuffer_request, framebuffer_request,
+    .id = LIMINE_FRAMEBUFFER_REQUEST_ID);
+LIMINE_REQUEST(limine_stack_size_request, stack_size_request,
+    .id = LIMINE_STACK_SIZE_REQUEST_ID, .stack_size = 1024 * 1024);
+LIMINE_REQUEST(limine_hhdm_request, hhdm_request, .id = LIMINE_HHDM_REQUEST_ID);
+LIMINE_REQUEST(limine_memmap_request, memmap_request, .id = LIMINE_MEMMAP_REQUEST_ID);
+LIMINE_REQUEST(limine_mp_request, mp_request,
+    .id = LIMINE_MP_REQUEST_ID, .flags = LIMINE_MP_REQUEST_X86_64_X2APIC);
+LIMINE_REQUEST(limine_rsdp_request, rsdp_request, .id = LIMINE_RSDP_REQUEST_ID);
+LIMINE_REQUEST(limine_executable_file_request, executable_file_request,
+    .id = LIMINE_EXECUTABLE_FILE_REQUEST_ID);
+#undef LIMINE_REQUEST
 
 __attribute__((used, section(".limine_requests_start")))
 static volatile uint64_t limine_requests_start_marker[] = LIMINE_REQUESTS_START_MARKER;
@@ -56,10 +35,7 @@ static volatile uint64_t limine_requests_end_marker[] = LIMINE_REQUESTS_END_MARK
 static uint32_t default_mxcsr = 0x1f80;
 static char boot_argv0[] = "kernel";
 
-static uint8_t boot_random[16] = {
-    0x41, 0x52, 0x6e, 0x79, 0x2d, 0x4d, 0x4c, 0x49,
-    0x42, 0x43, 0x2d, 0x54, 0x4c, 0x53, 0x21, 0x00
-};
+static uint8_t boot_random[16] = "ARny-MLIBC-TLS!";
 
 enum {
     at_null = 0,
@@ -100,49 +76,19 @@ struct elf64_ehdr {
     uint16_t e_shstrndx;
 };
 
-static uint64_t read_cr0(void) {
-    uint64_t value;
-    __asm__ volatile ("mov %%cr0, %0" : "=r"(value));
-    return value;
-}
-
-static void write_cr0(uint64_t value) {
-    __asm__ volatile ("mov %0, %%cr0" : : "r"(value) : "memory");
-}
-
-static uint64_t read_cr4(void) {
-    uint64_t value;
-    __asm__ volatile ("mov %%cr4, %0" : "=r"(value));
-    return value;
-}
-
-static void write_cr4(uint64_t value) {
-    __asm__ volatile ("mov %0, %%cr4" : : "r"(value) : "memory");
-}
-
 void setup_simd(void) {
-    uint64_t cr0 = read_cr0();
-    uint64_t cr4 = read_cr4();
-
-    cr0 &= ~(1u << 2);
-    cr0 |= (1u << 1);
-    cr0 |= (1u << 5);
-    cr0 &= ~(1u << 3);
-    write_cr0(cr0);
-
-    cr4 |= (1u << 9);
-    cr4 |= (1u << 10);
-    write_cr4(cr4);
-
-    __asm__ volatile ("fninit");
-    __asm__ volatile ("ldmxcsr %0" : : "m"(default_mxcsr));
+    uint64_t cr0, cr4;
+    __asm__ volatile ("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile ("mov %%cr4, %0" : "=r"(cr4));
+    cr0 = (cr0 & ~((1u << 2) | (1u << 3))) | (1u << 1) | (1u << 5);
+    cr4 |= (1u << 9) | (1u << 10);
+    __asm__ volatile ("mov %0, %%cr0" : : "r"(cr0) : "memory");
+    __asm__ volatile ("mov %0, %%cr4" : : "r"(cr4) : "memory");
+    __asm__ volatile ("fninit; ldmxcsr %0" : : "m"(default_mxcsr));
 }
 
-static void halt_forever(void) __attribute__((noreturn));
-static void halt_forever(void) {
-    for (;;) {
-        __asm__ volatile ("hlt");
-    }
+static __attribute__((noreturn)) void halt_forever(void) {
+    for (;;) __asm__ volatile ("hlt");
 }
 
 static bool setup_entry_stack(boot_uptr_t *entry_stack) {
@@ -163,9 +109,7 @@ static bool setup_entry_stack(boot_uptr_t *entry_stack) {
         return false;
     }
 
-    boot_uptr_t phdr_val  = elf_base + (boot_uptr_t)ehdr->e_phoff;
-    boot_uptr_t phent_val = (boot_uptr_t)ehdr->e_phentsize;
-    boot_uptr_t phnum_val = (boot_uptr_t)ehdr->e_phnum;
+    boot_uptr_t phdr_val = elf_base + (boot_uptr_t)ehdr->e_phoff;
     boot_uptr_t entry_val = (boot_uptr_t)ehdr->e_entry;
 
     if (ehdr->e_type == elf_type_dyn) {
@@ -175,20 +119,15 @@ static bool setup_entry_stack(boot_uptr_t *entry_stack) {
         entry_val += elf_base;
     }
 
-    entry_stack[0]  = 1;
-    entry_stack[1]  = (boot_uptr_t)boot_argv0;
-    entry_stack[2]  = 0;
-    entry_stack[3]  = 0;
-    
-    entry_stack[4]  = at_phdr;     entry_stack[5]  = phdr_val;
-    entry_stack[6]  = at_phent;    entry_stack[7]  = phent_val;
-    entry_stack[8]  = at_phnum;    entry_stack[9]  = phnum_val;
-    entry_stack[10] = at_pagesz;   entry_stack[11] = 0x1000;
-    entry_stack[12] = at_entry;    entry_stack[13] = entry_val;
-    entry_stack[14] = at_secure;   entry_stack[15] = 0;
-    entry_stack[16] = at_random;   entry_stack[17] = (boot_uptr_t)boot_random;
-    entry_stack[18] = at_execfn;   entry_stack[19] = (boot_uptr_t)boot_argv0;
-    entry_stack[20] = at_null;     entry_stack[21] = 0;
+    const boot_uptr_t initial_stack[] = {
+        1, (boot_uptr_t)boot_argv0, 0, 0,
+        at_phdr, phdr_val, at_phent, ehdr->e_phentsize, at_phnum, ehdr->e_phnum,
+        at_pagesz, 0x1000, at_entry, entry_val, at_secure, 0,
+        at_random, (boot_uptr_t)boot_random,
+        at_execfn, (boot_uptr_t)boot_argv0, at_null, 0,
+    };
+    for (uint8_t i = 0; i < sizeof(initial_stack) / sizeof(*initial_stack); i++)
+        entry_stack[i] = initial_stack[i];
 
     return true;
 }

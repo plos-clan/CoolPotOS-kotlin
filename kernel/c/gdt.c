@@ -5,6 +5,10 @@ static gdt_entries_t gdt_entries;
 static struct gdt_register gdt_pointer;
 static tss_t tss0;
 static tss_stack_t tss_stack __attribute__((aligned(16)));
+static const uint64_t gdt_template[] = {
+    0, 0x00a09a0000000000, 0x00c0920000000000,
+    0x00c0f20000000000, 0x00a0fa0000000000
+};
 
 static __attribute__((naked)) void _setcs_helper() {
     __asm__ volatile("pop %%rax\n\t"
@@ -14,86 +18,48 @@ static __attribute__((naked)) void _setcs_helper() {
             : "memory");
 }
 
-void tss_setup() {
-    uint64_t address = (uint64_t) & tss0;
-    uint64_t low_base = (address & 0xffffffU) << 16U;
-    uint64_t mid_base = (address >> 24U & 0xffU) << 56U;
-    uint64_t high_base = address >> 32U;
-    uint64_t access_byte = (uint64_t) 0x89U << 40U;
-    uint64_t limit = (uint32_t)(sizeof(tss_t) - 1U);
-    gdt_entries[5] = low_base | mid_base | limit | access_byte;
-    gdt_entries[6] = high_base;
+static void setup_gdt(
+    gdt_entries_t entries,
+    struct gdt_register *pointer,
+    tss_t *tss,
+    tss_stack_t stack
+) {
+    for (uint8_t i = 0; i < sizeof(gdt_template) / sizeof(*gdt_template); i++)
+        entries[i] = gdt_template[i];
 
-    tss0.ist[0] = ((uint64_t) & tss_stack + sizeof(tss_stack_t)) & ~0xfULL;
+    *pointer = (struct gdt_register){
+        .size = sizeof(gdt_entries_t) - 1,
+        .ptr = entries,
+    };
+    __asm__ volatile("lgdt %[ptr]\n\t"
+                     "call *%%rax\n\t"
+                     "mov %[dseg], %%ss\n\t"
+            :
+            : [ptr] "m"(*pointer),
+              [dseg] "rm"((uint16_t)0x10U),
+              "a"(&_setcs_helper),
+              "b"((uint16_t)0x8U)
+            : "memory");
 
+    const uint64_t address = (uint64_t)tss;
+    entries[5] = ((address & 0xffffffU) << 16U)
+        | (((address >> 24U) & 0xffU) << 56U)
+        | ((uint64_t)0x89U << 40U)
+        | (sizeof(tss_t) - 1U);
+    entries[6] = address >> 32U;
+    tss->ist[0] = ((uint64_t)stack + sizeof(tss_stack_t)) & ~0xfULL;
     __asm__ volatile("ltr %[offset];" : : [offset] "rm"(0x28U) : "memory");
 }
 
 void ap_gdt_setup(uint64_t lapic_id) {
     cpu_local_t *local = &locals[lapic_id];
-    local->gdt_entries[0] = 0x0000000000000000U;
-    local->gdt_entries[1] = 0x00a09a0000000000U;
-    local->gdt_entries[2] = 0x00c0920000000000U;
-    local->gdt_entries[3] = 0x00c0f20000000000U;
-    local->gdt_entries[4] = 0x00a0fa0000000000U;
-
-
-    local->gdt_pointer.size = (uint16_t)((uint32_t)sizeof(gdt_entries_t) - 1U);
-    local->gdt_pointer.ptr  = &local->gdt_entries;
-    __asm__ volatile("lgdt %[ptr]\n\t"
-                     "call *%%rax\n\t"
-                     "mov %[dseg], %%ss\n\t"
-            :
-            : [ptr] "m"(local->gdt_pointer),
-    [dseg] "rm"((uint16_t) 0x10U),
-            "a"(&_setcs_helper),
-            "b"((uint16_t) 0x8U)
-    : "memory");
-
-    uint64_t address = (uint64_t) &local->tss0;
-    uint64_t low_base = (address & 0xffffffU) << 16U;
-    uint64_t mid_base = (address >> 24U & 0xffU) << 56U;
-    uint64_t high_base = address >> 32U;
-    uint64_t access_byte = (uint64_t) 0x89U << 40U;
-    uint64_t limit = (uint32_t)(sizeof(tss_t) - 1U);
-    local->gdt_entries[5] = low_base | mid_base | limit | access_byte;
-    local->gdt_entries[6] = high_base;
-
-    local->tss0.ist[0] = ((uint64_t) &local->tss_stack + sizeof(tss_stack_t)) & ~0xfULL;
-
-    __asm__ volatile("ltr %[offset];" : : [offset] "rm"(0x28U) : "memory");
+    setup_gdt(local->gdt_entries, &local->gdt_pointer, &local->tss0, local->tss_stack);
 }
 
 void gdt_setup() {
-    gdt_entries[0] = 0x0000000000000000U;
-    gdt_entries[1] = 0x00a09a0000000000U;
-    gdt_entries[2] = 0x00c0920000000000U;
-    gdt_entries[3] = 0x00c0f20000000000U;
-    gdt_entries[4] = 0x00a0fa0000000000U;
-
-    gdt_pointer = (struct gdt_register) {
-            .size = (uint16_t)((uint32_t)sizeof(gdt_entries_t) - 1U),
-            .ptr  = &gdt_entries,
-    };
-
-    __asm__ volatile("lgdt %[ptr]\n\t"
-                     "call *%%rax\n\t"
-                     "mov %[dseg], %%ss\n\t"
-            :
-            : [ptr] "m"(gdt_pointer),
-    [dseg] "rm"((uint16_t) 0x10U),
-            "a"(&_setcs_helper),
-            "b"((uint16_t) 0x8U)
-    : "memory");
-
-    tss_setup();
+    setup_gdt(gdt_entries, &gdt_pointer, &tss0, tss_stack);
 }
 
-void set_kernel_stack(uint64_t lapic_id,uint64_t rsp, uint8_t is_bsp) {
-    if(is_bsp) {
-        tss0.rsp[0] = rsp;
-        return;
-    }
-    cpu_local_t *local = &locals[lapic_id];
-    local->tss0.rsp[0] = rsp;
+void set_kernel_stack(uint64_t lapic_id, uint64_t rsp, uint8_t is_bsp) {
+    (is_bsp ? &tss0 : &locals[lapic_id].tss0)->rsp[0] = rsp;
 }

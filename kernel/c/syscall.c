@@ -7,6 +7,7 @@
 extern void capture_sys_clone_context(uint64_t stack, uint64_t tls);
 extern void set_kernel_runtime_fs_base(uint64_t pointer);
 extern void serial_print(const char *buffer, size_t size);
+extern void wrmsr(uint32_t msr, uint64_t value);
 
 #define EAGAIN 11
 #define EBADF 9
@@ -42,15 +43,7 @@ static size_t vm_bump;
 static struct vm_block *vm_free_list;
 static int vm_lock;
 
-static void wrmsr(uint32_t msr, uint64_t value) {
-    uint32_t eax = (uint32_t)value;
-    uint32_t edx = (uint32_t)(value >> 32);
-    __asm__ volatile("wrmsr" : : "c"(msr), "a"(eax), "d"(edx));
-}
-
-static void cpu_relax(void) {
-    __asm__ volatile("pause" : : : "memory");
-}
+static void cpu_relax(void) { __asm__ volatile("pause" : : : "memory"); }
 
 static void spin_lock(int *lock) {
     while (__atomic_test_and_set(lock, __ATOMIC_ACQUIRE)) {
@@ -60,9 +53,7 @@ static void spin_lock(int *lock) {
     }
 }
 
-static void spin_unlock(int *lock) {
-    __atomic_clear(lock, __ATOMIC_RELEASE);
-}
+static void spin_unlock(int *lock) { __atomic_clear(lock, __ATOMIC_RELEASE); }
 
 static inline size_t align_up(size_t n) {
     return (n + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
@@ -270,17 +261,10 @@ static long clone_call(void *stack, int *parent_tid, void *tls) {
 }
 
 static long arch_prctl_call(int code, uint64_t pointer) {
-#if defined(__x86_64__)
-    if (code != ARCH_SET_FS)
-        return -EINVAL;
+    if (code != ARCH_SET_FS) return -EINVAL;
     wrmsr(IA32_FS_BASE, pointer);
     set_kernel_runtime_fs_base(pointer);
     return 0;
-#else
-    (void)code;
-    (void)pointer;
-    return -EINVAL;
-#endif
 }
 
 static long clock_gettime_call(struct timespec_arg *tp) {
@@ -352,19 +336,14 @@ long syscall(long number, ...) {
         ret = clock_gettime_call(ARG(struct timespec_arg *));
         break;
     }
-    case SYS_rt_sigaction:
-        ret = 0;
-        break;
+    case SYS_rt_sigaction: ret = 0; break;
     }
 
     va_end(args);
     return ret;
 }
 
-int sched_yield(void) {
-    __asm__ volatile("pause");
-    return 0;
-}
+int sched_yield(void) { __asm__ volatile("pause"); return 0; }
 
 #undef ARG
 #undef SKIP_ARG

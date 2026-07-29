@@ -1,16 +1,11 @@
 #include "bridge.h"
+#include "native.h"
 
 enum {
     idt_vector_count = 256,
     irq_vector_base = 32,
-    irq_stub_size = 10,
-    irq_stub_count = idt_vector_count - irq_vector_base
+    irq_stub_size = 10
 };
-
-struct idt_register {
-    uint16_t size;
-    void *ptr;
-} __attribute__((packed));
 
 struct idt_entry {
     uint16_t offset_low;
@@ -267,20 +262,13 @@ void idt_setup() {
         idt_entries[vector] = (struct idt_entry){0};
         kotlin_handle[vector] = 0;
     }
-
     for (uint16_t vector = 0; vector < irq_vector_base; vector++) {
-        if (!exception_entry_stub[vector]) {
-            continue;
-        }
+        if (!exception_entry_stub[vector]) continue;
         set_idt_gate(vector, exception_entry_stub[vector], vector == 8 ? 1 : 0, 0x8e);
     }
 
     for (uint16_t vector = irq_vector_base; vector < idt_vector_count; vector++) {
         const uint16_t irq_index = (uint16_t)(vector - irq_vector_base);
-        if (irq_index >= irq_stub_count) {
-            continue;
-        }
-
         uint8_t *stub = irq_stub_base + ((uint64_t)irq_index * irq_stub_size);
         set_idt_gate(vector, stub, 0, 0x8e);
     }
@@ -300,9 +288,7 @@ void register_interrupt_handler(
         return;
     }
 
-    uint8_t effective_ist = vector == 8 ? 1 : 0;
     (void)ist;
-
     kotlin_handle[vector] = (kotlin_interrupt_handler_t)handler;
-    set_idt_gate(vector, exception_entry_stub[vector], effective_ist, flags);
+    set_idt_gate(vector, exception_entry_stub[vector], vector == 8 ? 1 : 0, flags);
 }

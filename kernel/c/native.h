@@ -11,6 +11,11 @@ struct gdt_register {
     void *ptr;
 } __attribute__((packed));
 
+struct idt_register {
+    uint16_t size;
+    void *ptr;
+} __attribute__((packed));
+
 struct tss {
     uint32_t unused0;
     uint64_t rsp[3];
@@ -27,6 +32,7 @@ typedef struct cpu_local {
     tss_t tss0;
     tss_stack_t tss_stack __attribute__((aligned(16)));
     _Alignas(16) uint8_t irq_stack[16384];
-}cpu_local_t;
+} cpu_local_t;
 
 extern cpu_local_t locals[256];
+extern struct idt_register idt_pointer;
