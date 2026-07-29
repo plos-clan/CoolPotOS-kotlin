@@ -2,6 +2,7 @@
 #define BRIDGE_H
 
 #include <limine.h>
+#include "os_terminal.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,6 +41,9 @@ extern void wait_for_interrupt();
 extern void asm_pause(void);
 extern void (*ap_start_ptr)(struct limine_mp_info *);
 extern void *__rtld_allocateTcb();
+
+extern void *malloc(size_t size);
+extern void free(void *ptr);
 
 extern void register_interrupt_handler(
     uint16_t vector,

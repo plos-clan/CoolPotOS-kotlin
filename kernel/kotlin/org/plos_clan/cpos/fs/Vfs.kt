@@ -2,6 +2,7 @@
 
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.utils.IrqSpinLock
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicInt
 
@@ -51,22 +52,6 @@ value class IoResult private constructor(val raw: Long) {
         }
 
         fun failure(error: VfsError): IoResult = IoResult(-error.errno.toLong())
-    }
-}
-
-internal class SpinLock {
-    @PublishedApi
-    internal val held = AtomicBoolean(false)
-
-    inline fun <T> withLock(block: () -> T): T {
-        while (!held.compareAndSet(expectedValue = false, newValue = true)) {
-            // Busy waiting is intentional; scheduler-aware locks can replace this later.
-        }
-        return try {
-            block()
-        } finally {
-            held.store(false)
-        }
     }
 }
 
@@ -315,7 +300,7 @@ class Inode internal constructor(
     internal val backend: InodeBackend,
     metadata: InodeMetadata,
 ) {
-    private val lock = SpinLock()
+    private val lock = IrqSpinLock()
     private var currentMetadata = metadata
     private var openReferences = 0
     private var evicted = false
@@ -372,7 +357,7 @@ class Dentry internal constructor(
     val parent: Dentry?,
     inode: Inode?,
 ) {
-    private val lock = SpinLock()
+    private val lock = IrqSpinLock()
     private var currentInode = inode
     private val children = mutableMapOf<VfsName, Dentry>()
 
@@ -428,7 +413,7 @@ data class VfsPath(val mount: Mount, val dentry: Dentry) {
 private data class MountPoint(val mount: Mount, val dentry: Dentry)
 
 class MountNamespace internal constructor(val root: Mount) {
-    private val lock = SpinLock()
+    private val lock = IrqSpinLock()
     private val mounts = mutableMapOf<MountPoint, Mount>()
 
     internal fun mountedAt(path: VfsPath): Mount? =
@@ -466,7 +451,7 @@ class OpenFileDescription internal constructor(
     private val backend: OpenFileBackend,
 ) {
     private val references = AtomicInt(1)
-    private val positionLock = SpinLock()
+    private val positionLock = IrqSpinLock()
     private val position = FilePosition()
 
     val offset: Long
@@ -589,7 +574,7 @@ class OpenFileDescription internal constructor(
 class Vfs(
     private val maxSymlinkDepth: Int = 40,
 ) {
-    private val registryLock = SpinLock()
+    private val registryLock = IrqSpinLock()
     private val fileSystems = mutableMapOf<String, FileSystemType>()
 
     init {

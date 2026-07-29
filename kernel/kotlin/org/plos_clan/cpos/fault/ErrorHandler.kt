@@ -6,7 +6,6 @@ import bridge.read_cr2
 import bridge.read_cr3
 import bridge.register_interrupt_handler
 import kotlinx.cinterop.*
-import org.plos_clan.cpos.drivers.apic.LocalApic
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.utils.InterruptFrame
 import org.plos_clan.cpos.utils.hex

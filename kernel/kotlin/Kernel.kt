@@ -3,7 +3,11 @@ import bridge.get_kernel_clone_thread_entry_address
 import bridge.get_sys_clone_recorded_count
 import bridge.get_sys_clone_stack_at
 import bridge.get_sys_clone_tls_at
-import org.plos_clan.cpos.drivers.Acpi
+import org.plos_clan.cpos.drivers.DEV_TTY
+import org.plos_clan.cpos.drivers.DeviceManager
+import org.plos_clan.cpos.drivers.FrameBuffer
+import org.plos_clan.cpos.drivers.acpi.Acpi
+import org.plos_clan.cpos.drivers.char.TtyManager
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
@@ -39,11 +43,22 @@ fun kernelMain() {
     Scheduler.initialize()
     ProcessManager.initialize()
     startCapturedCloneThreads()
+    FrameBuffer.initialize()
+    TtyManager.initialize()
     Acpi.enumerateDevices()
     println("Kernel load done!")
     Scheduler.enableScheduler()
     bridge.enable_interrupt()
-    while (true) {}
+
+    val device = DeviceManager.findDevice(DEV_TTY, 0u) ?: run {
+        return
+    }
+    val text = "Hello CoolPotOS Kotlin Edition!".encodeToByteArray()
+    DeviceManager.write(device.dev, text, 0u, text.size.toULong())
+
+
+
+    while (true) bridge.wait_for_interrupt()
 }
 
 @ExperimentalForeignApi

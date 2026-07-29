@@ -5,11 +5,14 @@ package org.plos_clan.cpos.tasks
 import bridge.get_kernel_idle_entry_address
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
+import org.plos_clan.cpos.mem.KernelPageDirectory
+import org.plos_clan.cpos.mem.PageDirectory
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PtraceRegisters
 import org.plos_clan.cpos.utils.alignDown
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import kotlin.test.todo
 
 private const val DEFAULT_THREAD_STACK_PAGES = 8uL
 private const val KERNEL_CODE_SELECTOR = 0x08uL
@@ -70,9 +73,13 @@ class Thread(
     }
 }
 
-class Process(val id: Int, val name: String) {
+class Process(val id: Int, val name: String, clone: Boolean) {
     val threads = mutableListOf<Thread>()
     var state: TaskState = TaskState.READY
+
+    var pageDirectory: PageDirectory =
+        if (clone) KernelPageDirectory.getDirectory().cloneDirectory()
+        else KernelPageDirectory.getDirectory()
 
     fun addThread(thread: Thread) {
         threads += thread
@@ -97,7 +104,7 @@ object ProcessManager {
             thread.state = TaskState.RUNNING
         }
 
-        kernelProcess = newProcess("{system}").also { process ->
+        kernelProcess = newProcess("{system}", false).also { process ->
             process.state = TaskState.RUNNING
         }
         kernelProcess?.addThread(bootstrapThread!!)
@@ -162,8 +169,8 @@ object ProcessManager {
         }
     }
 
-    private fun newProcess(name: String): Process =
-        Process(nextProcessId.fetchAndAdd(1), name).also { process += it }
+    private fun newProcess(name: String,clone: Boolean): Process =
+        Process(nextProcessId.fetchAndAdd(1), name, clone).also { process += it }
 
     private fun newThread(): Thread =
         Thread(nextThreadId.fetchAndAdd(1)).also { threads += it }

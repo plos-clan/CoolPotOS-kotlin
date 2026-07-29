@@ -3,11 +3,11 @@
 package org.plos_clan.cpos.tasks
 
 import kotlinx.cinterop.*
-import org.plos_clan.cpos.drivers.apic.LAPIC_TIMER_FREQUENCY_HZ
-import org.plos_clan.cpos.drivers.apic.LAPIC_TIMER_INTERRUPT_VECTOR
-import org.plos_clan.cpos.drivers.apic.LocalApic
-import org.plos_clan.cpos.drivers.apic.LocalApic.calibrateTimer
-import org.plos_clan.cpos.drivers.apic.LocalApic.configurePeriodicTimer
+import org.plos_clan.cpos.drivers.acpi.apic.LAPIC_TIMER_FREQUENCY_HZ
+import org.plos_clan.cpos.drivers.acpi.apic.LAPIC_TIMER_INTERRUPT_VECTOR
+import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
+import org.plos_clan.cpos.drivers.acpi.apic.LocalApic.calibrateTimer
+import org.plos_clan.cpos.drivers.acpi.apic.LocalApic.configurePeriodicTimer
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.concurrent.atomics.incrementAndFetch

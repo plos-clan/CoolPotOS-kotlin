@@ -1,5 +1,7 @@
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.utils.IrqSpinLock
+
 data class TmpfsOptions(
     val sizeLimit: ULong? = null,
     val pageSize: Int = 4096,
@@ -27,7 +29,7 @@ object Tmpfs : FileSystemType {
 }
 
 private class TmpfsInstance(private val options: TmpfsOptions) : SuperBlockBackend {
-    private val lock = SpinLock()
+    private val lock = IrqSpinLock()
     private var nextInodeId = 1uL
     private var allocatedBytes = 0uL
 
@@ -88,7 +90,7 @@ private class TmpfsInstance(private val options: TmpfsOptions) : SuperBlockBacke
 private class TmpfsDirectory(private val fileSystem: TmpfsInstance) : DirectoryBackend {
     override val type: InodeType = InodeType.DIRECTORY
 
-    private val lock = SpinLock()
+    private val lock = IrqSpinLock()
     private val children = linkedMapOf<VfsName, Inode>()
 
     override fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?> =
@@ -179,7 +181,7 @@ private class TmpfsDirectoryHandle(private val directory: TmpfsDirectory) : Open
 private class TmpfsRegularFile(private val fileSystem: TmpfsInstance) : TruncatableBackend {
     override val type: InodeType = InodeType.REGULAR
 
-    private val lock = SpinLock()
+    private val lock = IrqSpinLock()
     private val pages = mutableMapOf<ULong, ByteArray>()
 
     override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =

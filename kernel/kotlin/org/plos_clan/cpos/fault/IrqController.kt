@@ -3,7 +3,7 @@
 package org.plos_clan.cpos.fault
 
 import kotlinx.cinterop.*
-import org.plos_clan.cpos.drivers.apic.LocalApic
+import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.utils.PtraceRegisters
 import kotlin.experimental.ExperimentalNativeApi
 

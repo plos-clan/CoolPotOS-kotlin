@@ -1,8 +1,9 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.drivers.apic
+package org.plos_clan.cpos.drivers.acpi.apic
 
 import bridge.io_out8
+import kotlinx.cinterop.ExperimentalForeignApi
 
 private const val PIC_MASTER_DATA_PORT: UShort = 0x21u
 private const val PIC_SLAVE_DATA_PORT: UShort = 0xA1u

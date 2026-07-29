@@ -93,6 +93,9 @@ val konanGccLibDir = File(toolRoot, "lib/gcc/$targetArch-unknown-linux-gnu/8.3.0
 val konanSysrootLibDir = File(toolRoot, "$targetArch-unknown-linux-gnu/sysroot/lib")
 val mlibcLibDir = mlibcPrefix.resolve("lib")
 
+val libNames = listOf("libos_terminal-embedfont-x86_64.a")
+val libDir = file("lib")
+val libSources = libNames.map(libDir::resolve)
 val cSourceNames = listOf("boot.c", "shim.c", "syscall.c", "gdt.c", "idt.c", "smp.c")
 val cSources = cSourceNames.map(kernelCDir::resolve)
 
@@ -173,7 +176,7 @@ val mlibcCFlagArgs =
 val mlibcCxxFlagArgs = mlibcCFlagArgs + mlibcCxxOnlyFlags
 val mlibcCFlags = mlibcCFlagArgs.joinToString(" ")
 val mlibcCxxFlags = mlibcCxxFlagArgs.joinToString(" ")
-val linkInputs = cObjectFiles + kotlinStaticLib + runtimeLibs
+val linkInputs = cObjectFiles + kotlinStaticLib + runtimeLibs + libSources
 
 fun Iterable<File>.absolutePaths(): List<String> = map(File::getAbsolutePath)
 
@@ -449,6 +452,7 @@ val linkKernel = tasks.register<Exec>("linkKernel") {
         addAll(cObjectFiles.absolutePaths())
         add(kotlinStaticLib.absolutePath)
         add("--start-group")
+        addAll(libSources.absolutePaths())
         addAll(runtimeLibs.absolutePaths())
         add("--end-group")
     }
