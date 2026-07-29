@@ -1,30 +1,34 @@
-#include <stddef.h>
-#include <stdint.h>
 #include <stdbool.h>
+#include "bridge.h"
+#include "native.h"
 
 extern void *realloc(void *ptr, size_t size);
 extern void free(void *);
+int get_nprocs(void);
+int __fxstat(int version, int fd, void *statbuf);
+int isnan(double x);
+int __unorddf2(double a, double b);
+void _ZdlPv(void *ptr);
+void _ZdlPvm(void *ptr, size_t size);
+void _ZdlPvj(void *ptr, unsigned int size);
+int __pthread_key_create(uintptr_t *key, void (*destructor)(void *));
 
-uint64_t kernel_runtime_fs_base = 0;
-uint64_t kernel_runtime_fs_bases[256] = {0};
+uint64_t kernel_runtime_fs_base;
+uint64_t kernel_runtime_fs_bases[cpu_slot_count];
 
 void set_kernel_runtime_fs_base(uint64_t pointer) {
-    uint32_t eax = 1, ebx, ecx = 0, edx;
-    __asm__ volatile(
-        "cpuid"
-        : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx)
-        :
-        : "memory"
-    );
-
+    uint32_t eax = 1, ebx;
+    __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx) : "c"(0) : "edx", "memory");
     kernel_runtime_fs_base = pointer;
-    kernel_runtime_fs_bases[(ebx >> 24) & 0xffu] = pointer;
+    kernel_runtime_fs_bases[ebx >> 24] = pointer;
 }
 
 int get_nprocs(void) { return 1; }
 
 int __fxstat(int version, int fd, void *statbuf) {
-    (void)version; (void)fd; (void)statbuf;
+    (void)version;
+    (void)fd;
+    (void)statbuf;
     return -1;
 }
 
@@ -45,40 +49,38 @@ int __unorddf2(double a, double b) {
 }
 
 void _ZdlPv(void *ptr) { free(ptr); }
+void _ZdaPv(void *ptr) __attribute__((alias("_ZdlPv")));
 void _ZdlPvm(void *ptr, size_t size) { (void)size; free(ptr); }
+void _ZdaPvm(void *ptr, size_t size) __attribute__((alias("_ZdlPvm")));
 void _ZdlPvj(void *ptr, unsigned int size) { (void)size; free(ptr); }
-void _ZdaPv(void *ptr) { free(ptr); }
-void _ZdaPvm(void *ptr, size_t size) { (void)size; free(ptr); }
-void _ZdaPvj(void *ptr, unsigned int size) { (void)size; free(ptr); }
+void _ZdaPvj(void *ptr, unsigned int size) __attribute__((alias("_ZdlPvj")));
 
-uint64_t read_cr3(void) {
-    uint64_t value;
-    __asm__ volatile ("mov %%cr3, %0" : "=r"(value));
-    return value;
-}
-
-uint64_t read_cr2(void) {
-    uint64_t value;
-    __asm__ volatile ("mov %%cr2, %0" : "=r"(value));
-    return value;
-}
+#define DEFINE_CR_READER(reg) \
+    uint64_t read_cr##reg(void) { \
+        uint64_t value; \
+        __asm__ volatile("mov %%cr" #reg ", %0" : "=r"(value)); \
+        return value; \
+    }
+DEFINE_CR_READER(2)
+DEFINE_CR_READER(3)
+#undef DEFINE_CR_READER
 
 void write_cr3(uint64_t value) {
     __asm__ volatile("mov %0, %%cr3" : : "r"(value) : "memory");
 }
 
 void invlpg(uint64_t address) {
-    __asm__ volatile ("invlpg (%0)" : : "r"(address) : "memory");
+    __asm__ volatile("invlpg (%0)" : : "r"(address) : "memory");
 }
 
 uint64_t rdmsr(uint32_t msr) {
     uint32_t eax, edx;
-    __asm__ volatile ("rdmsr" : "=a"(eax), "=d"(edx) : "c"(msr) : "memory");
+    __asm__ volatile("rdmsr" : "=a"(eax), "=d"(edx) : "c"(msr) : "memory");
     return ((uint64_t)edx << 32) | eax;
 }
 
 void wrmsr(uint32_t msr, uint64_t value) {
-    __asm__ volatile ("wrmsr" : : "a"((uint32_t)value),
+    __asm__ volatile("wrmsr" : : "a"((uint32_t)value),
         "d"((uint32_t)(value >> 32)), "c"(msr) : "memory");
 }
 
@@ -89,67 +91,53 @@ enum {
 };
 
 void io_out8(uint16_t port, uint8_t value) {
-    __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
+    __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port) : "memory");
 }
 
-void enable_interrupt() { __asm__ volatile("sti"); }
-void disable_interrupt() { __asm__ volatile("cli"); }
+void enable_interrupt(void) { __asm__ volatile("sti" : : : "memory"); }
+void disable_interrupt(void) { __asm__ volatile("cli" : : : "memory"); }
 
 struct clone_context_record {
     uint64_t stack;
     uint64_t tls;
 };
 
-static struct clone_context_record *sys_clone_records = 0;
-static uint64_t sys_clone_recorded_count = 0;
-static uint64_t sys_clone_capacity = 0;
+static struct clone_context_record *clone_records;
+static uint64_t clone_count;
+static uint64_t clone_capacity;
 
-static int ensure_sys_clone_record_capacity(uint64_t needed_count) {
-    if (needed_count <= sys_clone_capacity) {
-        return 1;
-    }
+static bool ensure_clone_capacity(uint64_t needed) {
+    if (needed <= clone_capacity) return true;
 
-    uint64_t new_capacity = sys_clone_capacity ? sys_clone_capacity : 64;
-    while (new_capacity < needed_count) {
-        if (new_capacity > UINT64_MAX / 2) return 0;
+    uint64_t new_capacity = clone_capacity ? clone_capacity : 64;
+    while (new_capacity < needed) {
+        if (new_capacity > UINT64_MAX / 2) return false;
         new_capacity *= 2;
     }
+    if (new_capacity > SIZE_MAX / sizeof(*clone_records)) return false;
 
-    const size_t bytes = (size_t)(new_capacity * sizeof(struct clone_context_record));
-    if (bytes / sizeof(struct clone_context_record) != new_capacity) return 0;
-
-    void *new_memory = realloc(sys_clone_records, bytes);
-    if (!new_memory) return 0;
-
-    sys_clone_records = (struct clone_context_record *)new_memory;
-    sys_clone_capacity = new_capacity;
-    return 1;
+    void *new_records = realloc(clone_records, new_capacity * sizeof(*clone_records));
+    if (!new_records) return false;
+    clone_records = new_records;
+    clone_capacity = new_capacity;
+    return true;
 }
 
-void capture_sys_clone_context(uint64_t stack, uint64_t tls) {
-    if (ensure_sys_clone_record_capacity(sys_clone_recorded_count + 1)) {
-        sys_clone_records[sys_clone_recorded_count++] = (struct clone_context_record){
-            .stack = stack,
-            .tls = tls,
-        };
-    }
+bool capture_sys_clone_context(uint64_t stack, uint64_t tls) {
+    if (clone_count == UINT64_MAX || !ensure_clone_capacity(clone_count + 1)) return false;
+    clone_records[clone_count++] = (struct clone_context_record){stack, tls};
+    return true;
 }
 
-uint64_t get_sys_clone_recorded_count(void) { return sys_clone_recorded_count; }
-uint64_t get_sys_clone_stack_at(uint64_t index) {
-    return index < sys_clone_recorded_count ? sys_clone_records[index].stack : 0;
-}
-uint64_t get_sys_clone_tls_at(uint64_t index) {
-    return index < sys_clone_recorded_count ? sys_clone_records[index].tls : 0;
-}
+uint64_t get_sys_clone_recorded_count(void) { return clone_count; }
+uint64_t get_sys_clone_stack_at(uint64_t index) { return index < clone_count ? clone_records[index].stack : 0; }
+uint64_t get_sys_clone_tls_at(uint64_t index) { return index < clone_count ? clone_records[index].tls : 0; }
 
 static __attribute__((noreturn)) void kernel_idle_thread_entry(void) {
     for (;;) __asm__ volatile("hlt");
 }
 
-uint64_t get_kernel_idle_entry_address(void) {
-    return (uint64_t)(uintptr_t)&kernel_idle_thread_entry;
-}
+uint64_t get_kernel_idle_entry_address(void) { return (uintptr_t)&kernel_idle_thread_entry; }
 
 void pthread_exit(void *ret_val) __attribute__((noreturn));
 int pthread_key_create(uintptr_t *key, void (*destructor)(void *));
@@ -166,16 +154,12 @@ static __attribute__((naked, noreturn)) void kernel_clone_thread_entry(void) {
     );
 }
 
-uint64_t get_kernel_clone_thread_entry_address(void) {
-    return (uint64_t)(uintptr_t)&kernel_clone_thread_entry;
-}
-int __pthread_key_create(uintptr_t *key, void (*destructor)(void *)) {
-    return pthread_key_create(key, destructor);
-}
+uint64_t get_kernel_clone_thread_entry_address(void) { return (uintptr_t)&kernel_clone_thread_entry; }
+int __pthread_key_create(uintptr_t *key, void (*destructor)(void *)) { return pthread_key_create(key, destructor); }
 
 static inline uint8_t inb(uint16_t port) {
     uint8_t value;
-    __asm__ volatile ("inb %1, %0" : "=a"(value) : "Nd"(port));
+    __asm__ volatile("inb %1, %0" : "=a"(value) : "Nd"(port) : "memory");
     return value;
 }
 
@@ -194,7 +178,7 @@ static void serial_write_byte(uint8_t value) {
     io_out8(serial_com1, value);
 }
 
-void asm_pause(void) { __asm__ volatile("pause"); }
+void asm_pause(void) { __asm__ volatile("pause" : : : "memory"); }
 
 void serial_print(const char *buffer, size_t size) {
     static bool initialized;
@@ -206,9 +190,7 @@ void serial_print(const char *buffer, size_t size) {
     }
 
     for (size_t i = 0; i < size; i++) {
-        if (buffer[i] == '\n') {
-            serial_write_byte('\r');
-        }
+        if (buffer[i] == '\n') serial_write_byte('\r');
         serial_write_byte((uint8_t)buffer[i]);
     }
 }

@@ -16,6 +16,7 @@ struct idt_entry {
     uint32_t offset_hi;
     uint32_t reserved;
 } __attribute__((packed));
+_Static_assert(sizeof(struct idt_entry) == 16, "invalid IDT entry layout");
 
 typedef struct interrupt_frame {
     uint64_t rip;
@@ -24,6 +25,7 @@ typedef struct interrupt_frame {
     uint64_t rsp;
     uint64_t ss;
 } __attribute__((packed)) interrupt_frame_t;
+_Static_assert(sizeof(interrupt_frame_t) == 40, "invalid interrupt frame layout");
 
 struct pt_regs {
     uint64_t r15;
@@ -52,6 +54,7 @@ struct pt_regs {
     uint64_t rsp;
     uint64_t ss;
 } __attribute__((packed));
+_Static_assert(sizeof(struct pt_regs) == 200, "invalid register frame layout");
 
 typedef void (*kotlin_interrupt_handler_t)(
     interrupt_frame_t *frame,
@@ -59,14 +62,14 @@ typedef void (*kotlin_interrupt_handler_t)(
     uint64_t rbp
 );
 
-extern void do_irq(void *regs, uint64_t irq_num);
 extern uint8_t irq_stub_base[];
-extern uint64_t kernel_runtime_fs_base;
-extern uint64_t kernel_runtime_fs_bases[256];
 
-struct idt_register idt_pointer;
 static struct idt_entry idt_entries[idt_vector_count];
-static kotlin_interrupt_handler_t kotlin_handle[idt_vector_count];
+static kotlin_interrupt_handler_t kotlin_handlers[idt_vector_count];
+static const descriptor_table_register_t idt_pointer = {
+    .size = sizeof(idt_entries) - 1,
+    .ptr = idt_entries,
+};
 
 __attribute__((noinline, force_align_arg_pointer))
 static void dispatch_kotlin_handler(
@@ -79,42 +82,38 @@ static void dispatch_kotlin_handler(
 }
 
 static __attribute__((noreturn)) void halt_forever(void) {
-    for (;;) {
-        __asm__ volatile("cli; hlt");
-    }
+    for (;;) __asm__ volatile("cli; hlt");
 }
 
 static inline __attribute__((always_inline)) uint64_t read_rbp(void) {
     uint64_t rbp;
-    __asm__ volatile ("movq (%%rbp), %0" : "=r"(rbp));
+    __asm__ volatile("movq (%%rbp), %0" : "=r"(rbp));
     return rbp;
 }
 
 static void set_idt_gate(uint16_t vector, void *handler, uint8_t ist, uint8_t flags) {
     const uint64_t address = (uint64_t)handler;
-    struct idt_entry *entry = &idt_entries[vector];
-
-    entry->offset_low = (uint16_t)(address & 0xffffu);
-    entry->selector = 0x08;
-    entry->ist = ist & 0x7u;
-    entry->flags = flags;
-    entry->offset_mid = (uint16_t)((address >> 16) & 0xffffu);
-    entry->offset_hi = (uint32_t)((address >> 32) & 0xffffffffu);
-    entry->reserved = 0;
+    idt_entries[vector] = (struct idt_entry){
+        .offset_low = address,
+        .selector = 0x08,
+        .ist = ist & 0x7u,
+        .flags = flags,
+        .offset_mid = address >> 16,
+        .offset_hi = address >> 32,
+    };
 }
 
 #define EXCEPTION_NO_ERROR_CODE_LIST \
-    X(0) X(2) X(5) X(6) X(7) X(9) X(15) X(16) X(18) X(19) X(20) X(22) X(23) X(24) X(25) X(26) X(27) X(28) X(31)
+    X(0) X(1) X(2) X(3) X(4) X(5) X(6) X(7) X(9) X(15) X(16) X(18) X(19) \
+    X(20) X(22) X(23) X(24) X(25) X(26) X(27) X(28) X(31)
 
 #define EXCEPTION_WITH_ERROR_CODE_LIST \
     X(8) X(10) X(11) X(12) X(13) X(14) X(17) X(21) X(29) X(30)
 
 #define X(vector) \
     __attribute__((interrupt)) static void isr_no_error_##vector(interrupt_frame_t *frame) { \
-        kotlin_interrupt_handler_t handler = kotlin_handle[vector]; \
-        if (!handler) { \
-            halt_forever(); \
-        } \
+        kotlin_interrupt_handler_t handler = kotlin_handlers[vector]; \
+        if (!handler) halt_forever(); \
         dispatch_kotlin_handler(handler, frame, 0, read_rbp()); \
     }
 EXCEPTION_NO_ERROR_CODE_LIST
@@ -122,11 +121,8 @@ EXCEPTION_NO_ERROR_CODE_LIST
 
 #define X(vector) \
     __attribute__((interrupt)) static void isr_with_error_##vector(interrupt_frame_t *frame, uint64_t error_code) { \
-        kotlin_interrupt_handler_t handler = kotlin_handle[vector]; \
-        if (!handler) { \
-            (void)error_code; \
-            halt_forever(); \
-        } \
+        kotlin_interrupt_handler_t handler = kotlin_handlers[vector]; \
+        if (!handler) halt_forever(); \
         dispatch_kotlin_handler(handler, frame, error_code, read_rbp()); \
     }
 EXCEPTION_WITH_ERROR_CODE_LIST
@@ -141,7 +137,7 @@ static void *const exception_entry_stub[irq_vector_base] = {
 #undef X
 };
 
-__attribute__((naked)) void irq_common_entry(void) {
+static __attribute__((naked, used)) void irq_common_entry(void) {
     __asm__ volatile(
         "subq $208, %rsp\n"
         "movq %r15, 0(%rsp)\n"
@@ -186,6 +182,7 @@ __attribute__((naked)) void irq_common_entry(void) {
         "movq %rax, 184(%rsp)\n"
         "movq 40(%rdx), %rax\n"
         "movq %rax, 192(%rsp)\n"
+        "movq %rsp, %r13\n"
         "movq %rsp, %rdi\n"
         "movq (%rdx), %rsi\n"
         "movl $1, %eax\n"
@@ -205,8 +202,9 @@ __attribute__((naked)) void irq_common_entry(void) {
         "movl $0xc0000100, %ecx\n"
         "wrmsr\n"
         "2:\n"
+        "andq $-16, %rsp\n"
         "call do_irq\n"
-        "movq %rsp, %r13\n"
+        "movq %r13, %rsp\n"
         "movq 184(%r13), %rdx\n"
         "subq $40, %rdx\n"
         "movq %rdx, %r12\n"
@@ -257,11 +255,13 @@ __asm__(
 ".endr\n"
 );
 
-void idt_setup() {
-    for (uint16_t vector = 0; vector < idt_vector_count; vector++) {
-        idt_entries[vector] = (struct idt_entry){0};
-        kotlin_handle[vector] = 0;
-    }
+void idt_load(void) {
+    __asm__ volatile("lidt %0" : : "m"(idt_pointer) : "memory");
+}
+
+void idt_setup(void) {
+    __builtin_memset(idt_entries, 0, sizeof(idt_entries));
+    __builtin_memset(kotlin_handlers, 0, sizeof(kotlin_handlers));
     for (uint16_t vector = 0; vector < irq_vector_base; vector++) {
         if (!exception_entry_stub[vector]) continue;
         set_idt_gate(vector, exception_entry_stub[vector], vector == 8 ? 1 : 0, 0x8e);
@@ -272,23 +272,19 @@ void idt_setup() {
         uint8_t *stub = irq_stub_base + ((uint64_t)irq_index * irq_stub_size);
         set_idt_gate(vector, stub, 0, 0x8e);
     }
-
-    idt_pointer.size = (uint16_t)(sizeof(idt_entries) - 1u);
-    idt_pointer.ptr = idt_entries;
-    __asm__ volatile("lidt %0" : : "m"(idt_pointer) : "memory");
+    idt_load();
 }
 
 void register_interrupt_handler(
     uint16_t vector,
     void (*handler)(void *interrupt_frame, uint64_t error_code, uint64_t rbp),
-    const uint8_t ist,
-    const uint8_t flags
+    uint8_t ist,
+    uint8_t flags
 ) {
     if (vector >= irq_vector_base || !exception_entry_stub[vector]) {
         return;
     }
 
-    (void)ist;
-    kotlin_handle[vector] = (kotlin_interrupt_handler_t)handler;
-    set_idt_gate(vector, exception_entry_stub[vector], vector == 8 ? 1 : 0, flags);
+    kotlin_handlers[vector] = (kotlin_interrupt_handler_t)handler;
+    set_idt_gate(vector, exception_entry_stub[vector], vector == 8 ? 1 : ist, flags);
 }

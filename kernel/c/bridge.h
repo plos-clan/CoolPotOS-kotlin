@@ -1,5 +1,4 @@
-#ifndef BRIDGE_H
-#define BRIDGE_H
+#pragma once
 
 #include <limine.h>
 #include "os_terminal.h"
@@ -16,44 +15,39 @@ extern volatile struct limine_mp_request mp_request;
 extern volatile struct limine_rsdp_request rsdp_request;
 extern volatile struct limine_executable_file_request executable_file_request;
 
-extern void gdt_setup();
-extern void idt_setup();
-
-extern void ap_gdt_setup(uint64_t lapic_id);
-extern void set_kernel_stack(uint64_t lapic_id,uint64_t rsp, uint8_t is_bsp);
-
-extern uint64_t read_cr3(void);
-extern uint64_t read_cr2(void);
-extern void write_cr3(uint64_t value);
-extern void invlpg(uint64_t address);
-extern uint64_t rdmsr(uint32_t msr);
-extern void wrmsr(uint32_t msr, uint64_t value);
-extern void io_out8(uint16_t port, uint8_t value);
-
-extern void enable_interrupt();
-extern void disable_interrupt();
-extern uint64_t get_sys_clone_recorded_count(void);
-extern uint64_t get_sys_clone_stack_at(uint64_t index);
-extern uint64_t get_sys_clone_tls_at(uint64_t index);
-extern uint64_t get_kernel_idle_entry_address(void);
-extern uint64_t get_kernel_clone_thread_entry_address(void);
-extern void wait_for_interrupt();
-extern void asm_pause(void);
+void gdt_setup(void);
+void idt_setup(void);
+void ap_gdt_setup(uint64_t lapic_id);
+void set_kernel_stack(uint64_t lapic_id, uint64_t rsp, uint8_t is_bsp);
+uint64_t read_cr3(void);
+uint64_t read_cr2(void);
+void write_cr3(uint64_t value);
+void invlpg(uint64_t address);
+uint64_t rdmsr(uint32_t msr);
+void wrmsr(uint32_t msr, uint64_t value);
+void io_out8(uint16_t port, uint8_t value);
+void enable_interrupt(void);
+void disable_interrupt(void);
+uint64_t get_sys_clone_recorded_count(void);
+uint64_t get_sys_clone_stack_at(uint64_t index);
+uint64_t get_sys_clone_tls_at(uint64_t index);
+uint64_t get_kernel_idle_entry_address(void);
+uint64_t get_kernel_clone_thread_entry_address(void);
+void wait_for_interrupt(void);
+void asm_pause(void);
 extern void (*ap_start_ptr)(struct limine_mp_info *);
-extern void *__rtld_allocateTcb();
+void *__rtld_allocateTcb(void);
 
-extern void *malloc(size_t size);
-extern void free(void *ptr);
+void *malloc(size_t size);
+void free(void *ptr);
 
-extern void register_interrupt_handler(
+void register_interrupt_handler(
     uint16_t vector,
     void (*handler)(void *, uint64_t, uint64_t),
-    const uint8_t ist,
-    const uint8_t flags
+    uint8_t ist,
+    uint8_t flags
 );
 
 #ifdef __cplusplus
 }
-#endif
-
 #endif

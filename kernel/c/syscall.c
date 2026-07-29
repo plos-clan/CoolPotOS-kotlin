@@ -2,12 +2,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "native.h"
 #include "syscall.h"
 
-extern void capture_sys_clone_context(uint64_t stack, uint64_t tls);
-extern void set_kernel_runtime_fs_base(uint64_t pointer);
-extern void serial_print(const char *buffer, size_t size);
-extern void wrmsr(uint32_t msr, uint64_t value);
+int sched_yield(void);
 
 #define EAGAIN 11
 #define EBADF 9
@@ -24,7 +22,6 @@ extern void wrmsr(uint32_t msr, uint64_t value);
 #define MAP_FIXED 0x10
 #define MAP_ANONYMOUS 0x20
 #define MAP_FIXED_NOREPLACE 0x100000
-#define IA32_FS_BASE 0xc0000100
 #define NS_PER_SEC ((uint64_t)1000000000)
 #define FUTEX_SPIN_SLICE ((uint64_t)64)
 
@@ -41,19 +38,17 @@ struct vm_block {
 static uint8_t vm_arena[VM_ARENA_SIZE] __attribute__((aligned(PAGE_SIZE)));
 static size_t vm_bump;
 static struct vm_block *vm_free_list;
-static int vm_lock;
+static uint8_t vm_lock;
 
-static void cpu_relax(void) { __asm__ volatile("pause" : : : "memory"); }
+static inline void cpu_relax(void) { __asm__ volatile("pause" : : : "memory"); }
 
-static void spin_lock(int *lock) {
-    while (__atomic_test_and_set(lock, __ATOMIC_ACQUIRE)) {
-        while (__atomic_load_n(lock, __ATOMIC_RELAXED)) {
+static void spin_lock(uint8_t *lock) {
+    while (__atomic_test_and_set(lock, __ATOMIC_ACQUIRE))
+        while (__atomic_load_n(lock, __ATOMIC_RELAXED))
             cpu_relax();
-        }
-    }
 }
 
-static void spin_unlock(int *lock) { __atomic_clear(lock, __ATOMIC_RELEASE); }
+static void spin_unlock(uint8_t *lock) { __atomic_clear(lock, __ATOMIC_RELEASE); }
 
 static inline size_t align_up(size_t n) {
     return (n + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
@@ -62,13 +57,12 @@ static inline size_t align_up(size_t n) {
 static void *vm_alloc_locked(size_t size) {
     for (struct vm_block **link = &vm_free_list; *link; link = &(*link)->next) {
         struct vm_block *block = *link;
-        if (block->size < size)
-            continue;
+        if (block->size < size) continue;
 
-        size_t remaining = block->size - size;
+        const size_t remaining = block->size - size;
         struct vm_block *next = block->next;
         if (remaining >= PAGE_SIZE) {
-            next = (struct vm_block *)((uint64_t)block + size);
+            next = (struct vm_block *)((uintptr_t)block + size);
             next->size = remaining;
             next->next = block->next;
         }
@@ -76,8 +70,7 @@ static void *vm_alloc_locked(size_t size) {
         return block;
     }
 
-    if (vm_bump > VM_ARENA_SIZE - size)
-        return NULL;
+    if (size > VM_ARENA_SIZE - vm_bump) return NULL;
 
     void *result = vm_arena + vm_bump;
     vm_bump += size;
@@ -89,7 +82,7 @@ static void vm_free_locked(void *pointer, size_t size) {
     struct vm_block *previous = NULL;
     struct vm_block **link = &vm_free_list;
 
-    while (*link && *link < block) {
+    while (*link && (uintptr_t)*link < (uintptr_t)block) {
         previous = *link;
         link = &(*link)->next;
     }
@@ -98,12 +91,12 @@ static void vm_free_locked(void *pointer, size_t size) {
     block->next = *link;
     *link = block;
 
-    if (block->next && (uint64_t)block + block->size == (uint64_t)block->next) {
+    if (block->next && (uintptr_t)block + block->size == (uintptr_t)block->next) {
         block->size += block->next->size;
         block->next = block->next->next;
     }
 
-    if (previous && (uint64_t)previous + previous->size == (uint64_t)block) {
+    if (previous && (uintptr_t)previous + previous->size == (uintptr_t)block) {
         previous->size += block->size;
         previous->next = block->next;
     }
@@ -115,20 +108,12 @@ static long futex_budget(const struct timespec_arg *time, uint64_t *budget) {
     if (time->tv_sec == 0 && time->tv_nsec == 0)
         return -ETIMEDOUT;
 
-    uint64_t sec = (uint64_t)time->tv_sec;
-    uint64_t timeout_ns = UINT64_MAX;
-    if (sec <= UINT64_MAX / NS_PER_SEC) {
-        uint64_t nsec = (uint64_t)time->tv_nsec;
-        timeout_ns = sec * NS_PER_SEC;
-        if (nsec > UINT64_MAX - timeout_ns)
-            timeout_ns = UINT64_MAX;
-        else
-            timeout_ns += nsec;
-    }
-
-    *budget = timeout_ns / FUTEX_SPIN_SLICE;
-    if (*budget != UINT64_MAX)
-        (*budget)++;
+    const uint64_t sec = time->tv_sec;
+    const uint64_t nsec = time->tv_nsec;
+    const uint64_t timeout_ns = sec > (UINT64_MAX - nsec) / NS_PER_SEC
+        ? UINT64_MAX : sec * NS_PER_SEC + nsec;
+    *budget = timeout_ns == UINT64_MAX
+        ? UINT64_MAX : timeout_ns / FUTEX_SPIN_SLICE + 1;
     return 0;
 }
 
@@ -136,7 +121,7 @@ static long futex_call(int *pointer, int operation, int expected, const struct t
     if (!pointer)
         return -EINVAL;
 
-    int command = operation & 0x7f;
+    const int command = operation & 0x7f;
     if (command == FUTEX_WAKE) return 0;
     if (command != FUTEX_WAIT) return -ENOSYS;
     if (__atomic_load_n(pointer, __ATOMIC_ACQUIRE) != expected)
@@ -144,9 +129,8 @@ static long futex_call(int *pointer, int operation, int expected, const struct t
 
     uint64_t spin_budget = 0;
     if (time) {
-        long e = futex_budget(time, &spin_budget);
-        if (e)
-            return e;
+        const long error = futex_budget(time, &spin_budget);
+        if (error) return error;
     }
 
     while (__atomic_load_n(pointer, __ATOMIC_ACQUIRE) == expected) {
@@ -165,25 +149,25 @@ static long mmap_call(void *hint, size_t size, int prot, int flags, int fd, int6
     if (size >= (size_t)__PTRDIFF_MAX__) return -ENOMEM;
     if (offset < 0 || ((uint64_t)offset & (PAGE_SIZE - 1)))
         return -EINVAL;
+    (void)prot;
 
-    int map_type = flags & (MAP_SHARED | MAP_PRIVATE);
+    const int map_type = flags & (MAP_SHARED | MAP_PRIVATE);
     if (map_type != MAP_SHARED && map_type != MAP_PRIVATE)
         return -EINVAL;
 
-    bool fixed_noreplace = (flags & MAP_FIXED_NOREPLACE) != 0;
-    bool fixed = (flags & MAP_FIXED) || fixed_noreplace;
+    const bool fixed_noreplace = (flags & MAP_FIXED_NOREPLACE) != 0;
+    const bool fixed = (flags & MAP_FIXED) || fixed_noreplace;
     if (!(flags & MAP_ANONYMOUS)) {
         if (fd < 0) return -EBADF;
         return -ENOSYS;
     }
 
-    (void)prot;
     size = align_up(size);
-    if (!size) return -ENOMEM;
+    if (!size || size > VM_ARENA_SIZE) return -ENOMEM;
 
     void *result = NULL;
     long err = 0;
-    uint64_t arena_base = (uint64_t)vm_arena;
+    const uintptr_t arena_base = (uintptr_t)vm_arena;
 
     spin_lock(&vm_lock);
 
@@ -194,23 +178,23 @@ static long mmap_call(void *hint, size_t size, int prot, int flags, int fd, int6
             goto unlock;
         }
     } else {
-        uint64_t address = (uint64_t)hint;
+        const uintptr_t address = (uintptr_t)hint;
         if (address & (PAGE_SIZE - 1)) {
             err = -EINVAL;
             goto unlock;
         }
 
-        size_t arena_offset = (size_t)(address - arena_base);
-        if (arena_offset > VM_ARENA_SIZE - size) {
+        if (address < arena_base || address - arena_base > VM_ARENA_SIZE - size) {
             err = -ENOMEM;
             goto unlock;
         }
+        const size_t arena_offset = address - arena_base;
         if (fixed_noreplace && arena_offset < vm_bump) {
             err = -EEXIST;
             goto unlock;
         }
 
-        size_t map_end = arena_offset + size;
+        const size_t map_end = arena_offset + size;
         if (map_end > vm_bump)
             vm_bump = map_end;
 
@@ -221,16 +205,16 @@ unlock:
     spin_unlock(&vm_lock);
     if (err) return err;
     __builtin_memset(result, 0, size);
-    return (long)(uint64_t)result;
+    return (long)(uintptr_t)result;
 }
 
 static long munmap_call(void *pointer, size_t size) {
     if (!pointer) return 0;
     if (!(size = align_up(size))) return -EINVAL;
 
-    uint64_t start = (uint64_t)vm_arena;
-    uint64_t end = start + VM_ARENA_SIZE;
-    uint64_t address = (uint64_t)pointer;
+    const uintptr_t start = (uintptr_t)vm_arena;
+    const uintptr_t end = start + VM_ARENA_SIZE;
+    const uintptr_t address = (uintptr_t)pointer;
 
     if (address < start || address > end || size > end - address)
         return -EINVAL;
@@ -244,32 +228,29 @@ static long munmap_call(void *pointer, size_t size) {
 }
 
 static long write_call(int fd, const void *buffer, size_t count) {
-    if (fd < 0)
-        return -EBADF;
-    if (fd < 2)
-        serial_print(buffer, count);
+    if (fd < 0) return -EBADF;
+    if (fd <= 2) serial_print(buffer, count);
     return (long)count;
 }
 
 static long clone_call(void *stack, int *parent_tid, void *tls) {
-    if (!stack || !parent_tid)
-        return -EINVAL;
+    if (!stack || !parent_tid) return -EINVAL;
 
-    capture_sys_clone_context((uint64_t)(uintptr_t)stack, (uint64_t)(uintptr_t)tls);
+    if (!capture_sys_clone_context((uintptr_t)stack, (uintptr_t)tls))
+        return -ENOMEM;
     *parent_tid = 2;
     return 2;
 }
 
 static long arch_prctl_call(int code, uint64_t pointer) {
     if (code != ARCH_SET_FS) return -EINVAL;
-    wrmsr(IA32_FS_BASE, pointer);
+    wrmsr(ia32_fs_base_msr, pointer);
     set_kernel_runtime_fs_base(pointer);
     return 0;
 }
 
 static long clock_gettime_call(struct timespec_arg *tp) {
-    if (!tp)
-        return -EINVAL;
+    if (!tp) return -EINVAL;
     tp->tv_sec = tp->tv_nsec = 0;
     return 0;
 }
@@ -285,7 +266,7 @@ long syscall(long number, ...) {
     switch (number) {
     case SYS_write: {
         int fd = ARG(int);
-        const void* buffer = ARG(const void *);
+        const void *buffer = ARG(const void *);
         size_t count = ARG(size_t);
         ret = write_call(fd, buffer, count);
         break;
@@ -328,7 +309,8 @@ long syscall(long number, ...) {
         break;
     }
     case SYS_munmap: {
-        ret = munmap_call(ARG(void *), ARG(size_t));
+        void *pointer = ARG(void *);
+        ret = munmap_call(pointer, ARG(size_t));
         break;
     }
     case SYS_clock_gettime: {

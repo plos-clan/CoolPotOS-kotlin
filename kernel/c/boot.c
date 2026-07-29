@@ -1,18 +1,19 @@
 #include <limine.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <bridge.h>
+#include "bridge.h"
+#include "native.h"
 
 typedef __UINTPTR_TYPE__ boot_uptr_t;
+void _start(void) __attribute__((noreturn));
 extern void kernel_main(void);
 extern void __dlapi_enter(boot_uptr_t *entry_stack);
 
+#define LIMINE_ITEM(section_name) __attribute__((used, section(section_name)))
 #define LIMINE_REQUEST(type, name, ...) \
-    __attribute__((used, section(".limine_requests"))) \
-    volatile struct type name = {__VA_ARGS__}
+    LIMINE_ITEM(".limine_requests") volatile struct type name = {__VA_ARGS__}
 
-__attribute__((used, section(".limine_requests")))
-static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(4);
+LIMINE_ITEM(".limine_requests") static volatile uint64_t limine_base_revision[] = LIMINE_BASE_REVISION(4);
 LIMINE_REQUEST(limine_framebuffer_request, framebuffer_request,
     .id = LIMINE_FRAMEBUFFER_REQUEST_ID);
 LIMINE_REQUEST(limine_stack_size_request, stack_size_request,
@@ -24,15 +25,14 @@ LIMINE_REQUEST(limine_mp_request, mp_request,
 LIMINE_REQUEST(limine_rsdp_request, rsdp_request, .id = LIMINE_RSDP_REQUEST_ID);
 LIMINE_REQUEST(limine_executable_file_request, executable_file_request,
     .id = LIMINE_EXECUTABLE_FILE_REQUEST_ID);
-#undef LIMINE_REQUEST
-
-__attribute__((used, section(".limine_requests_start")))
+LIMINE_ITEM(".limine_requests_start")
 static volatile uint64_t limine_requests_start_marker[] = LIMINE_REQUESTS_START_MARKER;
-
-__attribute__((used, section(".limine_requests_end")))
+LIMINE_ITEM(".limine_requests_end")
 static volatile uint64_t limine_requests_end_marker[] = LIMINE_REQUESTS_END_MARKER;
+#undef LIMINE_REQUEST
+#undef LIMINE_ITEM
 
-static uint32_t default_mxcsr = 0x1f80;
+static const uint32_t default_mxcsr = 0x1f80;
 static char boot_argv0[] = "kernel";
 
 static uint8_t boot_random[16] = "ARny-MLIBC-TLS!";
@@ -78,22 +78,25 @@ struct elf64_ehdr {
 
 void setup_simd(void) {
     uint64_t cr0, cr4;
-    __asm__ volatile ("mov %%cr0, %0" : "=r"(cr0));
-    __asm__ volatile ("mov %%cr4, %0" : "=r"(cr4));
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
     cr0 = (cr0 & ~((1u << 2) | (1u << 3))) | (1u << 1) | (1u << 5);
     cr4 |= (1u << 9) | (1u << 10);
-    __asm__ volatile ("mov %0, %%cr0" : : "r"(cr0) : "memory");
-    __asm__ volatile ("mov %0, %%cr4" : : "r"(cr4) : "memory");
-    __asm__ volatile ("fninit; ldmxcsr %0" : : "m"(default_mxcsr));
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+    __asm__ volatile("fninit; ldmxcsr %0" : : "m"(default_mxcsr));
 }
 
 static __attribute__((noreturn)) void halt_forever(void) {
-    for (;;) __asm__ volatile ("hlt");
+    for (;;) __asm__ volatile("hlt");
 }
 
 static bool setup_entry_stack(boot_uptr_t *entry_stack) {
     struct limine_executable_file_response *response = executable_file_request.response;
-    boot_uptr_t elf_base = (boot_uptr_t)response->executable_file->address;
+    struct limine_file *file = response ? response->executable_file : NULL;
+    if (!file || !file->address || file->size < sizeof(struct elf64_ehdr)) return false;
+
+    boot_uptr_t elf_base = (boot_uptr_t)file->address;
     const struct elf64_ehdr *ehdr = (const struct elf64_ehdr *)elf_base;
 
     if (ehdr->e_ident[0] != elf_ident_mag0 || ehdr->e_ident[1] != elf_ident_mag1 ||
@@ -102,10 +105,10 @@ static bool setup_entry_stack(boot_uptr_t *entry_stack) {
         return false;
     }
 
-    if (!ehdr->e_phoff || !ehdr->e_phentsize || !ehdr->e_phnum) {
-        return false;
-    }
-    if ((boot_uptr_t)ehdr->e_phoff > (~(boot_uptr_t)0 - elf_base)) {
+    const uint64_t phdr_size = (uint64_t)ehdr->e_phentsize * ehdr->e_phnum;
+    if (!ehdr->e_phoff || !phdr_size || ehdr->e_phoff > file->size ||
+        phdr_size > file->size - ehdr->e_phoff ||
+        (boot_uptr_t)ehdr->e_phoff > UINTPTR_MAX - elf_base) {
         return false;
     }
 
@@ -113,9 +116,7 @@ static bool setup_entry_stack(boot_uptr_t *entry_stack) {
     boot_uptr_t entry_val = (boot_uptr_t)ehdr->e_entry;
 
     if (ehdr->e_type == elf_type_dyn) {
-        if (entry_val > (~(boot_uptr_t)0 - elf_base)) {
-            return false;
-        }
+        if (entry_val > UINTPTR_MAX - elf_base) return false;
         entry_val += elf_base;
     }
 
@@ -126,23 +127,18 @@ static bool setup_entry_stack(boot_uptr_t *entry_stack) {
         at_random, (boot_uptr_t)boot_random,
         at_execfn, (boot_uptr_t)boot_argv0, at_null, 0,
     };
-    for (uint8_t i = 0; i < sizeof(initial_stack) / sizeof(*initial_stack); i++)
-        entry_stack[i] = initial_stack[i];
-
+    __builtin_memcpy(entry_stack, initial_stack, sizeof(initial_stack));
     return true;
 }
 
-void wait_for_interrupt() {
-    __asm__ volatile ("hlt");
-}
+void wait_for_interrupt(void) { __asm__ volatile("hlt" : : : "memory"); }
 
 void _start(void) {
-    boot_uptr_t entry_stack[24] __attribute__((aligned(16)));
+    boot_uptr_t entry_stack[22] __attribute__((aligned(16)));
 
     if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision) ||
         !framebuffer_request.response ||
         framebuffer_request.response->framebuffer_count < 1 ||
-        !executable_file_request.response ||
         !setup_entry_stack(entry_stack)) {
         halt_forever();
     }
