@@ -2,22 +2,28 @@
 
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.IrqSpinLock
-import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicInt
 
 enum class VfsError(val errno: Int) {
+    INTERRUPTED(4),
     IO(5),
     BAD_DESCRIPTOR(9),
+    WOULD_BLOCK(11),
     PERMISSION_DENIED(13),
+    FAULT(14),
     BUSY(16),
     ALREADY_EXISTS(17),
     CROSS_DEVICE(18),
+    NO_DEVICE(19),
     NOT_DIRECTORY(20),
     IS_DIRECTORY(21),
     INVALID_ARGUMENT(22),
+    NOT_TTY(25),
     FILE_TOO_LARGE(27),
     NO_SPACE(28),
+    ILLEGAL_SEEK(29),
     READ_ONLY(30),
     NOT_EMPTY(39),
     TOO_MANY_SYMLINKS(40),
@@ -241,6 +247,9 @@ interface SymlinkBackend : InodeBackend {
 }
 
 interface DirectoryBackend : InodeBackend {
+    val cacheNegativeLookups: Boolean
+        get() = true
+
     fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?>
 
     fun create(directory: Inode, name: VfsName, mode: FileMode): VfsResult<Inode> =
@@ -290,6 +299,12 @@ interface OpenFileBackend {
         position: FilePosition,
         emit: (DirectoryEntry) -> Boolean,
     ): VfsResult<Unit> = VfsResult.Err(VfsError.NOT_DIRECTORY)
+
+    fun ioctl(inode: Inode, command: Int, args: UserMemory): Long =
+        -VfsError.NOT_SUPPORTED.errno.toLong()
+
+    fun poll(inode: Inode, events: Int): Long =
+        -VfsError.NOT_SUPPORTED.errno.toLong()
 
     fun release() {}
 }
@@ -536,6 +551,22 @@ class OpenFileDescription internal constructor(
                 return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
             }
             backend.iterate(inode, position, emit)
+        }
+    }
+
+    fun ioctl(command: Int, args: UserMemory): Long = positionLock.withLock {
+        if (references.load() == 0) {
+            -VfsError.BAD_DESCRIPTOR.errno.toLong()
+        } else {
+            backend.ioctl(inode, command, args)
+        }
+    }
+
+    fun poll(events: Int): Long = positionLock.withLock {
+        if (references.load() == 0) {
+            -VfsError.BAD_DESCRIPTOR.errno.toLong()
+        } else {
+            backend.poll(inode, events)
         }
     }
 
@@ -967,11 +998,16 @@ class Vfs(
         followMount: Boolean = true,
     ): VfsResult<VfsPath> {
         parent.dentry.cachedChild(name)?.let { cached ->
-            if (cached.inode() == null) {
+            val inode = cached.inode()
+            if (inode == null &&
+                (parent.inode?.backend as? DirectoryBackend)?.cacheNegativeLookups != false
+            ) {
                 return VfsResult.Err(VfsError.NOT_FOUND)
             }
-            val path = VfsPath(parent.mount, cached)
-            return VfsResult.Ok(if (followMount) followMounts(context.namespace, path) else path)
+            if (inode != null) {
+                val path = VfsPath(parent.mount, cached)
+                return VfsResult.Ok(if (followMount) followMounts(context.namespace, path) else path)
+            }
         }
 
         val directory = parent.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
@@ -981,10 +1017,13 @@ class Vfs(
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        val dentry = parent.dentry.cacheChild(name, inode)
         if (inode == null) {
+            if (backend.cacheNegativeLookups) {
+                parent.dentry.cacheChild(name, null)
+            }
             return VfsResult.Err(VfsError.NOT_FOUND)
         }
+        val dentry = parent.dentry.cacheChild(name, inode)
         val path = VfsPath(parent.mount, dentry)
         return VfsResult.Ok(if (followMount) followMounts(context.namespace, path) else path)
     }

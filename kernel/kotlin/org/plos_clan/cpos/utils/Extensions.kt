@@ -4,6 +4,7 @@ package org.plos_clan.cpos.utils
 
 import kotlinx.cinterop.*
 import org.plos_clan.cpos.mem.Hhdm
+import platform.posix.memcpy
 
 const val PTE_COUNT = 512
 const val PAGE_SIZE_BYTES = 4096uL
@@ -74,4 +75,29 @@ fun CPointer<ULongVar>.clear() {
     repeat(PTE_COUNT) { index ->
         this[index] = 0uL
     }
+}
+
+fun CPointer<out CPointed>.pointerToByteArray(
+    size: ULong
+): ByteArray {
+    require(size <= Int.MAX_VALUE.toULong()) {
+        "ByteArray size exceeds Int.MAX_VALUE: $size"
+    }
+
+    val length = size.toInt()
+    val result = ByteArray(length)
+
+    if (length == 0) {
+        return result
+    }
+
+    result.usePinned { pinned ->
+        memcpy(
+            pinned.addressOf(0),
+            this,
+            size.convert()
+        )
+    }
+
+    return result
 }

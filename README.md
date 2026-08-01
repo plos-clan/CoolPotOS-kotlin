@@ -9,6 +9,8 @@ This project uses Gradle for kernel build, ISO packaging, and QEMU run.
 
 **Available Gradle tasks:**
 - `./gradlew build`: Build kernel ELF
+- `./gradlew downloadAlpineInitramfs`: Download and verify the Alpine Linux x86_64 initramfs
+- `./gradlew prepareAlpineInitramfs`: Decompress the downloaded initramfs into raw CPIO
 - `./gradlew buildIso`: Build the UEFI ISO image
 - `./gradlew run`: Run the ISO image in QEMU
 - `./gradlew clean`: Clean kernel build outputs
@@ -38,6 +40,16 @@ You need to install:
 - `qemu-system-x86_64` (for emulation)
 - Git and Gradle (included with Kotlin/Native)
 
+The ISO contains Alpine Linux 3.24.1's x86_64 `initramfs-lts` as an uncompressed
+ASCII CPIO archive at `/boot/alpine-initramfs-x86_64`. Limine exposes it to the
+kernel as a boot module. QEMU uses 512 MiB by default so the kernel can retain
+the boot module while populating tmpfs; override it with `-PqemuMemory=...` or
+the `QEMU_MEMORY` environment variable.
+
 ## License
 
 This project is licensed under the [0BSD License](LICENSE).
+
+## Dependency
+
+* mlibc [managarm/mlibc](https://github.com/managarm/mlibc)

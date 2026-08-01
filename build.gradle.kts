@@ -1,24 +1,126 @@
 import java.net.URI
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
+import java.util.zip.GZIPInputStream
 
 @DisableCachingByDefault(because = "Downloads third-party artifacts")
 abstract class DownloadFileTask : DefaultTask() {
     @get:Input
     abstract val sourceUrl: Property<String>
 
+    @get:Input
+    abstract val expectedSha256: Property<String>
+
     @get:OutputFile
     abstract val destinationFile: RegularFileProperty
+
+    init {
+        expectedSha256.convention("")
+        outputs.upToDateWhen {
+            val target = destinationFile.get().asFile
+            val expected = expectedSha256.get()
+            expected.isEmpty() || (target.isFile && target.sha256() == expected)
+        }
+    }
 
     @TaskAction
     fun download() {
         val target = destinationFile.get().asFile
+        val expected = expectedSha256.get()
+        if (target.isFile && (expected.isEmpty() || target.sha256() == expected)) {
+            logger.lifecycle("Using cached download: ${target.name}")
+            return
+        }
+
         target.parentFile.mkdirs()
+        val temporary = target.resolveSibling("${target.name}.part")
 
         val connection = URI.create(sourceUrl.get()).toURL().openConnection()
         connection.setRequestProperty("User-Agent", "Gradle")
         connection.getInputStream().use { input ->
-            target.outputStream().use { output ->
+            temporary.outputStream().use { output ->
                 input.copyTo(output)
             }
+        }
+
+        if (expected.isNotEmpty()) {
+            val actual = temporary.sha256()
+            if (actual != expected) {
+                temporary.delete()
+                throw GradleException(
+                    "SHA-256 mismatch for ${sourceUrl.get()}: expected $expected, got $actual."
+                )
+            }
+        }
+
+        try {
+            Files.move(
+                temporary.toPath(),
+                target.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+            Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
+    }
+
+    private fun File.sha256(): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        inputStream().buffered().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val length = input.read(buffer)
+                if (length < 0) break
+                digest.update(buffer, 0, length)
+            }
+        }
+        return digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
+}
+
+@CacheableTask
+abstract class DecompressGzipTask : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val sourceFile: RegularFileProperty
+
+    @get:OutputFile
+    abstract val destinationFile: RegularFileProperty
+
+    @TaskAction
+    fun decompress() {
+        val source = sourceFile.get().asFile
+        val target = destinationFile.get().asFile
+        target.parentFile.mkdirs()
+        val temporary = target.resolveSibling("${target.name}.part")
+
+        try {
+            GZIPInputStream(source.inputStream().buffered()).use { input ->
+                temporary.outputStream().buffered().use(input::copyTo)
+            }
+
+            val magic = ByteArray(6)
+            val magicSize = temporary.inputStream().use { it.read(magic) }
+            val magicString = magic.decodeToString()
+            if (magicSize != magic.size || magicString !in setOf("070701", "070702", "070707")) {
+                throw GradleException("Decompressed ${source.name} is not an ASCII CPIO archive.")
+            }
+
+            try {
+                Files.move(
+                    temporary.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+        } catch (failure: Exception) {
+            temporary.delete()
+            throw failure
         }
     }
 }
@@ -82,6 +184,17 @@ val freestndHeadersArchiveUrl = "https://codeberg.org/OSDev/freestnd-c-hdrs-0bsd
 val freestndHeadersDir = buildRootDir.resolve("freestnd-c-hdrs")
 val freestndHeadersArchive = downloadsDir.resolve("freestnd-c-hdrs-0bsd-$freestndHeadersRef.tar.gz")
 val freestndHeadersIncludeDir = freestndHeadersDir.resolve("include")
+
+val alpineVersion = "3.24.1"
+val alpineReleaseBranch = "v3.24"
+val alpineInitramfsIsoName = "alpine-initramfs-$targetArch"
+val alpineInitramfsUrl =
+    "https://dl-cdn.alpinelinux.org/alpine/$alpineReleaseBranch/releases/$targetArch/" +
+        "netboot-$alpineVersion/initramfs-lts"
+val alpineInitramfsSha256 = "e1649e94ef1b276bf22ea4ed2628dd17c7fa7505cd40b2c7aa7fd9ebb71fe5c9"
+val alpineInitramfs = downloadsDir.resolve("$alpineInitramfsIsoName-$alpineVersion")
+val alpineInitramfsUncompressed =
+    buildRootDir.resolve("generated/initramfs/$alpineInitramfsIsoName")
 
 val konanHome = System.getenv("KONAN_HOME") ?: "${System.getProperty("user.home")}/.konan"
 val defaultToolRoot = "$konanHome/dependencies/$targetArch-unknown-linux-gnu-gcc-8.3.0-glibc-2.19-kernel-4.9-2"
@@ -147,7 +260,7 @@ val xorrisoFlagsMode = listOf("-as", "mkisofs")
 val xorrisoFlagsBoot = listOf("--efi-boot", "limine/limine-uefi-cd.bin", "-efi-boot-part", "--efi-boot-image")
 val xorrisoFlags = xorrisoFlagsMode + xorrisoFlagsBoot
 
-val qemuMemory = setting("qemuMemory", "QEMU_MEMORY", "256m")
+val qemuMemory = setting("qemuMemory", "QEMU_MEMORY", "512m")
 val qemuFlagsMachine = listOf("-m", qemuMemory, "-M", "q35", "-cpu", "qemu64,+x2apic", "-no-reboot", "-smp", "4")
 val qemuFlagsFirmware = listOf("-drive", "if=pflash,format=raw,readonly=on,file=assets/ovmf-code.fd")
 val qemuFlagsDebug = listOf("-s", "-S")
@@ -254,6 +367,22 @@ val downloadFreestndHeaders = tasks.register<DownloadFileTask>("downloadFreestnd
     description = "Downloads freestanding C headers."
     sourceUrl.set(freestndHeadersArchiveUrl)
     destinationFile.set(freestndHeadersArchive)
+}
+
+val downloadAlpineInitramfs = tasks.register<DownloadFileTask>("downloadAlpineInitramfs") {
+    group = "build"
+    description = "Downloads the Alpine Linux $targetArch initramfs."
+    sourceUrl.set(alpineInitramfsUrl)
+    expectedSha256.set(alpineInitramfsSha256)
+    destinationFile.set(alpineInitramfs)
+}
+
+val prepareAlpineInitramfs = tasks.register<DecompressGzipTask>("prepareAlpineInitramfs") {
+    group = "build"
+    description = "Decompresses the Alpine Linux initramfs into a raw CPIO archive."
+    dependsOn(downloadAlpineInitramfs)
+    sourceFile.set(alpineInitramfs)
+    destinationFile.set(alpineInitramfsUncompressed)
 }
 
 val prepareFreestndHeaders = tasks.register<Sync>("prepareFreestndHeaders") {
@@ -465,12 +594,16 @@ tasks.named("build") {
 
 val stageIso = tasks.register<Sync>("stageIso") {
     group = "build"
-    description = "Stages the kernel and limine assets into the ISO directory."
-    dependsOn(linkKernel, prepareLimine)
+    description = "Stages the kernel, initramfs, and Limine assets into the ISO directory."
+    dependsOn(linkKernel, prepareLimine, prepareAlpineInitramfs)
 
     into(isoDir)
     from(limineConfigFile) { into("limine") }
     from(limineUefiCdBin) { into("limine") }
+    from(alpineInitramfsUncompressed) {
+        into("boot")
+        rename(".*", alpineInitramfsIsoName)
+    }
     from(kernelElf)
 }
 

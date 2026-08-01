@@ -1,7 +1,6 @@
 package org.plos_clan.cpos.drivers
 
 import org.plos_clan.cpos.mem.UserMemory
-import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 const val DEV_NULL = 0  // 空设备
@@ -21,33 +20,41 @@ const val DEV_USB = 33      // USB userspace node
 const val DEV_GPU = 226   // 显卡
 
 interface DeviceBackend {
-    fun ioctl(device: Device, args: UserMemory): ULong
-    fun poll(device: Device, events: Int): ULong
-    fun read(device: Device, buf: ByteArray, offset: ULong, size: ULong): ULong
-    fun write(device: Device, buf: ByteArray, offset: ULong, size: ULong): ULong
+    fun ioctl(device: Device, command: Int, args: UserMemory): Long
+    fun poll(device: Device, events: Int): Long
+    fun read(device: Device, buffer: ByteArray, offset: ULong, size: ULong): Long
+    fun write(device: Device, buffer: ByteArray, offset: ULong, size: ULong): Long
 }
 
 class Device(
-    val name: String, val type: Int, val subType: Int, val dev: ULong, val parent: ULong,
-    val handle: Any, val backend: DeviceBackend
-)
+    val name: String,
+    val type: Int,
+    val subType: Int,
+    val dev: ULong,
+    val parent: ULong,
+    val handle: Any,
+    val backend: DeviceBackend,
+) {
+    fun write(buffer: ByteArray, offset: ULong, count: ULong): Long =
+        backend.write(this, buffer, offset, count)
+
+    fun read(buffer: ByteArray, offset: ULong, count: ULong): Long =
+        backend.read(this, buffer, offset, count)
+}
 
 object DeviceManager {
-    val devices = mutableListOf<Device>()
+    private const val MAX_MINOR = 0xffuL
 
-    val deviceIdx = ULongArray(227)
+    private val devices = mutableListOf<Device>()
+    private val deviceIdx = ULongArray(227)
+    private val deviceLock = IrqSpinLock()
 
-    val deviceLock = IrqSpinLock()
-
-    fun deviceMinorInUse(subtype: Int, minor: ULong): Boolean {
-        for (dev in devices) {
-            if (dev.type == DEV_NULL || dev.subType != subtype) continue
-            if ((dev.dev and 255u) == minor) {
-                return true
-            }
+    private fun deviceMinorInUseLocked(subtype: Int, minor: ULong): Boolean =
+        devices.any { device ->
+            device.type != DEV_NULL &&
+                device.subType == subtype &&
+                (device.dev and MAX_MINOR) == minor
         }
-        return false
-    }
 
     private fun installDeviceInternal(
         type: Int,
@@ -56,38 +63,31 @@ object DeviceManager {
         name: String,
         parent: ULong,
         fixedMinor: ULong?,
-        backend: DeviceBackend
-    ): ULong {
-        deviceLock.withLock({
-            var devMinor: ULong
+        backend: DeviceBackend,
+    ): ULong = deviceLock.withLock {
+        if (subtype !in deviceIdx.indices ||
+            name.isEmpty() ||
+            name.any { it == '/' || it == '\u0000' } ||
+            devices.any { it.name == name }
+        ) {
+            return@withLock 0uL
+        }
 
-            if (fixedMinor != null) {
-                if (deviceMinorInUse(subtype, fixedMinor)) {
-                    return 0u
-                }
-                devMinor = fixedMinor
+        val minor = fixedMinor ?: deviceIdx[subtype]
+        if (minor > MAX_MINOR || deviceMinorInUseLocked(subtype, minor)) {
+            return@withLock 0uL
+        }
+        deviceIdx[subtype] = minor + 1uL
 
-                if (deviceIdx[subtype] <= devMinor) {
-                    deviceIdx[subtype] = devMinor + 1u
-                }
-            } else {
-                devMinor = deviceIdx[subtype]++
-            }
-
-            val device = Device(
-                name,
-                type,
-                subtype,
-                ((subtype.toULong() shl 8) or devMinor),
-                parent,
-                handle,
-                backend
-            )
-            devices += device
-
-            println("DEV: install ${device.name}")
-            return device.dev
-        })
+        Device(
+            name = name,
+            type = type,
+            subType = subtype,
+            dev = (subtype.toULong() shl 8) or minor,
+            parent = parent,
+            handle = handle,
+            backend = backend,
+        ).also(devices::add).dev
     }
 
     fun installDevice(
@@ -96,10 +96,8 @@ object DeviceManager {
         handle: Any,
         name: String,
         parent: ULong,
-        backend: DeviceBackend
-    ): ULong {
-        return installDeviceInternal(type, subtype, handle, name, parent, null, backend)
-    }
+        backend: DeviceBackend,
+    ): ULong = installDeviceInternal(type, subtype, handle, name, parent, null, backend)
 
     fun installDeviceMinor(
         type: Int,
@@ -108,35 +106,26 @@ object DeviceManager {
         name: String,
         parent: ULong,
         backend: DeviceBackend,
-        fixedMinor: ULong
-    ): ULong {
-        return installDeviceInternal(type,subtype,handle,name,parent,fixedMinor,backend)
-    }
+        fixedMinor: ULong,
+    ): ULong = installDeviceInternal(type, subtype, handle, name, parent, fixedMinor, backend)
 
-    fun findDevice(subType: Int,index: ULong) : Device? {
-        var nr = 0UL
-        for (device in devices) {
-            if(device.subType != subType) continue
-            if(index == nr) return device
-            nr++
+    fun findDevice(subType: Int, index: ULong): Device? = deviceLock.withLock {
+        var current = 0uL
+        devices.firstOrNull { device ->
+            if (device.subType != subType) {
+                false
+            } else {
+                current++ == index
+            }
         }
-        return null
     }
 
-    fun getDevice(dev: ULong) : Device? {
-        for (device in devices) {
-            if (device.dev == dev) return device
-        }
-        return null
-    }
+    fun getDevice(dev: ULong): Device? =
+        deviceLock.withLock { devices.firstOrNull { it.dev == dev } }
 
-    fun write(dev: ULong, buf: ByteArray, offset: ULong, count: ULong) : ULong {
-        val device = getDevice(dev) ?: return (-Errno.ENODEV).toULong()
-        return device.backend.write(device, buf, offset, count)
-    }
+    fun findDeviceByName(name: String): Device? =
+        deviceLock.withLock { devices.firstOrNull { it.name == name } }
 
-    fun read(dev: ULong, buf: ByteArray, offset: ULong, count: ULong) : ULong {
-        val device = getDevice(dev) ?: return (-Errno.ENODEV).toULong()
-        return device.backend.read(device, buf, offset, count)
-    }
+    fun snapshotDevices(): List<Device> =
+        deviceLock.withLock { devices.toList() }
 }

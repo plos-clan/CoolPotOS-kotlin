@@ -45,4 +45,6 @@ void do_irq(void *regs, uint64_t irq_num);
 bool capture_sys_clone_context(uint64_t stack, uint64_t tls);
 void set_kernel_runtime_fs_base(uint64_t pointer);
 void serial_print(const char *buffer, size_t size);
+bool runtime_vm_add_region(void *base, size_t size);
+void runtime_clock_configure_hpet(void *base, uint64_t period_femtoseconds);
 void wrmsr(uint32_t msr, uint64_t value);

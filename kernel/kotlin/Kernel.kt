@@ -3,18 +3,25 @@ import bridge.get_kernel_clone_thread_entry_address
 import bridge.get_sys_clone_recorded_count
 import bridge.get_sys_clone_stack_at
 import bridge.get_sys_clone_tls_at
-import org.plos_clan.cpos.drivers.DEV_TTY
-import org.plos_clan.cpos.drivers.DeviceManager
 import org.plos_clan.cpos.drivers.FrameBuffer
 import org.plos_clan.cpos.drivers.acpi.Acpi
 import org.plos_clan.cpos.drivers.char.TtyManager
+import org.plos_clan.cpos.fs.AccessMode
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.KernelPageDirectory
+import org.plos_clan.cpos.mem.RuntimeMemory
 import org.plos_clan.cpos.fault.ErrorHandler
+import org.plos_clan.cpos.fs.FileSystemManager
+import org.plos_clan.cpos.fs.Initrd
+import org.plos_clan.cpos.fs.OpenOptions
+import org.plos_clan.cpos.fs.VfsPathname
+import org.plos_clan.cpos.fs.VfsResult
+import org.plos_clan.cpos.module.ModuleManager
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.Scheduler
+import org.plos_clan.cpos.utils.Cmdline
 import org.plos_clan.cpos.utils.hex
 import kotlin.experimental.ExperimentalNativeApi
 
@@ -36,6 +43,9 @@ fun kernelMain() {
     Hhdm.initialize()
     BuddyFrameAllocator.initialize()
     KernelPageDirectory.initialize()
+    if (!RuntimeMemory.initialize()) {
+        return
+    }
     if (!Acpi.initialize()) {
         return
     }
@@ -43,20 +53,18 @@ fun kernelMain() {
     Scheduler.initialize()
     ProcessManager.initialize()
     startCapturedCloneThreads()
+    Cmdline.initialize()
+    if (!FileSystemManager.initialize()) {
+        return
+    }
     FrameBuffer.initialize()
     TtyManager.initialize()
     Acpi.enumerateDevices()
+    ModuleManager.initialize()
+    Initrd.initialize()
     println("Kernel load done!")
     Scheduler.enableScheduler()
     bridge.enable_interrupt()
-
-    val device = DeviceManager.findDevice(DEV_TTY, 0u) ?: run {
-        return
-    }
-    val text = "Hello CoolPotOS Kotlin Edition!".encodeToByteArray()
-    DeviceManager.write(device.dev, text, 0u, text.size.toULong())
-
-
 
     while (true) bridge.wait_for_interrupt()
 }

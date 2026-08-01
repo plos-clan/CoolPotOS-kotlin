@@ -5,14 +5,13 @@ package org.plos_clan.cpos.tasks
 import bridge.get_kernel_idle_entry_address
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
-import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.mem.PageDirectory
+import org.plos_clan.cpos.mem.VMA
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PtraceRegisters
 import org.plos_clan.cpos.utils.alignDown
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
-import kotlin.test.todo
 
 private const val DEFAULT_THREAD_STACK_PAGES = 8uL
 private const val KERNEL_CODE_SELECTOR = 0x08uL
@@ -73,13 +72,11 @@ class Thread(
     }
 }
 
-class Process(val id: Int, val name: String, clone: Boolean) {
+class Process(val id: Int, val name: String, clone: PageDirectory?) {
     val threads = mutableListOf<Thread>()
     var state: TaskState = TaskState.READY
 
-    var pageDirectory: PageDirectory =
-        if (clone) KernelPageDirectory.getDirectory().cloneDirectory()
-        else KernelPageDirectory.getDirectory()
+    val vma = VMA(this, clone)
 
     fun addThread(thread: Thread) {
         threads += thread
@@ -89,7 +86,6 @@ class Process(val id: Int, val name: String, clone: Boolean) {
 object ProcessManager {
     private var nextThreadId = AtomicInt(0)
     private var nextProcessId = AtomicInt(0)
-    private val threads = mutableListOf<Thread>()
     private val process = mutableListOf<Process>()
     private var bootstrapThread: Thread? = null
 
@@ -104,7 +100,7 @@ object ProcessManager {
             thread.state = TaskState.RUNNING
         }
 
-        kernelProcess = newProcess("{system}", false).also { process ->
+        kernelProcess = newProcess("{system}").also { process ->
             process.state = TaskState.RUNNING
         }
         kernelProcess?.addThread(bootstrapThread!!)
@@ -114,7 +110,7 @@ object ProcessManager {
             entryPoint = idleThreadEntryPoint,
         )
 
-        println("ProcessManager initialized threads=${threads.size}")
+        println("ProcessManager initialized.")
     }
 
     fun createThreadFromContext(
@@ -122,7 +118,7 @@ object ProcessManager {
         stackPointer: ULong,
         fsBase: ULong = 0uL,
     ): Thread? {
-        if (threads.isEmpty() || entryPoint == 0uL || stackPointer == 0uL) {
+        if (entryPoint == 0uL || stackPointer == 0uL) {
             return null
         }
 
@@ -136,8 +132,6 @@ object ProcessManager {
     fun getNewApIdleThread(): Thread = newThread().also { thread ->
         thread.state = TaskState.READY
     }
-
-    fun allThreads(): List<Thread> = threads
 
     private fun createKernelThread(
         name: String,
@@ -169,9 +163,9 @@ object ProcessManager {
         }
     }
 
-    private fun newProcess(name: String,clone: Boolean): Process =
-        Process(nextProcessId.fetchAndAdd(1), name, clone).also { process += it }
+    private fun newProcess(name: String): Process =
+        Process(nextProcessId.fetchAndAdd(1), name, null).also { process += it }
 
     private fun newThread(): Thread =
-        Thread(nextThreadId.fetchAndAdd(1)).also { threads += it }
+        Thread(nextThreadId.fetchAndAdd(1))
 }

@@ -14,6 +14,8 @@ extern volatile struct limine_memmap_request memmap_request;
 extern volatile struct limine_mp_request mp_request;
 extern volatile struct limine_rsdp_request rsdp_request;
 extern volatile struct limine_executable_file_request executable_file_request;
+extern volatile struct limine_module_request module_request;
+extern volatile struct limine_executable_cmdline_request cmdline_request;
 
 void gdt_setup(void);
 void idt_setup(void);
@@ -35,6 +37,8 @@ uint64_t get_kernel_idle_entry_address(void);
 uint64_t get_kernel_clone_thread_entry_address(void);
 void wait_for_interrupt(void);
 void asm_pause(void);
+bool runtime_vm_add_region(void *base, size_t size);
+void runtime_clock_configure_hpet(void *base, uint64_t period_femtoseconds);
 extern void (*ap_start_ptr)(struct limine_mp_info *);
 void *__rtld_allocateTcb(void);
 

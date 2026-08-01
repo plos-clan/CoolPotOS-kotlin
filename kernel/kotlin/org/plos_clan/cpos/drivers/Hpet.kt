@@ -2,8 +2,10 @@
 
 package org.plos_clan.cpos.drivers
 
+import bridge.runtime_clock_configure_hpet
 import kotlinx.cinterop.UIntVar
 import kotlinx.cinterop.ULongVar
+import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set
 import org.plos_clan.cpos.mem.KernelPageDirectory
@@ -63,6 +65,7 @@ object Hpet {
 
         val oldGeneralConfig = read64(GENERAL_CONFIGURATION_OFFSET)
         write64(GENERAL_CONFIGURATION_OFFSET, oldGeneralConfig or 1uL)
+        runtime_clock_configure_hpet(mappedBase.toPointer<UByteVar>(), fmsPerTick)
 
         val oldTimerConfig = read64(TIMER0_CONFIGURATION_OFFSET)
         val routeCapabilities = oldTimerConfig shr 32

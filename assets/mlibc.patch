@@ -36,7 +36,7 @@ new file mode 100644
 index 00000000..142a1aa6
 --- /dev/null
 +++ b/sysdeps/template/generic/generic.cpp
-@@ -0,0 +1,898 @@
+@@ -0,0 +1,906 @@
 +#include <bits/ensure.h>
 +#include <errno.h>
 +#include <fcntl.h>
@@ -83,6 +83,14 @@ index 00000000..142a1aa6
 +void sys_thread_exit() {
 +	::syscall(SYS_exit, 0);
 +	__builtin_unreachable();
++}
++
++int sys_thread_setname(void *, const char *) {
++	return ENOSYS;
++}
++
++void sys_yield() {
++	::syscall(SYS_sched_yield);
 +}
 +
 +int sys_clone(void *tcb, pid_t *pid_out, void *stack) {
@@ -1420,7 +1428,7 @@ new file mode 100644
 index 00000000..9dadd929
 --- /dev/null
 +++ b/sysdeps/template/include/sys/syscall.h
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,105 @@
 +#ifndef _SYS_SYSCALL_H
 +#define _SYS_SYSCALL_H
 +
@@ -1445,6 +1453,7 @@ index 00000000..9dadd929
 +#define SYS_rt_sigprocmask 14
 +#define SYS_ioctl 16
 +#define SYS_pipe 22
++#define SYS_sched_yield 24
 +#define SYS_dup 32
 +#define SYS_dup2 33
 +#define SYS_nanosleep 35

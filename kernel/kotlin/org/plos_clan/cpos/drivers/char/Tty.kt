@@ -7,6 +7,7 @@ import org.plos_clan.cpos.drivers.DeviceBackend
 import org.plos_clan.cpos.drivers.DeviceManager
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.utils.Cmdline
 import org.plos_clan.cpos.utils.TermiosConstants
 import org.plos_clan.cpos.utils.VTModeConstants
 
@@ -79,32 +80,26 @@ class TtySession(
 ) : DeviceBackend {
     override fun ioctl(
         device: Device,
+        command: Int,
         args: UserMemory
-    ): ULong {
-        TODO("Not yet implemented")
-    }
+    ): Long = backend.ioctl(this, command, args).toLong()
 
-    override fun poll(device: Device, events: Int): ULong {
-        TODO("Not yet implemented")
-    }
+    override fun poll(device: Device, events: Int): Long =
+        backend.poll(this, events).toLong()
 
     override fun read(
         device: Device,
-        buf: ByteArray,
+        buffer: ByteArray,
         offset: ULong,
         size: ULong
-    ): ULong {
-        TODO("Not yet implemented")
-    }
+    ): Long = backend.read(this, buffer, size).toLong()
 
     override fun write(
         device: Device,
-        buf: ByteArray,
+        buffer: ByteArray,
         offset: ULong,
         size: ULong
-    ): ULong {
-        return backend.write(this, buf, size)
-    }
+    ): Long = backend.write(this, buffer, size).toLong()
 
 }
 
@@ -165,7 +160,8 @@ object TtyManager {
     }
 
     fun initialize() {
-        val devName = "fb0"
+        val devName = Cmdline["console"] ?: "fb0"
+
         val device = devices.find { it.name == devName } ?: return
         for (index in 0..6) {
             val session =
