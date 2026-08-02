@@ -38,6 +38,36 @@ private enum class PageTableLevel(val shift: Int) {
 
 data class PageDirectory(val pml4PhysicalAddress: ULong) {
 
+    /**
+     * Creates an empty user address space while retaining the shared kernel
+     * half of this directory. User mappings are deliberately not inherited.
+     */
+    fun createUserDirectory(): PageDirectory {
+        val sourcePml4 = pml4Table()
+            ?: error("Paging: source PML4 is unavailable")
+        val allocatedFrames = mutableListOf<ULong>()
+        val userPml4PhysicalAddress = allocateTableFrame(allocatedFrames)
+            ?: error("Paging: failed to allocate user PML4")
+        val userPml4 = userPml4PhysicalAddress.toVirtualPointer<ULongVar>() ?: run {
+            releaseTableFrames(allocatedFrames)
+            error("Paging: user PML4 is unavailable")
+        }
+
+        for (index in KERNEL_PML4_START_INDEX until PTE_COUNT) {
+            val entry = sourcePml4[index]
+            userPml4[index] =
+                if ((entry and PTE_PRESENT) != 0uL &&
+                    (entry and PTE_ADDR_MASK) == (pml4PhysicalAddress and PTE_ADDR_MASK)
+                ) {
+                    replaceEntryAddress(entry, userPml4PhysicalAddress)
+                } else {
+                    entry
+                }
+        }
+
+        return PageDirectory(userPml4PhysicalAddress)
+    }
+
     fun mapPage(virtualAddress: ULong, physicalAddress: ULong, flags: ULong): Boolean {
         if (!virtualAddress.isPageAligned() || !physicalAddress.isPageAligned()) {
             println("Paging: unaligned map request v=${virtualAddress.hex()} p=${physicalAddress.hex()}")
@@ -52,6 +82,76 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
         pt[PageTableLevel.PT.index(virtualAddress)] = (physicalAddress and PTE_ADDR_MASK) or flags or PTE_PRESENT
         invlpg(virtualAddress)
         return true
+    }
+
+    fun mapUserPage(
+        virtualAddress: ULong,
+        physicalAddress: ULong,
+        writable: Boolean,
+        executable: Boolean,
+    ): Boolean {
+        if (virtualAddress >= USER_VIRTUAL_ADDRESS_LIMIT) {
+            println("Paging: user mapping is outside the user half: ${virtualAddress.hex()}")
+            return false
+        }
+        val flags = PTE_USER or
+            (if (writable) PTE_WRITABLE else 0uL) or
+            (if (executable) 0uL else PTE_NO_EXECUTE)
+        return mapPage(virtualAddress, physicalAddress, flags)
+    }
+
+    fun mapUserRange(
+        virtualAddress: ULong,
+        physicalAddress: ULong,
+        byteLength: ULong,
+        writable: Boolean,
+        executable: Boolean,
+    ): Boolean {
+        if (byteLength == 0uL) {
+            return true
+        }
+        if (virtualAddress >= USER_VIRTUAL_ADDRESS_LIMIT ||
+            byteLength > USER_VIRTUAL_ADDRESS_LIMIT - virtualAddress
+        ) {
+            println("Paging: user range exceeds the user half")
+            return false
+        }
+        val flags = PTE_USER or
+            (if (writable) PTE_WRITABLE else 0uL) or
+            (if (executable) 0uL else PTE_NO_EXECUTE)
+        return mapRange(virtualAddress, physicalAddress, byteLength, flags)
+    }
+
+    fun unmapPage(virtualAddress: ULong): ULong? {
+        if (!virtualAddress.isPageAligned()) {
+            return null
+        }
+
+        val pml4 = pml4Table() ?: return null
+        val pml4Entry = pml4[PageTableLevel.PML4.index(virtualAddress)]
+        if ((pml4Entry and PTE_PRESENT) == 0uL || (pml4Entry and PTE_HUGE) != 0uL) {
+            return null
+        }
+        val pdpt = (pml4Entry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return null
+        val pdptEntry = pdpt[PageTableLevel.PDPT.index(virtualAddress)]
+        if ((pdptEntry and PTE_PRESENT) == 0uL || (pdptEntry and PTE_HUGE) != 0uL) {
+            return null
+        }
+        val pd = (pdptEntry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return null
+        val pdEntry = pd[PageTableLevel.PD.index(virtualAddress)]
+        if ((pdEntry and PTE_PRESENT) == 0uL || (pdEntry and PTE_HUGE) != 0uL) {
+            return null
+        }
+        val pt = (pdEntry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return null
+        val index = PageTableLevel.PT.index(virtualAddress)
+        val entry = pt[index]
+        if ((entry and PTE_PRESENT) == 0uL) {
+            return null
+        }
+
+        pt[index] = 0uL
+        invlpg(virtualAddress)
+        return entry and PTE_ADDR_MASK
     }
 
     fun mapRange(

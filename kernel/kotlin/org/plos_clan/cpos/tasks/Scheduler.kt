@@ -143,6 +143,7 @@ object Scheduler {
         localScheduler.currentThread =
             bootstrapThread?.also { thread ->
                 thread.state = TaskState.RUNNING
+                installThreadArchitecture(thread, null)
             }
         localScheduler.initialized = true
         localScheduler.scheduled.store(true)
@@ -191,7 +192,23 @@ object Scheduler {
     }
 
     private fun switchTo(scheduler: PerCpuScheduler, thread: Thread) {
+        val previous = scheduler.currentThread
+        installThreadArchitecture(thread, previous)
         scheduler.currentThread = thread
         thread.state = TaskState.RUNNING
+    }
+
+    private fun installThreadArchitecture(thread: Thread, previous: Thread?) {
+        val nextDirectory = thread.process.vma.pageDirectory
+        if (previous == null ||
+            previous.process.vma.pageDirectory.pml4PhysicalAddress !=
+            nextDirectory.pml4PhysicalAddress
+        ) {
+            nextDirectory.activate()
+        }
+
+        if (thread.kernelStackTop != 0uL) {
+            SMProcessor.setKernelStack(thread.kernelStackTop)
+        }
     }
 }

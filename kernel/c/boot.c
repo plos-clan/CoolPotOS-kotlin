@@ -82,10 +82,12 @@ void setup_simd(void) {
     uint64_t cr0, cr4;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-    cr0 = (cr0 & ~((1u << 2) | (1u << 3))) | (1u << 1) | (1u << 5);
+    cr0 = (cr0 & ~((1u << 2) | (1u << 3))) |
+        (1u << 1) | (1u << 5) | (1u << 16);
     cr4 |= (1u << 9) | (1u << 10);
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
     __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+    wrmsr(0xc0000080u, rdmsr(0xc0000080u) | (1ULL << 11));
     __asm__ volatile("fninit; ldmxcsr %0" : : "m"(default_mxcsr));
 }
 
