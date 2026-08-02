@@ -35,12 +35,15 @@ uint64_t get_sys_clone_stack_at(uint64_t index);
 uint64_t get_sys_clone_tls_at(uint64_t index);
 uint64_t get_kernel_idle_entry_address(void);
 uint64_t get_kernel_clone_thread_entry_address(void);
+uint64_t get_asm_syscall_handle_address(void);
+void setup_syscall_cpu(uint64_t lapic_id, uint8_t is_bsp);
 void wait_for_interrupt(void);
 void asm_pause(void);
 bool runtime_vm_add_region(void *base, size_t size);
 void runtime_clock_configure_hpet(void *base, uint64_t period_femtoseconds);
 extern void (*ap_start_ptr)(struct limine_mp_info *);
 void *__rtld_allocateTcb(void);
+void asm_syscall_handle(void);
 
 void *malloc(size_t size);
 void free(void *ptr);

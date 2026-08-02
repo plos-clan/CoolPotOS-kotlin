@@ -6,10 +6,13 @@
 
 enum {
     cpu_slot_count = 256,
-    ia32_fs_base_msr = 0xc0000100u
+    ia32_fs_base_msr = 0xc0000100u,
+    ia32_kernel_gs_base_msr = 0xc0000102u,
+    syscall_stack_size = 32 * 1024
 };
 typedef uint64_t gdt_entries_t[7];
 typedef uint8_t tss_stack_t[4096];
+typedef uint8_t syscall_stack_t[syscall_stack_size];
 
 typedef struct {
     uint16_t size;
@@ -28,10 +31,52 @@ typedef struct {
 } __attribute__((packed)) tss_t;
 _Static_assert(sizeof(tss_t) == 104, "invalid TSS layout");
 
+typedef struct pt_regs {
+    uint64_t r15;
+    uint64_t r14;
+    uint64_t r13;
+    uint64_t r12;
+    uint64_t r11;
+    uint64_t r10;
+    uint64_t r9;
+    uint64_t r8;
+    uint64_t rbx;
+    uint64_t rcx;
+    uint64_t rdx;
+    uint64_t rsi;
+    uint64_t rdi;
+    uint64_t rbp;
+    uint64_t ds;
+    uint64_t es;
+    uint64_t fs_base;
+    uint64_t rax;
+    uint64_t func;
+    uint64_t errcode;
+    uint64_t rip;
+    uint64_t cs;
+    uint64_t rflags;
+    uint64_t rsp;
+    uint64_t ss;
+} __attribute__((packed)) pt_regs_t;
+_Static_assert(sizeof(pt_regs_t) == 200, "invalid register frame layout");
+
+typedef struct syscall_cpu_state {
+    uint64_t kernel_rsp;
+    uint64_t user_rsp;
+    uint64_t user_rax;
+    uint64_t kernel_fs_base;
+} syscall_cpu_state_t;
+_Static_assert(offsetof(syscall_cpu_state_t, kernel_rsp) == 0, "invalid syscall kernel RSP offset");
+_Static_assert(offsetof(syscall_cpu_state_t, user_rsp) == 8, "invalid syscall user RSP offset");
+_Static_assert(offsetof(syscall_cpu_state_t, user_rax) == 16, "invalid syscall RAX offset");
+_Static_assert(offsetof(syscall_cpu_state_t, kernel_fs_base) == 24, "invalid syscall FS offset");
+
 typedef struct cpu_local {
     gdt_entries_t gdt_entries;
     tss_t tss0;
     tss_stack_t tss_stack __attribute__((aligned(16)));
+    syscall_cpu_state_t syscall;
+    syscall_stack_t syscall_stack __attribute__((aligned(16)));
 } cpu_local_t;
 
 extern cpu_local_t locals[cpu_slot_count];

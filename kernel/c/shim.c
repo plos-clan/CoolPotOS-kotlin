@@ -194,3 +194,131 @@ void serial_print(const char *buffer, size_t size) {
         serial_write_byte((uint8_t)buffer[i]);
     }
 }
+
+void setup_syscall_cpu(uint64_t lapic_id, uint8_t is_bsp) {
+    cpu_local_t *local = &locals[lapic_id % cpu_slot_count];
+    syscall_cpu_state_t *state = &local->syscall;
+    const uintptr_t stack_top =
+        ((uintptr_t)local->syscall_stack + sizeof(local->syscall_stack)) & ~0xfULL;
+
+    state->kernel_rsp = stack_top;
+    state->user_rsp = 0;
+    state->user_rax = 0;
+    state->kernel_fs_base = rdmsr(ia32_fs_base_msr);
+
+    set_kernel_stack(lapic_id, stack_top, is_bsp);
+    wrmsr(ia32_kernel_gs_base_msr, (uintptr_t)state);
+}
+
+uint64_t get_asm_syscall_handle_address(void) {
+    return (uintptr_t)&asm_syscall_handle;
+}
+
+__attribute__((naked, used)) void asm_syscall_handle(void) {
+    __asm__ volatile(
+        "cli\n"
+        "cld\n"
+        "swapgs\n"
+
+        /* SYSCALL does not switch stacks. Save the user values in per-CPU GS
+         * storage before using RAX and RSP as scratch registers. */
+        "movq %rsp, %gs:8\n"
+        "movq %rax, %gs:16\n"
+        "movq %gs:0, %rsp\n"
+
+        /* pt_regs_t is 200 bytes; the extra eight bytes keep the stack
+         * 16-byte aligned at the C ABI call site. */
+        "subq $208, %rsp\n"
+        "movq %r15, 0(%rsp)\n"
+        "movq %r14, 8(%rsp)\n"
+        "movq %r13, 16(%rsp)\n"
+        "movq %r12, 24(%rsp)\n"
+        "movq %r11, 32(%rsp)\n"
+        "movq %r10, 40(%rsp)\n"
+        "movq %r9, 48(%rsp)\n"
+        "movq %r8, 56(%rsp)\n"
+        "movq %rbx, 64(%rsp)\n"
+        "movq %rcx, 72(%rsp)\n"
+        "movq %rdx, 80(%rsp)\n"
+        "movq %rsi, 88(%rsp)\n"
+        "movq %rdi, 96(%rsp)\n"
+        "movq %rbp, 104(%rsp)\n"
+
+        "xorq %rax, %rax\n"
+        "movw %ds, %ax\n"
+        "movq %rax, 112(%rsp)\n"
+        "xorq %rax, %rax\n"
+        "movw %es, %ax\n"
+        "movq %rax, 120(%rsp)\n"
+
+        /* Preserve the user TLS base, then install the Kotlin runtime TLS
+         * base while syscall_handler executes in kernel mode. */
+        "movl $0xc0000100, %ecx\n"
+        "rdmsr\n"
+        "shlq $32, %rdx\n"
+        "orq %rdx, %rax\n"
+        "movq %rax, 128(%rsp)\n"
+        "movq %gs:24, %rax\n"
+        "movq %rax, %rdx\n"
+        "shrq $32, %rdx\n"
+        "movl $0xc0000100, %ecx\n"
+        "wrmsr\n"
+
+        "movq %gs:16, %rax\n"
+        "movq %rax, 136(%rsp)\n"
+        "movq %rax, 144(%rsp)\n"
+        "movq $0, 152(%rsp)\n"
+        "movq 72(%rsp), %rax\n"
+        "movq %rax, 160(%rsp)\n"
+        "movq $0x23, 168(%rsp)\n"
+        "movq 32(%rsp), %rax\n"
+        "movq %rax, 176(%rsp)\n"
+        "movq %gs:8, %rax\n"
+        "movq %rax, 184(%rsp)\n"
+        "movq $0x1b, 192(%rsp)\n"
+
+        "movq %rsp, %rdi\n"
+        "call syscall_handler\n"
+        "movq %rsp, %r13\n"
+
+        /* The handler may change FS_BASE (for example, arch_prctl), so use
+         * the value from the returned frame rather than the entry value. */
+        "movq 128(%r13), %rax\n"
+        "movq %rax, %rdx\n"
+        "shrq $32, %rdx\n"
+        "movl $0xc0000100, %ecx\n"
+        "wrmsr\n"
+
+        /* Always return through the known user descriptors. IRETQ keeps an
+         * invalid-return fault on the controlled kernel stack, unlike SYSRET. */
+        "movl $0x1b, %eax\n"
+        "movw %ax, %ds\n"
+        "movw %ax, %es\n"
+        "pushq $0x1b\n"
+        "pushq 184(%r13)\n"
+        "movq 176(%r13), %rax\n"
+        "andq $-159745, %rax\n"
+        "orq $2, %rax\n"
+        "pushq %rax\n"
+        "pushq $0x23\n"
+        "pushq 160(%r13)\n"
+
+        "movq 0(%r13), %r15\n"
+        "movq 8(%r13), %r14\n"
+        "movq 24(%r13), %r12\n"
+        "movq 32(%r13), %r11\n"
+        "movq 40(%r13), %r10\n"
+        "movq 48(%r13), %r9\n"
+        "movq 56(%r13), %r8\n"
+        "movq 64(%r13), %rbx\n"
+        "movq 72(%r13), %rcx\n"
+        "movq 80(%r13), %rdx\n"
+        "movq 88(%r13), %rsi\n"
+        "movq 96(%r13), %rdi\n"
+        "movq 104(%r13), %rbp\n"
+        "movq 136(%r13), %rax\n"
+        "movq 16(%r13), %r13\n"
+        "swapgs\n"
+        "iretq\n"
+    );
+}

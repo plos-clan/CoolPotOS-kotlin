@@ -8,6 +8,7 @@ import org.plos_clan.cpos.drivers.acpi.apic.LAPIC_TIMER_INTERRUPT_VECTOR
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic.calibrateTimer
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic.configurePeriodicTimer
+import org.plos_clan.cpos.syscall.Syscall
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.concurrent.atomics.incrementAndFetch
@@ -24,6 +25,7 @@ fun apStart() {
     bridge.disable_interrupt()
     val lapicId = LocalApic.destinationApicId
     bridge.ap_gdt_setup(lapicId.toULong())
+    Syscall.initialize(lapicId.toULong(), false)
     LocalApic.enableController()
     val timerInitialCount = calibrateTimer(LAPIC_TIMER_FREQUENCY_HZ)
     if (timerInitialCount != 0uL && LAPIC_TIMER_INTERRUPT_VECTOR <= UByte.MAX_VALUE.toUInt()) {

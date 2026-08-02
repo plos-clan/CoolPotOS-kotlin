@@ -19,6 +19,7 @@ import org.plos_clan.cpos.fs.OpenOptions
 import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsResult
 import org.plos_clan.cpos.module.ModuleManager
+import org.plos_clan.cpos.syscall.Syscall
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.Cmdline
@@ -50,6 +51,9 @@ fun kernelMain() {
         return
     }
     SMProcessor.initialize()
+    SMProcessor.currentLocal().also { local ->
+        Syscall.initialize(local.lapicId.toULong(), local.isBsp)
+    }
     Scheduler.initialize()
     ProcessManager.initialize()
     startCapturedCloneThreads()
