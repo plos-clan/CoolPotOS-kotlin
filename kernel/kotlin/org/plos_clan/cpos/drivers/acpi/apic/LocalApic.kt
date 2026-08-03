@@ -75,6 +75,10 @@ object LocalApic {
             println("APIC: using xAPIC mode (base=${mappedBase.hex()})")
         }
 
+        bridge.fast_handoff_configure_lapic(
+            if (x2ApicMode) 1u.toUByte() else 0u.toUByte(),
+            mmioBaseVirtualAddress,
+        )
         enableController()
         timerInitialCount = calibrateTimer(timerFrequencyHz)
         if (timerInitialCount != 0uL && timerVector <= UByte.MAX_VALUE.toUInt()) {

@@ -9,17 +9,11 @@ import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.mem.PageDirectory
 import org.plos_clan.cpos.mem.VMA
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
-import org.plos_clan.cpos.utils.PtraceRegisters
 import org.plos_clan.cpos.utils.alignDown
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 private const val DEFAULT_THREAD_STACK_PAGES = 8uL
-private const val KERNEL_CODE_SELECTOR = 0x08uL
-private const val KERNEL_DATA_SELECTOR = 0x10uL
-private const val USER_CODE_SELECTOR = 0x23uL
-private const val USER_DATA_SELECTOR = 0x1buL
-private const val DEFAULT_THREAD_RFLAGS = 0x202uL
 
 private val idleThreadEntryPoint: ULong by lazy(LazyThreadSafetyMode.NONE) {
     get_kernel_idle_entry_address()
@@ -38,13 +32,29 @@ class Thread(
     val kernelStackTop: ULong = 0uL,
     val kernelStackPhysicalBase: ULong = 0uL,
     val kernelStackPages: ULong = 0uL,
-    private val context: ULongArray = ULongArray(PtraceRegisters.REGISTER_COUNT),
-    private val fpuContext: ByteArray = initialFpuContext(),
 ) {
-    var state: TaskState = TaskState.READY
-    var isQueued: Boolean = false
-    var hasSavedContext: Boolean = false
-        private set
+    val nativeContext: ULong = bridge.fast_handoff_create_task(
+        id.toULong(),
+        process.vma.pageDirectory.pml4PhysicalAddress,
+        kernelStackTop,
+    ).also { handle ->
+        require(handle != 0uL) { "Cannot allocate native context for thread $id" }
+    }
+
+    var state: TaskState
+        get() = TaskState.entries.getOrElse(
+            bridge.fast_handoff_task_state(nativeContext).toInt(),
+        ) { TaskState.ZOMBIE }
+        set(value) = bridge.fast_handoff_set_task_state(
+            nativeContext,
+            value.ordinal.toUByte(),
+        )
+
+    val isQueued: Boolean
+        get() = bridge.fast_handoff_task_is_queued(nativeContext) != 0u.toUByte()
+
+    val hasSavedContext: Boolean
+        get() = bridge.fast_handoff_task_has_context(nativeContext) != 0u.toUByte()
 
     fun initializeContext(
         entryPoint: ULong,
@@ -52,21 +62,13 @@ class Thread(
         argument: ULong = 0uL,
         fsBase: ULong = 0uL,
     ) {
-        context.apply {
-            fill(0uL)
-            this[PtraceRegisters.IDX_RIP] = entryPoint
-            this[PtraceRegisters.IDX_RSP] = stackTop
-            this[PtraceRegisters.IDX_RBP] = stackTop
-            this[PtraceRegisters.IDX_RFLAGS] = DEFAULT_THREAD_RFLAGS
-            this[PtraceRegisters.IDX_CS] = KERNEL_CODE_SELECTOR
-            this[PtraceRegisters.IDX_SS] = KERNEL_DATA_SELECTOR
-            this[PtraceRegisters.IDX_DS] = KERNEL_DATA_SELECTOR
-            this[PtraceRegisters.IDX_ES] = KERNEL_DATA_SELECTOR
-            this[PtraceRegisters.IDX_FS_BASE] = fsBase
-            this[PtraceRegisters.IDX_RDI] = argument
-        }
-        hasSavedContext = true
-        state = TaskState.READY
+        bridge.fast_handoff_init_kernel(
+            nativeContext,
+            entryPoint,
+            stackTop,
+            argument,
+            fsBase,
+        )
     }
 
     fun initializeUserContext(
@@ -75,34 +77,12 @@ class Thread(
         fsBase: ULong = 0uL,
     ) {
         require(!process.isKernelProcess) { "Kernel process cannot own a user context" }
-        context.apply {
-            fill(0uL)
-            this[PtraceRegisters.IDX_RIP] = entryPoint
-            this[PtraceRegisters.IDX_RSP] = stackPointer
-            this[PtraceRegisters.IDX_RBP] = 0uL
-            this[PtraceRegisters.IDX_RFLAGS] = DEFAULT_THREAD_RFLAGS
-            this[PtraceRegisters.IDX_CS] = USER_CODE_SELECTOR
-            this[PtraceRegisters.IDX_SS] = USER_DATA_SELECTOR
-            this[PtraceRegisters.IDX_DS] = USER_DATA_SELECTOR
-            this[PtraceRegisters.IDX_ES] = USER_DATA_SELECTOR
-            this[PtraceRegisters.IDX_FS_BASE] = fsBase
-        }
-        hasSavedContext = true
-        state = TaskState.READY
-    }
-
-    fun saveFrom(registers: PtraceRegisters) {
-        registers.copyInto(context)
-        registers.copyFpuInto(fpuContext)
-        hasSavedContext = true
-    }
-
-    fun restoreTo(registers: PtraceRegisters): Boolean {
-        if (hasSavedContext) {
-            registers.restoreFrom(context)
-            registers.restoreFpuFrom(fpuContext)
-        }
-        return hasSavedContext
+        bridge.fast_handoff_init_user(
+            nativeContext,
+            entryPoint,
+            stackPointer,
+            fsBase,
+        )
     }
 }
 
@@ -283,11 +263,3 @@ private data class KernelStack(
     val pages: ULong,
     val top: ULong,
 )
-
-private fun initialFpuContext(): ByteArray =
-    ByteArray(PtraceRegisters.FPU_STATE_SIZE).apply {
-        this[0] = 0x7f
-        this[1] = 0x03
-        this[24] = 0x80.toByte()
-        this[25] = 0x1f
-    }

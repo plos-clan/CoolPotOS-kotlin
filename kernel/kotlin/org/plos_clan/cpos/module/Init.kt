@@ -63,6 +63,8 @@ object Init {
         val rdinit = Cmdline["rdinit"] ?: "/init"
         val process = ProcessManager.createUserProcess(rdinit)
         val entry: ElfLoadResult
+        val imageInfo: ElfImageInfo
+        val executableData: ByteArray
 
         when (val result = readFile("/bin/sh")) {
             is VfsResult.Ok -> {
@@ -76,7 +78,11 @@ object Init {
                     println("Cannot load ELF")
                     return
                 }
-
+                imageInfo = ElfLoader.inspect(result.value) ?: run {
+                    println("Init: $rdinit is not a valid ELF64 image")
+                    return
+                }
+                executableData = result.value
                 entry = loaded
             }
 
@@ -86,7 +92,23 @@ object Init {
             }
         }
 
-        val rip = entry.entryPoint
+        var rip = entry.entryPoint
+
+        val interpreter = if (entry.requiresInterpreter) {
+            val executableBias =
+                if (imageInfo.isPositionIndependent) DEFAULT_INTERPRETER_LOAD_BIAS else 0uL
+            val executable = ElfLoader.loadInterpreterElf(
+                executableData,
+                directory = process.vma.pageDirectory,
+                offset = executableBias,
+                process = process,
+            ) ?: run {
+                println("Init: cannot load executable $rdinit")
+                return
+            }
+            rip = executable.entryPoint
+            executable
+        } else null
 
         val rsp = UserStackBuilder.build(
             process, arguments = listOf(rdinit),
@@ -97,7 +119,8 @@ object Init {
                 "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
             ),
             rdinit,
-            entry
+            executable = entry,
+            interpreter,
         ) ?: run {
             println("error: cannot build user stack.")
             return
@@ -113,8 +136,7 @@ object Init {
         }
 
         println(
-            "Init: created process=${process.id} thread=${thread.id} " +
-                    "rip=$rip rsp=$rsp"
+            "Init: created process=${process.id} thread=${thread.id} rip=0x${rip.toString(16)}"
         )
     }
 }

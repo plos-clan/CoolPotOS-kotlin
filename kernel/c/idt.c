@@ -163,25 +163,8 @@ static __attribute__((naked, used)) void irq_common_entry(void) {
         "movq %rsp, %r13\n"
         "movq %rsp, %rdi\n"
         "movq (%rdx), %rsi\n"
-        "movl $1, %eax\n"
-        "xorl %ecx, %ecx\n"
-        "cpuid\n"
-        "shrl $24, %ebx\n"
-        "leaq kernel_runtime_fs_bases(%rip), %rax\n"
-        "movq (%rax,%rbx,8), %rax\n"
-        "testq %rax, %rax\n"
-        "jnz 1f\n"
-        "movq kernel_runtime_fs_base(%rip), %rax\n"
-        "1:\n"
-        "testq %rax, %rax\n"
-        "jz 2f\n"
-        "movq %rax, %rdx\n"
-        "shrq $32, %rdx\n"
-        "movl $0xc0000100, %ecx\n"
-        "wrmsr\n"
-        "2:\n"
         "andq $-16, %rsp\n"
-        "call do_irq\n"
+        "call fast_handoff_irq\n"
         "movq %r13, %rsp\n"
         "fxrstor64 208(%r13)\n"
         "movq 128(%r13), %rax\n"
@@ -252,7 +235,8 @@ void idt_setup(void) {
     for (uint16_t vector = irq_vector_base; vector < idt_vector_count; vector++) {
         const uint16_t irq_index = (uint16_t)(vector - irq_vector_base);
         uint8_t *stub = irq_stub_base + ((uint64_t)irq_index * irq_stub_size);
-        set_idt_gate(vector, stub, 0, 0x8e);
+        /* Keep asynchronous IRQ frames off the interrupted code's red zone. */
+        set_idt_gate(vector, stub, 2, 0x8e);
     }
     idt_load();
 }

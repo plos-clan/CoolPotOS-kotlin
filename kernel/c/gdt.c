@@ -4,12 +4,18 @@
 static gdt_entries_t gdt_entries;
 static tss_t tss0;
 static tss_stack_t tss_stack __attribute__((aligned(16)));
+static irq_stack_t irq_stack __attribute__((aligned(16)));
 static const uint64_t gdt_template[] = {
     0, 0x00a09a0000000000, 0x00c0920000000000,
     0x00c0f20000000000, 0x00a0fa0000000000
 };
 
-static void setup_gdt(gdt_entries_t entries, tss_t *tss, tss_stack_t stack) {
+static void setup_gdt(
+    gdt_entries_t entries,
+    tss_t *tss,
+    tss_stack_t exception_stack,
+    irq_stack_t interrupt_stack
+) {
     for (size_t i = 0; i < sizeof(gdt_template) / sizeof(*gdt_template); i++)
         entries[i] = gdt_template[i];
 
@@ -19,7 +25,10 @@ static void setup_gdt(gdt_entries_t entries, tss_t *tss, tss_stack_t stack) {
         | ((uint64_t)0x89U << 40U)
         | (sizeof(*tss) - 1U);
     entries[6] = address >> 32U;
-    tss->ist[0] = ((uint64_t)stack + sizeof(tss_stack_t)) & ~0xfULL;
+    tss->ist[0] =
+        ((uint64_t)exception_stack + sizeof(tss_stack_t)) & ~0xfULL;
+    tss->ist[1] =
+        ((uint64_t)interrupt_stack + sizeof(irq_stack_t)) & ~0xfULL;
     tss->io_map_base = sizeof(*tss);
 
     const descriptor_table_register_t pointer = {
@@ -46,11 +55,16 @@ static void setup_gdt(gdt_entries_t entries, tss_t *tss, tss_stack_t stack) {
 
 void ap_gdt_setup(uint64_t lapic_id) {
     cpu_local_t *local = &locals[lapic_id % cpu_slot_count];
-    setup_gdt(local->gdt_entries, &local->tss0, local->tss_stack);
+    setup_gdt(
+        local->gdt_entries,
+        &local->tss0,
+        local->tss_stack,
+        local->irq_stack
+    );
 }
 
 void gdt_setup(void) {
-    setup_gdt(gdt_entries, &tss0, tss_stack);
+    setup_gdt(gdt_entries, &tss0, tss_stack, irq_stack);
 }
 
 void set_kernel_stack(uint64_t lapic_id, uint64_t rsp, uint8_t is_bsp) {

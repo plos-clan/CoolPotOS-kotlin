@@ -39,6 +39,33 @@ uint64_t get_asm_syscall_handle_address(void);
 void setup_syscall_cpu(uint64_t lapic_id, uint8_t is_bsp);
 void wait_for_interrupt(void);
 void asm_pause(void);
+void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base);
+uint64_t fast_handoff_create_task(uint64_t id, uint64_t cr3, uint64_t kernel_rsp);
+void fast_handoff_init_kernel(
+    uint64_t task,
+    uint64_t entry,
+    uint64_t rsp,
+    uint64_t argument,
+    uint64_t fs_base
+);
+void fast_handoff_init_user(
+    uint64_t task,
+    uint64_t entry,
+    uint64_t rsp,
+    uint64_t fs_base
+);
+bool fast_handoff_bind_current(
+    uint64_t task,
+    uint64_t lapic_id,
+    uint8_t is_bsp
+);
+bool fast_handoff_enqueue(uint64_t task, uint64_t lapic_id);
+void fast_handoff_set_enabled(uint8_t enabled);
+uint64_t fast_handoff_queue_size(uint64_t lapic_id);
+uint8_t fast_handoff_task_state(uint64_t task);
+void fast_handoff_set_task_state(uint64_t task, uint8_t state);
+uint8_t fast_handoff_task_is_queued(uint64_t task);
+uint8_t fast_handoff_task_has_context(uint64_t task);
 bool runtime_vm_add_region(void *base, size_t size);
 void runtime_clock_configure_hpet(void *base, uint64_t period_femtoseconds);
 extern void (*ap_start_ptr)(struct limine_mp_info *);

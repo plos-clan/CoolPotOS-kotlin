@@ -209,7 +209,15 @@ val mlibcLibDir = mlibcPrefix.resolve("lib")
 val libNames = listOf("libos_terminal-embedfont-x86_64.a")
 val libDir = file("lib")
 val libSources = libNames.map(libDir::resolve)
-val cSourceNames = listOf("boot.c", "shim.c", "syscall.c", "gdt.c", "idt.c", "smp.c")
+val cSourceNames = listOf(
+    "boot.c",
+    "shim.c",
+    "syscall.c",
+    "gdt.c",
+    "idt.c",
+    "handoff.c",
+    "smp.c",
+)
 val cSources = cSourceNames.map(kernelCDir::resolve)
 
 val cFlagsTarget = listOf("-target", "$targetArch-freestanding")

@@ -8,10 +8,12 @@ enum {
     cpu_slot_count = 256,
     ia32_fs_base_msr = 0xc0000100u,
     ia32_kernel_gs_base_msr = 0xc0000102u,
+    irq_stack_size = 16 * 1024,
     syscall_stack_size = 32 * 1024
 };
 typedef uint64_t gdt_entries_t[7];
 typedef uint8_t tss_stack_t[4096];
+typedef uint8_t irq_stack_t[irq_stack_size];
 typedef uint8_t syscall_stack_t[syscall_stack_size];
 
 typedef struct {
@@ -75,6 +77,7 @@ typedef struct cpu_local {
     gdt_entries_t gdt_entries;
     tss_t tss0;
     tss_stack_t tss_stack __attribute__((aligned(16)));
+    irq_stack_t irq_stack __attribute__((aligned(16)));
     syscall_cpu_state_t syscall;
     syscall_stack_t syscall_stack __attribute__((aligned(16)));
 } cpu_local_t;
@@ -87,6 +90,7 @@ void setup_simd(void);
 void idt_load(void);
 void kt_ap_start(void);
 void do_irq(void *regs, uint64_t irq_num);
+void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num);
 bool capture_sys_clone_context(uint64_t stack, uint64_t tls);
 void set_kernel_runtime_fs_base(uint64_t pointer);
 void serial_print(const char *buffer, size_t size);
