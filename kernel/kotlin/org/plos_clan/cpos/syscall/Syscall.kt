@@ -34,6 +34,8 @@ private const val SYS_MMAP = 9
 private const val SYS_MPROTECT = 10
 private const val SYS_MUNMAP = 11
 private const val SYS_IOCTL = 16
+private const val SYS_READV = 19
+private const val SYS_WRITEV = 20
 private const val SYS_GETCWD = 79
 private const val SYS_ARCH_PRCTL = 158
 private const val SYS_OPENAT = 257
@@ -69,6 +71,8 @@ object Syscall {
         this[SYS_MPROTECT] = ::sysMprotect
         this[SYS_MUNMAP] = ::sysMunmap
         this[SYS_IOCTL] = ::sysIoctl
+        this[SYS_READV] = ::sysReadv
+        this[SYS_WRITEV] = ::sysWritev
         this[SYS_ARCH_PRCTL] = ::sysArchPrctl
         this[SYS_OPENAT] = ::sysOpenAt
         this[SYS_GETCWD] = ::sysGetCWD

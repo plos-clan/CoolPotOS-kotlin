@@ -81,6 +81,7 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
                 }
             }
             bridge.terminal_set_custom_color_scheme(terminal, palette.ptr)
+            bridge.terminal_set_crnl_mapping(terminal, true)
         }
     }
 
