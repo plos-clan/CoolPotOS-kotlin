@@ -4,6 +4,7 @@ package org.plos_clan.cpos.fs
 
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.PollEvents
 import kotlin.concurrent.atomics.AtomicInt
 
 enum class VfsError(val errno: Int) {
@@ -595,6 +596,9 @@ class OpenFileDescription internal constructor(
     fun poll(events: Int): Long = positionLock.withLock {
         if (references.load() == 0) {
             -VfsError.BAD_DESCRIPTOR.errno.toLong()
+        } else if (inode.type == InodeType.REGULAR || inode.type == InodeType.DIRECTORY) {
+            // Ordinary filesystem objects never block for normal I/O.
+            (events and PollEvents.DEFAULT_FILE_EVENTS).toLong()
         } else {
             backend.poll(inode, events)
         }
@@ -852,6 +856,58 @@ class Vfs(
         }
         context.workingDirectory = path
         return VfsResult.Ok(Unit)
+    }
+
+    fun absolutePath(
+        context: FileSystemContext,
+        initial: VfsPath,
+    ): VfsResult<ByteArray> {
+        if (initial.inode == null) {
+            return VfsResult.Err(VfsError.NOT_FOUND)
+        }
+
+        val components = mutableListOf<ByteArray>()
+        var current = initial
+        while (current != context.root) {
+            if (current.dentry === current.mount.root) {
+                val parentMount = current.mount.parent
+                    ?: return VfsResult.Err(VfsError.NOT_FOUND)
+                val mountPoint = current.mount.mountPoint
+                    ?: return VfsResult.Err(VfsError.NOT_FOUND)
+                current = VfsPath(parentMount, mountPoint)
+                if (current == context.root) {
+                    break
+                }
+            }
+
+            components += current.dentry.name.copyBytes()
+            val parent = current.dentry.parent
+                ?: return VfsResult.Err(VfsError.NOT_FOUND)
+            current = VfsPath(current.mount, parent)
+        }
+
+        if (components.isEmpty()) {
+            return VfsResult.Ok(byteArrayOf('/'.code.toByte()))
+        }
+
+        val pathSize = components.fold(components.size - 1L) { size, component ->
+            size + component.size
+        } + 1L
+        if (pathSize > Int.MAX_VALUE) {
+            return VfsResult.Err(VfsError.FILE_TOO_LARGE)
+        }
+
+        val result = ByteArray(pathSize.toInt())
+        var offset = 0
+        result[offset++] = '/'.code.toByte()
+        components.asReversed().forEachIndexed { index, component ->
+            if (index != 0) {
+                result[offset++] = '/'.code.toByte()
+            }
+            component.copyInto(result, destinationOffset = offset)
+            offset += component.size
+        }
+        return VfsResult.Ok(result)
     }
 
     private fun createSuperBlock(name: String, options: FileSystemOptions): VfsResult<SuperBlock> {

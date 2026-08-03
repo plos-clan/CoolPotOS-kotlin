@@ -4,6 +4,8 @@ package org.plos_clan.cpos.tasks
 
 import bridge.get_kernel_idle_entry_address
 import org.plos_clan.cpos.fs.FileDescriptorTable
+import org.plos_clan.cpos.fs.FileSystemContext
+import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.KernelPageDirectory
@@ -15,7 +17,7 @@ import org.plos_clan.cpos.utils.alignDown
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
-private const val DEFAULT_THREAD_STACK_PAGES = 8uL
+private const val DEFAULT_THREAD_STACK_PAGES = 64uL
 
 private val idleThreadEntryPoint: ULong by lazy(LazyThreadSafetyMode.NONE) {
     get_kernel_idle_entry_address()
@@ -93,6 +95,7 @@ class Process internal constructor(
     val name: String,
     val isKernelProcess: Boolean,
     pageDirectory: PageDirectory,
+    var context: FileSystemContext?
 ) {
     val threads = mutableListOf<Thread>()
     var state: TaskState = TaskState.READY
@@ -108,6 +111,8 @@ class Process internal constructor(
         }
         threads += thread
     }
+
+    fun getFSContext() : FileSystemContext = context!! // 不得在 FileSystemManager 初始化之前调用
 }
 
 object ProcessManager {
@@ -129,6 +134,7 @@ object ProcessManager {
             name = "{system}",
             pageDirectory = KernelPageDirectory.getDirectory(),
             isKernelProcess = true,
+            null
         ).also { process ->
             process.state = TaskState.RUNNING
         }
@@ -163,6 +169,8 @@ object ProcessManager {
 
     fun getBootstrapThread(): Thread? = bootstrapThread
 
+    fun getKernelProcess() : Process? = bootstrapThread?.process
+
     fun currentThread(): Thread? {
         val id = bridge.fast_handoff_current_task_id()
         if (id > Int.MAX_VALUE.toULong()) {
@@ -183,6 +191,7 @@ object ProcessManager {
             pageDirectory = clone?.cloneDirectory()
                 ?: KernelPageDirectory.getDirectory().createUserDirectory(),
             isKernelProcess = false,
+            FileSystemManager.kernelContext
         )
 
     fun createUserThread(
@@ -252,11 +261,13 @@ object ProcessManager {
         name: String,
         pageDirectory: PageDirectory,
         isKernelProcess: Boolean,
+        context: FileSystemContext?
     ): Process = Process(
         id = nextProcessId.fetchAndAdd(1),
         name = name,
         isKernelProcess = isKernelProcess,
         pageDirectory = pageDirectory,
+        context,
     ).also { process += it }
 
     private fun newThread(

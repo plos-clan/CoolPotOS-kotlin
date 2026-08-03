@@ -98,6 +98,26 @@ object TermiosConstants {
     const val IEXTEN = 0x010000
 }
 
+/** Linux x86 poll(2) event bits. */
+object PollEvents {
+    const val POLLIN = 0x0001
+    const val POLLPRI = 0x0002
+    const val POLLOUT = 0x0004
+    const val POLLERR = 0x0008
+    const val POLLHUP = 0x0010
+    const val POLLNVAL = 0x0020
+    const val POLLRDNORM = 0x0040
+    const val POLLRDBAND = 0x0080
+    const val POLLWRNORM = 0x0100
+    const val POLLWRBAND = 0x0200
+    const val POLLRDHUP = 0x2000
+
+    const val NORMAL_INPUT = POLLIN or POLLRDNORM
+    const val NORMAL_OUTPUT = POLLOUT or POLLWRNORM
+    const val DEFAULT_FILE_EVENTS = NORMAL_INPUT or NORMAL_OUTPUT
+    const val UNCONDITIONALLY_REPORTED = POLLERR or POLLHUP or POLLNVAL
+}
+
 object Errno {
     const val ERRNO_MASK: ULong = 0x7FFFFFFFFFFFF000uL
 

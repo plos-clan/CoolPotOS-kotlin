@@ -1,5 +1,7 @@
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.tasks.ProcessManager
+
 object FileSystemManager {
     val vfs = Vfs()
 
@@ -49,6 +51,7 @@ object FileSystemManager {
         }
 
         kernelContext = context
+        ProcessManager.getKernelProcess()!!.context = kernelContext
         println("VFS: mounted tmpfs at '/'")
         return true
     }

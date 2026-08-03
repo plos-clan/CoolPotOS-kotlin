@@ -101,3 +101,44 @@ fun CPointer<out CPointed>.pointerToByteArray(
 
     return result
 }
+
+abstract class NativeStruct {
+    protected fun putU16LE(
+        buffer: ByteArray,
+        offset: Int,
+        value: Short,
+    ) {
+        val bits = value.toUShort().toUInt()
+        buffer[offset] = (bits and 0xffu).toByte()
+        buffer[offset + 1] = ((bits shr 8) and 0xffu).toByte()
+    }
+
+    protected fun putU32LE(
+        buffer: ByteArray,
+        offset: Int,
+        value: Int,
+    ) {
+        val bits = value.toUInt()
+        buffer[offset] = (bits and 0xffu).toByte()
+        buffer[offset + 1] = ((bits shr 8) and 0xffu).toByte()
+        buffer[offset + 2] = ((bits shr 16) and 0xffu).toByte()
+        buffer[offset + 3] = ((bits shr 24) and 0xffu).toByte()
+    }
+
+    protected fun getU32LE(
+        buffer: ByteArray,
+        offset: Int,
+    ): Int {
+        require(offset >= 0 && offset <= buffer.size - UInt.SIZE_BYTES) {
+            "32-bit field at offset $offset exceeds a ${buffer.size}-byte structure"
+        }
+        return (
+            buffer[offset].toUByte().toUInt() or
+                (buffer[offset + 1].toUByte().toUInt() shl 8) or
+                (buffer[offset + 2].toUByte().toUInt() shl 16) or
+                (buffer[offset + 3].toUByte().toUInt() shl 24)
+        ).toInt()
+    }
+
+    abstract fun toNativeBytes(): ByteArray
+}

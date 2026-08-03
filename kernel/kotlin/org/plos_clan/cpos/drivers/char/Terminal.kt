@@ -14,7 +14,9 @@ import kotlinx.cinterop.set
 import kotlinx.cinterop.staticCFunction
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.PollEvents
 
 private fun allocateTerminalMemory(size: ULong): COpaquePointer? = bridge.malloc(size)
 
@@ -114,15 +116,50 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         session: TtySession,
         command: Int,
         args: UserMemory
-    ): Int {
-        TODO("Not yet implemented")
+    ): Int = when (command) {
+        IoctlConstants.TIOCGWINSZ -> {
+            val rows = 61UL// bridge.terminal_rows(terminal)
+            val columns = 116UL// bridge.terminal_columns(terminal)
+
+            val size = WinSize(
+                wsRow = minOf(rows, UShort.MAX_VALUE.toULong()).toShort(),
+                wsCol = minOf(columns, UShort.MAX_VALUE.toULong()).toShort(),
+                wsXpixel = 0,
+                wsYpixel = 0,
+            )
+
+            if (args.copyToUser(size.toNativeBytes())) {
+                Errno.EOK
+            } else {
+                -Errno.EFAULT
+            }
+        }
+
+        IoctlConstants.TCGETS ->
+            if (args.copyToUser(session.termios.toNativeBytes())) {
+                Errno.EOK
+            } else {
+                -Errno.EFAULT
+            }
+
+        IoctlConstants.TCSETS -> {
+            val data = args.copyFromUser(Termios.NATIVE_SIZE)
+            if (data != null && session.termios.updateFromNativeBytes(data)) {
+                Errno.EOK
+            } else {
+                -Errno.EFAULT
+            }
+        }
+
+        else -> {
+            println("warn: no implement tty ioctl 0x${command.toString(16)}")
+            -Errno.ENOSYS
+        }
     }
 
     override fun poll(
         session: TtySession,
         events: Int
-    ): Int {
-        TODO("Not yet implemented")
-    }
+    ): Int = events and PollEvents.NORMAL_OUTPUT
 
 }
