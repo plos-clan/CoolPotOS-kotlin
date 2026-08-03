@@ -204,7 +204,14 @@ internal object CpioArchive {
         return when (mode and TYPE_MASK) {
             TYPE_DIRECTORY -> when (val result = vfs.mkdir(context, pathname, permissions)) {
                 is VfsResult.Ok -> null
-                is VfsResult.Err -> "cannot create directory $displayName: ${result.error}"
+                is VfsResult.Err -> if (
+                    result.error == VfsError.ALREADY_EXISTS &&
+                    isExistingDirectory(vfs, context, pathname)
+                ) {
+                    null
+                } else {
+                    "cannot create directory $displayName: ${result.error}"
+                }
             }
 
             TYPE_SYMLINK -> {
@@ -240,6 +247,15 @@ internal object CpioArchive {
 
             else -> "cannot create $displayName: unsupported CPIO file type 0x${(mode and TYPE_MASK).toString(16)}"
         }
+    }
+
+    private fun isExistingDirectory(
+        vfs: Vfs,
+        context: FileSystemContext,
+        pathname: VfsPathname,
+    ): Boolean = when (val result = vfs.resolve(context, pathname)) {
+        is VfsResult.Ok -> result.value.inode?.type == InodeType.DIRECTORY
+        is VfsResult.Err -> false
     }
 
     private fun writeRegularFile(

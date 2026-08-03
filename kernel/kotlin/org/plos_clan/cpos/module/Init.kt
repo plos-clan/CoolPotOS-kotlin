@@ -6,11 +6,12 @@ import org.plos_clan.cpos.fs.OpenOptions
 import org.plos_clan.cpos.fs.VfsError
 import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsResult
+import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Cmdline
 
 object Init {
-    fun readFile(path: String): VfsResult<ByteArray> {
+    private fun readFile(path: String): VfsResult<ByteArray> {
         val context = FileSystemManager.kernelContext
             ?: return VfsResult.Err(VfsError.NOT_FOUND)
 
@@ -59,6 +60,40 @@ object Init {
         }
     }
 
+    private fun initializeStdio(process: Process): Boolean {
+        val context = FileSystemManager.kernelContext ?: return false
+
+        val console = when (
+            val result = FileSystemManager.vfs.open(
+                context = context,
+                pathname = VfsPathname.fromString("/dev/tty0"),
+                options = OpenOptions(access = AccessMode.READ_WRITE),
+            )
+        ) {
+            is VfsResult.Ok -> result.value
+
+            is VfsResult.Err -> {
+                println("Init: cannot open controlling terminal: ${result.error}")
+                return false
+            }
+        }
+
+        if (!process.fdTable.installExact(0, console, 0U)) {
+            console.release()
+            return false
+        }
+
+        if (!process.fdTable.dup2(0, 1) || !process.fdTable.dup2(0, 2)) {
+            process.fdTable.close(0)
+            process.fdTable.close(1)
+            process.fdTable.close(2)
+            return false
+        }
+
+        return true
+    }
+
+
     fun setupInitProgram() {
         val rdinit = Cmdline["rdinit"] ?: "/init"
         val process = ProcessManager.createUserProcess(rdinit)
@@ -66,7 +101,7 @@ object Init {
         val imageInfo: ElfImageInfo
         val executableData: ByteArray
 
-        when (val result = readFile("/bin/sh")) {
+        when (val result = readFile(rdinit)) {
             is VfsResult.Ok -> {
                 val loaded = ElfLoader.loadExecutorElf(
                     data = result.value,
@@ -87,7 +122,7 @@ object Init {
             }
 
             is VfsResult.Err -> {
-                println("Cannot read /bin/sh: ${result.error}")
+                println("Cannot read $rdinit: ${result.error}")
                 return
             }
         }
@@ -125,6 +160,8 @@ object Init {
             println("error: cannot build user stack.")
             return
         }
+
+        initializeStdio(process)
 
         val thread = ProcessManager.createUserThread(
             process = process,

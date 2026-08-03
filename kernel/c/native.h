@@ -7,6 +7,7 @@
 enum {
     cpu_slot_count = 256,
     ia32_fs_base_msr = 0xc0000100u,
+    ia32_gs_base_msr = 0xc0000101u,
     ia32_kernel_gs_base_msr = 0xc0000102u,
     irq_stack_size = 16 * 1024,
     syscall_stack_size = 32 * 1024

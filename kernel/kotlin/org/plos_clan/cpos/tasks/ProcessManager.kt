@@ -3,11 +3,13 @@
 package org.plos_clan.cpos.tasks
 
 import bridge.get_kernel_idle_entry_address
+import org.plos_clan.cpos.fs.FileDescriptorTable
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.mem.PageDirectory
 import org.plos_clan.cpos.mem.VMA
+import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import kotlin.concurrent.atomics.AtomicInt
@@ -95,6 +97,8 @@ class Process internal constructor(
     val threads = mutableListOf<Thread>()
     var state: TaskState = TaskState.READY
 
+    val fdTable = FileDescriptorTable()
+
     val vma = VMA(pageDirectory)
 
     fun addThread(thread: Thread) {
@@ -110,6 +114,8 @@ object ProcessManager {
     private var nextThreadId = AtomicInt(0)
     private var nextProcessId = AtomicInt(0)
     private val process = mutableListOf<Process>()
+    private val threadTable = mutableMapOf<Int, Thread>()
+    private val threadTableLock = IrqSpinLock()
     private var bootstrapThread: Thread? = null
 
     private var kernelProcess: Process? = null
@@ -156,6 +162,16 @@ object ProcessManager {
     }
 
     fun getBootstrapThread(): Thread? = bootstrapThread
+
+    fun currentThread(): Thread? {
+        val id = bridge.fast_handoff_current_task_id()
+        if (id > Int.MAX_VALUE.toULong()) {
+            return null
+        }
+        return threadTableLock.withLock { threadTable[id.toInt()] }
+    }
+
+    fun currentProcess(): Process? = currentThread()?.process
 
     fun getNewApIdleThread(): Thread = newThread(requireNotNull(kernelProcess)).also { thread ->
         thread.state = TaskState.READY
@@ -255,7 +271,10 @@ object ProcessManager {
             kernelStackTop = kernelStackTop,
             kernelStackPhysicalBase = kernelStackPhysicalBase,
             kernelStackPages = kernelStackPages,
-        ).also(process::addThread)
+        ).also { thread ->
+            process.addThread(thread)
+            threadTableLock.withLock { threadTable[thread.id] = thread }
+        }
 }
 
 private data class KernelStack(

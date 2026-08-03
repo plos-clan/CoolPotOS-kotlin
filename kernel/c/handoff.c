@@ -27,6 +27,7 @@ struct fast_task {
     uint8_t state;
     uint8_t queued;
     uint8_t context_valid;
+    uint8_t user_context;
 };
 _Static_assert(
     offsetof(fast_task_t, fpu) == fpu_state_offset,
@@ -207,6 +208,7 @@ void fast_handoff_init_kernel(
     task->regs.es = 0x10;
     task->regs.fs_base = fs_base;
     task->regs.rdi = argument;
+    task->user_context = 0;
     task_state_store(task, task_ready);
     __atomic_store_n(&task->context_valid, 1, __ATOMIC_RELEASE);
     initialize_fpu(task);
@@ -229,6 +231,7 @@ void fast_handoff_init_user(
     task->regs.ds = 0x1b;
     task->regs.es = 0x1b;
     task->regs.fs_base = fs_base;
+    task->user_context = 1;
     task_state_store(task, task_ready);
     __atomic_store_n(&task->context_valid, 1, __ATOMIC_RELEASE);
     initialize_fpu(task);
@@ -310,11 +313,31 @@ uint8_t fast_handoff_task_has_context(uint64_t handle) {
     return task ? __atomic_load_n(&task->context_valid, __ATOMIC_ACQUIRE) : 0;
 }
 
+uint64_t fast_handoff_current_task_id(void) {
+    fast_cpu_t *cpu = &fast_cpus[current_lapic_id() % cpu_slot_count];
+    const uint64_t flags = interrupt_save();
+    lock_cpu(cpu);
+    const fast_task_t *task = cpu->current;
+    const uint64_t id = task ? task->id : UINT64_MAX;
+    unlock_cpu(cpu);
+    interrupt_restore(flags);
+    return id;
+}
+
 void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
     const uint64_t lapic_id = current_lapic_id();
     fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
 
-    if (irq_num == timer_irq &&
+    /* A user task may be interrupted after SYSCALL has entered the kernel.
+     * Its saved CS is then ring 0 even though its CR3 and kernel stack still
+     * belong to the user task.  Do not hand that half-finished syscall to a
+     * different CPU time slice: the syscall exit assembly owns that stack
+     * until it has constructed the ring-3 IRET frame. */
+    const fast_task_t *current = cpu->current;
+    const bool syscall_in_progress = current && current->user_context &&
+        (regs->cs & 3) == 0;
+
+    if (irq_num == timer_irq && !syscall_in_progress &&
         __atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) && cpu->bound) {
         lock_cpu(cpu);
         fast_task_t *previous = cpu->current;

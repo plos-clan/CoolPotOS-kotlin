@@ -9,7 +9,9 @@ import org.plos_clan.cpos.mem.MemChunk
 import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.VMA_READ
+import org.plos_clan.cpos.mem.VMA_STACK
 import org.plos_clan.cpos.mem.VMA_WRITE
+import org.plos_clan.cpos.mem.VmaType
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
@@ -182,12 +184,20 @@ object UserStackBuilder {
             rollback(process, mappedPages, allocatedFrames)
             return null
         }
-        process.vma.chunks += MemChunk(
-            start = stackStart,
-            end = stackTop,
-            flags = VMA_READ or VMA_WRITE,
-            name = "[stack]",
-        )
+        if (!process.vma.insert(
+                MemChunk(
+                    start = stackStart,
+                    end = stackTop,
+                    flags = VMA_READ or VMA_WRITE or VMA_STACK,
+                    name = "[stack]",
+                    type = VmaType.STACK,
+                ),
+            )
+        ) {
+            println("UserStack: cannot record stack in the process VMA")
+            rollback(process, mappedPages, allocatedFrames)
+            return null
+        }
         return UserStackResult(
             stackPointer = stackPointer,
             stackStart = stackStart,

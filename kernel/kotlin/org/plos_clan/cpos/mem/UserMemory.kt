@@ -13,28 +13,85 @@ class UserMemory internal constructor(
     private val address: ULong,
 ) {
     fun copyFromUser(size: Int): ByteArray? {
-        val chunks = resolveRange(size, requireWritable = false) ?: return null
-        val destination = ByteArray(size)
-
-        for (chunk in chunks) {
-            val source = chunk.physicalAddress.toVirtualPointer<UByteVar>() ?: return null
-            repeat(chunk.length) { index ->
-                destination[chunk.bufferOffset + index] = source[index].toByte()
-            }
+        if (size < 0) {
+            return null
         }
-        return destination
+        val destination = ByteArray(size)
+        return if (copyFromUser(destination)) destination else null
     }
 
-    fun copyToUser(data: ByteArray): Boolean {
-        val chunks = resolveRange(data.size, requireWritable = true) ?: return false
+    fun copyFromUser(
+        destination: ByteArray,
+        destinationOffset: Int = 0,
+        size: Int = destination.size - destinationOffset,
+    ): Boolean {
+        if (!isValidRange(destination, destinationOffset, size)) {
+            return false
+        }
+        val chunks = resolveRange(size, requireWritable = false) ?: return false
+
+        for (chunk in chunks) {
+            val source = chunk.physicalAddress.toVirtualPointer<UByteVar>() ?: return false
+            repeat(chunk.length) { index ->
+                destination[destinationOffset + chunk.bufferOffset + index] = source[index].toByte()
+            }
+        }
+        return true
+    }
+
+    fun copyToUser(
+        data: ByteArray,
+        sourceOffset: Int = 0,
+        size: Int = data.size - sourceOffset,
+    ): Boolean {
+        if (!isValidRange(data, sourceOffset, size)) {
+            return false
+        }
+        val chunks = resolveRange(size, requireWritable = true) ?: return false
 
         for (chunk in chunks) {
             val destination = chunk.physicalAddress.toVirtualPointer<UByteVar>() ?: return false
             repeat(chunk.length) { index ->
-                destination[index] = data[chunk.bufferOffset + index].toUByte()
+                destination[index] = data[sourceOffset + chunk.bufferOffset + index].toUByte()
             }
         }
         return true
+    }
+
+    fun isWritable(size: Int): Boolean =
+        resolveRange(size, requireWritable = true) != null
+
+    fun copyCStringFromUser(maxLength: Int): ByteArray? {
+        if (maxLength <= 0 || address >= USER_VIRTUAL_ADDRESS_LIMIT) {
+            return null
+        }
+
+        val result = ByteArray(maxLength)
+        var copied = 0
+        var currentAddress = address
+        while (copied < maxLength && currentAddress < USER_VIRTUAL_ADDRESS_LIMIT) {
+            val physicalAddress = pageDirectory.resolveUserPhysicalAddress(
+                virtualAddress = currentAddress,
+                requireWritable = false,
+            ) ?: return null
+            val source = physicalAddress.toVirtualPointer<UByteVar>() ?: return null
+            val pageOffset = currentAddress and (PAGE_SIZE_BYTES - 1uL)
+            val chunkLength = minOf(
+                maxLength - copied,
+                (PAGE_SIZE_BYTES - pageOffset).toInt(),
+            )
+
+            repeat(chunkLength) { index ->
+                val byte = source[index].toByte()
+                if (byte == 0.toByte()) {
+                    return result.copyOf(copied + index)
+                }
+                result[copied + index] = byte
+            }
+            copied += chunkLength
+            currentAddress += chunkLength.toULong()
+        }
+        return null
     }
 
     private fun resolveRange(
@@ -84,6 +141,9 @@ class UserMemory internal constructor(
     }
 
     fun getAddress() : ULong = address
+
+    private fun isValidRange(buffer: ByteArray, offset: Int, size: Int): Boolean =
+        offset >= 0 && size >= 0 && offset <= buffer.size - size
 }
 
 private data class UserMemoryChunk(

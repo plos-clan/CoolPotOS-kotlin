@@ -19,6 +19,7 @@ import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.mem.VMA_EXEC
 import org.plos_clan.cpos.mem.VMA_READ
 import org.plos_clan.cpos.mem.VMA_WRITE
+import org.plos_clan.cpos.mem.VmaType
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
@@ -220,16 +221,11 @@ object ElfLoader {
             }
         }
 
-        process?.vma?.chunks?.addAll(
-            segments.map { segment ->
-                MemChunk(
-                    start = segment.start,
-                    end = segment.end,
-                    flags = segment.vmaFlags,
-                    name = process.name,
-                )
-            },
-        )
+        if (process != null && !process.vma.insertAll(pageChunks(pages, process.name))) {
+            println("ELF: cannot record loadable segments in the process VMA")
+            rollback(directory, mappedPages, allocatedFrames)
+            return null
+        }
 
         val loadStart = segments.minOf(LoadSegment::start)
         val loadEnd = segments.maxOf(LoadSegment::end)
@@ -462,12 +458,36 @@ object ElfLoader {
             val end = segment.end.alignUp(PAGE_SIZE_BYTES)
             while (address < end) {
                 val page = pages.getOrPut(address) { PagePlan() }
+                page.readable = page.readable || (segment.vmaFlags and VMA_READ) != 0uL
                 page.writable = page.writable || segment.writable
                 page.executable = page.executable || segment.executable
                 address += PAGE_SIZE_BYTES
             }
         }
         return pages
+    }
+
+    private fun pageChunks(pages: Map<ULong, PagePlan>, name: String): List<MemChunk> {
+        val result = mutableListOf<MemChunk>()
+        for ((address, page) in pages.entries.sortedBy { it.key }) {
+            val flags =
+                (if (page.readable) VMA_READ else 0uL) or
+                    (if (page.writable) VMA_WRITE else 0uL) or
+                    (if (page.executable) VMA_EXEC else 0uL)
+            val previous = result.lastOrNull()
+            if (previous != null && previous.end == address && previous.flags == flags) {
+                previous.end += PAGE_SIZE_BYTES
+            } else {
+                result += MemChunk(
+                    start = address,
+                    end = address + PAGE_SIZE_BYTES,
+                    flags = flags,
+                    name = name,
+                    type = VmaType.IMAGE,
+                )
+            }
+        }
+        return result
     }
 
     private fun copySegmentData(
@@ -603,6 +623,7 @@ private data class LoadSegment(
 }
 
 private data class PagePlan(
+    var readable: Boolean = false,
     var writable: Boolean = false,
     var executable: Boolean = false,
     var physicalAddress: ULong? = null,

@@ -180,6 +180,16 @@ static void serial_write_byte(uint8_t value) {
 
 void asm_pause(void) { __asm__ volatile("pause" : : : "memory"); }
 
+uint64_t irq_save(void) {
+    uint64_t flags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    return flags;
+}
+
+void irq_restore(uint64_t flags) {
+    if (flags & (1u << 9)) __asm__ volatile("sti" : : : "memory");
+}
+
 void serial_print(const char *buffer, size_t size) {
     static bool initialized;
 
@@ -198,6 +208,7 @@ void serial_print(const char *buffer, size_t size) {
 void setup_syscall_cpu(uint64_t lapic_id, uint8_t is_bsp) {
     cpu_local_t *local = &locals[lapic_id % cpu_slot_count];
     syscall_cpu_state_t *state = &local->syscall;
+    const uint64_t user_gs_base = rdmsr(ia32_gs_base_msr);
     const uintptr_t stack_top =
         ((uintptr_t)local->syscall_stack + sizeof(local->syscall_stack)) & ~0xfULL;
 
@@ -207,7 +218,8 @@ void setup_syscall_cpu(uint64_t lapic_id, uint8_t is_bsp) {
     state->kernel_fs_base = rdmsr(ia32_fs_base_msr);
 
     set_kernel_stack(lapic_id, stack_top, is_bsp);
-    wrmsr(ia32_kernel_gs_base_msr, (uintptr_t)state);
+    wrmsr(ia32_gs_base_msr, (uintptr_t)state);
+    wrmsr(ia32_kernel_gs_base_msr, user_gs_base);
 }
 
 uint64_t get_asm_syscall_handle_address(void) {
@@ -278,7 +290,9 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "movq $0x1b, 192(%rsp)\n"
 
         "movq %rsp, %rdi\n"
+        "sti\n"
         "call syscall_handler\n"
+        "cli\n"
         "movq %rsp, %r13\n"
 
         /* The handler may change FS_BASE (for example, arch_prctl), so use

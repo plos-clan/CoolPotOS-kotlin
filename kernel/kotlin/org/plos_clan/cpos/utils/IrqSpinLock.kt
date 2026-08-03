@@ -15,7 +15,7 @@ class IrqSpinLock {
     internal val held = AtomicBoolean(false)
 
     inline fun <T> withLock(block: () -> T): T {
-        //val flags = bridge.irq_save()
+        val flags = bridge.irq_save()
         while (!held.compareAndSet(expectedValue = false, newValue = true)) {
             bridge.asm_pause()
         }
@@ -23,7 +23,7 @@ class IrqSpinLock {
             block()
         } finally {
             held.store(false)
-            //bridge.irq_restore(flags)
+            bridge.irq_restore(flags)
         }
     }
 }

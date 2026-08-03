@@ -49,7 +49,26 @@ static void dispatch_kotlin_handler(
     uint64_t error_code,
     uint64_t rbp
 ) {
+    const bool from_user = (frame->cs & 3u) != 0;
+    uint64_t user_fs_base = 0;
+
+    if (from_user) {
+        /* Interrupt gates do not perform SWAPGS and they leave FS_BASE at the
+         * user TLS value.  Kotlin/Native requires the kernel runtime TLS even
+         * while reporting a userspace fault. */
+        user_fs_base = rdmsr(ia32_fs_base_msr);
+        __asm__ volatile("swapgs" : : : "memory");
+        uint64_t kernel_fs_base;
+        __asm__ volatile("movq %%gs:24, %0" : "=r"(kernel_fs_base));
+        wrmsr(ia32_fs_base_msr, kernel_fs_base);
+    }
+
     handler(frame, error_code, rbp);
+
+    if (from_user) {
+        wrmsr(ia32_fs_base_msr, user_fs_base);
+        __asm__ volatile("swapgs" : : : "memory");
+    }
 }
 
 static __attribute__((noreturn)) void halt_forever(void) {
@@ -160,6 +179,12 @@ static __attribute__((naked, used)) void irq_common_entry(void) {
         "movq %rax, 184(%rsp)\n"
         "movq 40(%rdx), %rax\n"
         "movq %rax, 192(%rsp)\n"
+        /* Normalize GS while the IRQ runs: user entries still have the user
+         * GS base because interrupt gates do not perform SWAPGS. */
+        "testb $3, 16(%rdx)\n"
+        "jz 1f\n"
+        "swapgs\n"
+        "1:\n"
         "movq %rsp, %r13\n"
         "movq %rsp, %rdi\n"
         "movq (%rdx), %rsi\n"
@@ -184,6 +209,12 @@ static __attribute__((naked, used)) void irq_common_entry(void) {
         "movq %rax, 24(%r12)\n"
         "movq 192(%r13), %rax\n"
         "movq %rax, 32(%r12)\n"
+        /* The handler always runs with kernel GS; restore user GS only when
+         * the selected context returns to CPL3. */
+        "testb $3, 168(%r13)\n"
+        "jz 2f\n"
+        "swapgs\n"
+        "2:\n"
         "movq 112(%r13), %rax\n"
         "movw %ax, %ds\n"
         "movq 120(%r13), %rax\n"

@@ -518,6 +518,36 @@ class OpenFileDescription internal constructor(
         }
     }
 
+    /** Reads without changing the open file description's shared offset. */
+    fun readAt(
+        fileOffset: ULong,
+        destination: ByteArray,
+        offset: Int = 0,
+        count: Int = destination.size - offset,
+    ): IoResult {
+        if (!isValidRange(destination, offset, count) || fileOffset > Long.MAX_VALUE.toULong()) {
+            return IoResult.failure(VfsError.INVALID_ARGUMENT)
+        }
+        if (!access.canRead) {
+            return IoResult.failure(VfsError.BAD_DESCRIPTOR)
+        }
+        if (inode.type == InodeType.DIRECTORY) {
+            return IoResult.failure(VfsError.IS_DIRECTORY)
+        }
+        return positionLock.withLock {
+            if (references.load() == 0) {
+                return@withLock IoResult.failure(VfsError.BAD_DESCRIPTOR)
+            }
+            backend.read(
+                inode,
+                destination,
+                offset,
+                count,
+                FilePosition(fileOffset.toLong()),
+            )
+        }
+    }
+
     fun write(source: ByteArray, offset: Int = 0, count: Int = source.size - offset): IoResult {
         if (!isValidRange(source, offset, count)) {
             return IoResult.failure(VfsError.INVALID_ARGUMENT)
