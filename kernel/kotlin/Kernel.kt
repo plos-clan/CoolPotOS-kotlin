@@ -3,6 +3,7 @@ import bridge.get_kernel_clone_thread_entry_address
 import bridge.get_sys_clone_recorded_count
 import bridge.get_sys_clone_stack_at
 import bridge.get_sys_clone_tls_at
+import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.FrameBuffer
 import org.plos_clan.cpos.drivers.acpi.Acpi
 import org.plos_clan.cpos.drivers.char.TtyManager
@@ -63,11 +64,17 @@ fun kernelMain() {
     Acpi.enumerateDevices()
     ModuleManager.initialize()
     Initrd.initialize()
+    if (!KernelCoroutines.initialize()) {
+        return
+    }
     println("Kernel load done!")
     Scheduler.enableScheduler()
     bridge.enable_interrupt()
     Init.setupInitProgram()
-    while (true) bridge.wait_for_interrupt()
+    if (Cmdline.boolean("coroutine-smoke") == true) {
+        KernelCoroutines.launchSmokeTest()
+    }
+    KernelCoroutines.runEventLoop()
 }
 
 @ExperimentalForeignApi

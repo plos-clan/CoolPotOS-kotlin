@@ -11,6 +11,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.plos_clan.cpos.drivers.Hpet
 
+internal const val COROUTINE_SMOKE_SUCCESS_MARKER = "Coroutine smoke test passed"
+
 internal data class KernelCoroutineRuntime(
     val job: CompletableJob,
     val scope: CoroutineScope,
@@ -71,7 +73,7 @@ object KernelCoroutines {
     fun launchSmokeTest() {
         scope.launch {
             delay(10)
-            println("Coroutine smoke test passed")
+            println(COROUTINE_SMOKE_SUCCESS_MARKER)
         }
     }
 
