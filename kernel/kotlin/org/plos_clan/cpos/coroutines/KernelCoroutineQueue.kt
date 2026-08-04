@@ -78,6 +78,17 @@ internal class KernelCoroutineQueue {
 
     fun hasImmediateWork(): Boolean = immediate.isNotEmpty()
 
+    fun clear() {
+        immediate.clear()
+        delayed.forEach { task ->
+            if (task.state == DelayedTaskState.PENDING) {
+                task.state = DelayedTaskState.DISPOSED
+            }
+        }
+        delayed.clear()
+        nextSequence = 0uL
+    }
+
     private fun heapPush(task: DelayedCoroutineTask) {
         delayed += task
         var childIndex = delayed.lastIndex

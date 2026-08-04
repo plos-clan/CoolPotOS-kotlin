@@ -38,9 +38,11 @@ class KernelDispatcher internal constructor(
     private val failureReporter: (Throwable) -> Unit = Throwable::printStackTrace,
 ) : CoroutineDispatcher(), Delay {
     private val queue = KernelCoroutineQueue()
+    private var closed = false
 
     override fun dispatch(context: CoroutineContext, block: Runnable) {
         criticalSection.withLock {
+            check(!closed) { CLOSED_MESSAGE }
             queue.enqueue(block)
         }
     }
@@ -62,9 +64,16 @@ class KernelDispatcher internal constructor(
     ): DisposableHandle = schedule(timeMillis, block)
 
     internal fun runReadyBatch(limit: Int = MAX_TASKS_PER_BATCH): Int {
+        if (criticalSection.withLock { closed }) {
+            return 0
+        }
         val nowNanos = nanoTime()
         val ready = criticalSection.withLock {
-            queue.claimReady(nowNanos, limit)
+            if (closed) {
+                emptyList()
+            } else {
+                queue.claimReady(nowNanos, limit)
+            }
         }
         ready.forEach { runnable ->
             try {
@@ -79,13 +88,28 @@ class KernelDispatcher internal constructor(
         return ready.size
     }
 
-    internal fun hasReadyWork(): Boolean = criticalSection.withLock(queue::hasImmediateWork)
+    internal fun hasReadyWork(): Boolean = criticalSection.withLock {
+        !closed && queue.hasImmediateWork()
+    }
+
+    internal fun shutdown() {
+        criticalSection.withLock {
+            if (!closed) {
+                closed = true
+                queue.clear()
+            }
+        }
+    }
 
     override fun toString(): String = "KernelDispatcher[BSP]"
 
     private fun schedule(delayMillis: Long, block: Runnable): DisposableHandle {
+        criticalSection.withLock {
+            check(!closed) { CLOSED_MESSAGE }
+        }
         val nowNanos = nanoTime()
         val task = criticalSection.withLock {
+            check(!closed) { CLOSED_MESSAGE }
             queue.schedule(nowNanos, delayMillis, block)
         }
         return QueueDisposableHandle {
@@ -93,5 +117,9 @@ class KernelDispatcher internal constructor(
                 queue.dispose(task)
             }
         }
+    }
+
+    private companion object {
+        const val CLOSED_MESSAGE = "KernelDispatcher is shut down"
     }
 }

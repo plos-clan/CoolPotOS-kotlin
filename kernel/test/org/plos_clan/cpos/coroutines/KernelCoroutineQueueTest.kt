@@ -186,4 +186,20 @@ class KernelCoroutineQueueTest {
         assertEquals(0uL, first.sequence)
         assertEquals(0uL, afterDrain.sequence)
     }
+
+    @Test
+    fun clearDropsImmediateWorkDisposesDelayedTasksAndResetsSequence() {
+        val queue = KernelCoroutineQueue()
+        queue.enqueue(Runnable { throw AssertionError("cleared immediate task ran") })
+        val firstDelayed = queue.schedule(0uL, 1, Runnable {})
+        val secondDelayed = queue.schedule(0uL, 2, Runnable {})
+
+        queue.clear()
+
+        assertFalse(queue.hasImmediateWork())
+        assertEquals(DelayedTaskState.DISPOSED, firstDelayed.state)
+        assertEquals(DelayedTaskState.DISPOSED, secondDelayed.state)
+        assertTrue(queue.claimReady(ULong.MAX_VALUE, 64).isEmpty())
+        assertEquals(0uL, queue.schedule(0uL, 1, Runnable {}).sequence)
+    }
 }

@@ -30,28 +30,39 @@ internal fun createKernelCoroutineRuntime(
 
 object KernelCoroutines {
     private var initialized = false
-    private lateinit var runtime: KernelCoroutineRuntime
+    private var runtime: KernelCoroutineRuntime? = null
+    private var activeDispatcher: KernelDispatcher? = null
 
-    lateinit var dispatcher: KernelDispatcher
-        private set
+    val dispatcher: KernelDispatcher
+        get() = checkNotNull(activeDispatcher) { NOT_INITIALIZED_MESSAGE }
 
     val scope: CoroutineScope
         get() {
-            check(initialized)
-            return runtime.scope
+            check(initialized) { NOT_INITIALIZED_MESSAGE }
+            return checkNotNull(runtime).scope
         }
 
-    fun initialize(): Boolean {
+    fun initialize(): Boolean = initialize(
+        hpetReady = Hpet.isReady,
+        dispatcherFactory = { KernelDispatcher(failureReporter = ::reportFailure) },
+    )
+
+    internal fun initialize(
+        hpetReady: Boolean,
+        dispatcherFactory: () -> KernelDispatcher,
+    ): Boolean {
         if (initialized) {
             return true
         }
-        if (!Hpet.isReady) {
+        if (!hpetReady) {
             println("Kernel coroutines: HPET is unavailable")
             return false
         }
 
-        dispatcher = KernelDispatcher(failureReporter = ::reportFailure)
-        runtime = createKernelCoroutineRuntime(dispatcher, ::reportFailure)
+        val dispatcher = dispatcherFactory()
+        val newRuntime = createKernelCoroutineRuntime(dispatcher, ::reportFailure)
+        runtime = newRuntime
+        activeDispatcher = dispatcher
         initialized = true
         println("Kernel coroutines initialized dispatcher=$dispatcher")
         return true
@@ -65,10 +76,11 @@ object KernelCoroutines {
     }
 
     fun runEventLoop(): Nothing {
-        check(initialized)
+        check(initialized) { NOT_INITIALIZED_MESSAGE }
+        val eventDispatcher = dispatcher
         while (true) {
-            dispatcher.runReadyBatch()
-            if (dispatcher.hasReadyWork()) {
+            eventDispatcher.runReadyBatch()
+            if (eventDispatcher.hasReadyWork()) {
                 continue
             }
             bridge.wait_for_interrupt()
@@ -80,10 +92,15 @@ object KernelCoroutines {
             return
         }
 
-        runtime.job.cancel()
-        while (dispatcher.hasReadyWork()) {
-            dispatcher.runReadyBatch()
+        val currentRuntime = checkNotNull(runtime)
+        val currentDispatcher = checkNotNull(activeDispatcher)
+        currentRuntime.job.cancel()
+        while (currentDispatcher.hasReadyWork()) {
+            currentDispatcher.runReadyBatch()
         }
+        currentDispatcher.shutdown()
+        runtime = null
+        activeDispatcher = null
         initialized = false
     }
 
@@ -91,4 +108,6 @@ object KernelCoroutines {
         println("Uncaught kernel coroutine failure: $throwable")
         throwable.printStackTrace()
     }
+
+    private const val NOT_INITIALIZED_MESSAGE = "Kernel coroutines are not initialized"
 }
