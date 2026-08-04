@@ -5,6 +5,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class KernelCoroutineQueueTest {
@@ -97,5 +98,92 @@ class KernelCoroutineQueueTest {
         assertFailsWith<IllegalArgumentException> {
             queue.claimReady(nowNanos = 0uL, limit = 0)
         }
+    }
+
+    @Test
+    fun idleClaimReturnsCanonicalEmptyList() {
+        val queue = KernelCoroutineQueue()
+        val disposed = queue.schedule(0uL, 0, Runnable {})
+        queue.dispose(disposed)
+
+        val claimed = queue.claimReady(nowNanos = 0uL, limit = 1)
+
+        assertSame(emptyList<Runnable>(), claimed)
+    }
+
+    @Test
+    fun deeperDelayedHeapClaimsEveryTaskInDeadlineOrder() {
+        val queue = KernelCoroutineQueue()
+        val executed = mutableListOf<Long>()
+        val mixedDeadlines = listOf(7L, 2L, 6L, 1L, 5L, 3L, 4L)
+        mixedDeadlines.forEach { delayMillis ->
+            queue.schedule(0uL, delayMillis, Runnable { executed += delayMillis })
+        }
+
+        queue.claimReady(7_000_000uL, mixedDeadlines.size).forEach(Runnable::run)
+
+        assertEquals((1L..7L).toList(), executed)
+    }
+
+    @Test
+    fun disposingNonRootDelayedTaskPreservesRemainingHeapOrder() {
+        val queue = KernelCoroutineQueue()
+        val executed = mutableListOf<String>()
+        queue.schedule(0uL, 1, Runnable { executed += "first" })
+        val disposed = queue.schedule(0uL, 7, Runnable { executed += "disposed" })
+        queue.schedule(0uL, 3, Runnable { executed += "third" })
+        queue.schedule(0uL, 2, Runnable { executed += "second" })
+        queue.schedule(0uL, 6, Runnable { executed += "last" })
+
+        assertTrue(queue.dispose(disposed))
+        queue.claimReady(ULong.MAX_VALUE, 64).forEach(Runnable::run)
+
+        assertEquals(listOf("first", "second", "third", "last"), executed)
+    }
+
+    @Test
+    fun claimedDelayedTaskCannotBeDisposedOrClaimedAgain() {
+        val queue = KernelCoroutineQueue()
+        var executions = 0
+        val task = queue.schedule(0uL, 1, Runnable { executions++ })
+
+        val firstClaim = queue.claimReady(1_000_000uL, 1)
+        assertFalse(queue.dispose(task))
+        firstClaim.single().run()
+        val secondClaim = queue.claimReady(ULong.MAX_VALUE, 1)
+
+        assertTrue(secondClaim.isEmpty())
+        assertEquals(1, executions)
+    }
+
+    @Test
+    fun deadlineSaturatesWhenMillisecondsToNanosecondsOverflows() {
+        val queue = KernelCoroutineQueue()
+        val overflowMillis = (ULong.MAX_VALUE / 1_000_000uL + 1uL).toLong()
+
+        val task = queue.schedule(0uL, overflowMillis, Runnable {})
+
+        assertEquals(ULong.MAX_VALUE, task.deadlineNanos)
+    }
+
+    @Test
+    fun deadlineSaturatesWhenNanosecondsAdditionOverflows() {
+        val queue = KernelCoroutineQueue()
+
+        val task = queue.schedule(ULong.MAX_VALUE - 999_999uL, 1, Runnable {})
+
+        assertEquals(ULong.MAX_VALUE, task.deadlineNanos)
+    }
+
+    @Test
+    fun sequenceResetsAfterDelayedHeapIsDrained() {
+        val queue = KernelCoroutineQueue()
+        val first = queue.schedule(0uL, 1, Runnable {})
+        queue.claimReady(1_000_000uL, 1)
+
+        val afterDrain = queue.schedule(0uL, 1, Runnable {})
+
+        assertEquals(0uL, first.sequence)
+        assertEquals(0uL, afterDrain.sequence)
     }
 }

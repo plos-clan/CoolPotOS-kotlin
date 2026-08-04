@@ -26,6 +26,11 @@ internal class KernelCoroutineQueue {
     }
 
     fun schedule(nowNanos: ULong, delayMillis: Long, runnable: Runnable): DelayedCoroutineTask {
+        if (delayed.isEmpty()) {
+            nextSequence = 0uL
+        } else {
+            check(nextSequence != ULong.MAX_VALUE) { "delayed task sequence exhausted" }
+        }
         val task = DelayedCoroutineTask(
             deadlineNanos = deadlineNanos(nowNanos, delayMillis),
             sequence = nextSequence++,
@@ -61,6 +66,9 @@ internal class KernelCoroutineQueue {
             immediate.addLast(ready.runnable)
         }
 
+        if (immediate.isEmpty()) {
+            return emptyList()
+        }
         val claimed = ArrayList<Runnable>(minOf(limit, immediate.size))
         while (claimed.size < limit && immediate.isNotEmpty()) {
             claimed += immediate.removeFirst()
