@@ -39,6 +39,7 @@ class KernelDispatcher internal constructor(
 ) : CoroutineDispatcher(), Delay {
     private val queue = KernelCoroutineQueue()
     private var closed = false
+    private var callbacksInFlight = 0
 
     override fun dispatch(context: CoroutineContext, block: Runnable) {
         criticalSection.withLock {
@@ -75,17 +76,26 @@ class KernelDispatcher internal constructor(
                 queue.claimReady(nowNanos, limit)
             }
         }
-        ready.forEach { runnable ->
+        var executionCount = 0
+        for (runnable in ready) {
+            if (!acquireExecutionToken()) {
+                break
+            }
+            executionCount++
             try {
-                runnable.run()
-            } catch (failure: Throwable) {
                 try {
-                    failureReporter(failure)
-                } catch (_: Throwable) {
+                    runnable.run()
+                } catch (failure: Throwable) {
+                    try {
+                        failureReporter(failure)
+                    } catch (_: Throwable) {
+                    }
                 }
+            } finally {
+                releaseExecutionToken()
             }
         }
-        return ready.size
+        return executionCount
     }
 
     internal fun hasReadyWork(): Boolean = criticalSection.withLock {
@@ -116,6 +126,22 @@ class KernelDispatcher internal constructor(
             criticalSection.withLock {
                 queue.dispose(task)
             }
+        }
+    }
+
+    private fun acquireExecutionToken(): Boolean = criticalSection.withLock {
+        if (closed) {
+            false
+        } else {
+            callbacksInFlight++
+            true
+        }
+    }
+
+    private fun releaseExecutionToken() {
+        criticalSection.withLock {
+            check(callbacksInFlight > 0) { "callback execution token underflow" }
+            callbacksInFlight--
         }
     }
 

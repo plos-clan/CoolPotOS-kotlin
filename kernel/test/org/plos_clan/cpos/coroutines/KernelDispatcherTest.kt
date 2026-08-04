@@ -131,6 +131,24 @@ class KernelDispatcherTest {
     }
 
     @Test
+    fun shutdownFromCallbackStopsRemainingClaimedBatch() {
+        val dispatcher = dispatcher()
+        val executed = mutableListOf<String>()
+        dispatcher.invokeOnTimeout(0, Runnable {
+            executed += "first"
+            dispatcher.shutdown()
+        }, EmptyCoroutineContext)
+        dispatcher.invokeOnTimeout(0, Runnable {
+            executed += "second"
+        }, EmptyCoroutineContext)
+
+        val executionCount = dispatcher.runReadyBatch()
+
+        assertEquals(1, executionCount)
+        assertEquals(listOf("first"), executed)
+    }
+
+    @Test
     fun asyncAwaitCompletesThroughDispatcher() {
         val dispatcher = dispatcher()
         val scope = CoroutineScope(SupervisorJob() + dispatcher)
