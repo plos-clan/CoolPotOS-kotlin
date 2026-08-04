@@ -120,7 +120,8 @@ does not promise that host-oriented dispatchers work in a freestanding kernel.
 
 ## Time And Cancellation Semantics
 
-- `delay(0)` is dispatched normally and does not enter the delayed heap.
+- `delay(0)` follows the official library behavior: it returns immediately and
+  does not enter the dispatcher or delayed heap.
 - Positive delays use a monotonic HPET deadline.
 - Deadline arithmetic saturates at `ULong.MAX_VALUE`.
 - Equal deadlines resume in scheduling order.
