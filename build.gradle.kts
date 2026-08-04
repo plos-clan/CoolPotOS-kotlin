@@ -253,7 +253,7 @@ val runtimeLibs = buildList {
 }
 
 val ldFlagsFormat = listOf("-m", "elf_$targetArch")
-val ldFlagsRuntime = listOf("-nostdlib")
+val ldFlagsRuntime = listOf("-nostdlib", "--eh-frame-hdr")
 val ldFlagsPaging = listOf("-z", "max-page-size=0x1000")
 val ldFlagsSections = listOf("--gc-sections")
 val ldFlagsScript = listOf("-T", linkerScript.absolutePath)
@@ -643,6 +643,7 @@ tasks.register<Exec>("run") {
         addAll(qemuBaseFlags)
         add("-serial")
         add("stdio")
+        // add("-enable-kvm")
         add(isoImage.absolutePath)
     }
     commandLine(runCommand)

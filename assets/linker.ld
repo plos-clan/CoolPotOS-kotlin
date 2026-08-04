@@ -15,6 +15,7 @@ PHDRS
     data PT_LOAD;
     tls PT_TLS;
     dynamic PT_DYNAMIC;
+    eh_frame PT_GNU_EH_FRAME;
 }
 
 SECTIONS
@@ -45,6 +46,19 @@ SECTIONS
 
     .rodata : {
         *(.rodata .rodata.*)
+    } :rodata
+
+    .eh_frame_hdr : {
+        KEEP(*(.eh_frame_hdr))
+    } :rodata :eh_frame
+
+    .eh_frame : {
+        KEEP(*(.eh_frame))
+    } :rodata
+
+    .gcc_except_table : {
+        KEEP(*(.gcc_except_table))
+        KEEP(*(.gcc_except_table.*))
     } :rodata
 
     /* Move to the next memory page for .data */
@@ -97,7 +111,6 @@ SECTIONS
 
     /* Discard .note.* and .eh_frame* since they may cause issues on some hosts. */
     /DISCARD/ : {
-        *(.eh_frame*)
         *(.note .note.*)
     }
 }
