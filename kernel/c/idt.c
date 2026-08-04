@@ -53,9 +53,6 @@ static void dispatch_kotlin_handler(
     uint64_t user_fs_base = 0;
 
     if (from_user) {
-        /* Interrupt gates do not perform SWAPGS and they leave FS_BASE at the
-         * user TLS value.  Kotlin/Native requires the kernel runtime TLS even
-         * while reporting a userspace fault. */
         user_fs_base = rdmsr(ia32_fs_base_msr);
         __asm__ volatile("swapgs" : : : "memory");
         uint64_t kernel_fs_base;
@@ -174,13 +171,12 @@ static __attribute__((naked, used)) void irq_common_entry(void) {
         "movq %rax, 168(%rsp)\n"
         "movq 24(%rdx), %rax\n"
         "movq %rax, 176(%rsp)\n"
-        /* Long mode interrupt frames always contain the interrupted RSP and SS. */
+
         "movq 32(%rdx), %rax\n"
         "movq %rax, 184(%rsp)\n"
         "movq 40(%rdx), %rax\n"
         "movq %rax, 192(%rsp)\n"
-        /* Normalize GS while the IRQ runs: user entries still have the user
-         * GS base because interrupt gates do not perform SWAPGS. */
+
         "testb $3, 16(%rdx)\n"
         "jz 1f\n"
         "swapgs\n"
@@ -197,7 +193,7 @@ static __attribute__((naked, used)) void irq_common_entry(void) {
         "shrq $32, %rdx\n"
         "movl $0xc0000100, %ecx\n"
         "wrmsr\n"
-        /* IRETQ in 64-bit mode always consumes RIP, CS, RFLAGS, RSP and SS. */
+
         "leaq -40(%r13), %r12\n"
         "movq 160(%r13), %rax\n"
         "movq %rax, 0(%r12)\n"
@@ -209,8 +205,7 @@ static __attribute__((naked, used)) void irq_common_entry(void) {
         "movq %rax, 24(%r12)\n"
         "movq 192(%r13), %rax\n"
         "movq %rax, 32(%r12)\n"
-        /* The handler always runs with kernel GS; restore user GS only when
-         * the selected context returns to CPL3. */
+
         "testb $3, 168(%r13)\n"
         "jz 2f\n"
         "swapgs\n"
@@ -266,7 +261,7 @@ void idt_setup(void) {
     for (uint16_t vector = irq_vector_base; vector < idt_vector_count; vector++) {
         const uint16_t irq_index = (uint16_t)(vector - irq_vector_base);
         uint8_t *stub = irq_stub_base + ((uint64_t)irq_index * irq_stub_size);
-        /* Keep asynchronous IRQ frames off the interrupted code's red zone. */
+
         set_idt_gate(vector, stub, 2, 0x8e);
     }
     idt_load();

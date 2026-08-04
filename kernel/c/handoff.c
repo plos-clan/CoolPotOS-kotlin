@@ -328,11 +328,6 @@ void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
     const uint64_t lapic_id = current_lapic_id();
     fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
 
-    /* A user task may be interrupted after SYSCALL has entered the kernel.
-     * Its saved CS is then ring 0 even though its CR3 and kernel stack still
-     * belong to the user task.  Do not hand that half-finished syscall to a
-     * different CPU time slice: the syscall exit assembly owns that stack
-     * until it has constructed the ring-3 IRET frame. */
     const fast_task_t *current = cpu->current;
     const bool syscall_in_progress = current && current->user_context &&
         (regs->cs & 3) == 0;

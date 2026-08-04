@@ -80,7 +80,6 @@ class FileDescriptorTable {
     fun get(fd: Int): OpenFileDescription? =
         lock.withLock { entries[fd]?.file }
 
-    /** Returns a temporary reference which the caller must release. */
     fun acquire(fd: Int): OpenFileDescription? = lock.withLock {
         val file = entries[fd]?.file ?: return@withLock null
         if (file.retain()) file else null

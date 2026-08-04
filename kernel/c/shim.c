@@ -90,8 +90,34 @@ enum {
     serial_tx_empty = 0x20
 };
 
+uint8_t io_in8(uint16_t port) {
+    uint8_t value;
+    __asm__ volatile("inb %1, %0" : "=a"(value) : "Nd"(port) : "memory");
+    return value;
+}
+
+uint16_t io_in16(uint16_t port) {
+    uint16_t value;
+    __asm__ volatile("inw %1, %0" : "=a"(value) : "Nd"(port) : "memory");
+    return value;
+}
+
+uint32_t io_in32(uint16_t port) {
+    uint32_t value;
+    __asm__ volatile("inl %1, %0" : "=a"(value) : "Nd"(port) : "memory");
+    return value;
+}
+
 void io_out8(uint16_t port, uint8_t value) {
     __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port) : "memory");
+}
+
+void io_out16(uint16_t port, uint16_t value) {
+    __asm__ volatile("outw %0, %1" : : "a"(value), "Nd"(port) : "memory");
+}
+
+void io_out32(uint16_t port, uint32_t value) {
+    __asm__ volatile("outl %0, %1" : : "a"(value), "Nd"(port) : "memory");
 }
 
 void enable_interrupt(void) { __asm__ volatile("sti" : : : "memory"); }
@@ -157,12 +183,6 @@ static __attribute__((naked, noreturn)) void kernel_clone_thread_entry(void) {
 uint64_t get_kernel_clone_thread_entry_address(void) { return (uintptr_t)&kernel_clone_thread_entry; }
 int __pthread_key_create(uintptr_t *key, void (*destructor)(void *)) { return pthread_key_create(key, destructor); }
 
-static inline uint8_t inb(uint16_t port) {
-    uint8_t value;
-    __asm__ volatile("inb %1, %0" : "=a"(value) : "Nd"(port) : "memory");
-    return value;
-}
-
 static void serial_init(void) {
     io_out8(serial_com1 + 1, 0x00);
     io_out8(serial_com1 + 3, 0x80);
@@ -174,7 +194,7 @@ static void serial_init(void) {
 }
 
 static void serial_write_byte(uint8_t value) {
-    while (!(inb(serial_com1 + serial_line_status) & serial_tx_empty)) {}
+    while (!(io_in8(serial_com1 + serial_line_status) & serial_tx_empty)) {}
     io_out8(serial_com1, value);
 }
 
@@ -232,14 +252,10 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "cld\n"
         "swapgs\n"
 
-        /* SYSCALL does not switch stacks. Save the user values in per-CPU GS
-         * storage before using RAX and RSP as scratch registers. */
         "movq %rsp, %gs:8\n"
         "movq %rax, %gs:16\n"
         "movq %gs:0, %rsp\n"
 
-        /* pt_regs_t is 200 bytes; the extra eight bytes keep the stack
-         * 16-byte aligned at the C ABI call site. */
         "subq $208, %rsp\n"
         "movq %r15, 0(%rsp)\n"
         "movq %r14, 8(%rsp)\n"
@@ -263,8 +279,6 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "movw %es, %ax\n"
         "movq %rax, 120(%rsp)\n"
 
-        /* Preserve the user TLS base, then install the Kotlin runtime TLS
-         * base while syscall_handler executes in kernel mode. */
         "movl $0xc0000100, %ecx\n"
         "rdmsr\n"
         "shlq $32, %rdx\n"
@@ -295,16 +309,12 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "cli\n"
         "movq %rsp, %r13\n"
 
-        /* The handler may change FS_BASE (for example, arch_prctl), so use
-         * the value from the returned frame rather than the entry value. */
         "movq 128(%r13), %rax\n"
         "movq %rax, %rdx\n"
         "shrq $32, %rdx\n"
         "movl $0xc0000100, %ecx\n"
         "wrmsr\n"
 
-        /* Always return through the known user descriptors. IRETQ keeps an
-         * invalid-return fault on the controlled kernel stack, unlike SYSRET. */
         "movl $0x1b, %eax\n"
         "movw %ax, %ds\n"
         "movw %ax, %es\n"

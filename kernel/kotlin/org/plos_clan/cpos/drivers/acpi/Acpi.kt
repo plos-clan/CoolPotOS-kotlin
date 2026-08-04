@@ -28,7 +28,7 @@ private const val HPET_GAS_SPACE_ID_OFFSET = SDT_HEADER_LENGTH + 4
 private const val HPET_GAS_ADDRESS_OFFSET = SDT_HEADER_LENGTH + 8
 private const val SPCR_GAS_ADDRESS_OFFSET = SDT_HEADER_LENGTH + 8
 
-private data class AcpiTable(
+data class AcpiTable(
     val pointer: CPointer<UByteVar>,
     val length: Int,
 ) {
@@ -91,7 +91,7 @@ private data class HpetGasAddress(
     val address: ULong,
 )
 
-private interface AcpiTableParser<out T> {
+interface AcpiTableParser<out T> {
     val signature: String
     fun parse(table: AcpiTable): T?
 }
@@ -240,6 +240,15 @@ object Acpi {
         parseIfFound(McfgParser) { mcfg ->
             println("ACPI: MCFG region count=${mcfg.totalRegionCount} usable=${mcfg.regions.size}")
             Pcie.initialize(mcfg.regions)
+        }
+
+        parseIfFound(FadtParser) { fadt ->
+            println(
+                "ACPI: FADT SCI=${fadt.sciInterrupt}, " +
+                        "DSDT=0x${fadt.dsdtAddress?.toString(16)}, " +
+                        "i8042=${fadt.hasI8042Controller}"
+            )
+
         }
     }
 

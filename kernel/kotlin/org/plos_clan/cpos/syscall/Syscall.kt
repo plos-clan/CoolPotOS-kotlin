@@ -36,8 +36,10 @@ private const val SYS_MUNMAP = 11
 private const val SYS_IOCTL = 16
 private const val SYS_READV = 19
 private const val SYS_WRITEV = 20
+private const val SYS_UNAME = 63
 private const val SYS_GETCWD = 79
 private const val SYS_ARCH_PRCTL = 158
+private const val SYS_REBOOT = 169
 private const val SYS_OPENAT = 257
 
 const val SUPPORTED_PROT = 0x7uL
@@ -76,6 +78,8 @@ object Syscall {
         this[SYS_ARCH_PRCTL] = ::sysArchPrctl
         this[SYS_OPENAT] = ::sysOpenAt
         this[SYS_GETCWD] = ::sysGetCWD
+        this[SYS_REBOOT] = ::sysReboot
+        this[SYS_UNAME] = ::sysUname
     }
 
     fun syscallHandle(regs: PtraceRegisters) {

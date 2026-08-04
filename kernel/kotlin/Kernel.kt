@@ -24,7 +24,7 @@ import org.plos_clan.cpos.utils.hex
 import kotlin.experimental.ExperimentalNativeApi
 
 private val KERNEL_RUNTIME = "x86_64/kotlin-${KotlinVersion.CURRENT}"
-private val KERNEL_BANNER = "CoolPotOS Kernel v0.0.1 [$KERNEL_RUNTIME]"
+val KERNEL_NAME = "CP_Kernel-x86_64-v0.0.1_{$KERNEL_RUNTIME}"
 
 @ExperimentalNativeApi
 @ExperimentalForeignApi
@@ -33,7 +33,7 @@ private val KERNEL_BANNER = "CoolPotOS Kernel v0.0.1 [$KERNEL_RUNTIME]"
 fun kernelMain() {
     bridge.disable_interrupt()
     println("Kernel booting...")
-    println(KERNEL_BANNER)
+    println("CoolPotOS $KERNEL_NAME")
     bridge.gdt_setup()
     bridge.idt_setup()
     println("Descriptor table initialized.")
