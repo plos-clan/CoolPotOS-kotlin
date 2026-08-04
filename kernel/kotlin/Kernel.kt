@@ -5,6 +5,7 @@ import bridge.get_sys_clone_stack_at
 import bridge.get_sys_clone_tls_at
 import org.plos_clan.cpos.drivers.FrameBuffer
 import org.plos_clan.cpos.drivers.acpi.Acpi
+import org.plos_clan.cpos.drivers.acpi.aml.Aml
 import org.plos_clan.cpos.drivers.char.TtyManager
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
@@ -67,7 +68,10 @@ fun kernelMain() {
     Scheduler.enableScheduler()
     bridge.enable_interrupt()
     Init.setupInitProgram()
-    while (true) bridge.wait_for_interrupt()
+    while (true) {
+        bridge.wait_for_interrupt()
+        Aml.processPendingEvents()
+    }
 }
 
 @ExperimentalForeignApi

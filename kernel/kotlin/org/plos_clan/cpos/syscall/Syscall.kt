@@ -36,6 +36,7 @@ private const val SYS_MUNMAP = 11
 private const val SYS_IOCTL = 16
 private const val SYS_READV = 19
 private const val SYS_WRITEV = 20
+private const val SYS_NANO_SLEEP = 35
 private const val SYS_UNAME = 63
 private const val SYS_GETCWD = 79
 private const val SYS_ARCH_PRCTL = 158
@@ -80,6 +81,7 @@ object Syscall {
         this[SYS_GETCWD] = ::sysGetCWD
         this[SYS_REBOOT] = ::sysReboot
         this[SYS_UNAME] = ::sysUname
+        this[SYS_NANO_SLEEP] = :: sysNanoSleep
     }
 
     fun syscallHandle(regs: PtraceRegisters) {

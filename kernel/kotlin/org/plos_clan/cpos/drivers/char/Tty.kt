@@ -131,6 +131,10 @@ data class WinSize(
             putU16LE(buffer, 4, wsXpixel)
             putU16LE(buffer, 6, wsYpixel)
         }
+
+    override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
+        TODO("Not yet implemented")
+    }
 }
 
 class Termios(
@@ -158,7 +162,7 @@ class Termios(
         }
     }
 
-    fun updateFromNativeBytes(buffer: ByteArray): Boolean {
+    override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
         if (buffer.size != NATIVE_SIZE) {
             return false
         }
@@ -216,6 +220,10 @@ class Termios2(
             putU32LE(buffer, INPUT_SPEED_OFFSET, cIspeed)
             putU32LE(buffer, OUTPUT_SPEED_OFFSET, cOspeed)
         }
+    }
+
+    override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
+        TODO("Not yet implemented")
     }
 
     private companion object {

@@ -125,6 +125,22 @@ abstract class NativeStruct {
         buffer[offset + 3] = ((bits shr 24) and 0xffu).toByte()
     }
 
+    protected fun putU64LE(
+        buffer: ByteArray,
+        offset: Int,
+        value: ULong,
+    ) {
+        val bits = value.toULong()
+        buffer[offset] = (bits and 0xffu).toByte()
+        buffer[offset + 1] = ((bits shr 8) and 0xffu).toByte()
+        buffer[offset + 2] = ((bits shr 16) and 0xffu).toByte()
+        buffer[offset + 3] = ((bits shr 24) and 0xffu).toByte()
+        buffer[offset + 4] = ((bits shr 32) and 0xffu).toByte()
+        buffer[offset + 5] = ((bits shr 40) and 0xffu).toByte()
+        buffer[offset + 6] = ((bits shr 48) and 0xffu).toByte()
+        buffer[offset + 7] = ((bits shr 56) and 0xffu).toByte()
+    }
+
     protected fun getU32LE(
         buffer: ByteArray,
         offset: Int,
@@ -140,5 +156,19 @@ abstract class NativeStruct {
         ).toInt()
     }
 
+    protected fun getU64LE(
+        buffer: ByteArray,
+        offset: Int,
+    ): ULong {
+        require(offset >= 0 && offset <= buffer.size - ULong.SIZE_BYTES) {
+            "64-bit field at offset $offset exceeds a ${buffer.size}-byte structure"
+        }
+
+        return (0 until ULong.SIZE_BYTES).fold(0uL) { value, byteIndex ->
+            value or (buffer[offset + byteIndex].toUByte().toULong() shl (byteIndex * Byte.SIZE_BITS))
+        }
+    }
+
     abstract fun toNativeBytes(): ByteArray
+    abstract fun updateFromNativeBytes(buffer: ByteArray): Boolean
 }

@@ -25,14 +25,12 @@ object IrqController {
     fun doIrq(regs: PtraceRegisters, irqNum: ULong) {
         val irqIndex = irqIndexOf(irqNum) ?: run {
             println("IrqController: out-of-range irq_num=$irqNum")
-            bridge.disable_interrupt()
+            LocalApic.endOfInterrupt()
             return
         }
 
         val handler = irqHandlers[irqIndex] ?: run {
-            println("empty irq action: $irqNum")
             LocalApic.endOfInterrupt()
-            bridge.disable_interrupt()
             return
         }
         handler(regs, irqNum)
