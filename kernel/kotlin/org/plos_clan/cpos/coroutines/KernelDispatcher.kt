@@ -61,7 +61,7 @@ class KernelDispatcher internal constructor(
         context: CoroutineContext,
     ): DisposableHandle = schedule(timeMillis, block)
 
-    fun runReadyBatch(limit: Int = MAX_TASKS_PER_BATCH): Int {
+    internal fun runReadyBatch(limit: Int = MAX_TASKS_PER_BATCH): Int {
         val nowNanos = nanoTime()
         val ready = criticalSection.withLock {
             queue.claimReady(nowNanos, limit)
@@ -70,13 +70,16 @@ class KernelDispatcher internal constructor(
             try {
                 runnable.run()
             } catch (failure: Throwable) {
-                failureReporter(failure)
+                try {
+                    failureReporter(failure)
+                } catch (_: Throwable) {
+                }
             }
         }
         return ready.size
     }
 
-    fun hasReadyWork(): Boolean = criticalSection.withLock(queue::hasImmediateWork)
+    internal fun hasReadyWork(): Boolean = criticalSection.withLock(queue::hasImmediateWork)
 
     override fun toString(): String = "KernelDispatcher[BSP]"
 

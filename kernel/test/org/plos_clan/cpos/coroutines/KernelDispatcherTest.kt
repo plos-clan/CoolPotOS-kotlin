@@ -109,6 +109,28 @@ class KernelDispatcherTest {
     }
 
     @Test
+    fun throwingReporterDoesNotStopClaimedBatch() {
+        val failure = IllegalStateException("task failure")
+        var reported: Throwable? = null
+        val dispatcher = KernelDispatcher(
+            nanoTime = { 0uL },
+            criticalSection = NoOpCriticalSection,
+            failureReporter = {
+                reported = it
+                throw IllegalStateException("reporter failure")
+            },
+        )
+        var secondRan = false
+        dispatcher.dispatch(EmptyCoroutineContext, Runnable { throw failure })
+        dispatcher.dispatch(EmptyCoroutineContext, Runnable { secondRan = true })
+
+        assertEquals(2, dispatcher.runReadyBatch())
+
+        assertSame(failure, reported)
+        assertTrue(secondRan)
+    }
+
+    @Test
     fun asyncAwaitCompletesThroughDispatcher() {
         val dispatcher = dispatcher()
         val scope = CoroutineScope(SupervisorJob() + dispatcher)
