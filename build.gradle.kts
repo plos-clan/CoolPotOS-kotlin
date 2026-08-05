@@ -156,6 +156,7 @@ val linker = setting("linker", "LINKER", "ld.lld")
 val xorriso = setting("xorriso", "XORRISO", "xorriso")
 val qemu = setting("qemu", "QEMU", "qemu-system-x86_64")
 val debugMode = settingBoolean("debugMode", "DEBUG_MODE", false)
+val coroutineSmoke = settingBoolean("coroutineSmoke", "COROUTINE_SMOKE", false)
 
 val isoDir = buildRootDir.resolve("iso")
 val kernelCDir = file("kernel/c")
@@ -615,8 +616,20 @@ val stageIso = tasks.register<Sync>("stageIso") {
     description = "Stages the kernel, initramfs, and Limine assets into the ISO directory."
     dependsOn(linkKernel, prepareLimine, prepareAlpineInitramfs)
 
+    inputs.property("coroutineSmoke", coroutineSmoke)
+
+    val coroutineSmokeEnabled = coroutineSmoke
     into(isoDir)
-    from(limineConfigFile) { into("limine") }
+    from(limineConfigFile) {
+        into("limine")
+        filter { line: String ->
+            if (coroutineSmokeEnabled && line.trimStart().startsWith("cmdline:")) {
+                "$line coroutine-smoke"
+            } else {
+                line
+            }
+        }
+    }
     from(limineUefiCdBin) { into("limine") }
     from(alpineInitramfsUncompressed) {
         into("boot")
