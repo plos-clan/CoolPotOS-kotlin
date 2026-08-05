@@ -10,6 +10,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.plos_clan.cpos.drivers.Hpet
+import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 
 internal const val COROUTINE_SMOKE_SUCCESS_MARKER = "Coroutine smoke test passed"
 
@@ -46,11 +47,13 @@ object KernelCoroutines {
 
     fun initialize(): Boolean = initialize(
         hpetReady = Hpet.isReady,
+        bspPeriodicTimerReady = LocalApic.isBspPeriodicTimerReady,
         dispatcherFactory = { KernelDispatcher(failureReporter = ::reportFailure) },
     )
 
     internal fun initialize(
         hpetReady: Boolean,
+        bspPeriodicTimerReady: Boolean,
         dispatcherFactory: () -> KernelDispatcher,
     ): Boolean {
         if (initialized) {
@@ -58,6 +61,10 @@ object KernelCoroutines {
         }
         if (!hpetReady) {
             println("Kernel coroutines: HPET is unavailable")
+            return false
+        }
+        if (!bspPeriodicTimerReady) {
+            println("Kernel coroutines: BSP LAPIC periodic timer is unavailable")
             return false
         }
 

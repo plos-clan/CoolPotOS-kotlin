@@ -58,11 +58,11 @@ class KernelCoroutineRuntimeTest {
         val firstDispatcher = runtimeDispatcher()
 
         try {
-            assertTrue(KernelCoroutines.initialize(hpetReady = true) { firstDispatcher })
+            assertTrue(KernelCoroutines.initialize(hpetReady = true, bspPeriodicTimerReady = true) { firstDispatcher })
             val firstScope = KernelCoroutines.scope
             val firstJob = firstScope.coroutineContext[Job]
 
-            assertTrue(KernelCoroutines.initialize(hpetReady = true) {
+            assertTrue(KernelCoroutines.initialize(hpetReady = true, bspPeriodicTimerReady = true) {
                 error("idempotent initialization must not create a dispatcher")
             })
 
@@ -82,7 +82,7 @@ class KernelCoroutineRuntimeTest {
         var timeoutRan = false
 
         try {
-            assertTrue(KernelCoroutines.initialize(hpetReady = true) { dispatcher })
+            assertTrue(KernelCoroutines.initialize(hpetReady = true, bspPeriodicTimerReady = true) { dispatcher })
             val handle = dispatcher.invokeOnTimeout(
                 timeMillis = 5,
                 block = Runnable { timeoutRan = true },
@@ -119,7 +119,7 @@ class KernelCoroutineRuntimeTest {
         val secondDispatcher = runtimeDispatcher()
 
         try {
-            assertTrue(KernelCoroutines.initialize(hpetReady = true) { firstDispatcher })
+            assertTrue(KernelCoroutines.initialize(hpetReady = true, bspPeriodicTimerReady = true) { firstDispatcher })
             val firstScope = KernelCoroutines.scope
             val firstJob = firstScope.coroutineContext[Job]
 
@@ -128,7 +128,7 @@ class KernelCoroutineRuntimeTest {
             assertFalse(firstJob?.isActive == true)
             assertFailsWith<IllegalStateException> { KernelCoroutines.dispatcher }
             assertFailsWith<IllegalStateException> { KernelCoroutines.scope }
-            assertTrue(KernelCoroutines.initialize(hpetReady = true) { secondDispatcher })
+            assertTrue(KernelCoroutines.initialize(hpetReady = true, bspPeriodicTimerReady = true) { secondDispatcher })
             assertSame(secondDispatcher, KernelCoroutines.dispatcher)
             assertNotSame(firstScope, KernelCoroutines.scope)
             assertTrue(KernelCoroutines.scope.coroutineContext[Job]?.isActive == true)
@@ -142,9 +142,29 @@ class KernelCoroutineRuntimeTest {
         KernelCoroutines.shutdown()
 
         try {
-            assertFalse(KernelCoroutines.initialize(hpetReady = false) {
+            assertFalse(KernelCoroutines.initialize(hpetReady = false, bspPeriodicTimerReady = true) {
                 error("dispatcher factory must not run")
             })
+            assertFailsWith<IllegalStateException> { KernelCoroutines.dispatcher }
+            assertFailsWith<IllegalStateException> { KernelCoroutines.scope }
+        } finally {
+            KernelCoroutines.shutdown()
+        }
+    }
+
+    @Test
+    fun unavailableBspPeriodicTimerGateDoesNotCreateOrPublishRuntime() {
+        KernelCoroutines.shutdown()
+
+        try {
+            assertFalse(
+                KernelCoroutines.initialize(
+                    hpetReady = true,
+                    bspPeriodicTimerReady = false,
+                ) {
+                    error("dispatcher factory must not run")
+                },
+            )
             assertFailsWith<IllegalStateException> { KernelCoroutines.dispatcher }
             assertFailsWith<IllegalStateException> { KernelCoroutines.scope }
         } finally {
