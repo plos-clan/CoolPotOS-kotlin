@@ -49,6 +49,7 @@ object Hpet {
     private const val GENERAL_CAPABILITIES_OFFSET = 0uL
     private const val COUNTER_PERIOD_OFFSET = 0x4uL
     private const val GENERAL_CONFIGURATION_OFFSET = 0x10uL
+    private const val GENERAL_CONFIGURATION_ENABLE = 1uL
     private const val TIMER0_CONFIGURATION_OFFSET = 0x100uL
     private const val MAIN_COUNTER_OFFSET = 0xF0uL
 
@@ -114,11 +115,12 @@ object Hpet {
             return
         }
 
-        write64(MAIN_COUNTER_OFFSET, 0uL)
-
         val oldGeneralConfig = read64(GENERAL_CONFIGURATION_OFFSET)
-        write64(GENERAL_CONFIGURATION_OFFSET, oldGeneralConfig or 1uL)
-        configureClock(mappedBase, period)
+        write64(
+            GENERAL_CONFIGURATION_OFFSET,
+            oldGeneralConfig and GENERAL_CONFIGURATION_ENABLE.inv(),
+        )
+        write64(MAIN_COUNTER_OFFSET, 0uL)
 
         val oldTimerConfig = read64(TIMER0_CONFIGURATION_OFFSET)
         val routeCapabilities = oldTimerConfig shr 32
@@ -128,6 +130,11 @@ object Hpet {
 
         val timerConfig = (HPET_ROUTE_IRQ_VECTOR.toULong() shl 9) or (1uL shl 2)
         write64(TIMER0_CONFIGURATION_OFFSET, timerConfig)
+        configureClock(mappedBase, period)
+        write64(
+            GENERAL_CONFIGURATION_OFFSET,
+            oldGeneralConfig or GENERAL_CONFIGURATION_ENABLE,
+        )
 
         baseVirtualAddress = mappedBase
         fmsPerTick = period

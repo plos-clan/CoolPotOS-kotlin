@@ -52,11 +52,85 @@ class HpetInitializationTest {
         assertEquals(listOf(0x1000uL to period), clockConfigurations)
         assertEquals(
             listOf(
+                0x10uL to 0uL,
                 0xF0uL to 0uL,
-                0x10uL to 1uL,
                 0x100uL to ((20uL shl 9) or (1uL shl 2)),
+                0x10uL to 1uL,
             ),
             writes,
         )
+    }
+
+    @Test
+    fun reinitializingEnabledCounterDisablesBeforeResetAndPreservesGeneralConfigBits() {
+        val period = 100_000_000u
+        val preservedGeneralConfig = 0xA4uL
+        val enabledGeneralConfig = preservedGeneralConfig or 1uL
+        val programmedTimerConfig = (20uL shl 9) or (1uL shl 2)
+        var generalConfig = preservedGeneralConfig
+        var mainCounter = 0uL
+        var recordEvents = false
+        val events = mutableListOf<String>()
+
+        fun initialize(mappedBase: ULong) {
+            Hpet.initializeMapped(
+                mappedBase = mappedBase,
+                read32 = { offset ->
+                    if (recordEvents) events += "read32:$offset"
+                    if (offset == 0x4uL) period else 0u
+                },
+                read64 = { offset ->
+                    if (recordEvents) events += "read64:$offset"
+                    when (offset) {
+                        0uL -> 1uL shl 13
+                        0x10uL -> generalConfig
+                        0x100uL -> 1uL shl (32 + 20)
+                        0xF0uL -> mainCounter
+                        else -> 0uL
+                    }
+                },
+                write64 = { offset, value ->
+                    if (recordEvents) events += "write64:$offset=$value"
+                    when (offset) {
+                        0x10uL -> generalConfig = value
+                        0xF0uL -> mainCounter = value
+                    }
+                },
+                configureClock = { base, configuredPeriod ->
+                    if (recordEvents) events += "configure:$base=$configuredPeriod"
+                },
+                log = {
+                    if (recordEvents) events += "log"
+                },
+            )
+        }
+
+        initialize(0x1000uL)
+        assertEquals(enabledGeneralConfig, generalConfig)
+        assertTrue(Hpet.isReady)
+
+        mainCounter = 123uL
+        recordEvents = true
+        initialize(0x2000uL)
+
+        assertEquals(
+            listOf(
+                "read64:0",
+                "read32:4",
+                "read64:16",
+                "write64:16=$preservedGeneralConfig",
+                "write64:240=0",
+                "read64:256",
+                "write64:256=$programmedTimerConfig",
+                "configure:8192=$period",
+                "write64:16=$enabledGeneralConfig",
+                "read64:240",
+                "log",
+            ),
+            events,
+        )
+        assertEquals(enabledGeneralConfig, generalConfig)
+        assertEquals(0uL, mainCounter)
+        assertTrue(Hpet.isReady)
     }
 }
