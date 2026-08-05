@@ -6,13 +6,19 @@ import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
 import org.plos_clan.cpos.drivers.Hpet
+import org.plos_clan.cpos.drivers.acpi.aml.Aml
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 
 internal const val COROUTINE_SMOKE_SUCCESS_MARKER = "Coroutine smoke test passed"
+internal const val AML_EVENT_BATCH_SIZE = 64
+internal const val AML_EVENT_IDLE_POLL_MILLIS = 1L
 
 internal data class KernelCoroutineRuntime(
     val job: CompletableJob,
@@ -35,6 +41,7 @@ object KernelCoroutines {
     private var initialized = false
     private var runtime: KernelCoroutineRuntime? = null
     private var activeDispatcher: KernelDispatcher? = null
+    private var amlEventWorker: Job? = null
 
     val dispatcher: KernelDispatcher
         get() = checkNotNull(activeDispatcher) { NOT_INITIALIZED_MESSAGE }
@@ -84,6 +91,24 @@ object KernelCoroutines {
         }
     }
 
+    internal fun launchAmlEventWorker(
+        processPendingEvents: (Int) -> Int = Aml::processPendingEvents,
+    ): Job {
+        amlEventWorker?.takeIf(Job::isActive)?.let { return it }
+        return scope.launch(CoroutineName("aml-events")) {
+            while (isActive) {
+                val processed = processPendingEvents(AML_EVENT_BATCH_SIZE)
+                if (processed == 0) {
+                    delay(AML_EVENT_IDLE_POLL_MILLIS)
+                } else {
+                    yield()
+                }
+            }
+        }.also { worker ->
+            amlEventWorker = worker
+        }
+    }
+
     fun runEventLoop(): Nothing {
         check(initialized) { NOT_INITIALIZED_MESSAGE }
         val eventDispatcher = dispatcher
@@ -108,6 +133,7 @@ object KernelCoroutines {
             currentDispatcher.runReadyBatch()
         }
         currentDispatcher.shutdown()
+        amlEventWorker = null
         runtime = null
         activeDispatcher = null
         initialized = false

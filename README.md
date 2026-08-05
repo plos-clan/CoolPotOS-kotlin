@@ -66,7 +66,9 @@ KernelCoroutines.scope.launch {
 
 `Dispatchers.Default`, `Dispatchers.IO`, and `Dispatchers.Main` are not kernel
 execution targets. Long compute loops must suspend or yield cooperatively so
-other kernel work can run. Build the boot smoke check with
+other kernel work can run. AML SCI/GPE pending events run in a dedicated child
+of the kernel scope; it processes bounded batches and suspends when idle rather
+than polling in the bootstrap loop. Build the boot smoke check with
 `./gradlew buildIso -PcoroutineSmoke=true`.
 
 ## License

@@ -171,6 +171,86 @@ class KernelCoroutineRuntimeTest {
             KernelCoroutines.shutdown()
         }
     }
+
+    @Test
+    fun amlEventWorkerUsesBoundedBatchesAndSleepsWhenIdle() {
+        KernelCoroutines.shutdown()
+        val clock = RuntimeFakeClock()
+        val dispatcher = runtimeDispatcher(clock)
+        val requestedBatchSizes = mutableListOf<Int>()
+        val results = ArrayDeque(listOf(AML_EVENT_BATCH_SIZE, 1, 0, 0))
+
+        try {
+            assertTrue(
+                KernelCoroutines.initialize(
+                    hpetReady = true,
+                    bspPeriodicTimerReady = true,
+                ) { dispatcher },
+            )
+            val worker = KernelCoroutines.launchAmlEventWorker { maxEvents ->
+                requestedBatchSizes += maxEvents
+                results.removeFirstOrNull() ?: 0
+            }
+
+            assertTrue(worker.isActive)
+            assertEquals(1, dispatcher.runReadyBatch())
+            assertEquals(listOf(AML_EVENT_BATCH_SIZE), requestedBatchSizes)
+
+            assertEquals(1, dispatcher.runReadyBatch())
+            assertEquals(listOf(AML_EVENT_BATCH_SIZE, AML_EVENT_BATCH_SIZE), requestedBatchSizes)
+
+            assertEquals(1, dispatcher.runReadyBatch())
+            assertEquals(3, requestedBatchSizes.size)
+            assertEquals(0, dispatcher.runReadyBatch())
+
+            clock.nowNanos = AML_EVENT_IDLE_POLL_MILLIS.toULong() * 1_000_000uL - 1uL
+            assertEquals(0, dispatcher.runReadyBatch())
+            assertEquals(3, requestedBatchSizes.size)
+
+            clock.nowNanos++
+            assertEquals(1, dispatcher.runReadyBatch())
+            assertEquals(4, requestedBatchSizes.size)
+            assertTrue(requestedBatchSizes.all { it == AML_EVENT_BATCH_SIZE })
+        } finally {
+            KernelCoroutines.shutdown()
+        }
+    }
+
+    @Test
+    fun amlEventWorkerIsSingletonAndStopsWithRootScope() {
+        KernelCoroutines.shutdown()
+        val clock = RuntimeFakeClock()
+        val dispatcher = runtimeDispatcher(clock)
+        var calls = 0
+
+        try {
+            assertTrue(
+                KernelCoroutines.initialize(
+                    hpetReady = true,
+                    bspPeriodicTimerReady = true,
+                ) { dispatcher },
+            )
+            val firstWorker = KernelCoroutines.launchAmlEventWorker {
+                calls++
+                0
+            }
+            val sameWorker = KernelCoroutines.launchAmlEventWorker {
+                error("an active AML worker must be reused")
+            }
+
+            assertSame(firstWorker, sameWorker)
+            assertEquals(1, dispatcher.runReadyBatch())
+            assertEquals(1, calls)
+
+            KernelCoroutines.shutdown()
+            assertFalse(firstWorker.isActive)
+            clock.nowNanos = AML_EVENT_IDLE_POLL_MILLIS.toULong() * 1_000_000uL
+            assertEquals(0, dispatcher.runReadyBatch())
+            assertEquals(1, calls)
+        } finally {
+            KernelCoroutines.shutdown()
+        }
+    }
 }
 
 private fun runtimeDispatcher(clock: RuntimeFakeClock = RuntimeFakeClock()): KernelDispatcher = KernelDispatcher(
