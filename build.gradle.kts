@@ -125,6 +125,39 @@ abstract class DecompressGzipTask : DefaultTask() {
     }
 }
 
+@CacheableTask
+abstract class GenerateLimineConfigTask : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val sourceFile: RegularFileProperty
+
+    @get:Input
+    abstract val smokeEnabled: Property<Boolean>
+
+    @get:OutputFile
+    abstract val destinationFile: RegularFileProperty
+
+    @TaskAction
+    fun generate() {
+        val source = sourceFile.get().asFile.toPath()
+        val target = destinationFile.get().asFile.toPath()
+        Files.createDirectories(target.parent)
+
+        if (!smokeEnabled.get()) {
+            Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING)
+            return
+        }
+
+        val cmdline = Regex("(?m)^[\\t ]*cmdline:[^\\r\\n]*(?=\\r?$)")
+        val smokeFlag = Regex("(?:^|[\\t ])coroutine-smoke(?:$|[\\t ])")
+        val content = Files.readString(source, Charsets.UTF_8)
+        val transformed = cmdline.replace(content) { match ->
+            if (smokeFlag.containsMatchIn(match.value)) match.value else "${match.value} coroutine-smoke"
+        }
+        Files.writeString(target, transformed, Charsets.UTF_8)
+    }
+}
+
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
 }
@@ -611,25 +644,19 @@ tasks.named("build") {
     dependsOn(linkKernel)
 }
 
+val generateLimineConfig = tasks.register<GenerateLimineConfigTask>("generateLimineConfig") {
+    sourceFile.set(limineConfigFile)
+    smokeEnabled.set(coroutineSmoke)
+    destinationFile.set(layout.buildDirectory.file("generated/limine/limine.conf"))
+}
+
 val stageIso = tasks.register<Sync>("stageIso") {
     group = "build"
     description = "Stages the kernel, initramfs, and Limine assets into the ISO directory."
-    dependsOn(linkKernel, prepareLimine, prepareAlpineInitramfs)
+    dependsOn(linkKernel, prepareLimine, prepareAlpineInitramfs, generateLimineConfig)
 
-    inputs.property("coroutineSmoke", coroutineSmoke)
-
-    val coroutineSmokeEnabled = coroutineSmoke
     into(isoDir)
-    from(limineConfigFile) {
-        into("limine")
-        filter { line: String ->
-            if (coroutineSmokeEnabled && line.trimStart().startsWith("cmdline:")) {
-                "$line coroutine-smoke"
-            } else {
-                line
-            }
-        }
-    }
+    from(generateLimineConfig.flatMap { it.destinationFile }) { into("limine") }
     from(limineUefiCdBin) { into("limine") }
     from(alpineInitramfsUncompressed) {
         into("boot")
