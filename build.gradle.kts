@@ -342,6 +342,9 @@ kotlin {
 
     sourceSets.named("nativeMain") {
         kotlin.srcDir(kernelKotlinDir)
+        dependencies {
+            implementation(libs.kotlinx.coroutines.core)
+        }
     }
 
     nativeTarget.compilations.getByName("main").cinterops {
