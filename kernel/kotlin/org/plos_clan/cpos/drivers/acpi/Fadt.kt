@@ -44,11 +44,19 @@ private const val FADT_SMI_COMMAND_OFFSET = 48
 private const val FADT_ACPI_ENABLE_OFFSET = 52
 private const val FADT_ACPI_DISABLE_OFFSET = 53
 
+private const val FADT_PM1A_EVENT_OFFSET = 56
+private const val FADT_PM1B_EVENT_OFFSET = 60
 private const val FADT_PM1A_CONTROL_OFFSET = 64
 private const val FADT_PM1B_CONTROL_OFFSET = 68
 private const val FADT_PM_TIMER_OFFSET = 76
+private const val FADT_GPE0_OFFSET = 80
+private const val FADT_GPE1_OFFSET = 84
+private const val FADT_PM1_EVENT_LENGTH_OFFSET = 88
 private const val FADT_PM1_CONTROL_LENGTH_OFFSET = 89
 private const val FADT_PM_TIMER_LENGTH_OFFSET = 91
+private const val FADT_GPE0_LENGTH_OFFSET = 92
+private const val FADT_GPE1_LENGTH_OFFSET = 93
+private const val FADT_GPE1_BASE_OFFSET = 94
 
 private const val FADT_CENTURY_OFFSET = 108
 private const val FADT_IAPC_BOOT_ARCH_OFFSET = 109
@@ -58,9 +66,13 @@ private const val FADT_RESET_REGISTER_OFFSET = 116
 private const val FADT_RESET_VALUE_OFFSET = 128
 private const val FADT_X_FACS_OFFSET = 132
 private const val FADT_X_DSDT_OFFSET = 140
+private const val FADT_X_PM1A_EVENT_OFFSET = 148
+private const val FADT_X_PM1B_EVENT_OFFSET = 160
 private const val FADT_X_PM1A_CONTROL_OFFSET = 172
 private const val FADT_X_PM1B_CONTROL_OFFSET = 184
 private const val FADT_X_PM_TIMER_OFFSET = 208
+private const val FADT_X_GPE0_OFFSET = 220
+private const val FADT_X_GPE1_OFFSET = 232
 
 private const val DSDT_HEADER_LENGTH = 36
 private const val DSDT_LENGTH_OFFSET = 4
@@ -137,9 +149,17 @@ data class FadtInfo(
     val flags: UInt,
     val resetRegister: GenericAddressStructure?,
     val resetValue: UInt?,
+    val pm1aEventBlock: GenericAddressStructure?,
+    val pm1bEventBlock: GenericAddressStructure?,
     val pm1aControlBlock: GenericAddressStructure?,
     val pm1bControlBlock: GenericAddressStructure?,
     val pmTimerBlock: GenericAddressStructure?,
+    val gpe0Block: GenericAddressStructure?,
+    val gpe1Block: GenericAddressStructure?,
+    val pm1EventLength: UInt,
+    val gpe0Length: UInt,
+    val gpe1Length: UInt,
+    val gpe1Base: UInt,
 ) {
     val hasI8042Controller: Boolean?
         get() = bootArchitectureFlags?.let {
@@ -152,8 +172,12 @@ data class FadtInfo(
     val hardwareReducedAcpi: Boolean
         get() = (flags and FADT_FLAG_HARDWARE_REDUCED_ACPI) != 0u
 
+    val hasFixedPowerButton: Boolean
+        get() = (flags and FADT_FLAG_POWER_BUTTON_IS_CONTROL_METHOD) == 0u
+
     companion object {
         const val IAPC_BOOT_ARCH_8042 = 0x00000002u
+        const val FADT_FLAG_POWER_BUTTON_IS_CONTROL_METHOD = 0x00000010u
         const val FADT_FLAG_RESET_REGISTER_SUPPORTED = 0x00000400u
         const val FADT_FLAG_HARDWARE_REDUCED_ACPI = 0x00100000u
     }
@@ -175,6 +199,15 @@ object Fadt {
 
     internal fun install(info: FadtInfo) {
         current = info
+    }
+
+    internal fun ensureAcpiEnabled(): Boolean {
+        val fadt = current ?: return false
+        if (fadt.hardwareReducedAcpi) {
+            return true
+        }
+        val pm1a = fadt.pm1aControlBlock ?: return false
+        return enableAcpi(fadt, pm1a)
     }
 
     fun shutdown(): Boolean {
@@ -344,6 +377,32 @@ private fun GenericAddressStructure.writeRaw(value: ULong): Boolean {
         GAS_SYSTEM_MEMORY -> writeMmio(address, byteCount, value)
         else -> false
     }
+}
+
+/** Reads one byte from a register block described by a GAS. */
+internal fun GenericAddressStructure.readByte(byteOffset: UInt): UInt? {
+    if (byteOffset.toULong() > ULong.MAX_VALUE - address) {
+        return null
+    }
+    return copy(
+        registerBitWidth = 8u,
+        registerBitOffset = 0u,
+        accessSize = GAS_ACCESS_BYTE,
+        address = address + byteOffset,
+    ).readRaw()?.toUInt()
+}
+
+/** Writes one byte to a register block described by a GAS. */
+internal fun GenericAddressStructure.writeByte(byteOffset: UInt, value: UInt): Boolean {
+    if (byteOffset.toULong() > ULong.MAX_VALUE - address) {
+        return false
+    }
+    return copy(
+        registerBitWidth = 8u,
+        registerBitOffset = 0u,
+        accessSize = GAS_ACCESS_BYTE,
+        address = address + byteOffset,
+    ).writeRaw(value.toULong())
 }
 
 private fun readMmio(
@@ -604,8 +663,27 @@ object FadtParser : AcpiTableParser<FadtInfo> {
         val pm1ControlLength =
             table.pointer.readU8(FADT_PM1_CONTROL_LENGTH_OFFSET).toUInt()
 
+        val pm1EventLength =
+            table.pointer.readU8(FADT_PM1_EVENT_LENGTH_OFFSET).toUInt()
+
         val pmTimerLength =
             table.pointer.readU8(FADT_PM_TIMER_LENGTH_OFFSET).toUInt()
+
+        val gpe0Length =
+            table.pointer.readU8(FADT_GPE0_LENGTH_OFFSET).toUInt()
+
+        val gpe1Length =
+            table.pointer.readU8(FADT_GPE1_LENGTH_OFFSET).toUInt()
+
+        val legacyPm1aEvent = legacyIoGas(
+            address = table.pointer.readU32(FADT_PM1A_EVENT_OFFSET),
+            byteLength = pm1EventLength,
+        )
+
+        val legacyPm1bEvent = legacyIoGas(
+            address = table.pointer.readU32(FADT_PM1B_EVENT_OFFSET),
+            byteLength = pm1EventLength,
+        )
 
         val legacyPm1aControl = legacyIoGas(
             address = table.pointer.readU32(FADT_PM1A_CONTROL_OFFSET),
@@ -622,6 +700,24 @@ object FadtParser : AcpiTableParser<FadtInfo> {
             byteLength = pmTimerLength,
         )
 
+        val legacyGpe0 = legacyIoGas(
+            address = table.pointer.readU32(FADT_GPE0_OFFSET),
+            byteLength = gpe0Length,
+        )
+
+        val legacyGpe1 = legacyIoGas(
+            address = table.pointer.readU32(FADT_GPE1_OFFSET),
+            byteLength = gpe1Length,
+        )
+
+        val extendedPm1aEvent =
+            table.readGas(FADT_X_PM1A_EVENT_OFFSET)
+                ?.takeIf { it.isPresent }
+
+        val extendedPm1bEvent =
+            table.readGas(FADT_X_PM1B_EVENT_OFFSET)
+                ?.takeIf { it.isPresent }
+
         val extendedPm1aControl =
             table.readGas(FADT_X_PM1A_CONTROL_OFFSET)
                 ?.takeIf { it.isPresent }
@@ -632,6 +728,14 @@ object FadtParser : AcpiTableParser<FadtInfo> {
 
         val extendedPmTimer =
             table.readGas(FADT_X_PM_TIMER_OFFSET)
+                ?.takeIf { it.isPresent }
+
+        val extendedGpe0 =
+            table.readGas(FADT_X_GPE0_OFFSET)
+                ?.takeIf { it.isPresent }
+
+        val extendedGpe1 =
+            table.readGas(FADT_X_GPE1_OFFSET)
                 ?.takeIf { it.isPresent }
 
         return FadtInfo(
@@ -670,9 +774,17 @@ object FadtParser : AcpiTableParser<FadtInfo> {
                 } else {
                     null
                 },
+            pm1aEventBlock = extendedPm1aEvent ?: legacyPm1aEvent,
+            pm1bEventBlock = extendedPm1bEvent ?: legacyPm1bEvent,
             pm1aControlBlock = extendedPm1aControl ?: legacyPm1aControl,
             pm1bControlBlock = extendedPm1bControl ?: legacyPm1bControl,
             pmTimerBlock = extendedPmTimer ?: legacyPmTimer,
+            gpe0Block = extendedGpe0 ?: legacyGpe0,
+            gpe1Block = extendedGpe1 ?: legacyGpe1,
+            pm1EventLength = pm1EventLength,
+            gpe0Length = gpe0Length,
+            gpe1Length = gpe1Length,
+            gpe1Base = table.pointer.readU8(FADT_GPE1_BASE_OFFSET).toUInt(),
         ).also(Fadt::install)
     }
 }

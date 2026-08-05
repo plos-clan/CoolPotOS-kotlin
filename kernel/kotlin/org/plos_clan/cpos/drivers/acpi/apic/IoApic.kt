@@ -7,6 +7,7 @@ import kotlinx.cinterop.UIntVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set
 import org.plos_clan.cpos.mem.KernelPageDirectory
+import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.hex
 import org.plos_clan.cpos.utils.toPointer
 
@@ -25,6 +26,7 @@ private const val IOAPIC_TRIGGER_LEVEL_BIT = 0x8000uL
 private const val IOAPIC_MASK_BIT = 0x1_0000uL
 
 object IoApic {
+    private val lock = IrqSpinLock()
     private var mmioBaseVirtualAddress = 0uL
     private var redirectionEntryCount = 0u
 
@@ -36,7 +38,7 @@ object IoApic {
 
         mmioBaseVirtualAddress = mappedBase
 
-        val version = read(IOAPIC_REG_VERSION)
+        val version = lock.withLock { readUnlocked(IOAPIC_REG_VERSION) }
         redirectionEntryCount = ((version shr 16) and IOAPIC_BYTE_MASK) + 1u
         val versionId = (version and IOAPIC_BYTE_MASK).hex()
         println("APIC: IOAPIC mapped=${mappedBase.hex()} version=$versionId entries=$redirectionEntryCount")
@@ -71,18 +73,38 @@ object IoApic {
 
         val destination = destinationApicId and IOAPIC_BYTE_MASK
         val high = destination.toULong() shl IOAPIC_DESTINATION_SHIFT
-        write(tableRegister, low.toUInt())
-        write(tableRegister + 1u, high.toUInt())
+        lock.withLock {
+            writeUnlocked(tableRegister, low.toUInt())
+            writeUnlocked(tableRegister + 1u, high.toUInt())
+        }
 
         println("APIC: route irq=$irq vector=$vector dst_apic_id=$destination masked=$masked")
     }
 
-    private fun read(register: UInt): UInt {
+    /** Changes only the mask bit while preserving the firmware/programmed route. */
+    fun setMasked(irq: UInt, masked: Boolean): Boolean {
+        if (mmioBaseVirtualAddress == 0uL || irq >= redirectionEntryCount) {
+            return false
+        }
+        return lock.withLock {
+            val tableRegister = IOAPIC_REG_TABLE_BASE + irq * 2u
+            val current = readUnlocked(tableRegister)
+            val updated = if (masked) {
+                current or IOAPIC_MASK_BIT.toUInt()
+            } else {
+                current and IOAPIC_MASK_BIT.toUInt().inv()
+            }
+            writeUnlocked(tableRegister, updated)
+            true
+        }
+    }
+
+    private fun readUnlocked(register: UInt): UInt {
         writeRaw(IOAPIC_IOREGSEL_OFFSET, register)
         return readRaw(IOAPIC_IOWIN_OFFSET)
     }
 
-    private fun write(register: UInt, value: UInt) {
+    private fun writeUnlocked(register: UInt, value: UInt) {
         writeRaw(IOAPIC_IOREGSEL_OFFSET, register)
         writeRaw(IOAPIC_IOWIN_OFFSET, value)
     }

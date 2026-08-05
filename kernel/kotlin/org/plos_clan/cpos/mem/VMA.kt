@@ -61,11 +61,21 @@ data class VmaMapRequest(
     val name: String? = null,
     /** Returns bytes read, or a negative errno. */
     val pageReader: ((offset: ULong, destination: ByteArray) -> Int)? = null,
+    /** Requests immediate population instead of anonymous demand paging. */
+    val populate: Boolean = false,
 )
 
 sealed interface VmaResult<out T> {
     data class Ok<T>(val value: T) : VmaResult<T>
     data class Err(val errno: Int) : VmaResult<Nothing>
+}
+
+enum class VmaFaultResult {
+    RESOLVED,
+    INVALID_ADDRESS,
+    ACCESS_DENIED,
+    OUT_OF_MEMORY,
+    MAPPING_FAILED,
 }
 
 class VMA internal constructor(
@@ -161,6 +171,11 @@ class VMA internal constructor(
         val start = selection.first
         val region = requireNotNull(selection.second)
 
+        if (request.type == VmaType.ANONYMOUS && !request.populate) {
+            lock.withLock { mergeAroundLocked(region) }
+            return VmaResult.Ok(start)
+        }
+
         val mappedPages = mutableListOf<ULong>()
         val pageBuffer = request.pageReader?.let { ByteArray(PAGE_SIZE_BYTES.toInt()) }
         var address = start
@@ -220,6 +235,65 @@ class VMA internal constructor(
         return VmaResult.Ok(start)
     }
 
+    /** Materializes one anonymous page after validating the authoritative VMA permissions. */
+    fun faultIn(
+        address: ULong,
+        write: Boolean,
+        execute: Boolean = false,
+    ): VmaFaultResult = lock.withLock {
+        if (address >= USER_VIRTUAL_ADDRESS_LIMIT) {
+            return@withLock VmaFaultResult.INVALID_ADDRESS
+        }
+        val region = findLocked(address)
+            ?: return@withLock VmaFaultResult.INVALID_ADDRESS
+        val access = region.flags and (VMA_READ or VMA_WRITE or VMA_EXEC)
+        if (access == 0uL ||
+            write && (access and VMA_WRITE) == 0uL ||
+            execute && (access and VMA_EXEC) == 0uL
+        ) {
+            return@withLock VmaFaultResult.ACCESS_DENIED
+        }
+
+        val page = address.alignDown(PAGE_SIZE_BYTES)
+        if (pageDirectory.userPageFrame(page) != null) {
+            return@withLock if (pageDirectory.protectUserPage(
+                    virtualAddress = page,
+                    accessible = true,
+                    writable = (access and VMA_WRITE) != 0uL,
+                    executable = (access and VMA_EXEC) != 0uL,
+                )
+            ) {
+                VmaFaultResult.RESOLVED
+            } else {
+                VmaFaultResult.MAPPING_FAILED
+            }
+        }
+        if (region.type != VmaType.ANONYMOUS) {
+            return@withLock VmaFaultResult.INVALID_ADDRESS
+        }
+
+        val physicalAddress = BuddyFrameAllocator.allocateFrames(1uL)
+            ?: return@withLock VmaFaultResult.OUT_OF_MEMORY
+        val destination = Hhdm.toVirtualPointer<UByteVar>(physicalAddress)
+        if (destination == null) {
+            BuddyFrameAllocator.freeFrames(physicalAddress, 1uL)
+            return@withLock VmaFaultResult.MAPPING_FAILED
+        }
+        memset(destination, 0, PAGE_SIZE_BYTES)
+
+        if (!pageDirectory.mapUserPage(
+                virtualAddress = page,
+                physicalAddress = physicalAddress,
+                writable = (access and VMA_WRITE) != 0uL,
+                executable = (access and VMA_EXEC) != 0uL,
+            )
+        ) {
+            BuddyFrameAllocator.freeFrames(physicalAddress, 1uL)
+            return@withLock VmaFaultResult.MAPPING_FAILED
+        }
+        VmaFaultResult.RESOLVED
+    }
+
     fun unmap(address: ULong, length: ULong): VmaResult<Unit> {
         val alignedLength = alignLength(length) ?: return VmaResult.Err(EINVAL)
         if (!address.isPageAligned()) {
@@ -253,7 +327,8 @@ class VMA internal constructor(
             val accessible = access != 0uL
             var page = address
             while (page < end) {
-                if (!pageDirectory.protectUserPage(
+                if (pageDirectory.userPageFrame(page) != null &&
+                    !pageDirectory.protectUserPage(
                         virtualAddress = page,
                         accessible = accessible,
                         writable = (access and VMA_WRITE) != 0uL,

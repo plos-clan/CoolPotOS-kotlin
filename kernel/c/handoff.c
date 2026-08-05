@@ -1,6 +1,8 @@
 #include "bridge.h"
 #include "native.h"
 
+extern void do_irq(void *regs, uint64_t irq_num);
+
 enum {
     timer_irq = 1,
     spurious_irq = 224,
@@ -332,7 +334,13 @@ void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
     const bool syscall_in_progress = current && current->user_context &&
         (regs->cs & 3) == 0;
 
-    if (irq_num == timer_irq && !syscall_in_progress &&
+    if (irq_num != timer_irq) {
+        if (irq_num != spurious_irq) do_irq(regs, irq_num);
+        else lapic_eoi(irq_num);
+        return;
+    }
+
+    if (!syscall_in_progress &&
         __atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) && cpu->bound) {
         lock_cpu(cpu);
         fast_task_t *previous = cpu->current;

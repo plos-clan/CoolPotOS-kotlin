@@ -36,6 +36,7 @@ private const val SYS_MUNMAP = 11
 private const val SYS_IOCTL = 16
 private const val SYS_READV = 19
 private const val SYS_WRITEV = 20
+private const val SYS_NANO_SLEEP = 35
 private const val SYS_UNAME = 63
 private const val SYS_GETCWD = 79
 private const val SYS_ARCH_PRCTL = 158
@@ -80,6 +81,7 @@ object Syscall {
         this[SYS_GETCWD] = ::sysGetCWD
         this[SYS_REBOOT] = ::sysReboot
         this[SYS_UNAME] = ::sysUname
+        this[SYS_NANO_SLEEP] = :: sysNanoSleep
     }
 
     fun syscallHandle(regs: PtraceRegisters) {
@@ -101,7 +103,7 @@ object Syscall {
         val bytes = ByteArray(ULong.SIZE_BYTES) { index ->
             (value shr (index * Byte.SIZE_BITS)).toByte()
         }
-        return if (UserMemory(process.vma.pageDirectory, address).copyToUser(bytes)) {
+        return if (UserMemory(process.vma, address).copyToUser(bytes)) {
             0L
         } else {
             errno(Errno.EFAULT)
@@ -109,13 +111,13 @@ object Syscall {
     }
 
     fun copyPath(process: Process, address: ULong): ByteArray? =
-        UserMemory(process.vma.pageDirectory, address).copyCStringFromUser(PATH_MAX)
+        UserMemory(process.vma, address).copyCStringFromUser(PATH_MAX)
 
     fun userMemory(process: Process, base: ULong, offset: ULong): UserMemory? {
         if (offset > ULong.MAX_VALUE - base) {
             return null
         }
-        return UserMemory(process.vma.pageDirectory, base + offset)
+        return UserMemory(process.vma, base + offset)
     }
 
     fun fileDescriptor(value: ULong): Int? =

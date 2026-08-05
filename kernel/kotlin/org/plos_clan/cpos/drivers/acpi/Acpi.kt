@@ -6,6 +6,7 @@ import bridge.rsdp_request
 import kotlinx.cinterop.*
 import org.plos_clan.cpos.drivers.Hpet
 import org.plos_clan.cpos.mem.Hhdm
+import org.plos_clan.cpos.drivers.acpi.aml.Aml
 import org.plos_clan.cpos.drivers.acpi.apic.Apic
 import org.plos_clan.cpos.utils.*
 
@@ -17,6 +18,8 @@ private const val RSDP_LENGTH_OFFSET = 20
 private const val RSDP_XSDT_ADDRESS_OFFSET = 24
 private const val SDT_HEADER_LENGTH = 36
 private const val SDT_LENGTH_OFFSET = 4
+private const val MAX_ACPI_TABLE_LENGTH = 16 * 1024 * 1024
+private const val MAX_RSDP_LENGTH = 4096
 private const val MCFG_HEADER_LENGTH = SDT_HEADER_LENGTH + 8
 private const val MCFG_ENTRY_LENGTH = 16
 private const val MCFG_ENTRY_BASE_ADDRESS_OFFSET = 0
@@ -29,6 +32,7 @@ private const val HPET_GAS_ADDRESS_OFFSET = SDT_HEADER_LENGTH + 8
 private const val SPCR_GAS_ADDRESS_OFFSET = SDT_HEADER_LENGTH + 8
 
 data class AcpiTable(
+    val physicalAddress: ULong,
     val pointer: CPointer<UByteVar>,
     val length: Int,
 ) {
@@ -197,11 +201,23 @@ private object SpcrParser : AcpiTableParser<ULong> {
 
 object Acpi {
     private var root: RootSdt? = null
-    private val tableIndex = mutableMapOf<String, ULong>()
+    private val tableIndex = mutableMapOf<String, MutableList<ULong>>()
 
     fun initialize(): Boolean {
         if (!initializeRoot()) {
             return false
+        }
+
+        parseIfFound(FadtParser) { fadt ->
+            println(
+                "ACPI: FADT SCI=${fadt.sciInterrupt}, " +
+                    "DSDT=0x${fadt.dsdtAddress?.toString(16)}, " +
+                    "i8042=${fadt.hasI8042Controller}",
+            )
+        }
+
+        if (!Aml.initialize()) {
+            println("ACPI: AML namespace initialization failed")
         }
 
         parseIfFound(HpetParser) { hpetGasAddress ->
@@ -242,15 +258,25 @@ object Acpi {
             Pcie.initialize(mcfg.regions)
         }
 
-        parseIfFound(FadtParser) { fadt ->
-            println(
-                "ACPI: FADT SCI=${fadt.sciInterrupt}, " +
-                        "DSDT=0x${fadt.dsdtAddress?.toString(16)}, " +
-                        "i8042=${fadt.hasI8042Controller}"
-            )
-
-        }
+        Aml.enumerateDevices()
     }
+
+    fun findTable(signature: String): AcpiTable? =
+        findTables(signature).firstOrNull()
+
+    fun findTables(signature: String): List<AcpiTable> {
+        if (signature.length != 4) {
+            return emptyList()
+        }
+        if (tableIndex.isEmpty()) {
+            rebuildTableIndex()
+        }
+        return tableIndex[signature]
+            .orEmpty()
+            .mapNotNull(::tableAt)
+    }
+
+    fun tableAtPhysical(address: ULong): AcpiTable? = tableAt(address)
 
     private fun initializeRoot(): Boolean {
         if (root != null) {
@@ -273,11 +299,19 @@ object Acpi {
         val revision = rsdp.readU8(RSDP_REVISION_OFFSET).toUInt()
         if (!rsdp.checksumOk(RSDP_V1_LENGTH)) {
             println("ACPI: RSDP v1 checksum failed")
+            return false
         }
         if (revision >= 2u) {
-            val rsdpLength = rsdp.readU32(RSDP_LENGTH_OFFSET).toInt()
-            if (rsdpLength >= RSDP_V2_MIN_LENGTH && !rsdp.checksumOk(rsdpLength)) {
+            val rsdpLength = rsdp.readU32(RSDP_LENGTH_OFFSET)
+            if (rsdpLength < RSDP_V2_MIN_LENGTH.toUInt() ||
+                rsdpLength > MAX_RSDP_LENGTH.toUInt()
+            ) {
+                println("ACPI: invalid RSDP v2 length=$rsdpLength")
+                return false
+            }
+            if (!rsdp.checksumOk(rsdpLength.toInt())) {
                 println("ACPI: RSDP v2 checksum failed")
+                return false
             }
         }
 
@@ -292,6 +326,10 @@ object Acpi {
             println("ACPI: cannot access root SDT at ${rootAddress.hex()}")
             return false
         }
+        if (rootTable.signature != rootKind.name || !rootTable.pointer.checksumOk(rootTable.length)) {
+            println("ACPI: invalid ${rootKind.name} table")
+            return false
+        }
         root = RootSdt(rootTable, rootKind)
         println("ACPI revision: $revision")
         println("ACPI root SDT: ${rootTable.signature} at ${rootAddress.hex()}")
@@ -303,7 +341,7 @@ object Acpi {
     private fun rebuildTableIndex() {
         tableIndex.clear()
         scanRootEntries { signature, address ->
-            tableIndex.getOrPut(signature) { address }
+            tableIndex.getOrPut(signature) { mutableListOf() } += address
         }
     }
 
@@ -324,7 +362,7 @@ object Acpi {
         if (tableIndex.isEmpty()) {
             rebuildTableIndex()
         }
-        return tableIndex[signature]
+        return tableIndex[signature]?.firstOrNull()
     }
 
     private inline fun scanRootEntries(
@@ -347,6 +385,10 @@ object Acpi {
             }
 
             val table = tableAt(tableAddress) ?: return@repeat
+            if (!table.pointer.checksumOk(table.length)) {
+                println("ACPI: ignore ${table.signature} with invalid checksum")
+                return@repeat
+            }
             consume(table.signature, tableAddress)
         }
     }
@@ -355,6 +397,16 @@ object Acpi {
 private fun tableAt(address: ULong): AcpiTable? {
     val pointer = address.toVirtualPointer<UByteVar>() ?: return null
 
-    val length = pointer.readU32(SDT_LENGTH_OFFSET).toInt()
-    return AcpiTable(pointer = pointer, length = length).takeIf { length >= SDT_HEADER_LENGTH }
+    val lengthValue = pointer.readU32(SDT_LENGTH_OFFSET)
+    if (lengthValue < SDT_HEADER_LENGTH.toUInt() ||
+        lengthValue > MAX_ACPI_TABLE_LENGTH.toUInt()
+    ) {
+        return null
+    }
+    val length = lengthValue.toInt()
+    return AcpiTable(
+        physicalAddress = address,
+        pointer = pointer,
+        length = length,
+    )
 }

@@ -45,6 +45,7 @@ uint64_t get_kernel_clone_thread_entry_address(void);
 uint64_t get_asm_syscall_handle_address(void);
 void setup_syscall_cpu(uint64_t lapic_id, uint8_t is_bsp);
 void wait_for_interrupt(void);
+void cpu_relax(void);
 void asm_pause(void);
 void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base);
 uint64_t fast_handoff_create_task(uint64_t id, uint64_t cr3, uint64_t kernel_rsp);

@@ -3,8 +3,10 @@
 package org.plos_clan.cpos.drivers.acpi
 
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.UIntVar
 import kotlinx.cinterop.get
+import kotlinx.cinterop.set
 import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.utils.hasBit
 import org.plos_clan.cpos.utils.hex
@@ -220,6 +222,7 @@ object Pcie {
 
     private val devices = mutableListOf<PciDeviceInfo>()
     private val enumeratedLocations = hashSetOf<PciFunctionAddress>()
+    private val activeRegions = mutableListOf<MappedRegion>()
 
     val enumeratedDevices: List<PciDeviceInfo>
         get() = devices.toList()
@@ -232,20 +235,80 @@ object Pcie {
     fun initialize(regions: List<PcieEcamRegion>) {
         devices.clear()
         enumeratedLocations.clear()
+        activeRegions.clear()
 
         if (regions.isEmpty()) {
             println("PCIe: no usable ECAM region, skip enumeration")
             return
         }
 
-        val mappedRegions = regions.mapNotNull(::mapRegion)
-        if (mappedRegions.isEmpty()) {
+        activeRegions += regions.mapNotNull(::mapRegion)
+        if (activeRegions.isEmpty()) {
             println("PCIe: failed to map any ECAM region")
             return
         }
 
-        mappedRegions.forEach { region -> scanBus(region, region.descriptor.busStart) }
+        activeRegions.forEach { region -> scanBus(region, region.descriptor.busStart) }
         println("PCIe: enumeration complete devices=${devices.size}")
+    }
+
+    fun readConfig(
+        segment: UInt,
+        bus: UInt,
+        device: UInt,
+        function: UInt,
+        offset: UInt,
+        byteCount: Int,
+    ): ULong? {
+        if (byteCount !in 1..8 || offset.toULong() + byteCount.toULong() > PCI_FUNCTION_CONFIG_SIZE) {
+            return null
+        }
+        val address = PciFunctionAddress(
+            segmentGroup = segment,
+            bus = bus.toInt(),
+            device = device.toInt(),
+            function = function.toInt(),
+        )
+        val region = activeRegions.firstOrNull { it.contains(address) } ?: return null
+        var value = 0uL
+        repeat(byteCount) { index ->
+            val byte = readConfig8(region, address, offset.toInt() + index) ?: return null
+            value = value or (byte.toULong() shl (index * 8))
+        }
+        return value
+    }
+
+    fun writeConfig(
+        segment: UInt,
+        bus: UInt,
+        device: UInt,
+        function: UInt,
+        offset: UInt,
+        byteCount: Int,
+        value: ULong,
+    ): Boolean {
+        if (byteCount !in 1..8 || offset.toULong() + byteCount.toULong() > PCI_FUNCTION_CONFIG_SIZE) {
+            return false
+        }
+        val address = PciFunctionAddress(
+            segmentGroup = segment,
+            bus = bus.toInt(),
+            device = device.toInt(),
+            function = function.toInt(),
+        )
+        val region = activeRegions.firstOrNull { it.contains(address) } ?: return false
+        repeat(byteCount) { index ->
+            if (!writeConfig8(
+                    region,
+                    address,
+                    offset.toInt() + index,
+                    (value shr (index * 8)).toUByte(),
+                )
+            ) {
+                return false
+            }
+        }
+        return true
     }
 
     private fun mapRegion(region: PcieEcamRegion): MappedRegion? {
@@ -350,6 +413,35 @@ object Pcie {
         val virtualBase = mapFunction(region, functionBase) ?: return PCI_INVALID_CONFIG_VALUE
         val registerAddress = virtualBase + offset.toULong()
         return registerAddress.toPointer<UIntVar>()?.get(0) ?: PCI_INVALID_CONFIG_VALUE
+    }
+
+    private fun readConfig8(
+        region: MappedRegion,
+        address: PciFunctionAddress,
+        offset: Int,
+    ): UByte? {
+        if (offset !in 0 until PCI_FUNCTION_CONFIG_SIZE.toInt() || !region.contains(address)) {
+            return null
+        }
+        val functionBase = region.descriptor.baseAddress + address.offsetFrom(region.descriptor.busStart)
+        val virtualBase = mapFunction(region, functionBase) ?: return null
+        return (virtualBase + offset.toULong()).toPointer<UByteVar>()?.get(0)
+    }
+
+    private fun writeConfig8(
+        region: MappedRegion,
+        address: PciFunctionAddress,
+        offset: Int,
+        value: UByte,
+    ): Boolean {
+        if (offset !in 0 until PCI_FUNCTION_CONFIG_SIZE.toInt() || !region.contains(address)) {
+            return false
+        }
+        val functionBase = region.descriptor.baseAddress + address.offsetFrom(region.descriptor.busStart)
+        val virtualBase = mapFunction(region, functionBase) ?: return false
+        val register = (virtualBase + offset.toULong()).toPointer<UByteVar>() ?: return false
+        register[0] = value
+        return true
     }
 
     private fun mapFunction(region: MappedRegion, physicalAddress: ULong): ULong? {

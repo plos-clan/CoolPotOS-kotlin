@@ -135,7 +135,7 @@ fun sysPoll(regs: PtraceRegisters, process: Process): Long {
     val count = countValue.toInt()
     val byteCount = count * POLL_FD_SIZE
     val userFds = UserMemory(
-        process.vma.pageDirectory,
+        process.vma,
         regs[PtraceRegisters.IDX_RDI],
     )
     val descriptors = userFds.copyFromUser(byteCount)
@@ -321,7 +321,7 @@ fun sysReadv(regs: PtraceRegisters, process: Process): Long {
 
         val vectorCount = vectorCountValue.toInt()
         val vectors = UserMemory(
-            process.vma.pageDirectory,
+            process.vma,
             regs[PtraceRegisters.IDX_RSI],
         ).copyFromUser(vectorCount * IO_VECTOR_SIZE)
             ?: return errno(Errno.EFAULT)
@@ -389,7 +389,7 @@ fun sysWritev(regs: PtraceRegisters, process: Process): Long {
 
         val vectorCount = vectorCountValue.toInt()
         val vectors = UserMemory(
-            process.vma.pageDirectory,
+            process.vma,
             regs[PtraceRegisters.IDX_RSI],
         ).copyFromUser(vectorCount * IO_VECTOR_SIZE)
             ?: return errno(Errno.EFAULT)
@@ -468,7 +468,7 @@ fun sysIoctl(regs: PtraceRegisters, process: Process): Long {
         file.ioctl(
             command = regs[PtraceRegisters.IDX_RSI].toInt(),
             args = UserMemory(
-                process.vma.pageDirectory,
+                process.vma,
                 regs[PtraceRegisters.IDX_RDX],
             ),
         )
@@ -500,7 +500,7 @@ fun sysGetCWD(regs: PtraceRegisters, process: Process): Long {
     }
 
     if (!UserMemory(
-            process.vma.pageDirectory,
+            process.vma,
             userAddress,
         ).copyToUser(result)
     ) {

@@ -280,6 +280,47 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
         return (ptEntry and PTE_ADDR_MASK) or (virtualAddress and (PAGE_SIZE_BYTES - 1uL))
     }
 
+    /** Returns the resident frame even when the leaf PTE is intentionally non-present. */
+    internal fun userPageFrame(virtualAddress: ULong): ULong? {
+        if (!virtualAddress.isPageAligned() || virtualAddress >= USER_VIRTUAL_ADDRESS_LIMIT) {
+            return null
+        }
+
+        val pml4 = pml4Table() ?: return null
+        val pml4Entry = pml4[PageTableLevel.PML4.index(virtualAddress)]
+        if ((pml4Entry and PTE_PRESENT) == 0uL ||
+            (pml4Entry and PTE_USER) == 0uL ||
+            (pml4Entry and PTE_HUGE) != 0uL
+        ) {
+            return null
+        }
+
+        val pdpt = (pml4Entry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return null
+        val pdptEntry = pdpt[PageTableLevel.PDPT.index(virtualAddress)]
+        if ((pdptEntry and PTE_PRESENT) == 0uL ||
+            (pdptEntry and PTE_USER) == 0uL ||
+            (pdptEntry and PTE_HUGE) != 0uL
+        ) {
+            return null
+        }
+
+        val pd = (pdptEntry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return null
+        val pdEntry = pd[PageTableLevel.PD.index(virtualAddress)]
+        if ((pdEntry and PTE_PRESENT) == 0uL ||
+            (pdEntry and PTE_USER) == 0uL ||
+            (pdEntry and PTE_HUGE) != 0uL
+        ) {
+            return null
+        }
+
+        val pt = (pdEntry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return null
+        val entry = pt[PageTableLevel.PT.index(virtualAddress)]
+        if ((entry and PTE_USER) == 0uL) {
+            return null
+        }
+        return (entry and PTE_ADDR_MASK).takeIf { it != 0uL }
+    }
+
     fun cloneDirectory(): PageDirectory {
         val sourcePml4 = pml4Table()
             ?: error("Paging: source PML4 is unavailable")

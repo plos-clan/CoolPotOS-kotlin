@@ -4,6 +4,7 @@ package org.plos_clan.cpos.syscall
 
 import KERNEL_NAME
 import kotlinx.cinterop.ExperimentalForeignApi
+import org.plos_clan.cpos.drivers.Hpet
 import org.plos_clan.cpos.drivers.acpi.Fadt
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.syscall.Syscall.errno
@@ -54,6 +55,10 @@ data class UtsName(
             }
         }
 
+    override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
+        TODO("Not yet implemented")
+    }
+
     private fun fields(): List<Pair<String, String>> = listOf(
         "sysname" to sysname,
         "nodename" to nodename,
@@ -67,6 +72,33 @@ data class UtsName(
         const val FIELD_SIZE = 65
         const val FIELD_COUNT = 6
         const val NATIVE_SIZE = FIELD_SIZE * FIELD_COUNT
+    }
+}
+
+data class TimeSpec(var sec: Long, var nsec: Long) : NativeStruct() {
+    override fun toNativeBytes(): ByteArray =
+        ByteArray(NATIVE_SIZE).also { buffer ->
+            putU64LE(buffer, SEC_OFFSET, sec.toULong())
+            putU64LE(buffer, NSEC_OFFSET, nsec.toULong())
+        }
+
+    override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
+        if (buffer.size != NATIVE_SIZE) {
+            return false
+        }
+
+        val updatedSec = getU64LE(buffer, SEC_OFFSET).toLong()
+        val updatedNsec = getU64LE(buffer, NSEC_OFFSET).toLong()
+
+        sec = updatedSec
+        nsec = updatedNsec
+        return true
+    }
+
+    companion object {
+        private const val SEC_OFFSET = 0
+        private const val NSEC_OFFSET = SEC_OFFSET + Long.SIZE_BYTES
+        const val NATIVE_SIZE = Long.SIZE_BYTES * 2
     }
 }
 
@@ -96,7 +128,7 @@ fun sysReboot(regs: PtraceRegisters, process: Process): Long {
 }
 
 fun sysUname(regs: PtraceRegisters, process: Process): Long {
-    val userBuffer = UserMemory(process.vma.pageDirectory, regs[PtraceRegisters.IDX_RDI])
+    val userBuffer = UserMemory(process.vma, regs[PtraceRegisters.IDX_RDI])
 
     val utsName = UtsName(
         sysname = "CoolPotOS",
@@ -109,4 +141,28 @@ fun sysUname(regs: PtraceRegisters, process: Process): Long {
 
     return if (userBuffer.copyToUser(utsName.toNativeBytes())) errno(Errno.EFAULT)
     else errno(Errno.EOK)
+}
+
+fun sysNanoSleep(regs: PtraceRegisters, process: Process): Long {
+    val time = UserMemory(process.vma, regs[PtraceRegisters.IDX_RDI])
+    val destination = ByteArray(TimeSpec.NATIVE_SIZE)
+
+    if (!time.copyFromUser(destination = destination, 0, TimeSpec.NATIVE_SIZE)) {
+        return errno(Errno.EFAULT)
+    }
+
+    val timeSpec = TimeSpec(0, 0).also {
+        spec -> spec.updateFromNativeBytes(destination)
+    }
+
+    if(timeSpec.nsec >= 1000000000L) return errno(Errno.EINVAL)
+
+    val nsec = timeSpec.sec.toULong() * 1000000000UL + timeSpec.nsec.toULong()
+    val end = Hpet.nanoTime() + nsec
+
+    while (Hpet.nanoTime() >= end) {
+        bridge.cpu_relax()
+    }
+
+    return errno(Errno.EOK)
 }

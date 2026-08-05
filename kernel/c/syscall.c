@@ -62,7 +62,7 @@ static uint64_t runtime_hpet_period_femtoseconds;
 static uint64_t runtime_clock_offset_ns;
 static uint64_t runtime_clock_last_ns;
 
-static inline void cpu_relax(void) { __asm__ volatile("pause" : : : "memory"); }
+void cpu_relax(void) { __asm__ volatile("pause" : : : "memory"); }
 
 static void spin_lock(uint8_t *lock) {
     while (__atomic_test_and_set(lock, __ATOMIC_ACQUIRE))

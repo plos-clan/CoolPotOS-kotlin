@@ -126,6 +126,7 @@ fun sysMmap(regs: PtraceRegisters, process: Process): Long {
                     noReplace = noReplace,
                     shared = shared,
                     type = VmaType.ANONYMOUS,
+                    populate = (flags and (MAP_POPULATE or MAP_LOCKED)) != 0uL,
                 ),
             ),
         )
