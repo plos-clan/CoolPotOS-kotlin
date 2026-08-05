@@ -72,9 +72,6 @@ fun kernelMain() {
     bridge.enable_interrupt()
     Init.setupInitProgram()
     KernelCoroutines.launchAmlEventWorker()
-    if (Cmdline.boolean("coroutine-smoke") == true) {
-        KernelCoroutines.launchSmokeTest()
-    }
     KernelCoroutines.runEventLoop()
 }
 

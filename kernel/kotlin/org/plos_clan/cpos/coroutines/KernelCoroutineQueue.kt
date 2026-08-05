@@ -51,7 +51,7 @@ internal class KernelCoroutineQueue {
     fun claimReady(nowNanos: ULong, limit: Int): List<Runnable> {
         require(limit > 0) { "limit must be positive" }
 
-        while (delayed.isNotEmpty()) {
+        while (immediate.size < limit && delayed.isNotEmpty()) {
             val next = delayed.first()
             if (next.state == DelayedTaskState.DISPOSED) {
                 heapPop()
@@ -77,17 +77,6 @@ internal class KernelCoroutineQueue {
     }
 
     fun hasImmediateWork(): Boolean = immediate.isNotEmpty()
-
-    fun clear() {
-        immediate.clear()
-        delayed.forEach { task ->
-            if (task.state == DelayedTaskState.PENDING) {
-                task.state = DelayedTaskState.DISPOSED
-            }
-        }
-        delayed.clear()
-        nextSequence = 0uL
-    }
 
     private fun heapPush(task: DelayedCoroutineTask) {
         delayed += task
