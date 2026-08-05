@@ -53,7 +53,7 @@ internal class BspPeriodicTimerReadiness {
         configure: (UByte, ULong, Boolean) -> Boolean,
     ): Boolean {
         reset()
-        if (timerVector !in LAPIC_MIN_INTERRUPT_VECTOR..UByte.MAX_VALUE.toUInt()) {
+        if (timerVector !in LAPIC_MIN_INTERRUPT_VECTOR until LAPIC_SPURIOUS_VECTOR) {
             return false
         }
 
@@ -132,7 +132,7 @@ object LocalApic {
         )
         if (!timerReady) {
             when {
-                timerVector !in LAPIC_MIN_INTERRUPT_VECTOR..UByte.MAX_VALUE.toUInt() ->
+                timerVector !in LAPIC_MIN_INTERRUPT_VECTOR until LAPIC_SPURIOUS_VECTOR ->
                     println("APIC: invalid LAPIC timer vector=$timerVector")
                 timerInitialCount == 0uL ->
                     println("APIC: LAPIC periodic timer calibration failed")

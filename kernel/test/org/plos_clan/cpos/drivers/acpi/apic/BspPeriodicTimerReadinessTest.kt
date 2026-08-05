@@ -45,7 +45,7 @@ class BspPeriodicTimerReadinessTest {
 
     @Test
     fun invalidVectorRejectsWithoutCalibrationOrPublication() {
-        listOf(0u, 31u, UByte.MAX_VALUE.toUInt() + 1u).forEach { invalidVector ->
+        listOf(0u, 31u, UByte.MAX_VALUE.toUInt(), UByte.MAX_VALUE.toUInt() + 1u).forEach { invalidVector ->
             val readiness = readyState()
             var calibrateCalled = false
 
