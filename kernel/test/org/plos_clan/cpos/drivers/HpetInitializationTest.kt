@@ -64,10 +64,10 @@ class HpetInitializationTest {
     @Test
     fun reinitializingEnabledCounterDisablesBeforeResetAndPreservesGeneralConfigBits() {
         val period = 100_000_000u
-        val preservedGeneralConfig = 0xA4uL
-        val enabledGeneralConfig = preservedGeneralConfig or 1uL
+        val disabledGeneralConfig = 0x2uL // LEG_RT_CNF
+        val enabledGeneralConfig = 0x3uL // LEG_RT_CNF | ENABLE_CNF
         val programmedTimerConfig = (20uL shl 9) or (1uL shl 2)
-        var generalConfig = preservedGeneralConfig
+        var generalConfig = disabledGeneralConfig
         var mainCounter = 0uL
         var recordEvents = false
         val events = mutableListOf<String>()
@@ -118,7 +118,7 @@ class HpetInitializationTest {
                 "read64:0",
                 "read32:4",
                 "read64:16",
-                "write64:16=$preservedGeneralConfig",
+                "write64:16=$disabledGeneralConfig",
                 "write64:240=0",
                 "read64:256",
                 "write64:256=$programmedTimerConfig",
