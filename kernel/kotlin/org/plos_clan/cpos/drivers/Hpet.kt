@@ -13,11 +13,33 @@ import org.plos_clan.cpos.utils.hasBit
 import org.plos_clan.cpos.utils.hex
 import org.plos_clan.cpos.utils.toPointer
 
+private const val FEMTOSECONDS_PER_NANOSECOND = 1_000_000uL
+
+internal fun hpetTicksToNanoseconds(ticks: ULong, femtosecondsPerTick: UInt): ULong {
+    if (femtosecondsPerTick == 0u) {
+        return 0uL
+    }
+
+    val period = femtosecondsPerTick.toULong()
+    val wholeTickGroups = ticks / FEMTOSECONDS_PER_NANOSECOND
+    if (wholeTickGroups > ULong.MAX_VALUE / period) {
+        return ULong.MAX_VALUE
+    }
+
+    val wholeNanoseconds = wholeTickGroups * period
+    val remainingNanoseconds =
+        (ticks % FEMTOSECONDS_PER_NANOSECOND) * period / FEMTOSECONDS_PER_NANOSECOND
+    return if (remainingNanoseconds > ULong.MAX_VALUE - wholeNanoseconds) {
+        ULong.MAX_VALUE
+    } else {
+        wholeNanoseconds + remainingNanoseconds
+    }
+}
+
 object Hpet {
     private const val GAS_SPACE_SYSTEM_MEMORY = 0u
     private const val HPET_MMIO_SIZE = 0x1000uL
 
-    private const val FEMTOSECONDS_PER_NANOSECOND = 1_000_000uL
     private const val HPET_ROUTE_IRQ_VECTOR = 20u
 
     private const val COUNTER_PERIOD_OFFSET = 0x4uL
@@ -26,16 +48,16 @@ object Hpet {
     private const val MAIN_COUNTER_OFFSET = 0xF0uL
 
     private var baseVirtualAddress = 0uL
-    private var fmsPerTick = 0uL
+    private var fmsPerTick = 0u
 
     val isReady: Boolean
-        get() = baseVirtualAddress != 0uL && fmsPerTick != 0uL
+        get() = baseVirtualAddress != 0uL && fmsPerTick != 0u
 
-    fun nanoTime(): ULong = if (isReady) ticks() * fmsPerTick / FEMTOSECONDS_PER_NANOSECOND else 0uL
+    fun nanoTime(): ULong = if (isReady) hpetTicksToNanoseconds(ticks(), fmsPerTick) else 0uL
 
     fun estimate(ns: ULong): ULong =
         if (isReady) {
-            ticks() + (ns * FEMTOSECONDS_PER_NANOSECOND / fmsPerTick)
+            ticks() + (ns * FEMTOSECONDS_PER_NANOSECOND / fmsPerTick.toULong())
         } else {
             0uL
         }
@@ -54,8 +76,8 @@ object Hpet {
         }
 
         baseVirtualAddress = mappedBase
-        fmsPerTick = read32(COUNTER_PERIOD_OFFSET).toULong()
-        if (fmsPerTick == 0uL) {
+        fmsPerTick = read32(COUNTER_PERIOD_OFFSET)
+        if (fmsPerTick == 0u) {
             println("HPET: invalid counter period register")
             reset()
             return
@@ -65,7 +87,7 @@ object Hpet {
 
         val oldGeneralConfig = read64(GENERAL_CONFIGURATION_OFFSET)
         write64(GENERAL_CONFIGURATION_OFFSET, oldGeneralConfig or 1uL)
-        runtime_clock_configure_hpet(mappedBase.toPointer<UByteVar>(), fmsPerTick)
+        runtime_clock_configure_hpet(mappedBase.toPointer<UByteVar>(), fmsPerTick.toULong())
 
         val oldTimerConfig = read64(TIMER0_CONFIGURATION_OFFSET)
         val routeCapabilities = oldTimerConfig shr 32
@@ -81,7 +103,7 @@ object Hpet {
 
     private fun reset() {
         baseVirtualAddress = 0uL
-        fmsPerTick = 0uL
+        fmsPerTick = 0u
     }
 
     private fun ticks(): ULong = if (isReady) read64(MAIN_COUNTER_OFFSET) else 0uL

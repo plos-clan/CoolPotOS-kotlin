@@ -10,6 +10,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import org.plos_clan.cpos.drivers.hpetTicksToNanoseconds
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -57,6 +58,37 @@ class KernelDispatcherTest {
 
             clock.nowNanos = 5_000_000uL
             assertEquals(1, dispatcher.runReadyBatch())
+            assertTrue(resumed)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun delayRemainsPendingAcrossLegacyHpetOverflowBoundary() {
+        val period = 100_000_000u
+        var ticks = ULong.MAX_VALUE / period.toULong()
+        val dispatcher = KernelDispatcher(
+            nanoTime = { hpetTicksToNanoseconds(ticks, period) },
+            criticalSection = NoOpCriticalSection,
+            failureReporter = { throw AssertionError("Unexpected dispatcher failure", it) },
+        )
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        var resumed = false
+
+        try {
+            scope.launch {
+                delay(1)
+                resumed = true
+            }
+            dispatcher.runReadyBatch()
+
+            ticks += 9_999uL
+            dispatcher.runReadyBatch()
+            assertFalse(resumed)
+
+            ticks += 1uL
+            dispatcher.runReadyBatch()
             assertTrue(resumed)
         } finally {
             scope.cancel()
