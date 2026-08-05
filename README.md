@@ -46,6 +46,29 @@ kernel as a boot module. QEMU uses 512 MiB by default so the kernel can retain
 the boot module while populating tmpfs; override it with `-PqemuMemory=...` or
 the `QEMU_MEMORY` environment variable.
 
+## Kernel coroutines
+
+Launch structured kernel work through `KernelCoroutines.scope` or child scopes
+derived from it. The kernel dispatcher supports `launch`, `async`, cancellation,
+timeouts, and non-blocking `delay`; continuations execute on the BSP bootstrap
+thread.
+
+```kotlin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import org.plos_clan.cpos.coroutines.KernelCoroutines
+
+KernelCoroutines.scope.launch {
+    delay(10)
+    println("Kernel coroutine resumed")
+}
+```
+
+`Dispatchers.Default`, `Dispatchers.IO`, and `Dispatchers.Main` are not kernel
+execution targets. Long compute loops must suspend or yield cooperatively so
+other kernel work can run. Build the boot smoke check with
+`./gradlew buildIso -PcoroutineSmoke=true`.
+
 ## License
 
 This project is licensed under the [0BSD License](LICENSE).
