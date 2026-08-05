@@ -14,6 +14,10 @@ import org.plos_clan.cpos.utils.hex
 import org.plos_clan.cpos.utils.toPointer
 
 private const val FEMTOSECONDS_PER_NANOSECOND = 1_000_000uL
+private const val HPET_COUNTER_SIZE_CAPABILITY_BIT = 13
+
+internal fun hpetSupports64BitMainCounter(generalCapabilities: ULong): Boolean =
+    generalCapabilities.hasBit(HPET_COUNTER_SIZE_CAPABILITY_BIT)
 
 internal fun hpetTicksToNanoseconds(ticks: ULong, femtosecondsPerTick: UInt): ULong {
     if (femtosecondsPerTick == 0u) {
@@ -42,6 +46,7 @@ object Hpet {
 
     private const val HPET_ROUTE_IRQ_VECTOR = 20u
 
+    private const val GENERAL_CAPABILITIES_OFFSET = 0uL
     private const val COUNTER_PERIOD_OFFSET = 0x4uL
     private const val GENERAL_CONFIGURATION_OFFSET = 0x10uL
     private const val TIMER0_CONFIGURATION_OFFSET = 0x100uL
@@ -75,11 +80,37 @@ object Hpet {
             return
         }
 
-        baseVirtualAddress = mappedBase
-        fmsPerTick = read32(COUNTER_PERIOD_OFFSET)
-        if (fmsPerTick == 0u) {
-            println("HPET: invalid counter period register")
-            reset()
+        initializeMapped(
+            mappedBase = mappedBase,
+            read32 = { offset -> read32(mappedBase, offset) },
+            read64 = { offset -> read64(mappedBase, offset) },
+            write64 = { offset, value -> write64(mappedBase, offset, value) },
+            configureClock = { base, period ->
+                runtime_clock_configure_hpet(base.toPointer<UByteVar>(), period.toULong())
+            },
+            log = { message -> println(message) },
+        )
+    }
+
+    internal fun initializeMapped(
+        mappedBase: ULong,
+        read32: (ULong) -> UInt,
+        read64: (ULong) -> ULong,
+        write64: (ULong, ULong) -> Unit,
+        configureClock: (ULong, UInt) -> Unit,
+        log: (String) -> Unit,
+    ) {
+        reset()
+
+        val generalCapabilities = read64(GENERAL_CAPABILITIES_OFFSET)
+        if (!hpetSupports64BitMainCounter(generalCapabilities)) {
+            log("HPET: 64-bit main counter unsupported")
+            return
+        }
+
+        val period = read32(COUNTER_PERIOD_OFFSET)
+        if (period == 0u) {
+            log("HPET: invalid counter period register")
             return
         }
 
@@ -87,18 +118,22 @@ object Hpet {
 
         val oldGeneralConfig = read64(GENERAL_CONFIGURATION_OFFSET)
         write64(GENERAL_CONFIGURATION_OFFSET, oldGeneralConfig or 1uL)
-        runtime_clock_configure_hpet(mappedBase.toPointer<UByteVar>(), fmsPerTick.toULong())
+        configureClock(mappedBase, period)
 
         val oldTimerConfig = read64(TIMER0_CONFIGURATION_OFFSET)
         val routeCapabilities = oldTimerConfig shr 32
         if (!routeCapabilities.hasBit(HPET_ROUTE_IRQ_VECTOR.toInt())) {
-            println("HPET: IRQ route vector $HPET_ROUTE_IRQ_VECTOR unsupported, route_cap=${routeCapabilities.hex()}")
+            log("HPET: IRQ route vector $HPET_ROUTE_IRQ_VECTOR unsupported, route_cap=${routeCapabilities.hex()}")
         }
 
         val timerConfig = (HPET_ROUTE_IRQ_VECTOR.toULong() shl 9) or (1uL shl 2)
         write64(TIMER0_CONFIGURATION_OFFSET, timerConfig)
 
-        println("HPET: time=${nanoTime()}ns mapped=${mappedBase.hex()} period=${fmsPerTick}fms/tick")
+        baseVirtualAddress = mappedBase
+        fmsPerTick = period
+
+        val initializedTime = hpetTicksToNanoseconds(read64(MAIN_COUNTER_OFFSET), period)
+        log("HPET: time=${initializedTime}ns mapped=${mappedBase.hex()} period=${period}fms/tick")
     }
 
     private fun reset() {
@@ -106,16 +141,16 @@ object Hpet {
         fmsPerTick = 0u
     }
 
-    private fun ticks(): ULong = if (isReady) read64(MAIN_COUNTER_OFFSET) else 0uL
+    private fun ticks(): ULong = if (isReady) read64(baseVirtualAddress, MAIN_COUNTER_OFFSET) else 0uL
 
-    private fun read32(offset: ULong): UInt =
-        (baseVirtualAddress + offset).toPointer<UIntVar>()?.get(0) ?: 0u
+    private fun read32(base: ULong, offset: ULong): UInt =
+        (base + offset).toPointer<UIntVar>()?.get(0) ?: 0u
 
-    private fun read64(offset: ULong): ULong =
-        (baseVirtualAddress + offset).toPointer<ULongVar>()?.get(0) ?: 0uL
+    private fun read64(base: ULong, offset: ULong): ULong =
+        (base + offset).toPointer<ULongVar>()?.get(0) ?: 0uL
 
-    private fun write64(offset: ULong, value: ULong) {
-        val register = (baseVirtualAddress + offset).toPointer<ULongVar>() ?: return
+    private fun write64(base: ULong, offset: ULong, value: ULong) {
+        val register = (base + offset).toPointer<ULongVar>() ?: return
         register[0] = value
     }
 }
