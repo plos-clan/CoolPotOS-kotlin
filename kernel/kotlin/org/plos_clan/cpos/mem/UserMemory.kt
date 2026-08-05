@@ -8,10 +8,17 @@ import kotlinx.cinterop.set
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.toVirtualPointer
 
-class UserMemory internal constructor(
+class UserMemory private constructor(
     private val pageDirectory: PageDirectory,
     private val address: ULong,
+    private val vma: VMA?,
 ) {
+    internal constructor(pageDirectory: PageDirectory, address: ULong) :
+        this(pageDirectory, address, null)
+
+    internal constructor(vma: VMA, address: ULong) :
+        this(vma.pageDirectory, address, vma)
+
     fun copyFromUser(size: Int): ByteArray? {
         if (size < 0) {
             return null
@@ -70,7 +77,7 @@ class UserMemory internal constructor(
         var copied = 0
         var currentAddress = address
         while (copied < maxLength && currentAddress < USER_VIRTUAL_ADDRESS_LIMIT) {
-            val physicalAddress = pageDirectory.resolveUserPhysicalAddress(
+            val physicalAddress = resolveUserPhysicalAddress(
                 virtualAddress = currentAddress,
                 requireWritable = false,
             ) ?: return null
@@ -119,7 +126,7 @@ class UserMemory internal constructor(
         var remaining = size
 
         while (remaining > 0) {
-            val physicalAddress = pageDirectory.resolveUserPhysicalAddress(
+            val physicalAddress = resolveUserPhysicalAddress(
                 virtualAddress = currentAddress,
                 requireWritable = requireWritable,
             ) ?: return null
@@ -141,6 +148,20 @@ class UserMemory internal constructor(
     }
 
     fun getAddress() : ULong = address
+
+    private fun resolveUserPhysicalAddress(
+        virtualAddress: ULong,
+        requireWritable: Boolean,
+    ): ULong? {
+        pageDirectory.resolveUserPhysicalAddress(virtualAddress, requireWritable)?.let {
+            return it
+        }
+        val owner = vma ?: return null
+        if (owner.faultIn(virtualAddress, write = requireWritable) != VmaFaultResult.RESOLVED) {
+            return null
+        }
+        return pageDirectory.resolveUserPhysicalAddress(virtualAddress, requireWritable)
+    }
 
     private fun isValidRange(buffer: ByteArray, offset: Int, size: Int): Boolean =
         offset >= 0 && size >= 0 && offset <= buffer.size - size

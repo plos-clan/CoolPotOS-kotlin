@@ -6,6 +6,8 @@ import bridge.read_cr2
 import bridge.read_cr3
 import bridge.register_interrupt_handler
 import kotlinx.cinterop.*
+import org.plos_clan.cpos.mem.VmaFaultResult
+import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.utils.InterruptFrame
 import org.plos_clan.cpos.utils.hex
@@ -18,6 +20,10 @@ private val MAX_STACK_FRAME_STEP_BYTES = 64uL * 1024uL
 private const val DIVIDE_ERROR_VECTOR: UShort = 0u
 private const val GENERAL_PROTECTION_VECTOR: UShort = 13u
 private const val PAGE_FAULT_VECTOR: UShort = 14u
+private const val PAGE_FAULT_PRESENT = 0x01uL
+private const val PAGE_FAULT_WRITE = 0x02uL
+private const val PAGE_FAULT_USER = 0x04uL
+private const val PAGE_FAULT_INSTRUCTION = 0x10uL
 
 private data class StackWindow(val rsp: ULong) {
     val isBounded: Boolean
@@ -96,8 +102,26 @@ private fun haltOnFault(
     while (true) {}
 }
 
-fun pageFault(frame: COpaquePointer?, ecode: ULong, interruptedRbp: ULong) =
+fun pageFault(frame: COpaquePointer?, ecode: ULong, interruptedRbp: ULong) {
+    val interruptFrame = InterruptFrame(requireNotNull(frame).reinterpret())
+    val cameFromUser = (ecode and PAGE_FAULT_USER) != 0uL &&
+        (interruptFrame.cs and 0x3uL) == 0x3uL
+    if (cameFromUser && (ecode and PAGE_FAULT_PRESENT) == 0uL) {
+        val resolution = ProcessManager.currentProcess()
+            ?.takeUnless { it.isKernelProcess }
+            ?.vma
+            ?.faultIn(
+                address = read_cr2(),
+                write = (ecode and PAGE_FAULT_WRITE) != 0uL,
+                execute = (ecode and PAGE_FAULT_INSTRUCTION) != 0uL,
+            )
+        if (resolution == VmaFaultResult.RESOLVED) {
+            return
+        }
+        println("PageFault: demand paging failed: $resolution")
+    }
     haltOnFault(frame, ecode, interruptedRbp, "PageFault(#PF)")
+}
 
 fun divideError(frame: COpaquePointer?, ecode: ULong, interruptedRbp: ULong) =
     haltOnFault(frame, ecode, interruptedRbp, "DivideError(#DE)")

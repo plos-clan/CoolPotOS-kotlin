@@ -103,7 +103,7 @@ object Syscall {
         val bytes = ByteArray(ULong.SIZE_BYTES) { index ->
             (value shr (index * Byte.SIZE_BITS)).toByte()
         }
-        return if (UserMemory(process.vma.pageDirectory, address).copyToUser(bytes)) {
+        return if (UserMemory(process.vma, address).copyToUser(bytes)) {
             0L
         } else {
             errno(Errno.EFAULT)
@@ -111,13 +111,13 @@ object Syscall {
     }
 
     fun copyPath(process: Process, address: ULong): ByteArray? =
-        UserMemory(process.vma.pageDirectory, address).copyCStringFromUser(PATH_MAX)
+        UserMemory(process.vma, address).copyCStringFromUser(PATH_MAX)
 
     fun userMemory(process: Process, base: ULong, offset: ULong): UserMemory? {
         if (offset > ULong.MAX_VALUE - base) {
             return null
         }
-        return UserMemory(process.vma.pageDirectory, base + offset)
+        return UserMemory(process.vma, base + offset)
     }
 
     fun fileDescriptor(value: ULong): Int? =

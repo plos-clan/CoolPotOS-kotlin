@@ -128,7 +128,7 @@ fun sysReboot(regs: PtraceRegisters, process: Process): Long {
 }
 
 fun sysUname(regs: PtraceRegisters, process: Process): Long {
-    val userBuffer = UserMemory(process.vma.pageDirectory, regs[PtraceRegisters.IDX_RDI])
+    val userBuffer = UserMemory(process.vma, regs[PtraceRegisters.IDX_RDI])
 
     val utsName = UtsName(
         sysname = "CoolPotOS",
@@ -144,7 +144,7 @@ fun sysUname(regs: PtraceRegisters, process: Process): Long {
 }
 
 fun sysNanoSleep(regs: PtraceRegisters, process: Process): Long {
-    val time = UserMemory(process.vma.pageDirectory, regs[PtraceRegisters.IDX_RDI])
+    val time = UserMemory(process.vma, regs[PtraceRegisters.IDX_RDI])
     val destination = ByteArray(TimeSpec.NATIVE_SIZE)
 
     if (!time.copyFromUser(destination = destination, 0, TimeSpec.NATIVE_SIZE)) {

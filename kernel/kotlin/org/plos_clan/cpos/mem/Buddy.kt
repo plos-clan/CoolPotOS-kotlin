@@ -49,6 +49,7 @@ object BuddyFrameAllocator {
     private const val LOW_MEMORY_GUARD = PAGE_SIZE_BYTES
 
     private val freeLists = Array(MAX_BUDDY_ORDER + 1) { linkedSetOf<ULong>() }
+    private val lock = IrqSpinLock()
 
     private var usableFrames = 0uL
     private var initialized = false
@@ -56,7 +57,9 @@ object BuddyFrameAllocator {
     val isReady: Boolean
         get() = initialized
 
-    fun initialize(): Boolean {
+    fun initialize(): Boolean = lock.withLock { initializeLocked() }
+
+    private fun initializeLocked(): Boolean {
         reset()
 
         val decision = analyzeMemmap() ?: run {
@@ -86,18 +89,18 @@ object BuddyFrameAllocator {
         return initialized
     }
 
-    fun allocateFrames(frameCount: ULong): ULong? {
+    fun allocateFrames(frameCount: ULong): ULong? = lock.withLock {
         if (frameCount == 0uL) {
-            return null
+            return@withLock null
         }
-        if (!ensureInitialized()) {
-            return null
+        if (!ensureInitializedLocked()) {
+            return@withLock null
         }
 
-        val targetOrder = requiredOrder(frameCount) ?: return null
-        val sourceOrder = firstNonEmptyOrder(targetOrder) ?: return null
+        val targetOrder = requiredOrder(frameCount) ?: return@withLock null
+        val sourceOrder = firstNonEmptyOrder(targetOrder) ?: return@withLock null
 
-        val blockStart = removeFirstBlock(sourceOrder) ?: return null
+        val blockStart = removeFirstBlock(sourceOrder) ?: return@withLock null
         var order = sourceOrder
         while (order > targetOrder) {
             order -= 1
@@ -106,18 +109,18 @@ object BuddyFrameAllocator {
         }
 
         usableFrames -= 1uL shl targetOrder
-        return blockStart * PAGE_SIZE_BYTES
+        blockStart * PAGE_SIZE_BYTES
     }
 
-    fun freeFrames(physicalAddress: ULong, frameCount: ULong): Boolean {
+    fun freeFrames(physicalAddress: ULong, frameCount: ULong): Boolean = lock.withLock {
         if (frameCount == 0uL || !physicalAddress.isPageAligned()) {
-            return false
+            return@withLock false
         }
-        if (!ensureInitialized()) {
-            return false
+        if (!ensureInitializedLocked()) {
+            return@withLock false
         }
 
-        val requestedOrder = requiredOrder(frameCount) ?: return false
+        val requestedOrder = requiredOrder(frameCount) ?: return@withLock false
         var order = requestedOrder
         var frameStart = physicalAddress / PAGE_SIZE_BYTES
 
@@ -132,7 +135,7 @@ object BuddyFrameAllocator {
 
         freeLists[order].add(frameStart)
         usableFrames += 1uL shl requestedOrder
-        return true
+        true
     }
 
     private fun analyzeMemmap(): MemmapDecision? {
@@ -223,7 +226,7 @@ object BuddyFrameAllocator {
         initialized = false
     }
 
-    private fun ensureInitialized(): Boolean = initialized || initialize()
+    private fun ensureInitializedLocked(): Boolean = initialized || initializeLocked()
 
     private fun addRange(startFrame: ULong, frameCount: ULong) {
         var currentFrame = startFrame
