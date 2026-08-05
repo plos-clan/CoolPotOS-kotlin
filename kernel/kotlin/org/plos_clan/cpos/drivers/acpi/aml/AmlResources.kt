@@ -119,10 +119,10 @@ object AmlResourceTemplateParser {
     private fun parseIrq(payload: ByteArray): AcpiResource? {
         if (payload.size !in 2..3) return null
         val mask = payload.u16(0)
-        val flags = payload.getOrNull(2)?.toUByte()?.toUInt() ?: 0x01u
+        val flags = payload.getOrNull(2)?.toUByte()?.toUInt() ?: 0u
         return AcpiIrqResource(
             interrupts = (0 until 16).filter { (mask and (1 shl it)) != 0 }.map(Int::toUInt),
-            levelTriggered = (flags and 0x01u) == 0u,
+            levelTriggered = (flags and 0x01u) != 0u,
             activeLow = (flags and 0x08u) != 0u,
             shared = (flags and 0x10u) != 0u,
         )
@@ -135,7 +135,7 @@ object AmlResourceTemplateParser {
         if (count > (payload.size - 2) / 4) return null
         return AcpiIrqResource(
             interrupts = List(count) { payload.u32(2 + it * 4) },
-            levelTriggered = (flags and 0x02u) == 0u,
+            levelTriggered = (flags and 0x02u) != 0u,
             activeLow = (flags and 0x04u) != 0u,
             shared = (flags and 0x08u) != 0u,
             wakeCapable = (flags and 0x10u) != 0u,

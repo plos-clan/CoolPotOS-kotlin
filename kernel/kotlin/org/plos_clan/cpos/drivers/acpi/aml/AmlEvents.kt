@@ -4,13 +4,12 @@ package org.plos_clan.cpos.drivers.acpi.aml
 
 import org.plos_clan.cpos.drivers.acpi.Fadt
 import org.plos_clan.cpos.drivers.acpi.apic.IoApic
-import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.drivers.acpi.readByte
 import org.plos_clan.cpos.drivers.acpi.writeByte
+import org.plos_clan.cpos.fault.IRQ_BASE_VECTOR
 import org.plos_clan.cpos.fault.IrqController
 import org.plos_clan.cpos.utils.IrqSpinLock
 
-private const val IRQ_VECTOR_BASE = 32u
 private const val EVENT_QUEUE_CAPACITY = 256
 private const val EVENT_GPE_LEVEL = 2
 private const val EVENT_GPE_EDGE = 3
@@ -75,14 +74,19 @@ object AmlEvents {
             configureFixedEvents(info.pm1bEventBlock, info.pm1EventLength)
         }
         val gsi = info.sciInterrupt
-        val vector = IRQ_VECTOR_BASE + gsi
+        val vector = IRQ_BASE_VECTOR + gsi
         if (vector > UByte.MAX_VALUE.toUInt()) {
             println("AML: SCI GSI $gsi cannot be represented by an IDT vector")
             return false
         }
 
-        val irqNumber = (vector - IRQ_VECTOR_BASE + 1u).toInt()
-        if (!IrqController.registerAction(irqNumber) { _, _ ->
+        if (!IrqController.registerAction(
+                irq = gsi,
+                vector = vector,
+                masked = true,
+                levelTriggered = true,
+                activeLow = true,
+            ) { _, _ ->
                 IoApic.setMasked(gsi, true)
                 signalSci()
             }
@@ -91,14 +95,6 @@ object AmlEvents {
         }
         sciGsi = gsi
         sciInstalled = true
-        IoApic.routeIrq(
-            irq = gsi,
-            vector = vector,
-            destinationApicId = LocalApic.destinationApicId,
-            masked = true,
-            levelTriggered = true,
-            activeLow = true,
-        )
         signalSci()
         println("AML: SCI routed gsi=$gsi vector=$vector")
         return true

@@ -3,11 +3,13 @@
 package org.plos_clan.cpos.fault
 
 import kotlinx.cinterop.*
+import org.plos_clan.cpos.drivers.acpi.apic.IoApic
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.utils.PtraceRegisters
 import kotlin.experimental.ExperimentalNativeApi
 
 const val ARCH_MAX_IRQ_NUM = 256
+const val IRQ_BASE_VECTOR = 32u
 
 @ExperimentalNativeApi
 @ExperimentalForeignApi
@@ -37,12 +39,30 @@ object IrqController {
         LocalApic.endOfInterrupt()
     }
 
-    fun registerAction(irq: Int, handle: IrqHandler): Boolean {
-        val irqIndex = irqIndexOf(irq) ?: run {
-            println("IrqController: Invalid irq num: $irq")
+    fun registerAction(
+        irq: UInt,
+        vector: UInt,
+        masked: Boolean = false,
+        levelTriggered: Boolean = false,
+        activeLow: Boolean = false,
+        handle: IrqHandler
+    ): Boolean {
+        val irqNumber = vector
+            .takeIf { it in IRQ_BASE_VECTOR..UByte.MAX_VALUE.toUInt() }
+            ?.let { (it - IRQ_BASE_VECTOR + 1u).toInt() }
+        val irqIndex = irqNumber?.let(::irqIndexOf) ?: run {
+            println("IrqController: Invalid interrupt vector: $vector")
             return false
         }
         irqHandlers[irqIndex] = handle
+        IoApic.routeIrq(
+            irq,
+            vector,
+            LocalApic.destinationApicId,
+            masked = masked,
+            levelTriggered = levelTriggered,
+            activeLow = activeLow
+        )
         return true
     }
 
