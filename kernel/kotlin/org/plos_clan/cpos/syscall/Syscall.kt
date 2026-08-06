@@ -37,10 +37,15 @@ private const val SYS_IOCTL = 16
 private const val SYS_READV = 19
 private const val SYS_WRITEV = 20
 private const val SYS_NANO_SLEEP = 35
+private const val SYS_GETPID = 39
 private const val SYS_UNAME = 63
 private const val SYS_GETCWD = 79
+private const val SYS_GETUID = 102
+private const val SYS_GETGID = 104
+private const val SYS_GETSID = 124
 private const val SYS_ARCH_PRCTL = 158
 private const val SYS_REBOOT = 169
+private const val SYS_GETTID = 186
 private const val SYS_OPENAT = 257
 
 const val SUPPORTED_PROT = 0x7uL
@@ -81,7 +86,12 @@ object Syscall {
         this[SYS_GETCWD] = ::sysGetCWD
         this[SYS_REBOOT] = ::sysReboot
         this[SYS_UNAME] = ::sysUname
-        this[SYS_NANO_SLEEP] = :: sysNanoSleep
+        this[SYS_NANO_SLEEP] = ::sysNanoSleep
+        this[SYS_GETPID] = ::sysGetPID
+        this[SYS_GETUID] = ::sysGetUID
+        this[SYS_GETGID] = ::sysGetGID
+        this[SYS_GETSID] = ::sysGetSID
+        this[SYS_GETTID] = ::sysGetTID
     }
 
     fun syscallHandle(regs: PtraceRegisters) {
@@ -92,7 +102,11 @@ object Syscall {
             null
         }
         val result = when {
-            handler == null -> errno(Errno.ENOSYS)
+            handler == null -> {
+                println("SYSCALL: no implement $number")
+                errno(Errno.ENOSYS)
+            }
+
             else -> ProcessManager.currentProcess()?.let { handler(regs, it) }
                 ?: errno(Errno.ESRCH)
         }

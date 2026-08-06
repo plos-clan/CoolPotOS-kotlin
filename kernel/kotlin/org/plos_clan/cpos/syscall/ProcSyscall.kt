@@ -7,6 +7,7 @@ import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.syscall.Syscall.copyWordToUser
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.tasks.Process
+import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
 
@@ -52,4 +53,28 @@ fun sysArchPrctl(regs: PtraceRegisters, process: Process): Long {
 
         else -> errno(Errno.EINVAL)
     }
+}
+
+fun sysGetPID(regs: PtraceRegisters, process: Process): Long {
+    return process.id.toLong()
+}
+
+fun sysGetUID(regs: PtraceRegisters, process: Process): Long {
+    return process.uid.toLong()
+}
+
+fun sysGetGID(regs: PtraceRegisters, process: Process): Long {
+    return process.rgid.toLong()
+}
+
+fun sysGetSID(regs: PtraceRegisters, process: Process): Long {
+    val pid = regs[PtraceRegisters.IDX_RDI].toInt()
+    val process =
+        if (pid == 0) process else ProcessManager.findProcess(pid) ?: return errno(Errno.ESRCH)
+    return process.sid.toLong()
+}
+
+fun sysGetTID(regs: PtraceRegisters, process: Process): Long {
+    val thread = ProcessManager.currentThread()!!
+    return thread.id.toLong()
 }

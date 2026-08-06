@@ -97,7 +97,14 @@ class Process internal constructor(
     val name: String,
     val isKernelProcess: Boolean,
     pageDirectory: PageDirectory,
-    var context: FileSystemContext?
+    var context: FileSystemContext?,
+    var uid: Int = 0,
+    var euid: Int = 0,
+    var ruid: Int = 0,
+    var egid: Int = 0,
+    var rgid: Int = 0,
+    var sgid: Int = 0,
+    var sid: Int = 0
 ) {
     val threads = mutableListOf<Thread>()
     var state: TaskState = TaskState.READY
@@ -225,6 +232,12 @@ object ProcessManager {
         ).also { thread ->
             thread.initializeUserContext(entryPoint, stackPointer, fsBase)
         }.also(Scheduler::enqueueThread)
+    }
+
+    fun findProcess(pid: Int) : Process? {
+        for (proc in process)
+            if(proc.id == pid) return proc
+        return null
     }
 
     private fun createKernelThread(
