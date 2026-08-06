@@ -11,15 +11,13 @@ struct tcb_layout {
     int did_exit;
 };
 
-static _Atomic uint64_t next_tid = 4;
-
 static __attribute__((noreturn)) void ap_start(struct limine_mp_info *info) {
     disable_interrupt();
     idt_load();
     setup_simd();
     wrmsr(ia32_fs_base_msr, info->extra_argument);
     kernel_runtime_fs_bases[info->lapic_id % cpu_slot_count] = info->extra_argument;
-    ((struct tcb_layout *)info->extra_argument)->tid = next_tid++;
+    ((struct tcb_layout *)info->extra_argument)->tid = (int)allocate_runtime_tid();
 
     kt_ap_start();
     for (;;) __asm__ volatile("hlt");

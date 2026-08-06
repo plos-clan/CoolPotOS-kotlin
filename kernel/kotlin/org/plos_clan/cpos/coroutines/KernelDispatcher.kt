@@ -27,6 +27,16 @@ class KernelDispatcher internal constructor(
 ) : CoroutineDispatcher(), Delay {
     private val lock = IrqSpinLock()
     private val queue = KernelCoroutineQueue()
+    private val events = mutableListOf<KernelEvent>()
+    private val pollers = mutableListOf<() -> Unit>()
+
+    internal fun createEvent(): KernelEvent = KernelEvent().also { event ->
+        lock.withLock { events += event }
+    }
+
+    internal fun registerPoller(poller: () -> Unit) {
+        lock.withLock { pollers += poller }
+    }
 
     override fun dispatch(context: CoroutineContext, block: Runnable) {
         lock.withLock { queue.enqueue(block) }
@@ -49,6 +59,14 @@ class KernelDispatcher internal constructor(
     ): DisposableHandle = schedule(timeMillis, block)
 
     internal fun runReadyBatch(): Int {
+        pollers.forEach { poller ->
+            try {
+                poller()
+            } catch (failure: Throwable) {
+                failureReporter(failure)
+            }
+        }
+        dispatchPendingEvents()
         val nowNanos = Hpet.nanoTime()
         val ready = lock.withLock {
             queue.claimReady(nowNanos, MAX_TASKS_PER_BATCH)
@@ -67,6 +85,16 @@ class KernelDispatcher internal constructor(
     }
 
     internal fun hasReadyWork(): Boolean = lock.withLock(queue::hasImmediateWork)
+
+    private fun dispatchPendingEvents() {
+        events.forEach { event ->
+            try {
+                event.dispatchPending()
+            } catch (failure: Throwable) {
+                failureReporter(failure)
+            }
+        }
+    }
 
     override fun toString(): String = "KernelDispatcher[BSP]"
 

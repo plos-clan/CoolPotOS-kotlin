@@ -55,23 +55,23 @@ fun kernelMain() {
     ProcessManager.initialize()
     Scheduler.initialize()
     startCapturedCloneThreads()
+    Scheduler.enableScheduler()
     Cmdline.initialize()
     if (!FileSystemManager.initialize()) {
         return
     }
     FrameBuffer.initialize()
     TtyManager.initialize()
-    Acpi.enumerateDevices()
-    ModuleManager.initialize()
-    Initrd.initialize()
     if (!KernelCoroutines.initialize()) {
         return
     }
+    Acpi.enumerateDevices()
+    ModuleManager.initialize()
+    Initrd.initialize()
     println("Kernel load done!")
-    Scheduler.enableScheduler()
-    bridge.enable_interrupt()
     Init.setupInitProgram()
     KernelCoroutines.launchAmlEventWorker()
+    bridge.enable_interrupt()
     KernelCoroutines.runEventLoop()
 }
 

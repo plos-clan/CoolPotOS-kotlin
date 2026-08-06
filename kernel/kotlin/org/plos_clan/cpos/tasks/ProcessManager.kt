@@ -36,11 +36,13 @@ class Thread(
     val kernelStackTop: ULong = 0uL,
     val kernelStackPhysicalBase: ULong = 0uL,
     val kernelStackPages: ULong = 0uL,
+    val kernelFsBase: ULong = 0uL,
 ) {
     val nativeContext: ULong = bridge.fast_handoff_create_task(
         id.toULong(),
         process.vma.pageDirectory.pml4PhysicalAddress,
         kernelStackTop,
+        kernelFsBase,
     ).also { handle ->
         require(handle != 0uL) { "Cannot allocate native context for thread $id" }
     }
@@ -208,12 +210,18 @@ object ProcessManager {
             name = "process ${process.id} thread",
             stackPages = kernelStackPages,
         ) ?: return null
+        val kernelFsBase = bridge.create_kernel_runtime_tcb()
+        if (kernelFsBase == 0uL) {
+            BuddyFrameAllocator.freeFrames(stack.physicalBase, stack.pages)
+            return null
+        }
 
         return newThread(
             process = process,
             kernelStackTop = stack.top,
             kernelStackPhysicalBase = stack.physicalBase,
             kernelStackPages = stack.pages,
+            kernelFsBase = kernelFsBase,
         ).also { thread ->
             thread.initializeUserContext(entryPoint, stackPointer, fsBase)
         }.also(Scheduler::enqueueThread)
@@ -275,6 +283,7 @@ object ProcessManager {
         kernelStackTop: ULong = 0uL,
         kernelStackPhysicalBase: ULong = 0uL,
         kernelStackPages: ULong = 0uL,
+        kernelFsBase: ULong = 0uL,
     ): Thread =
         Thread(
             id = nextThreadId.fetchAndAdd(1),
@@ -282,6 +291,7 @@ object ProcessManager {
             kernelStackTop = kernelStackTop,
             kernelStackPhysicalBase = kernelStackPhysicalBase,
             kernelStackPages = kernelStackPages,
+            kernelFsBase = kernelFsBase,
         ).also { thread ->
             process.addThread(thread)
             threadTableLock.withLock { threadTable[thread.id] = thread }

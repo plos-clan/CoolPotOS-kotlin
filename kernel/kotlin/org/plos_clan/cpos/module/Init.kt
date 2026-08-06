@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.module
 
+import org.plos_clan.cpos.drivers.char.TtyManager
 import org.plos_clan.cpos.fs.AccessMode
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.OpenOptions
@@ -84,6 +85,13 @@ object Init {
         }
 
         if (!process.fdTable.dup2(0, 1) || !process.fdTable.dup2(0, 2)) {
+            process.fdTable.close(0)
+            process.fdTable.close(1)
+            process.fdTable.close(2)
+            return false
+        }
+
+        if (!TtyManager.attachProcessToVT(0, process)) {
             process.fdTable.close(0)
             process.fdTable.close(1)
             process.fdTable.close(2)

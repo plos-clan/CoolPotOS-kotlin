@@ -31,6 +31,18 @@ index d4660cb5..d5dd9ec0 100644
  #endif
  	__ensure(phdr_pointer);
  	__ensure(entry_pointer);
+@@ -986,7 +981,10 @@ int __dlapi_reverse(const void *ptr, __dlapi_symbol *info) {
+ 			start_symbols = hash_table->symbolOffset;
+ 			num_symbols = last_sym;
+ 		} else {
+-			__ensure(!"unexpected hash style!");
++			// Static kernel images are not required to expose a dynamic hash
++			// table. They cannot be searched through the rtld repository, but
++			// that must not make best-effort stack symbolization fatal.
++			continue;
+ 		}
+ 
+ 		for(size_t i = start_symbols; i < num_symbols; i++) {
 diff --git a/sysdeps/template/generic/generic.cpp b/sysdeps/template/generic/generic.cpp
 new file mode 100644
 index 00000000..142a1aa6
@@ -1593,3 +1605,31 @@ index 898bf82a..2262408a 100644
  				return EBUSY;
  			}
  			++mutex->__mlibc_recursion;
+diff --git a/options/posix/generic/pthread.cpp b/options/posix/generic/pthread.cpp
+index 0d133859..6f685597 100644
+--- a/options/posix/generic/pthread.cpp
++++ b/options/posix/generic/pthread.cpp
+@@ -685,5 +685,9 @@ int pthread_atfork(void (*prepare) (void), void (*parent) (void), void (*child)
+ int pthread_key_create(pthread_key_t *out, void (*destructor)(void *)) {
+-	SCOPE_TRACE();
+-
+-	return mlibc::thread_key_create(out, destructor);
++	SCOPE_TRACE();
++
++	__mlibc_uintptr key;
++	auto error = mlibc::thread_key_create(&key, destructor);
++	if(!error)
++		*out = static_cast<pthread_key_t>(key);
++	return error;
+ }
+diff --git a/options/posix/include/bits/posix/pthread_types.h b/options/posix/include/bits/posix/pthread_types.h
+index 34a63654..5067300f 100644
+--- a/options/posix/include/bits/posix/pthread_types.h
++++ b/options/posix/include/bits/posix/pthread_types.h
+@@ -10,3 +10,5 @@ typedef struct __mlibc_cond pthread_cond_t;
+ typedef struct __mlibc_condattr pthread_condattr_t;
+-typedef __mlibc_uintptr pthread_key_t;
++// Match the Linux/glibc ABI used by Kotlin/Native. pthread_key_t is an
++// unsigned 32-bit key, not a pointer-sized value on x86_64.
++typedef __mlibc_uint32 pthread_key_t;
+ typedef struct __mlibc_mutex pthread_mutex_t;

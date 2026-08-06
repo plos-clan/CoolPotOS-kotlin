@@ -2,6 +2,7 @@
 
 package org.plos_clan.cpos.drivers.acpi.aml
 
+import org.plos_clan.cpos.coroutines.KernelEvent
 import org.plos_clan.cpos.drivers.acpi.Fadt
 import org.plos_clan.cpos.drivers.acpi.apic.IoApic
 import org.plos_clan.cpos.drivers.acpi.readByte
@@ -26,19 +27,33 @@ object AmlEvents {
     private var sciInstalled = false
     private var sciGsi = 0u
     private var workerReported = false
+    private var workerWakeup: KernelEvent? = null
     private val powerButtons = mutableSetOf<AmlName>()
 
     val droppedEvents: ULong
         get() = lock.withLock { dropped }
 
     /** Coalesces level-triggered SCI notifications while the worker is busy. */
-    fun signalSci(): Boolean = lock.withLock {
-        sciPending = true
-        true
+    fun signalSci(): Boolean {
+        lock.withLock { sciPending = true }
+        workerWakeup?.signal()
+        return true
     }
 
-    fun signalGpe(number: UInt, edgeTriggered: Boolean): Boolean =
-        enqueue(if (edgeTriggered) EVENT_GPE_EDGE else EVENT_GPE_LEVEL, number)
+    fun signalGpe(number: UInt, edgeTriggered: Boolean): Boolean {
+        val accepted = enqueue(
+            if (edgeTriggered) EVENT_GPE_EDGE else EVENT_GPE_LEVEL,
+            number,
+        )
+        if (accepted) {
+            workerWakeup?.signal()
+        }
+        return accepted
+    }
+
+    internal fun installWorkerWakeup(wakeup: KernelEvent) {
+        workerWakeup = wakeup
+    }
 
     internal fun registerPowerButton(path: AmlName, gpe: UInt): Boolean {
         if (!enableGpe(gpe)) {

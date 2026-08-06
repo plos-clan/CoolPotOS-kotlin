@@ -15,6 +15,9 @@ enum {
     task_running = 1,
     task_blocked = 2,
     task_zombie = 3,
+    ps2_queue_capacity = 256,
+    ps2_queue_mask = ps2_queue_capacity - 1,
+    ps2_queue_empty = 0x100,
 };
 
 typedef struct fast_task fast_task_t;
@@ -24,6 +27,7 @@ struct fast_task {
     uint8_t fpu[fpu_state_size] __attribute__((aligned(16)));
     uint64_t cr3;
     uint64_t kernel_rsp;
+    uint64_t kernel_fs_base;
     uint64_t id;
     fast_task_t *next;
     uint8_t state;
@@ -52,8 +56,15 @@ typedef struct {
 
 static fast_cpu_t fast_cpus[cpu_slot_count];
 static uint8_t handoff_enabled;
+static uint8_t yield_requested[cpu_slot_count];
 static uint8_t lapic_x2apic;
 static uint64_t lapic_mmio_base;
+static uint8_t ps2_queue[ps2_queue_capacity];
+static uint16_t ps2_queue_head;
+static uint16_t ps2_queue_tail;
+static uint16_t ps2_data_port;
+static uint16_t ps2_status_port;
+static uint64_t ps2_irq_num;
 
 static inline fast_task_t *task_from_handle(uint64_t handle) {
     return (fast_task_t *)(uintptr_t)handle;
@@ -178,13 +189,76 @@ void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base) {
     lapic_mmio_base = mmio_base;
 }
 
-uint64_t fast_handoff_create_task(uint64_t id, uint64_t cr3, uint64_t kernel_rsp) {
+void fast_handoff_yield(void) {
+    if (!__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE)) return;
+
+    const uint64_t slot = current_lapic_id() % cpu_slot_count;
+    if (!fast_cpus[slot].bound) return;
+    __atomic_store_n(&yield_requested[slot], 1, __ATOMIC_RELEASE);
+    __asm__ volatile("int $0x20" : : : "memory");
+}
+
+/* The Kotlin/Native interop wrapper keeps this entire call in Native state. */
+void fast_handoff_park_kotlin(void) {
+    fast_handoff_yield();
+    __asm__ volatile("hlt" : : : "memory");
+}
+
+void fast_handoff_configure_ps2(
+    uint64_t irq_num,
+    uint16_t data_port,
+    uint16_t status_port
+) {
+    __atomic_store_n(&ps2_queue_head, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&ps2_queue_tail, 0, __ATOMIC_RELAXED);
+    ps2_data_port = data_port;
+    ps2_status_port = status_port;
+    __atomic_store_n(&ps2_irq_num, irq_num, __ATOMIC_RELEASE);
+}
+
+uint16_t fast_handoff_read_ps2_scan_code(void) {
+    const uint16_t tail = __atomic_load_n(&ps2_queue_tail, __ATOMIC_RELAXED);
+    if (tail == __atomic_load_n(&ps2_queue_head, __ATOMIC_ACQUIRE))
+        return ps2_queue_empty;
+
+    const uint8_t scan_code = ps2_queue[tail];
+    __atomic_store_n(
+        &ps2_queue_tail,
+        (tail + 1) & ps2_queue_mask,
+        __ATOMIC_RELEASE
+    );
+    return scan_code;
+}
+
+static bool fast_handoff_ps2_irq(uint64_t irq_num) {
+    if (!irq_num || irq_num != __atomic_load_n(&ps2_irq_num, __ATOMIC_ACQUIRE))
+        return false;
+
+    if (!(io_in8(ps2_status_port) & 1u)) return true;
+
+    const uint8_t scan_code = io_in8(ps2_data_port);
+    const uint16_t head = __atomic_load_n(&ps2_queue_head, __ATOMIC_RELAXED);
+    const uint16_t next = (head + 1) & ps2_queue_mask;
+    if (next != __atomic_load_n(&ps2_queue_tail, __ATOMIC_ACQUIRE)) {
+        ps2_queue[head] = scan_code;
+        __atomic_store_n(&ps2_queue_head, next, __ATOMIC_RELEASE);
+    }
+    return true;
+}
+
+uint64_t fast_handoff_create_task(
+    uint64_t id,
+    uint64_t cr3,
+    uint64_t kernel_rsp,
+    uint64_t kernel_fs_base
+) {
     fast_task_t *task = malloc(sizeof(*task));
     if (!task) return 0;
     __builtin_memset(task, 0, sizeof(*task));
     task->id = id;
     task->cr3 = cr3;
     task->kernel_rsp = kernel_rsp;
+    task->kernel_fs_base = kernel_fs_base;
     task_state_store(task, task_ready);
     initialize_fpu(task);
     return (uintptr_t)task;
@@ -209,6 +283,7 @@ void fast_handoff_init_kernel(
     task->regs.ds = 0x10;
     task->regs.es = 0x10;
     task->regs.fs_base = fs_base;
+    task->kernel_fs_base = fs_base;
     task->regs.rdi = argument;
     task->user_context = 0;
     task_state_store(task, task_ready);
@@ -257,6 +332,8 @@ bool fast_handoff_bind_current(
     cpu->current = task;
     cpu->is_bsp = is_bsp != 0;
     cpu->bound = 1;
+    if (!task->kernel_fs_base)
+        task->kernel_fs_base = rdmsr(ia32_fs_base_msr);
     task_state_store(task, task_running);
     __atomic_store_n(&task->queued, 0, __ATOMIC_RELEASE);
     unlock_cpu(cpu);
@@ -328,19 +405,26 @@ uint64_t fast_handoff_current_task_id(void) {
 
 void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
     const uint64_t lapic_id = current_lapic_id();
-    fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
+    const uint64_t slot = lapic_id % cpu_slot_count;
+    fast_cpu_t *cpu = &fast_cpus[slot];
 
     const fast_task_t *current = cpu->current;
     const bool syscall_in_progress = current && current->user_context &&
         (regs->cs & 3) == 0;
 
     if (irq_num != timer_irq) {
-        if (irq_num != spurious_irq) do_irq(regs, irq_num);
-        else lapic_eoi(irq_num);
+        if (fast_handoff_ps2_irq(irq_num) || irq_num == spurious_irq)
+            lapic_eoi(irq_num);
+        else
+            do_irq(regs, irq_num);
         return;
     }
 
-    if (!syscall_in_progress &&
+    const bool voluntary = __atomic_exchange_n(
+        &yield_requested[slot], 0, __ATOMIC_ACQ_REL) != 0;
+    const bool preemptible = (regs->cs & 3) != 0 || voluntary;
+
+    if (preemptible && !syscall_in_progress &&
         __atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) && cpu->bound) {
         lock_cpu(cpu);
         fast_task_t *previous = cpu->current;
@@ -367,6 +451,8 @@ void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
                 set_kernel_stack(lapic_id, next->kernel_rsp, cpu->is_bsp);
                 locals[lapic_id % cpu_slot_count].syscall.kernel_rsp = next->kernel_rsp;
             }
+            locals[slot].syscall.kernel_fs_base = next->kernel_fs_base
+                ? next->kernel_fs_base : kernel_runtime_fs_bases[slot];
             restore_task(next, regs);
         }
     }

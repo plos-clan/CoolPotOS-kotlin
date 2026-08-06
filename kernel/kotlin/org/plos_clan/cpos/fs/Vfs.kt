@@ -597,7 +597,6 @@ class OpenFileDescription internal constructor(
         if (references.load() == 0) {
             -VfsError.BAD_DESCRIPTOR.errno.toLong()
         } else if (inode.type == InodeType.REGULAR || inode.type == InodeType.DIRECTORY) {
-            // Ordinary filesystem objects never block for normal I/O.
             (events and PollEvents.DEFAULT_FILE_EVENTS).toLong()
         } else {
             backend.poll(inode, events)

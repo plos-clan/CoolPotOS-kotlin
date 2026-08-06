@@ -6,7 +6,6 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
@@ -15,7 +14,6 @@ import org.plos_clan.cpos.drivers.acpi.aml.Aml
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 
 private const val AML_EVENT_BATCH_SIZE = 64
-private const val AML_EVENT_IDLE_POLL_MILLIS = 1L
 private const val NOT_INITIALIZED_MESSAGE = "Kernel coroutines are not initialized"
 
 object KernelCoroutines {
@@ -54,13 +52,16 @@ object KernelCoroutines {
     }
 
     internal fun launchAmlEventWorker() {
+        val wakeup = dispatcher.createEvent()
+        Aml.installEventWakeup(wakeup)
+        while (Aml.processPendingEvents(AML_EVENT_BATCH_SIZE) != 0) {
+        }
         scope.launch(CoroutineName("aml-events")) {
             while (isActive) {
-                if (Aml.processPendingEvents(AML_EVENT_BATCH_SIZE) == 0) {
-                    delay(AML_EVENT_IDLE_POLL_MILLIS)
-                } else {
+                while (Aml.processPendingEvents(AML_EVENT_BATCH_SIZE) != 0) {
                     yield()
                 }
+                wakeup.await()
             }
         }
     }
@@ -72,12 +73,11 @@ object KernelCoroutines {
             if (dispatcher.hasReadyWork()) {
                 continue
             }
-            bridge.wait_for_interrupt()
+            bridge.fast_handoff_park_kotlin()
         }
     }
 
     private fun reportFailure(failure: Throwable) {
         println("Uncaught kernel coroutine failure: $failure")
-        failure.printStackTrace()
     }
 }

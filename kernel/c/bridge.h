@@ -42,13 +42,27 @@ uint64_t get_sys_clone_stack_at(uint64_t index);
 uint64_t get_sys_clone_tls_at(uint64_t index);
 uint64_t get_kernel_idle_entry_address(void);
 uint64_t get_kernel_clone_thread_entry_address(void);
+uint64_t create_kernel_runtime_tcb(void);
 uint64_t get_asm_syscall_handle_address(void);
 void setup_syscall_cpu(uint64_t lapic_id, uint8_t is_bsp);
 void wait_for_interrupt(void);
 void cpu_relax(void);
 void asm_pause(void);
 void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base);
-uint64_t fast_handoff_create_task(uint64_t id, uint64_t cr3, uint64_t kernel_rsp);
+void fast_handoff_yield(void);
+void fast_handoff_park_kotlin(void);
+void fast_handoff_configure_ps2(
+    uint64_t irq_num,
+    uint16_t data_port,
+    uint16_t status_port
+);
+uint16_t fast_handoff_read_ps2_scan_code(void);
+uint64_t fast_handoff_create_task(
+    uint64_t id,
+    uint64_t cr3,
+    uint64_t kernel_rsp,
+    uint64_t kernel_fs_base
+);
 void fast_handoff_init_kernel(
     uint64_t task,
     uint64_t entry,

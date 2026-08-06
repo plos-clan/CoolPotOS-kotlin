@@ -45,6 +45,11 @@ SECTIONS
     . = ALIGN(CONSTANT(MAXPAGESIZE));
 
     .rodata : {
+        /* Kotlin/Native TypeInfo stores GC reference-field offsets in these
+         * individually named sections. lld's section GC does not retain them
+         * reliably through the local section-symbol relocations in a static
+         * library, leaving TypeInfo.objOffsets_ dangling. */
+        KEEP(*(.rodata.krefs:*))
         *(.rodata .rodata.*)
     } :rodata
 

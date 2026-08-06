@@ -2,6 +2,8 @@
 
 package org.plos_clan.cpos.drivers.acpi.aml
 
+import org.plos_clan.cpos.coroutines.KernelEvent
+
 import org.plos_clan.cpos.drivers.acpi.Acpi
 import org.plos_clan.cpos.drivers.acpi.AcpiTable
 import org.plos_clan.cpos.drivers.acpi.Fadt
@@ -82,7 +84,6 @@ object Aml {
             return devices
         }
 
-        // Tell firmware methods that interrupt routing uses the APIC model.
         evaluate("\\_PIC", listOf(AmlInteger(1uL)))
 
         devices = namespace.allNodes()
@@ -131,6 +132,10 @@ object Aml {
 
     fun processPendingEvents(maxEvents: Int = 64): Int =
         AmlEvents.processPending(maxEvents)
+
+    internal fun installEventWakeup(wakeup: KernelEvent) {
+        AmlEvents.installWorkerWakeup(wakeup)
+    }
 
     internal fun evaluateGpe(number: UInt, edgeTriggered: Boolean) {
         if (number > 0xFFu) {

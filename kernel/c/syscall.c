@@ -12,6 +12,7 @@
 #define ENOMEM 12
 #define ENOSYS 38
 #define ETIMEDOUT 110
+#define SYS_gettid 186
 
 #define PAGE_SIZE 0x1000u
 #define BOOTSTRAP_VM_ARENA_SIZE (32u * 1024u * 1024u)
@@ -61,7 +62,6 @@ static volatile uint64_t *runtime_hpet_counter;
 static uint64_t runtime_hpet_period_femtoseconds;
 static uint64_t runtime_clock_offset_ns;
 static uint64_t runtime_clock_last_ns;
-
 void cpu_relax(void) { __asm__ volatile("pause" : : : "memory"); }
 
 static void spin_lock(uint8_t *lock) {
@@ -222,6 +222,7 @@ static inline bool interrupts_enabled(void) {
 }
 
 static void wait_for_event(void) {
+    fast_handoff_yield();
     if (interrupts_enabled()) {
         __asm__ volatile("hlt" : : : "memory");
     } else {
@@ -375,8 +376,16 @@ static long clone_call(void *stack, int *parent_tid, void *tls) {
 
     if (!capture_sys_clone_context((uintptr_t)stack, (uintptr_t)tls))
         return -ENOMEM;
-    *parent_tid = 2;
-    return 2;
+    const uint64_t tid = allocate_runtime_tid();
+    if (tid > INT32_MAX) return -EAGAIN;
+    *parent_tid = (int)tid;
+    return (long)tid;
+}
+
+static long gettid_call(void) {
+    int tid;
+    __asm__ volatile("movl %%fs:24, %0" : "=r"(tid));
+    return tid;
 }
 
 static long arch_prctl_call(int code, uint64_t pointer) {
@@ -437,6 +446,9 @@ long syscall(long number, ...) {
     case SYS_sched_yield:
         wait_for_event();
         ret = 0;
+        break;
+    case SYS_gettid:
+        ret = gettid_call();
         break;
     case SYS_futex: {
         int *futex_ptr = ARG(int *);

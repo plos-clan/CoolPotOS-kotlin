@@ -7,7 +7,10 @@ import org.plos_clan.cpos.drivers.DeviceBackend
 import org.plos_clan.cpos.drivers.DeviceManager
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.tasks.Process
+import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Cmdline
+import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.TermiosConstants
 import org.plos_clan.cpos.utils.VTModeConstants
@@ -251,6 +254,16 @@ class TtySession(
     val backend: TtySessionBackend,
     val device: TtyDevice,
 ) : DeviceBackend {
+    private val stateLock = IrqSpinLock()
+    private var controllingSessionId = 0
+    private var foregroundProcessGroupId = 0
+
+    val sessionId: Int
+        get() = stateLock.withLock { controllingSessionId }
+
+    val foregroundProcessGroup: Int
+        get() = stateLock.withLock { foregroundProcessGroupId }
+
     override fun ioctl(
         device: Device,
         command: Int,
@@ -274,11 +287,48 @@ class TtySession(
         size: ULong
     ): Long = backend.write(this, buffer, size).toLong()
 
+    fun keyboardInput(data: CharArray) = backend.keyboardInput(this, data)
+
+    fun attach(process: Process) {
+        stateLock.withLock {
+            controllingSessionId = process.id
+            foregroundProcessGroupId = process.id
+        }
+    }
+
+    fun attachCurrentProcess(): Boolean {
+        val process = ProcessManager.currentProcess() ?: return false
+        attach(process)
+        return true
+    }
+
+    fun setForegroundProcessGroup(processGroup: Int): Boolean {
+        if (processGroup <= 0) {
+            return false
+        }
+        stateLock.withLock {
+            foregroundProcessGroupId = processGroup
+        }
+        return true
+    }
+
+    fun detachCurrentProcess(): Boolean {
+        val process = ProcessManager.currentProcess() ?: return false
+        return stateLock.withLock {
+            if (controllingSessionId != process.id) {
+                return@withLock false
+            }
+            controllingSessionId = 0
+            foregroundProcessGroupId = 0
+            true
+        }
+    }
 }
 
 data class TtyDevice(val name: String, val device: TtyPhysicalDevice, val type: TtyDeviceType)
 
 interface TtySessionBackend {
+    fun keyboardInput(session: TtySession, data: CharArray)
     fun write(session: TtySession, buffer: ByteArray, count: ULong): ULong
     fun read(session: TtySession, buffer: ByteArray, count: ULong): ULong
     fun flush(session: TtySession)
@@ -295,6 +345,27 @@ interface TtyPhysicalDevice {
 
 object TtyManager {
     val devices = mutableListOf<TtyDevice>()
+    val vts = ArrayList<TtySession>()
+
+    private var activeVT = 0
+
+    fun setActiveVT(index: Int): Boolean {
+        if (index !in vts.indices) {
+            return false
+        }
+        activeVT = index
+        return true
+    }
+
+    fun setActiveTV(index: Int): Boolean = setActiveVT(index)
+
+    fun getActiveVT(): TtySession = vts[activeVT]
+
+    fun attachProcessToVT(index: Int, process: Process): Boolean {
+        val session = vts.getOrNull(index) ?: return false
+        session.attach(process)
+        return true
+    }
 
     fun installTtyDevice(device: TtyDevice) {
         devices += device
@@ -303,7 +374,8 @@ object TtyManager {
 
     private fun createDefaultTermios(): Termios {
         return Termios(
-            TermiosConstants.BRKINT or TermiosConstants.ICRNL,
+            TermiosConstants.BRKINT or TermiosConstants.ICRNL or
+                TermiosConstants.INPCK or TermiosConstants.ISTRIP or TermiosConstants.IXON,
             TermiosConstants.OPOST,
             TermiosConstants.CS8 or TermiosConstants.CREAD or TermiosConstants.CLOCAL,
             TermiosConstants.ECHO or TermiosConstants.ICANON or TermiosConstants.IEXTEN or TermiosConstants.ISIG,
@@ -311,6 +383,7 @@ object TtyManager {
             ByteArray(19).apply {
                 this[TermiosConstants.VINTR] = 3
                 this[TermiosConstants.VQUIT] = 28
+                this[TermiosConstants.VERASE] = 127
                 this[TermiosConstants.VKILL] = 21
                 this[TermiosConstants.VEOF] = 4
                 this[TermiosConstants.VTIME] = 0
@@ -346,6 +419,7 @@ object TtyManager {
                     TerminalSession(device.device as TtyGraphicsDevice),
                     device
                 )
+            vts += session
             DeviceManager.installDevice(
                 DEV_CHAR,
                 DEV_TTY,
@@ -353,6 +427,17 @@ object TtyManager {
                 "tty$index",
                 0UL,
                 session
+            )
+        }
+
+        vts.firstOrNull()?.let { console ->
+            DeviceManager.installDevice(
+                DEV_CHAR,
+                DEV_TTY,
+                console,
+                "tty",
+                0uL,
+                console,
             )
         }
     }

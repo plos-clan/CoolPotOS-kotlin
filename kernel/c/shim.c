@@ -2,6 +2,14 @@
 #include "bridge.h"
 #include "native.h"
 
+#if defined(__clang__)
+#  define NO_OPTIMIZE __attribute__((optnone, noinline))
+#elif defined(__GNUC__)
+#  define NO_OPTIMIZE __attribute__((optimize("O0"), noinline))
+#else
+#  define NO_OPTIMIZE
+#endif
+
 extern void *realloc(void *ptr, size_t size);
 extern void free(void *);
 int get_nprocs(void);
@@ -11,7 +19,7 @@ int __unorddf2(double a, double b);
 void _ZdlPv(void *ptr);
 void _ZdlPvm(void *ptr, size_t size);
 void _ZdlPvj(void *ptr, unsigned int size);
-int __pthread_key_create(uintptr_t *key, void (*destructor)(void *));
+int __pthread_key_create(uint32_t *key, void (*destructor)(void *));
 
 uint64_t kernel_runtime_fs_base;
 uint64_t kernel_runtime_fs_bases[cpu_slot_count];
@@ -43,7 +51,7 @@ static int is_nan_bits(union double_bits bits) {
 }
 
 int isnan(double x) { return is_nan_bits((union double_bits){.f64 = x}); }
-int __unorddf2(double a, double b) {
+NO_OPTIMIZE int __unorddf2(double a, double b) {
     return is_nan_bits((union double_bits){.f64 = a})
         || is_nan_bits((union double_bits){.f64 = b});
 }
@@ -131,6 +139,26 @@ struct clone_context_record {
 static struct clone_context_record *clone_records;
 static uint64_t clone_count;
 static uint64_t clone_capacity;
+static uint64_t next_runtime_tid = 2;
+
+struct runtime_tcb_prefix {
+    struct runtime_tcb_prefix *self_pointer;
+    size_t dtv_size;
+    void **dtv_pointers;
+    int tid;
+    int did_exit;
+};
+
+uint64_t allocate_runtime_tid(void) {
+    return __atomic_fetch_add(&next_runtime_tid, 1, __ATOMIC_RELAXED);
+}
+
+uint64_t create_kernel_runtime_tcb(void) {
+    struct runtime_tcb_prefix *tcb = __rtld_allocateTcb();
+    if (!tcb) return 0;
+    tcb->tid = (int)allocate_runtime_tid();
+    return (uintptr_t)tcb;
+}
 
 static bool ensure_clone_capacity(uint64_t needed) {
     if (needed <= clone_capacity) return true;
@@ -160,13 +188,16 @@ uint64_t get_sys_clone_stack_at(uint64_t index) { return index < clone_count ? c
 uint64_t get_sys_clone_tls_at(uint64_t index) { return index < clone_count ? clone_records[index].tls : 0; }
 
 static __attribute__((noreturn)) void kernel_idle_thread_entry(void) {
-    for (;;) __asm__ volatile("hlt");
+    for (;;) {
+        fast_handoff_yield();
+        __asm__ volatile("hlt");
+    }
 }
 
 uint64_t get_kernel_idle_entry_address(void) { return (uintptr_t)&kernel_idle_thread_entry; }
 
 void pthread_exit(void *ret_val) __attribute__((noreturn));
-int pthread_key_create(uintptr_t *key, void (*destructor)(void *));
+int pthread_key_create(uint32_t *key, void (*destructor)(void *));
 
 static __attribute__((naked, noreturn)) void kernel_clone_thread_entry(void) {
     __asm__ volatile(
@@ -181,7 +212,7 @@ static __attribute__((naked, noreturn)) void kernel_clone_thread_entry(void) {
 }
 
 uint64_t get_kernel_clone_thread_entry_address(void) { return (uintptr_t)&kernel_clone_thread_entry; }
-int __pthread_key_create(uintptr_t *key, void (*destructor)(void *)) { return pthread_key_create(key, destructor); }
+int __pthread_key_create(uint32_t *key, void (*destructor)(void *)) { return pthread_key_create(key, destructor); }
 
 static void serial_init(void) {
     io_out8(serial_com1 + 1, 0x00);

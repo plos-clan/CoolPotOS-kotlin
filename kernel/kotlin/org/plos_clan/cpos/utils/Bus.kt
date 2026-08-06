@@ -9,7 +9,6 @@ object VTModeConstants {
     const val KD_GRAPHICS = 0x01 // 图形模式
 
 
-    // Keyboard mode
     const val KDGKBMODE = 0x4B44 // gets current keyboard mode
     const val KDSKBMODE = 0x4B45 // sets current keyboard mode
 
