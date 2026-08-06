@@ -38,6 +38,9 @@ class Thread(
     val kernelStackPages: ULong = 0uL,
     val kernelFsBase: ULong = 0uL,
 ) {
+    /** Address cleared to zero when this thread exits, if set by set_tid_address. */
+    var clearChildTid: ULong = 0uL
+
     val nativeContext: ULong = bridge.fast_handoff_create_task(
         id.toULong(),
         process.vma.pageDirectory.pml4PhysicalAddress,

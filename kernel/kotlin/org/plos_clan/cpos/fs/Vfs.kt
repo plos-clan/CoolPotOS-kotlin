@@ -155,6 +155,7 @@ data class InodeMetadata(
     val mode: FileMode,
     val size: ULong = 0uL,
     val linkCount: UInt = 1u,
+    val deviceNumber: ULong = 0uL,
 )
 
 enum class AccessMode {

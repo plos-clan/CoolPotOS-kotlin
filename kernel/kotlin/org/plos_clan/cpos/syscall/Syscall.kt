@@ -29,7 +29,13 @@ private const val SYS_READ = 0
 private const val SYS_WRITE = 1
 private const val SYS_OPEN = 2
 private const val SYS_CLOSE = 3
+private const val SYS_STAT = 4
+private const val SYS_FSTAT = 5
+private const val SYS_LSTAT = 6
 private const val SYS_POLL = 7
+private const val SYS_LSEEK = 8
+private const val SYS_DUP = 32
+private const val SYS_DUP2 = 33
 private const val SYS_MMAP = 9
 private const val SYS_MPROTECT = 10
 private const val SYS_MUNMAP = 11
@@ -46,6 +52,7 @@ private const val SYS_GETSID = 124
 private const val SYS_ARCH_PRCTL = 158
 private const val SYS_REBOOT = 169
 private const val SYS_GETTID = 186
+private const val SYS_SET_TID_ADDRESS = 218
 private const val SYS_OPENAT = 257
 
 const val SUPPORTED_PROT = 0x7uL
@@ -74,7 +81,13 @@ object Syscall {
         this[SYS_WRITE] = ::sysWrite
         this[SYS_OPEN] = ::sysOpen
         this[SYS_CLOSE] = ::sysClose
+        this[SYS_STAT] = ::sysStat
+        this[SYS_FSTAT] = ::sysFstat
+        this[SYS_LSTAT] = ::sysLstat
         this[SYS_POLL] = ::sysPoll
+        this[SYS_LSEEK] = ::sysLseek
+        this[SYS_DUP] = ::sysDup
+        this[SYS_DUP2] = ::sysDup2
         this[SYS_MMAP] = ::sysMmap
         this[SYS_MPROTECT] = ::sysMprotect
         this[SYS_MUNMAP] = ::sysMunmap
@@ -92,6 +105,7 @@ object Syscall {
         this[SYS_GETGID] = ::sysGetGID
         this[SYS_GETSID] = ::sysGetSID
         this[SYS_GETTID] = ::sysGetTID
+        this[SYS_SET_TID_ADDRESS] = ::sysSetTidAddress
     }
 
     fun syscallHandle(regs: PtraceRegisters) {
@@ -103,7 +117,7 @@ object Syscall {
         }
         val result = when {
             handler == null -> {
-                println("SYSCALL: no implement $number")
+                if(number != 12UL) println("SYSCALL: no implement $number")
                 errno(Errno.ENOSYS)
             }
 

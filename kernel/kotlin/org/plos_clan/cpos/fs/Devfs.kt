@@ -48,6 +48,7 @@ private class DevfsInstance : SuperBlockBackend {
                 metadata = InodeMetadata(
                     mode = FileMode(0x1B6u),
                     linkCount = 1u,
+                    deviceNumber = device.dev,
                 ),
             )
         }

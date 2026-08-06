@@ -1,16 +1,10 @@
 package org.plos_clan.cpos.coroutines
 
+import kotlinx.coroutines.suspendCancellableCoroutine
 import org.plos_clan.cpos.utils.IrqSpinLock
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
 
-/**
- * An IRQ-safe, coalescing wake-up for kernel coroutines.
- *
- * [signal] never resumes a continuation. The BSP dispatcher does that after the
- * hard-interrupt handler has returned, so an IRQ cannot re-enter coroutine code.
- */
 class KernelEvent internal constructor() {
     private val lock = IrqSpinLock()
     private var pending = false
@@ -21,7 +15,7 @@ class KernelEvent internal constructor() {
     }
 
     suspend fun await() {
-        suspendCoroutine<Unit> { continuation ->
+        suspendCancellableCoroutine { continuation ->
             val consumeNow = lock.withLock {
                 if (pending) {
                     pending = false

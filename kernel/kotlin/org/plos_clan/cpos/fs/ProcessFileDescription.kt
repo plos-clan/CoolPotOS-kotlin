@@ -101,7 +101,9 @@ class FileDescriptorTable {
 
         val replaced = entries.put(
             newFd,
-            FileDescriptor(source.file, source.flags),
+            // dup2 creates a descriptor without FD_CLOEXEC, even when the
+            // source descriptor has that flag set.
+            FileDescriptor(source.file, 0uL),
         )
         replaced?.file?.release()
         true

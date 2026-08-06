@@ -130,15 +130,14 @@ abstract class NativeStruct {
         offset: Int,
         value: ULong,
     ) {
-        val bits = value.toULong()
-        buffer[offset] = (bits and 0xffu).toByte()
-        buffer[offset + 1] = ((bits shr 8) and 0xffu).toByte()
-        buffer[offset + 2] = ((bits shr 16) and 0xffu).toByte()
-        buffer[offset + 3] = ((bits shr 24) and 0xffu).toByte()
-        buffer[offset + 4] = ((bits shr 32) and 0xffu).toByte()
-        buffer[offset + 5] = ((bits shr 40) and 0xffu).toByte()
-        buffer[offset + 6] = ((bits shr 48) and 0xffu).toByte()
-        buffer[offset + 7] = ((bits shr 56) and 0xffu).toByte()
+        buffer[offset] = (value and 0xffu).toByte()
+        buffer[offset + 1] = ((value shr 8) and 0xffu).toByte()
+        buffer[offset + 2] = ((value shr 16) and 0xffu).toByte()
+        buffer[offset + 3] = ((value shr 24) and 0xffu).toByte()
+        buffer[offset + 4] = ((value shr 32) and 0xffu).toByte()
+        buffer[offset + 5] = ((value shr 40) and 0xffu).toByte()
+        buffer[offset + 6] = ((value shr 48) and 0xffu).toByte()
+        buffer[offset + 7] = ((value shr 56) and 0xffu).toByte()
     }
 
     protected fun getU32LE(

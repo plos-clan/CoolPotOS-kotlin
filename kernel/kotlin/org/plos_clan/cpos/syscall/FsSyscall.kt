@@ -8,8 +8,11 @@ import org.plos_clan.cpos.fs.CreateDisposition
 import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.FileMode
 import org.plos_clan.cpos.fs.FileSystemManager
+import org.plos_clan.cpos.fs.Inode
+import org.plos_clan.cpos.fs.InodeType
 import org.plos_clan.cpos.fs.OpenFlags
 import org.plos_clan.cpos.fs.OpenOptions
+import org.plos_clan.cpos.fs.SeekOrigin
 import org.plos_clan.cpos.fs.VfsError
 import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsResult
@@ -21,6 +24,7 @@ import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.syscall.Syscall.partialOrError
 import org.plos_clan.cpos.syscall.Syscall.userMemory
 import org.plos_clan.cpos.tasks.Process
+import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PollEvents
 import org.plos_clan.cpos.utils.PtraceRegisters
@@ -33,6 +37,56 @@ private const val AT_FDCWD = -100L
 private const val POLL_FD_SIZE = 8
 private const val MAX_POLL_FDS = 1024
 private const val NANOSECONDS_PER_MILLISECOND = 1_000_000uL
+
+private const val STAT_SIZE = 144
+private const val STAT_BLOCK_SIZE = 512uL
+private const val STAT_BLKSIZE = 4096uL
+
+private const val S_IFIFO = 0x1000u
+private const val S_IFCHR = 0x2000u
+private const val S_IFDIR = 0x4000u
+private const val S_IFBLK = 0x6000u
+private const val S_IFREG = 0x8000u
+private const val S_IFLNK = 0xA000u
+private const val S_IFSOCK = 0xC000u
+
+/** Linux x86_64 struct stat (144 bytes). */
+private class LinuxStat(private val inode: Inode) : NativeStruct() {
+    override fun toNativeBytes(): ByteArray = ByteArray(STAT_SIZE).also { buffer ->
+        val metadata = inode.metadata()
+        putU64LE(buffer, 0, 0uL) // st_dev: VFS has no device number yet.
+        putU64LE(buffer, 8, inode.id.value)
+        putU64LE(buffer, 16, metadata.linkCount.toULong())
+        putU32LE(buffer, 24, (metadata.mode.bits or typeBits(inode.type)).toInt())
+        putU32LE(buffer, 28, 0) // st_uid
+        putU32LE(buffer, 32, 0) // st_gid
+        putU32LE(buffer, 36, 0) // __pad0
+        putU64LE(buffer, 40, metadata.deviceNumber)
+        putU64LE(buffer, 48, metadata.size)
+        putU64LE(buffer, 56, STAT_BLKSIZE)
+        putU64LE(buffer, 64, blocksFor(metadata.size))
+        // atime, mtime and ctime are zero until timestamp metadata is added.
+    }
+
+    override fun updateFromNativeBytes(buffer: ByteArray): Boolean = false
+
+    private fun typeBits(type: InodeType): UInt = when (type) {
+        InodeType.REGULAR -> S_IFREG
+        InodeType.DIRECTORY -> S_IFDIR
+        InodeType.SYMLINK -> S_IFLNK
+        InodeType.CHARACTER_DEVICE -> S_IFCHR
+        InodeType.BLOCK_DEVICE -> S_IFBLK
+        InodeType.PIPE -> S_IFIFO
+        InodeType.SOCKET -> S_IFSOCK
+    }
+
+    private fun blocksFor(size: ULong): ULong =
+        if (size > ULong.MAX_VALUE - (STAT_BLOCK_SIZE - 1uL)) {
+            ULong.MAX_VALUE
+        } else {
+            (size + STAT_BLOCK_SIZE - 1uL) / STAT_BLOCK_SIZE
+        }
+}
 
 fun sysOpen(regs: PtraceRegisters, process: Process): Long {
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RDI])
@@ -124,6 +178,118 @@ fun sysClose(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     return if (process.fdTable.close(fd)) 0L else errno(Errno.EBADF)
+}
+
+fun sysStat(regs: PtraceRegisters, process: Process): Long = statPath(
+    process = process,
+    pathnameAddress = regs[PtraceRegisters.IDX_RDI],
+    statAddress = regs[PtraceRegisters.IDX_RSI],
+    followFinalSymlink = true,
+)
+
+fun sysLstat(regs: PtraceRegisters, process: Process): Long = statPath(
+    process = process,
+    pathnameAddress = regs[PtraceRegisters.IDX_RDI],
+    statAddress = regs[PtraceRegisters.IDX_RSI],
+    followFinalSymlink = false,
+)
+
+fun sysFstat(regs: PtraceRegisters, process: Process): Long {
+    val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
+        ?: return errno(Errno.EBADF)
+    val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
+    return try {
+        val data = LinuxStat(file.inode).toNativeBytes()
+        if (UserMemory(process.vma, regs[PtraceRegisters.IDX_RSI]).copyToUser(data)) {
+            0L
+        } else {
+            errno(Errno.EFAULT)
+        }
+    } finally {
+        file.release()
+    }
+}
+
+private fun statPath(
+    process: Process,
+    pathnameAddress: ULong,
+    statAddress: ULong,
+    followFinalSymlink: Boolean,
+): Long {
+    val pathname = copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
+    val context = process.context
+        ?: return errno(Errno.ENOENT)
+    val path = when (
+        val result = FileSystemManager.vfs.resolve(
+            context = context,
+            pathname = VfsPathname.fromBytes(pathname),
+            followFinalSymlink = followFinalSymlink,
+        )
+    ) {
+        is VfsResult.Ok -> result.value
+        is VfsResult.Err -> return errno(result.error.errno)
+    }
+    val inode = path.inode ?: return errno(Errno.ENOENT)
+    return if (UserMemory(process.vma, statAddress).copyToUser(LinuxStat(inode).toNativeBytes())) {
+        0L
+    } else {
+        errno(Errno.EFAULT)
+    }
+}
+
+fun sysLseek(regs: PtraceRegisters, process: Process): Long {
+    val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
+        ?: return errno(Errno.EBADF)
+    val whenceValue = regs[PtraceRegisters.IDX_RDX]
+    if (whenceValue > Int.MAX_VALUE.toULong()) {
+        return errno(Errno.EINVAL)
+    }
+    val origin = when (whenceValue.toInt()) {
+        0 -> SeekOrigin.START
+        1 -> SeekOrigin.CURRENT
+        2 -> SeekOrigin.END
+        else -> return errno(Errno.EINVAL)
+    }
+    val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
+    return try {
+        when (file.inode.type) {
+            InodeType.CHARACTER_DEVICE,
+            InodeType.BLOCK_DEVICE,
+            InodeType.PIPE,
+            InodeType.SOCKET,
+            -> errno(Errno.ESPIPE)
+            else -> when (val result = file.seek(regs[PtraceRegisters.IDX_RSI].toLong(), origin)) {
+                is VfsResult.Ok -> result.value
+                is VfsResult.Err -> errno(result.error.errno)
+            }
+        }
+    } finally {
+        file.release()
+    }
+}
+
+fun sysDup(regs: PtraceRegisters, process: Process): Long {
+    val oldFd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
+        ?: return errno(Errno.EBADF)
+    val file = process.fdTable.acquire(oldFd) ?: return errno(Errno.EBADF)
+    val newFd = process.fdTable.install(file, 0uL)
+    if (newFd == null) {
+        file.release()
+        return errno(Errno.EMFILE)
+    }
+    return newFd.toLong()
+}
+
+fun sysDup2(regs: PtraceRegisters, process: Process): Long {
+    val oldFd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
+        ?: return errno(Errno.EBADF)
+    val newFd = fileDescriptor(regs[PtraceRegisters.IDX_RSI])
+        ?: return errno(Errno.EBADF)
+    return if (process.fdTable.dup2(oldFd, newFd)) {
+        newFd.toLong()
+    } else {
+        errno(Errno.EBADF)
+    }
 }
 
 fun sysPoll(regs: PtraceRegisters, process: Process): Long {
