@@ -136,7 +136,18 @@ data class WinSize(
         }
 
     override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
-        TODO("Not yet implemented")
+        if (buffer.size != 8) {
+            return false
+        }
+        fun readShort(offset: Int): Short = (
+            buffer[offset].toUByte().toUInt() or
+                (buffer[offset + 1].toUByte().toUInt() shl 8)
+        ).toShort()
+        wsRow = readShort(0)
+        wsCol = readShort(2)
+        wsXpixel = readShort(4)
+        wsYpixel = readShort(6)
+        return true
     }
 }
 
@@ -226,14 +237,25 @@ class Termios2(
     }
 
     override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
-        TODO("Not yet implemented")
+        if (buffer.size != NATIVE_SIZE) {
+            return false
+        }
+        cIflag = getU32LE(buffer, 0)
+        cOflag = getU32LE(buffer, 4)
+        cCflag = getU32LE(buffer, 8)
+        cLflag = getU32LE(buffer, 12)
+        cLine = buffer[LINE_OFFSET]
+        cCc = buffer.copyOfRange(CONTROL_CHARACTERS_OFFSET, INPUT_SPEED_OFFSET)
+        cIspeed = getU32LE(buffer, INPUT_SPEED_OFFSET)
+        cOspeed = getU32LE(buffer, OUTPUT_SPEED_OFFSET)
+        return true
     }
 
-    private companion object {
-        const val LINE_OFFSET = 16
-        const val CONTROL_CHARACTERS_OFFSET = 17
-        const val INPUT_SPEED_OFFSET = CONTROL_CHARACTERS_OFFSET + TERMIOS2_NCCS
-        const val OUTPUT_SPEED_OFFSET = INPUT_SPEED_OFFSET + Int.SIZE_BYTES
+    companion object {
+        private const val LINE_OFFSET = 16
+        private const val CONTROL_CHARACTERS_OFFSET = 17
+        private const val INPUT_SPEED_OFFSET = CONTROL_CHARACTERS_OFFSET + TERMIOS2_NCCS
+        private const val OUTPUT_SPEED_OFFSET = INPUT_SPEED_OFFSET + Int.SIZE_BYTES
         const val NATIVE_SIZE = OUTPUT_SPEED_OFFSET + Int.SIZE_BYTES
     }
 }
@@ -254,6 +276,16 @@ class TtySession(
     val backend: TtySessionBackend,
     val device: TtyDevice,
 ) : DeviceBackend {
+    val termios2 = Termios2(
+        termios.cIflag,
+        termios.cOflag,
+        termios.cCflag,
+        termios.cLflag,
+        termios.cLine,
+        termios.cCc.copyOf(),
+        0,
+        0,
+    )
     private val stateLock = IrqSpinLock()
     private var controllingSessionId = 0
     private var foregroundProcessGroupId = 0

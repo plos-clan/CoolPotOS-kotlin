@@ -160,7 +160,7 @@ private class TmpfsDirectoryHandle(private val directory: TmpfsDirectory) : Open
     override fun iterate(
         inode: Inode,
         position: FilePosition,
-        emit: (DirectoryEntry) -> Boolean,
+        emit: (entry: DirectoryEntry, nextOffset: Long) -> Boolean,
     ): VfsResult<Unit> {
         val entries = directory.snapshot()
         if (position.value > Int.MAX_VALUE) {
@@ -168,21 +168,50 @@ private class TmpfsDirectoryHandle(private val directory: TmpfsDirectory) : Open
         }
         var index = position.value.coerceAtLeast(0).toInt()
         while (index < entries.size) {
-            if (!emit(entries[index])) {
+            val nextOffset = index.toLong() + 1L
+            if (!emit(entries[index], nextOffset)) {
                 break
             }
             index++
-            position.value = index.toLong()
+            position.value = nextOffset
         }
         return VfsResult.Ok(Unit)
     }
 }
 
-private class TmpfsRegularFile(private val fileSystem: TmpfsInstance) : TruncatableBackend {
+private class TmpfsRegularFile(
+    private val fileSystem: TmpfsInstance,
+) : TruncatableBackend, ContentBackedFile {
     override val type: InodeType = InodeType.REGULAR
 
     private val lock = IrqSpinLock()
     private val pages = mutableMapOf<ULong, ByteArray>()
+    private var content: FileContent? = null
+    private var contentOffset = 0
+    private var contentSize = 0
+
+    override fun attachContent(
+        inode: Inode,
+        content: FileContent,
+        offset: Int,
+        size: Int,
+    ): Boolean {
+        val attached = lock.withLock {
+            if (this.content != null || pages.isNotEmpty() ||
+                offset < 0 || size < 0 || offset > content.size - size
+            ) {
+                return@withLock false
+            }
+            this.content = content
+            contentOffset = offset
+            contentSize = size
+            true
+        }
+        if (attached) {
+            inode.updateMetadata { it.copy(size = size.toULong()) }
+        }
+        return attached
+    }
 
     override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
         VfsResult.Ok(TmpfsRegularHandle(this))
@@ -203,6 +232,7 @@ private class TmpfsRegularFile(private val fileSystem: TmpfsInstance) : Truncata
                     pages[size / pageSize]?.fill(0, tail)
                 }
             }
+            contentSize = minOf(contentSize.toULong(), size).toInt()
         }
         inode.updateMetadata { it.copy(size = size) }
         return VfsResult.Ok(Unit)
@@ -212,6 +242,7 @@ private class TmpfsRegularFile(private val fileSystem: TmpfsInstance) : Truncata
         val releasedPages = lock.withLock {
             val count = pages.size
             pages.clear()
+            content = null
             count
         }
         if (releasedPages != 0) {
@@ -240,7 +271,19 @@ private class TmpfsRegularFile(private val fileSystem: TmpfsInstance) : Truncata
             val chunk = minOf(available - copied, fileSystem.pageSize - pageOffset)
             val page = pages[pageIndex]
             if (page == null) {
-                destination.fill(0, destinationOffset + copied, destinationOffset + copied + chunk)
+                val sourceCount = copyContent(
+                    absolute,
+                    destination,
+                    destinationOffset + copied,
+                    chunk,
+                )
+                if (sourceCount != chunk) {
+                    destination.fill(
+                        0,
+                        destinationOffset + copied + sourceCount,
+                        destinationOffset + copied + chunk,
+                    )
+                }
             } else {
                 page.copyInto(
                     destination,
@@ -281,6 +324,7 @@ private class TmpfsRegularFile(private val fileSystem: TmpfsInstance) : Truncata
                     break
                 }
                 page = ByteArray(fileSystem.pageSize)
+                copyContent(pageIndex * fileSystem.pageSize.toULong(), page, 0, page.size)
                 pages[pageIndex] = page
             }
             source.copyInto(page, pageOffset, sourceOffset + copied, sourceOffset + copied + chunk)
@@ -294,6 +338,27 @@ private class TmpfsRegularFile(private val fileSystem: TmpfsInstance) : Truncata
         position.value = cursor.toLong()
         inode.updateMetadata { it.copy(size = maxOf(it.size, cursor)) }
         IoResult.success(copied)
+    }
+
+    private fun copyContent(
+        position: ULong,
+        destination: ByteArray,
+        destinationOffset: Int,
+        count: Int,
+    ): Int {
+        val source = content ?: return 0
+        if (position > Int.MAX_VALUE.toULong()) return 0
+        val sourcePosition = position.toInt()
+        val copied = minOf(count, contentSize - sourcePosition).coerceAtLeast(0)
+        if (copied != 0) {
+            source.copyInto(
+                destination,
+                destinationOffset,
+                contentOffset + sourcePosition,
+                copied,
+            )
+        }
+        return copied
     }
 }
 

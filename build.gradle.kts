@@ -1,126 +1,48 @@
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
-import java.security.MessageDigest
-import java.util.zip.GZIPInputStream
+import org.gradle.api.Project
 
 @DisableCachingByDefault(because = "Downloads third-party artifacts")
 abstract class DownloadFileTask : DefaultTask() {
     @get:Input
     abstract val sourceUrl: Property<String>
 
-    @get:Input
-    abstract val expectedSha256: Property<String>
-
     @get:OutputFile
     abstract val destinationFile: RegularFileProperty
-
-    init {
-        expectedSha256.convention("")
-        outputs.upToDateWhen {
-            val target = destinationFile.get().asFile
-            val expected = expectedSha256.get()
-            expected.isEmpty() || (target.isFile && target.sha256() == expected)
-        }
-    }
 
     @TaskAction
     fun download() {
         val target = destinationFile.get().asFile
-        val expected = expectedSha256.get()
-        if (target.isFile && (expected.isEmpty() || target.sha256() == expected)) {
-            logger.lifecycle("Using cached download: ${target.name}")
-            return
-        }
-
         target.parentFile.mkdirs()
         val temporary = target.resolveSibling("${target.name}.part")
 
-        val connection = URI.create(sourceUrl.get()).toURL().openConnection()
-        connection.setRequestProperty("User-Agent", "Gradle")
-        connection.getInputStream().use { input ->
-            temporary.outputStream().use { output ->
-                input.copyTo(output)
+        try {
+            val connection = URI.create(sourceUrl.get()).toURL().openConnection()
+            connection.setRequestProperty("User-Agent", "Gradle")
+            connection.getInputStream().use { input ->
+                temporary.outputStream().use(input::copyTo)
             }
+            replace(temporary, target)
+        } finally {
+            temporary.delete()
         }
+    }
 
-        if (expected.isNotEmpty()) {
-            val actual = temporary.sha256()
-            if (actual != expected) {
-                temporary.delete()
-                throw GradleException(
-                    "SHA-256 mismatch for ${sourceUrl.get()}: expected $expected, got $actual."
-                )
-            }
-        }
-
+    private fun replace(source: File, target: File) {
         try {
             Files.move(
-                temporary.toPath(),
+                source.toPath(),
                 target.toPath(),
                 StandardCopyOption.ATOMIC_MOVE,
                 StandardCopyOption.REPLACE_EXISTING,
             )
         } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
-            Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
-        }
-    }
-
-    private fun File.sha256(): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        inputStream().buffered().use { input ->
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            while (true) {
-                val length = input.read(buffer)
-                if (length < 0) break
-                digest.update(buffer, 0, length)
-            }
-        }
-        return digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
-    }
-}
-
-@CacheableTask
-abstract class DecompressGzipTask : DefaultTask() {
-    @get:InputFile
-    @get:PathSensitive(PathSensitivity.NONE)
-    abstract val sourceFile: RegularFileProperty
-
-    @get:OutputFile
-    abstract val destinationFile: RegularFileProperty
-
-    @TaskAction
-    fun decompress() {
-        val source = sourceFile.get().asFile
-        val target = destinationFile.get().asFile
-        target.parentFile.mkdirs()
-        val temporary = target.resolveSibling("${target.name}.part")
-
-        try {
-            GZIPInputStream(source.inputStream().buffered()).use { input ->
-                temporary.outputStream().buffered().use(input::copyTo)
-            }
-
-            val magic = ByteArray(6)
-            val magicSize = temporary.inputStream().use { it.read(magic) }
-            val magicString = magic.decodeToString()
-            if (magicSize != magic.size || magicString !in setOf("070701", "070702", "070707")) {
-                throw GradleException("Decompressed ${source.name} is not an ASCII CPIO archive.")
-            }
-
-            try {
-                Files.move(
-                    temporary.toPath(),
-                    target.toPath(),
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING,
-                )
-            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
-                Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
-            }
-        } catch (failure: Exception) {
-            temporary.delete()
-            throw failure
+            Files.move(
+                source.toPath(),
+                target.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+            )
         }
     }
 }
@@ -129,196 +51,222 @@ plugins {
     alias(libs.plugins.kotlinMultiplatform)
 }
 
-val targetArch = "x86_64"
-val projectName = "CoolPotOS"
-val buildRootDir = layout.buildDirectory.get().asFile
-val mlibcBuildDirName = "mlibc-$targetArch"
-
-fun setting(propName: String, envName: String, defaultValue: String): String {
-    return listOfNotNull(
-        (findProperty(propName) as String?)?.takeIf(String::isNotBlank),
-        System.getenv(envName)?.takeIf(String::isNotBlank),
-    ).firstOrNull() ?: defaultValue
-}
-
-fun settingBoolean(propName: String, envName: String, defaultValue: Boolean): Boolean {
-    val value = setting(propName, envName, defaultValue.toString())
-    return when (value.lowercase()) {
-        "1", "true", "yes", "on" -> true
-        "0", "false", "no", "off" -> false
-        else -> throw GradleException("Expected boolean for $propName/$envName, got '$value'.")
-    }
-}
-
-val crossCc = setting("crossCc", "CROSS_CC", "clang")
-val crossCxx = setting("crossCxx", "CROSS_CXX", "clang++")
-val linker = setting("linker", "LINKER", "ld.lld")
-val xorriso = setting("xorriso", "XORRISO", "xorriso")
-val qemu = setting("qemu", "QEMU", "qemu-system-x86_64")
-val debugMode = settingBoolean("debugMode", "DEBUG_MODE", false)
-
-val isoDir = buildRootDir.resolve("iso")
-val kernelCDir = file("kernel/c")
-val kernelKotlinDir = file("kernel/kotlin")
-val assetsDir = file("assets")
-val limineConfigFile = assetsDir.resolve("limine.conf")
-
-val linkerScript = assetsDir.resolve("linker.ld")
-val bridgeDef = kernelCDir.resolve("bridge.def")
-val mlibcPatch = assetsDir.resolve("mlibc.patch")
-
-val limineRef = "v10.x-binary"
-val limineArchiveUrl = "https://codeberg.org/Limine/Limine/archive/$limineRef.tar.gz"
-val limineProtocolArchiveUrl = "https://codeberg.org/Limine/limine-protocol/archive/trunk.tar.gz"
-val limineDir = buildRootDir.resolve("limine")
-val downloadsDir = buildRootDir.resolve("downloads")
-val limineArchive = downloadsDir.resolve("limine-$limineRef.tar.gz")
-val limineProtocolArchive = downloadsDir.resolve("limine-protocol-trunk.tar.gz")
-val limineIncludeDir = limineDir.resolve("include")
-val limineBootDir = limineDir.resolve("boot")
-val limineHeader = limineIncludeDir.resolve("limine.h")
-val limineUefiCdBin = limineBootDir.resolve("limine-uefi-cd.bin")
-
-val freestndHeadersRef = "trunk"
-val freestndHeadersArchiveUrl = "https://codeberg.org/OSDev/freestnd-c-hdrs-0bsd/archive/$freestndHeadersRef.tar.gz"
-val freestndHeadersDir = buildRootDir.resolve("freestnd-c-hdrs")
-val freestndHeadersArchive = downloadsDir.resolve("freestnd-c-hdrs-0bsd-$freestndHeadersRef.tar.gz")
-val freestndHeadersIncludeDir = freestndHeadersDir.resolve("include")
-
-val alpineVersion = "3.24.1"
-val alpineReleaseBranch = "v3.24"
-val alpineInitramfsIsoName = "alpine-initramfs-$targetArch"
-val alpineInitramfsUrl =
-    "https://dl-cdn.alpinelinux.org/alpine/$alpineReleaseBranch/releases/$targetArch/" +
-        "netboot-$alpineVersion/initramfs-lts"
-val alpineInitramfsSha256 = "e1649e94ef1b276bf22ea4ed2628dd17c7fa7505cd40b2c7aa7fd9ebb71fe5c9"
-val alpineInitramfs = downloadsDir.resolve("$alpineInitramfsIsoName-$alpineVersion")
-val alpineInitramfsUncompressed =
-    buildRootDir.resolve("generated/initramfs/$alpineInitramfsIsoName")
-
-val konanHome = System.getenv("KONAN_HOME") ?: "${System.getProperty("user.home")}/.konan"
-val defaultToolRoot = "$konanHome/dependencies/$targetArch-unknown-linux-gnu-gcc-8.3.0-glibc-2.19-kernel-4.9-2"
-val toolRoot = setting("konanToolRoot", "KONAN_TOOLROOT", defaultToolRoot)
-
-val defaultMlibcPrefix = buildRootDir.resolve("$mlibcBuildDirName/prefix").path
-val mlibcPrefix = file(setting("mlibcPrefix", "MLIBC_PREFIX", defaultMlibcPrefix))
-val konanGccLibDir = File(toolRoot, "lib/gcc/$targetArch-unknown-linux-gnu/8.3.0")
-val konanSysrootLibDir = File(toolRoot, "$targetArch-unknown-linux-gnu/sysroot/lib")
-val mlibcLibDir = mlibcPrefix.resolve("lib")
-
-val libNames = listOf("libos_terminal-embedfont-x86_64.a")
-val libDir = file("lib")
-val libSources = libNames.map(libDir::resolve)
-val cSourceNames = listOf(
-    "boot.c",
-    "shim.c",
-    "syscall.c",
-    "gdt.c",
-    "idt.c",
-    "handoff.c",
-    "smp.c",
+private data class ToolSettings(
+    val cc: String,
+    val cxx: String,
+    val linker: String,
+    val xorriso: String,
+    val qemu: String,
 )
-val cSources = cSourceNames.map(kernelCDir::resolve)
 
-val cFlagsTarget = listOf("-target", "$targetArch-freestanding")
-val cFlagsLanguage = listOf("-std=c23", "-ffreestanding", "-nostdinc", "-fno-builtin")
-val cFlagsMachine = listOf("-m64", "-mno-red-zone", "-mcmodel=kernel", "-fno-stack-protector")
-val cFlagsNoSimd = listOf("-mno-80387", "-mno-mmx", "-mno-sse", "-mno-sse2")
-val cFlagsWarnings = listOf("-Wall", "-Wextra", "-Wpedantic", "-Werror")
-val cFlagsIncludes = listOf(
-    "-I${kernelCDir.path}",
-    "-I${buildRootDir.path}",
-    "-I${limineIncludeDir.path}",
-    "-I${freestndHeadersIncludeDir.path}"
+private data class Archive(
+    val url: String,
+    val file: File,
 )
-val cFlagsOptimization = listOf(if (debugMode) "-Og" else "-O2")
-val cCompilerArgs =
-    cFlagsTarget +
-    cFlagsLanguage +
-    cFlagsMachine +
-    cFlagsNoSimd +
-    cFlagsWarnings +
-    cFlagsIncludes +
-    cFlagsOptimization
 
-val cObjectsDir = buildRootDir.resolve("c-objects")
-val cObjectFiles = cSources.map { source -> cObjectsDir.resolve("${source.nameWithoutExtension}.o") }
+private class BuildPaths(project: Project) {
+    val root = project.layout.buildDirectory.get().asFile
+    val iso = root.resolve("iso")
+    val downloads = root.resolve("downloads")
+    val kernelC = project.file("kernel/c")
+    val kernelKotlin = project.file("kernel/kotlin")
+    val assets = project.file("assets")
+    val libraries = project.file("lib")
+    val mlibc = project.file("mlibc")
 
-val mlibcArtifacts = listOf("libc.a", "libm.a", "libpthread.a").map(mlibcLibDir::resolve)
-val kotlinStaticLib = buildRootDir.resolve("bin/native/debugStatic/libkernel.a")
-val runtimeLibs = buildList {
-    addAll(mlibcArtifacts)
-    add(konanSysrootLibDir.resolve("libstdc++.a"))
-    addAll(listOf("libgcc.a", "libgcc_eh.a").map(konanGccLibDir::resolve))
+    val limine = root.resolve("limine")
+    val limineInclude = limine.resolve("include")
+    val limineHeader = limineInclude.resolve("limine.h")
+    val limineUefi = limine.resolve("boot/limine-uefi-cd.bin")
+    val limineArchive = Archive(
+        "https://codeberg.org/Limine/Limine/archive/v10.x-binary.tar.gz",
+        downloads.resolve("limine-v10.x-binary.tar.gz"),
+    )
+    val limineProtocol = Archive(
+        "https://codeberg.org/Limine/limine-protocol/archive/trunk.tar.gz",
+        downloads.resolve("limine-protocol-trunk.tar.gz"),
+    )
+
+    val freestanding = root.resolve("freestnd-c-hdrs")
+    val freestandingInclude = freestanding.resolve("include")
+    val freestandingArchive = Archive(
+        "https://codeberg.org/OSDev/freestnd-c-hdrs-0bsd/archive/trunk.tar.gz",
+        downloads.resolve("freestnd-c-hdrs-0bsd-trunk.tar.gz"),
+    )
+
+    val linkerScript = assets.resolve("linker.ld")
+    val bridgeDef = kernelC.resolve("bridge.def")
+    val userlandScript = assets.resolve("userland.sh")
+    val mlibcPatch = assets.resolve("mlibc.patch")
+    val mlibcSyscallHeader = mlibc.resolve("sysdeps/template/include/sys/syscall.h")
+    val cObjects = root.resolve("c-objects")
+    val kotlinLibrary = root.resolve("bin/native/debugStatic/libkernel.a")
+    val kernelElf = root.resolve("kernel.elf")
+    val isoImage = root.resolve("${project.name}.iso")
 }
 
-val ldFlagsFormat = listOf("-m", "elf_$targetArch")
-val ldFlagsRuntime = listOf("-nostdlib", "--eh-frame-hdr")
-val ldFlagsPaging = listOf("-z", "max-page-size=0x1000")
-val ldFlagsSections = listOf("--gc-sections")
-val ldFlagsScript = listOf("-T", linkerScript.absolutePath)
-val ldFlags =
-    ldFlagsFormat +
-    ldFlagsRuntime +
-    ldFlagsPaging +
-    ldFlagsSections +
-    ldFlagsScript
+private data class UserlandConfig(
+    val image: String,
+    val platform: String,
+    val name: String,
+    val script: File,
+    val archive: File,
+)
 
-val xorrisoFlagsMode = listOf("-as", "mkisofs")
-val xorrisoFlagsBoot = listOf("--efi-boot", "limine/limine-uefi-cd.bin", "-efi-boot-part", "--efi-boot-image")
-val xorrisoFlags = xorrisoFlagsMode + xorrisoFlagsBoot
+private class MlibcConfig(
+    paths: BuildPaths,
+    tools: ToolSettings,
+    arch: String,
+    val prefix: File,
+) {
+    val source = paths.mlibc
+    val build = paths.root.resolve("mlibc-$arch")
+    val crossFile = build.resolve("cross_file.txt")
+    val path = "${build.absolutePath}:${System.getenv("PATH").orEmpty()}"
+    val cc = "${tools.cc} -target $arch-unknown-none"
+    val cxx = "${tools.cxx} -target $arch-unknown-none"
+    val cFlags = listOf(
+        "-g", "-O2", "-pipe",
+        "-Wall", "-Wextra", "-nostdinc", "-ffreestanding",
+        "-fno-stack-protector", "-fno-stack-check", "-fno-lto", "-fno-PIC",
+        "-ffunction-sections", "-fdata-sections",
+        "-m64", "-march=x86-64", "-mno-red-zone", "-mcmodel=kernel",
+        "-D__thread=''", "-D_Thread_local=''", "-D_GNU_SOURCE",
+    ).joinToString(" ")
+    val cxxFlags = "$cFlags -fno-rtti -fno-exceptions -fno-sized-deallocation"
+    val libraries = listOf("libc.a", "libm.a", "libpthread.a")
+        .map(prefix.resolve("lib")::resolve)
 
-val qemuMemory = setting("qemuMemory", "QEMU_MEMORY", "512m")
-val qemuFlagsMachine = listOf("-m", qemuMemory, "-M", "q35", "-cpu", "qemu64,+x2apic", "-no-reboot", "-smp", "4")
-val qemuFlagsFirmware = listOf("-drive", "if=pflash,format=raw,readonly=on,file=assets/ovmf-code.fd")
-val qemuFlagsDebug = listOf("-s", "-S")
-val qemuBaseFlags =
-    qemuFlagsMachine +
-    qemuFlagsFirmware +
-    (if (debugMode) qemuFlagsDebug else emptyList())
+    fun run(command: List<String>, quiet: Boolean = false): Boolean =
+        ProcessBuilder(command).apply {
+            directory(build)
+            environment()["PATH"] = path
+            if (quiet) {
+                redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                redirectError(ProcessBuilder.Redirect.DISCARD)
+            } else {
+                inheritIO()
+            }
+        }.start().waitFor() == 0
+}
 
-val mlibcTarget = "$targetArch-unknown-none"
-val mlibcCc = "$crossCc -target $mlibcTarget"
-val mlibcCxx = "$crossCxx -target $mlibcTarget"
-val mlibcCFlagsBase = listOf("-g", "-O2", "-pipe")
-val mlibcCFlagsWarnings = listOf("-Wall", "-Wextra", "-nostdinc", "-ffreestanding")
-val mlibcCFlagsSafety = listOf("-fno-stack-protector", "-fno-stack-check", "-fno-lto", "-fno-PIC")
-val mlibcCFlagsSections = listOf("-ffunction-sections", "-fdata-sections")
-val mlibcCFlagsArch = listOf("-m64", "-march=x86-64", "-mno-red-zone", "-mcmodel=kernel")
-val mlibcCFlagsDefines = listOf("-D__thread=''", "-D_Thread_local=''", "-D_GNU_SOURCE")
-val mlibcCxxOnlyFlags = listOf("-fno-rtti", "-fno-exceptions", "-fno-sized-deallocation")
-val mlibcCFlagArgs =
-    mlibcCFlagsBase +
-    mlibcCFlagsWarnings +
-    mlibcCFlagsSafety +
-    mlibcCFlagsSections +
-    mlibcCFlagsArch +
-    mlibcCFlagsDefines
-val mlibcCxxFlagArgs = mlibcCFlagArgs + mlibcCxxOnlyFlags
-val mlibcCFlags = mlibcCFlagArgs.joinToString(" ")
-val mlibcCxxFlags = mlibcCxxFlagArgs.joinToString(" ")
-val linkInputs = cObjectFiles + kotlinStaticLib + runtimeLibs + libSources
+private class KernelConfig(
+    paths: BuildPaths,
+    mlibc: MlibcConfig,
+    tools: ToolSettings,
+    arch: String,
+    debug: Boolean,
+    toolRoot: File,
+) {
+    val sources = listOf(
+        "boot.c", "shim.c", "syscall.c", "gdt.c",
+        "idt.c", "handoff.c", "smp.c", "zstd_bridge.c",
+    ).map(paths.kernelC::resolve)
+    val objects = sources.map { paths.cObjects.resolve("${it.nameWithoutExtension}.o") }
+    val staticLibraries = listOf(
+        "libos_terminal-embedfont-x86_64.a",
+        "libzstd-decompress-x86_64.a",
+    ).map(paths.libraries::resolve)
+    val runtimeLibraries = mlibc.libraries + listOf(
+        File(toolRoot, "$arch-unknown-linux-gnu/sysroot/lib/libstdc++.a"),
+        File(toolRoot, "lib/gcc/$arch-unknown-linux-gnu/8.3.0/libgcc.a"),
+        File(toolRoot, "lib/gcc/$arch-unknown-linux-gnu/8.3.0/libgcc_eh.a"),
+    )
+    val linkInputs = objects + paths.kotlinLibrary + runtimeLibraries + staticLibraries
+    val compileArgs = listOf(
+        "-target", "$arch-freestanding",
+        "-std=c23", "-ffreestanding", "-nostdinc", "-fno-builtin",
+        "-m64", "-mno-red-zone", "-mcmodel=kernel", "-fno-stack-protector",
+        "-mno-80387", "-mno-mmx", "-mno-sse", "-mno-sse2",
+        "-Wall", "-Wextra", "-Wpedantic", "-Werror",
+    ) + listOf(
+        paths.kernelC,
+        paths.root,
+        paths.mlibcSyscallHeader.parentFile,
+        paths.limineInclude,
+        paths.freestandingInclude,
+    ).map { "-I${it.absolutePath}" } + if (debug) listOf("-Og") else listOf("-O2")
+    val linkArgs = listOf(
+        "-m", "elf_$arch", "-nostdlib", "--eh-frame-hdr",
+        "-z", "max-page-size=0x1000", "--gc-sections",
+        "-T", paths.linkerScript.absolutePath,
+    )
+    val linker = tools.linker
+}
 
-fun Iterable<File>.absolutePaths(): List<String> = map(File::getAbsolutePath)
+private data class QemuConfig(
+    val executable: String,
+    val flags: List<String>,
+)
 
-fun runProcess(
-    command: List<String>,
-    workingDir: File? = null,
-    path: String? = null,
-    quiet: Boolean = false
-): Boolean {
-    val process = ProcessBuilder(command).apply {
-        workingDir?.let(::directory)
-        path?.let { environment()["PATH"] = it }
-        if (quiet) {
-            redirectOutput(ProcessBuilder.Redirect.DISCARD)
-            redirectError(ProcessBuilder.Redirect.DISCARD)
-        } else {
-            inheritIO()
+private class BuildConfig(private val project: Project) {
+    val arch = "x86_64"
+    val debug = settingBoolean("debugMode", "DEBUG_MODE", false)
+    val paths = BuildPaths(project)
+    val tools = ToolSettings(
+        cc = setting("crossCc", "CROSS_CC", "clang"),
+        cxx = setting("crossCxx", "CROSS_CXX", "clang++"),
+        linker = setting("linker", "LINKER", "ld.lld"),
+        xorriso = setting("xorriso", "XORRISO", "xorriso"),
+        qemu = setting("qemu", "QEMU", "qemu-system-x86_64"),
+    )
+    private val toolRoot = setting(
+        "konanToolRoot",
+        "KONAN_TOOLROOT",
+        "${System.getenv("KONAN_HOME") ?: "${System.getProperty("user.home")}/.konan"}/" +
+            "dependencies/$arch-unknown-linux-gnu-gcc-8.3.0-glibc-2.19-kernel-4.9-2",
+    ).let(::File)
+    val mlibc = MlibcConfig(
+        paths,
+        tools,
+        arch,
+        project.file(
+            setting(
+                "mlibcPrefix",
+                "MLIBC_PREFIX",
+                paths.root.resolve("mlibc-$arch/prefix").path,
+            ),
+        ),
+    )
+    private val rootfsName = "cachyos-rootfs-$arch.squashfs"
+    val kernel = KernelConfig(paths, mlibc, tools, arch, debug, toolRoot)
+    val userland = UserlandConfig(
+        image = setting(
+            "userlandImage",
+            "USERLAND_IMAGE",
+            "docker.io/cachyos/cachyos:latest",
+        ),
+        platform = "linux/amd64",
+        name = rootfsName,
+        script = paths.userlandScript,
+        archive = paths.root.resolve("generated/userland/$rootfsName"),
+    )
+    val qemu = QemuConfig(
+        executable = tools.qemu,
+        flags = listOf(
+            "-m", setting("qemuMemory", "QEMU_MEMORY", "2g"),
+            "-M", "q35", "-cpu", "qemu64,+x2apic",
+            "-no-reboot", "-smp", "4",
+            "-drive",
+            "if=pflash,format=raw,readonly=on,file=${paths.assets.resolve("ovmf-code.fd")}",
+        ) + if (debug) listOf("-s", "-S") else emptyList(),
+    )
+
+    private fun setting(prop: String, env: String, default: String): String = listOfNotNull(
+        (project.findProperty(prop) as String?)?.takeIf(String::isNotBlank),
+        System.getenv(env)?.takeIf(String::isNotBlank),
+    ).firstOrNull() ?: default
+
+    private fun settingBoolean(prop: String, env: String, default: Boolean): Boolean =
+        when (val value = setting(prop, env, default.toString()).lowercase()) {
+            "1", "true", "yes", "on" -> true
+            "0", "false", "no", "off" -> false
+            else -> throw GradleException("Expected boolean for $prop/$env, got '$value'.")
         }
-    }.start()
-    return process.waitFor() == 0
+
 }
+
+private val config = BuildConfig(project)
 
 kotlin {
     val hostOs = System.getProperty("os.name")
@@ -335,13 +283,13 @@ kotlin {
 
     nativeTarget.binaries.staticLib {
         baseName = "kernel"
-        if (debugMode) {
+        if (config.debug) {
             freeCompilerArgs += "-g"
         }
     }
 
     sourceSets.named("nativeMain") {
-        kotlin.srcDir(kernelKotlinDir)
+        kotlin.srcDir(config.paths.kernelKotlin)
         dependencies {
             implementation(libs.kotlinx.coroutines.core)
         }
@@ -349,51 +297,59 @@ kotlin {
 
     nativeTarget.compilations.getByName("main").cinterops {
         create("bridge") {
-            defFile(bridgeDef)
+            defFile(config.paths.bridgeDef)
             packageName("bridge")
-            includeDirs(kernelCDir, limineIncludeDir, freestndHeadersIncludeDir)
+            includeDirs(
+                config.paths.kernelC,
+                config.paths.limineInclude,
+                config.paths.freestandingInclude,
+            )
         }
     }
 }
 
-val kernelElf = buildRootDir.resolve("kernel.elf")
-val isoImage = buildRootDir.resolve("$projectName.iso")
-
 val downloadLimine = tasks.register<DownloadFileTask>("downloadLimine") {
     group = "build"
     description = "Downloads Limine bootloader assets."
-    sourceUrl.set(limineArchiveUrl)
-    destinationFile.set(limineArchive)
+    sourceUrl.set(config.paths.limineArchive.url)
+    destinationFile.set(config.paths.limineArchive.file)
 }
 
 val downloadLimineProtocol = tasks.register<DownloadFileTask>("downloadLimineProtocol") {
     group = "build"
     description = "Downloads limine-protocol headers."
-    sourceUrl.set(limineProtocolArchiveUrl)
-    destinationFile.set(limineProtocolArchive)
+    sourceUrl.set(config.paths.limineProtocol.url)
+    destinationFile.set(config.paths.limineProtocol.file)
 }
 
 val downloadFreestndHeaders = tasks.register<DownloadFileTask>("downloadFreestndHeaders") {
     group = "build"
     description = "Downloads freestanding C headers."
-    sourceUrl.set(freestndHeadersArchiveUrl)
-    destinationFile.set(freestndHeadersArchive)
+    sourceUrl.set(config.paths.freestandingArchive.url)
+    destinationFile.set(config.paths.freestandingArchive.file)
 }
 
-val downloadAlpineInitramfs = tasks.register<DownloadFileTask>("downloadAlpineInitramfs") {
+val prepareUserland = tasks.register<Exec>("prepareUserland") {
     group = "build"
-    description = "Downloads the Alpine Linux $targetArch initramfs."
-    sourceUrl.set(alpineInitramfsUrl)
-    expectedSha256.set(alpineInitramfsSha256)
-    destinationFile.set(alpineInitramfs)
-}
+    description = "Builds a zstd-compressed CachyOS SquashFS root filesystem."
 
-val prepareAlpineInitramfs = tasks.register<DecompressGzipTask>("prepareAlpineInitramfs") {
-    group = "build"
-    description = "Decompresses the Alpine Linux initramfs into a raw CPIO archive."
-    dependsOn(downloadAlpineInitramfs)
-    sourceFile.set(alpineInitramfs)
-    destinationFile.set(alpineInitramfsUncompressed)
+    inputs.property("image", config.userland.image)
+    inputs.property("platform", config.userland.platform)
+    inputs.file(config.userland.script).withPathSensitivity(PathSensitivity.NONE)
+    outputs.file(config.userland.archive)
+
+    commandLine(
+        listOf(
+            "podman",
+            "run", "--rm", "--pull=newer",
+            "--platform", config.userland.platform,
+            "--volume", "${config.userland.archive.parentFile.absolutePath}:/output:rw,Z",
+            "--volume", "${config.userland.script.absolutePath}:/usr/local/bin/cpos-userland:ro,Z",
+            config.userland.image,
+            "/usr/local/bin/cpos-userland",
+            config.userland.name,
+        )
+    )
 }
 
 val prepareFreestndHeaders = tasks.register<Sync>("prepareFreestndHeaders") {
@@ -401,9 +357,9 @@ val prepareFreestndHeaders = tasks.register<Sync>("prepareFreestndHeaders") {
     description = "Extracts all freestanding C headers."
     dependsOn(downloadFreestndHeaders)
 
-    into(freestndHeadersDir)
+    into(config.paths.freestanding)
     from({
-        tarTree(resources.gzip(freestndHeadersArchive))
+        tarTree(resources.gzip(config.paths.freestandingArchive.file))
     }) {
         include("*/include/**")
         eachFile {
@@ -418,9 +374,9 @@ val prepareLimine = tasks.register<Sync>("prepareLimine") {
     description = "Extracts Limine boot binary and protocol header."
     dependsOn(downloadLimine, downloadLimineProtocol)
 
-    into(limineDir)
+    into(config.paths.limine)
     from({
-        tarTree(resources.gzip(limineArchive))
+        tarTree(resources.gzip(config.paths.limineArchive.file))
     }) {
         include("*/limine-uefi-cd.bin")
         eachFile {
@@ -431,7 +387,7 @@ val prepareLimine = tasks.register<Sync>("prepareLimine") {
         includeEmptyDirs = false
     }
     from({
-        tarTree(resources.gzip(limineProtocolArchive))
+        tarTree(resources.gzip(config.paths.limineProtocol.file))
     }) {
         include("*/include/limine.h")
         eachFile {
@@ -447,131 +403,98 @@ tasks.matching { it.name == "cinteropBridgeNative" }.configureEach {
     dependsOn(prepareLimine, prepareFreestndHeaders)
 }
 
-val compileC = tasks.register("compileC") {
+val buildMlibc = tasks.register("buildMlibc") {
     group = "build"
-    description = "Compiles C sources into object files."
-    dependsOn(prepareLimine, prepareFreestndHeaders, buildMlibc)
-    notCompatibleWithConfigurationCache("Uses ProcessBuilder from build script.")
+    description = "Builds the mlibc C library."
+    notCompatibleWithConfigurationCache("Runs an external source build.")
 
-    inputs.files(cSources)
-        .withPathSensitivity(PathSensitivity.RELATIVE)
-    inputs.files(kernelCDir.resolve("bridge.h"), limineHeader)
-        .withPathSensitivity(PathSensitivity.RELATIVE)
-    inputs.dir(freestndHeadersIncludeDir)
-        .withPathSensitivity(PathSensitivity.RELATIVE)
-    inputs.file(buildRootDir.resolve("syscall.h"))
-        .withPathSensitivity(PathSensitivity.RELATIVE)
-    outputs.dir(cObjectsDir)
+    inputs.file(config.paths.mlibcPatch)
+    inputs.dir(config.mlibc.source)
+    outputs.dir(config.mlibc.prefix)
 
     doLast {
-        cObjectsDir.mkdirs()
-        cSources.forEach { source ->
-            val output = cObjectsDir.resolve("${source.nameWithoutExtension}.o")
-            val command = buildList {
-                add(crossCc)
-                addAll(cCompilerArgs)
-                add("-c")
-                add(source.absolutePath)
-                add("-o")
-                add(output.absolutePath)
+        with(config.mlibc) {
+            build.deleteRecursively()
+            check(build.mkdirs()) { "Failed to create ${build.path}" }
+
+            listOf(
+                Triple("cc", cc, cFlags),
+                Triple("c++", cxx, cxxFlags),
+            ).forEach { (name, compiler, flags) ->
+                build.resolve(name).apply {
+                    writeText("#!/bin/sh\n$compiler $flags \"\$@\"\n")
+                    check(setExecutable(true)) { "Failed to make $name executable" }
+                }
             }
-            check(runProcess(command)) {
-                "Failed to compile ${source.name}"
-            }
+
+            crossFile.writeText(
+                """
+                [binaries]
+                c = 'cc'
+                cpp = 'c++'
+
+                [host_machine]
+                system = 'template'
+                cpu_family = '${config.arch}'
+                cpu = '${config.arch}'
+                endian = 'little'
+                """.trimIndent()
+            )
+
+            val applyPatch = listOf("git", "-C", source.path, "apply")
+            check(
+                run(applyPatch + config.paths.mlibcPatch.path, quiet = true) ||
+                    run(
+                        applyPatch + listOf("-R", "--check", config.paths.mlibcPatch.path),
+                        quiet = true,
+                    )
+            ) { "Failed to apply ${config.paths.mlibcPatch.name}" }
+
+            val meson = listOf(
+                "meson", "setup", source.path,
+                "--cross-file", crossFile.path,
+                "--buildtype=debug",
+                "--prefix=${prefix.path}",
+                "-Ddefault_library=static",
+                "-Dlibgcc_dependency=false",
+                "-Duse_freestnd_hdrs=enabled",
+            )
+            check(run(meson)) { "meson setup failed" }
+            check(run(listOf("ninja", "-v"))) { "ninja build failed" }
+            check(run(listOf("ninja", "install"))) { "ninja install failed" }
         }
     }
 }
 
-val buildMlibc = tasks.register<Exec>("buildMlibc") {
+val compileC = tasks.register("compileC") {
     group = "build"
-    description = "Builds the mlibc C library."
-    notCompatibleWithConfigurationCache("Uses ProcessBuilder from build script.")
+    description = "Compiles C sources into object files."
+    dependsOn(prepareLimine, prepareFreestndHeaders, buildMlibc)
+    notCompatibleWithConfigurationCache("Runs an external compiler.")
 
-    inputs.files(mlibcPatch)
-    inputs.dir("mlibc")
-    outputs.dir(mlibcPrefix)
-
-    val mlibcBuildDir = buildRootDir.resolve(mlibcBuildDirName)
-    val mlibcDir = file("mlibc")
-    val mlibcSyscallH = mlibcDir.resolve("sysdeps/template/include/sys/syscall.h")
-    val crossFile = mlibcBuildDir.resolve("cross_file.txt")
-    val buildPath = "${mlibcBuildDir.absolutePath}:${System.getenv("PATH") ?: ""}"
-
-    doFirst {
-        delete(mlibcBuildDir)
-        mlibcBuildDir.mkdirs()
-
-        fun createWrapper(name: String, compiler: String, flags: String) =
-            mlibcBuildDir.resolve(name).apply {
-                writeText("#!/bin/sh\n$compiler $flags \"\$@\"\n")
-                setExecutable(true)
-            }
-        createWrapper("cc", mlibcCc, mlibcCFlags)
-        createWrapper("c++", mlibcCxx, mlibcCxxFlags)
-
-        crossFile.writeText(
-            """
-            [binaries]
-            c = 'cc'
-            cpp = 'c++'
-
-            [host_machine]
-            system = 'template'
-            cpu_family = '$targetArch'
-            cpu = '$targetArch'
-            endian = 'little'
-            """.trimIndent()
-        )
-
-        val gitApplyCommand = listOf("git", "-C", mlibcDir.absolutePath, "apply")
-
-        if (!runProcess(
-            gitApplyCommand + mlibcPatch.absolutePath,
-            workingDir = mlibcBuildDir,
-            path = buildPath,
-            quiet = true
-        )) {
-            val patchResult = runProcess(
-                gitApplyCommand + listOf("-R", "--check", mlibcPatch.absolutePath),
-                workingDir = mlibcBuildDir,
-                path = buildPath,
-                quiet = true
-            )
-            check(patchResult) { "Failed to apply ${mlibcPatch.name}" }
-        }
-
-        val syscallPath = buildRootDir.resolve("syscall.h").toPath()
-        val fileSystemProvider = syscallPath.fileSystem.provider()
-        fileSystemProvider.deleteIfExists(syscallPath)
-        fileSystemProvider.createSymbolicLink(syscallPath, mlibcSyscallH.toPath())
-    }
-
-    workingDir(mlibcBuildDir)
-    environment("PATH", buildPath)
-    commandLine(
-        "meson",
-        "setup",
-        mlibcDir.absolutePath,
-        "--cross-file",
-        crossFile.absolutePath,
-        "--buildtype=debug",
-        "--prefix=${mlibcBuildDir.absolutePath}/prefix",
-        "-Ddefault_library=static",
-        "-Dlibgcc_dependency=false",
-        "-Duse_freestnd_hdrs=enabled"
-    )
+    inputs.files(config.kernel.sources)
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.files(
+        config.paths.kernelC.resolve("bridge.h"),
+        config.paths.limineHeader,
+        config.paths.mlibcSyscallHeader,
+    ).withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.dir(config.paths.freestandingInclude)
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    outputs.dir(config.paths.cObjects)
 
     doLast {
-        fun runNinja(vararg args: String, errorMsg: String) {
-            val ninjaResult = runProcess(
-                args.toList(),
-                workingDir = mlibcBuildDir,
-                path = buildPath
+        config.paths.cObjects.mkdirs()
+        config.kernel.sources.forEach { source ->
+            val objectFile = config.paths.cObjects.resolve("${source.nameWithoutExtension}.o")
+            val command = listOf(config.tools.cc) + config.kernel.compileArgs + listOf(
+                "-c", source.absolutePath,
+                "-o", objectFile.absolutePath,
             )
-            check(ninjaResult) { errorMsg }
+            check(ProcessBuilder(command).inheritIO().start().waitFor() == 0) {
+                "Failed to compile ${source.name}"
+            }
         }
-        runNinja("ninja", "-v", errorMsg = "ninja build failed")
-        runNinja("ninja", "install", errorMsg = "ninja install failed")
     }
 }
 
@@ -580,20 +503,20 @@ val linkKernel = tasks.register<Exec>("linkKernel") {
     description = "Links the kernel and runtime libraries into an ELF executable."
     dependsOn("linkDebugStaticNative", compileC, buildMlibc)
 
-    inputs.files(linkInputs)
-    inputs.file(linkerScript)
-    outputs.file(kernelElf)
+    inputs.files(config.kernel.linkInputs)
+    inputs.file(config.paths.linkerScript)
+    outputs.file(config.paths.kernelElf)
 
     val linkCommand = buildList {
-        add(linker)
-        addAll(ldFlags)
+        add(config.kernel.linker)
+        addAll(config.kernel.linkArgs)
         add("-o")
-        add(kernelElf.absolutePath)
-        addAll(cObjectFiles.absolutePaths())
-        add(kotlinStaticLib.absolutePath)
+        add(config.paths.kernelElf.absolutePath)
+        addAll(config.kernel.objects.map(File::getAbsolutePath))
+        add(config.paths.kotlinLibrary.absolutePath)
         add("--start-group")
-        addAll(libSources.absolutePaths())
-        addAll(runtimeLibs.absolutePaths())
+        addAll(config.kernel.staticLibraries.map(File::getAbsolutePath))
+        addAll(config.kernel.runtimeLibraries.map(File::getAbsolutePath))
         add("--end-group")
     }
     commandLine(linkCommand)
@@ -605,17 +528,14 @@ tasks.named("build") {
 
 val stageIso = tasks.register<Sync>("stageIso") {
     group = "build"
-    description = "Stages the kernel, initramfs, and Limine assets into the ISO directory."
-    dependsOn(linkKernel, prepareLimine, prepareAlpineInitramfs)
+    description = "Stages the kernel, SquashFS root filesystem, and Limine assets into the ISO directory."
+    dependsOn(linkKernel, prepareLimine, prepareUserland)
 
-    into(isoDir)
-    from(limineConfigFile) { into("limine") }
-    from(limineUefiCdBin) { into("limine") }
-    from(alpineInitramfsUncompressed) {
-        into("boot")
-        rename(".*", alpineInitramfsIsoName)
-    }
-    from(kernelElf)
+    into(config.paths.iso)
+    from(config.paths.assets.resolve("limine.conf")) { into("limine") }
+    from(config.paths.limineUefi) { into("limine") }
+    from(config.userland.archive) { into("boot") }
+    from(config.paths.kernelElf)
 }
 
 val buildIso = tasks.register<Exec>("buildIso") {
@@ -623,15 +543,19 @@ val buildIso = tasks.register<Exec>("buildIso") {
     description = "Builds the UEFI ISO image from staged assets."
     dependsOn(stageIso)
 
-    inputs.dir(isoDir)
-    outputs.file(isoImage)
+    inputs.dir(config.paths.iso)
+    outputs.file(config.paths.isoImage)
 
     val isoCommand = buildList {
-        add(xorriso)
-        addAll(xorrisoFlags)
-        add(isoDir.absolutePath)
+        add(config.tools.xorriso)
+        addAll(listOf(
+            "-as", "mkisofs",
+            "--efi-boot", "limine/limine-uefi-cd.bin",
+            "-efi-boot-part", "--efi-boot-image",
+        ))
+        add(config.paths.iso.absolutePath)
         add("-o")
-        add(isoImage.absolutePath)
+        add(config.paths.isoImage.absolutePath)
     }
     commandLine(isoCommand)
 }
@@ -642,12 +566,11 @@ tasks.register<Exec>("run") {
     dependsOn(buildIso)
 
     val runCommand = buildList {
-        add(qemu)
-        addAll(qemuBaseFlags)
+        add(config.qemu.executable)
+        addAll(config.qemu.flags)
         add("-serial")
         add("stdio")
-        // add("-enable-kvm")
-        add(isoImage.absolutePath)
+        add(config.paths.isoImage.absolutePath)
     }
     commandLine(runCommand)
 }
@@ -655,8 +578,8 @@ tasks.register<Exec>("run") {
 tasks.named<Delete>("clean") {
     description = "Deletes kernel build artifacts while preserving mlibc build outputs."
     setDelete(
-        fileTree(buildRootDir) {
-            exclude(mlibcBuildDirName, "$mlibcBuildDirName/**")
+        fileTree(config.paths.root) {
+            exclude(config.mlibc.build.name, "${config.mlibc.build.name}/**")
         }
     )
 }
@@ -664,5 +587,5 @@ tasks.named<Delete>("clean") {
 tasks.register<Delete>("cleanAll") {
     group = "build"
     description = "Deletes all build artifacts, including mlibc."
-    delete(buildRootDir)
+    delete(config.paths.root)
 }

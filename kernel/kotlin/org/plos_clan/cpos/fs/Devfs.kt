@@ -94,7 +94,7 @@ private class DevfsDirectoryHandle(
     override fun iterate(
         inode: Inode,
         position: FilePosition,
-        emit: (DirectoryEntry) -> Boolean,
+        emit: (entry: DirectoryEntry, nextOffset: Long) -> Boolean,
     ): VfsResult<Unit> {
         if (position.value < 0 || position.value > Int.MAX_VALUE) {
             return VfsResult.Ok(Unit)
@@ -103,10 +103,12 @@ private class DevfsDirectoryHandle(
         val entries = directory.snapshot(inode.superBlock)
         var index = position.value.toInt()
         while (index < entries.size) {
-            if (!emit(entries[index])) {
+            val nextOffset = index.toLong() + 1L
+            if (!emit(entries[index], nextOffset)) {
                 break
             }
-            position.value = (++index).toLong()
+            index++
+            position.value = nextOffset
         }
         return VfsResult.Ok(Unit)
     }

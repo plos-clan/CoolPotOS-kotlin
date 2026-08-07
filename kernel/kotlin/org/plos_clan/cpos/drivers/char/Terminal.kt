@@ -201,11 +201,29 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
                 -Errno.EFAULT
             }
 
+        IoctlConstants.TCGETS2.toInt() ->
+            if (args.copyToUser(session.termios2.toNativeBytes())) {
+                Errno.EOK
+            } else {
+                -Errno.EFAULT
+            }
+
         IoctlConstants.TCSETS,
         IoctlConstants.TCSETSW -> updateTermiosFromUser(session, args)
 
         IoctlConstants.TCSETSF -> {
             val result = updateTermiosFromUser(session, args)
+            if (result == Errno.EOK) {
+                flushInput()
+            }
+            result
+        }
+
+        IoctlConstants.TCSETS2,
+        IoctlConstants.TCSETSW2 -> updateTermios2FromUser(session, args)
+
+        IoctlConstants.TCSETSF2 -> {
+            val result = updateTermios2FromUser(session, args)
             if (result == Errno.EOK) {
                 flushInput()
             }
@@ -483,6 +501,20 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         }
     }
 
+    private fun updateTermios2FromUser(session: TtySession, args: UserMemory): Int {
+        val data = args.copyFromUser(Termios2.NATIVE_SIZE)
+        if (data == null || !session.termios2.updateFromNativeBytes(data)) {
+            return -Errno.EFAULT
+        }
+        session.termios.cIflag = session.termios2.cIflag
+        session.termios.cOflag = session.termios2.cOflag
+        session.termios.cCflag = session.termios2.cCflag
+        session.termios.cLflag = session.termios2.cLflag
+        session.termios.cLine = session.termios2.cLine
+        session.termios.cCc = session.termios2.cCc.copyOf()
+        return Errno.EOK
+    }
+
     private fun copyIntFromUser(args: UserMemory): Int? {
         val data = args.copyFromUser(Int.SIZE_BYTES) ?: return null
         return data[0].toUByte().toInt() or
@@ -527,6 +559,7 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         Hpet.isReady && Hpet.nanoTime() >= deadline
 
     private fun waitForInterrupt() {
+        bridge.fast_handoff_yield()
         val flags = bridge.irq_save()
         bridge.enable_interrupt()
         bridge.wait_for_interrupt()

@@ -5,10 +5,12 @@ package org.plos_clan.cpos.mem
 import bridge.invlpg
 import bridge.read_cr3
 import kotlinx.cinterop.CPointer
+import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set
 import org.plos_clan.cpos.utils.*
+import platform.posix.memcpy
 
 private const val PTE_PRESENT = 0x001uL
 private const val PTE_WRITABLE = 0x002uL
@@ -377,10 +379,28 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
     ): Boolean {
         val entry = sourceTable[index]
         if ((entry and PTE_PRESENT) == 0uL ||
-            level == PageTableLevel.PT ||
-            level != PageTableLevel.PML4 && (entry and PTE_HUGE) != 0uL
+            level != PageTableLevel.PT && (entry and PTE_HUGE) != 0uL
         ) {
             destinationTable[index] = entry
+            return true
+        }
+
+        if (level == PageTableLevel.PT) {
+            if ((entry and PTE_USER) == 0uL) {
+                destinationTable[index] = entry
+                return true
+            }
+
+            val sourcePhysicalAddress = entry and PTE_ADDR_MASK
+            if (sourcePhysicalAddress == 0uL) {
+                println("Paging: user page entry has no frame at index=$index")
+                return false
+            }
+            val sourcePage = sourcePhysicalAddress.toVirtualPointer<UByteVar>() ?: return false
+            val clonedPhysicalAddress = allocateTableFrame(allocatedFrames) ?: return false
+            val clonedPage = clonedPhysicalAddress.toVirtualPointer<UByteVar>() ?: return false
+            memcpy(clonedPage, sourcePage, PAGE_SIZE_BYTES)
+            destinationTable[index] = replaceEntryAddress(entry, clonedPhysicalAddress)
             return true
         }
 

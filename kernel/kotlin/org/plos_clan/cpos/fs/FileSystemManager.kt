@@ -1,6 +1,8 @@
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.module.ModuleManager
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.utils.Cmdline
 
 object FileSystemManager {
     val vfs = Vfs()
@@ -9,18 +11,43 @@ object FileSystemManager {
         private set
 
     fun initialize(): Boolean {
-        if (kernelContext != null) {
-            return true
-        }
+        return register(Tmpfs) && register(Devfs) && register(Squashfs) && register(Overlayfs)
+    }
 
-        if (!register(Tmpfs) || !register(Devfs)) {
+    fun mountRootfs(): Boolean {
+        if (kernelContext != null) return true
+        val moduleName = Cmdline["rootfs"] ?: "cachyos-rootfs-x86_64.squashfs"
+        val module = ModuleManager[moduleName] ?: run {
+            println("VFS: rootfs module '$moduleName' is unavailable")
             return false
         }
-
-        val context = when (val result = vfs.createContext(Tmpfs.name)) {
+        val lower = when (val result = vfs.createContext(
+            Squashfs.name,
+            MountOptions(
+                flags = MountFlags.READ_ONLY,
+                fileSystem = SquashfsOptions(module.data),
+            ),
+        )) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> {
-                println("VFS: failed to mount root tmpfs: ${result.error}")
+                println("VFS: failed to mount SquashFS: ${result.error}")
+                return false
+            }
+        }
+        val upper = when (val result = vfs.createContext(Tmpfs.name)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> {
+                println("VFS: failed to create overlay upper tmpfs: ${result.error}")
+                return false
+            }
+        }
+        val context = when (val result = vfs.createContext(
+            Overlayfs.name,
+            MountOptions(fileSystem = OverlayfsOptions(lower.root, upper.root)),
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> {
+                println("VFS: failed to create OverlayFS: ${result.error}")
                 return false
             }
         }
@@ -29,30 +56,21 @@ object FileSystemManager {
         when (val result = vfs.mkdir(context, devPath)) {
             is VfsResult.Ok -> Unit
             is VfsResult.Err -> if (result.error != VfsError.ALREADY_EXISTS) {
-                println("VFS: failed to create /dev: ${result.error}")
+                println("VFS: failed to create /dev in overlay: ${result.error}")
                 return false
             }
         }
-
         val devfsFlags = MountFlags(MountFlags.NO_EXEC.bits or MountFlags.NO_SUID.bits)
-        when (
-            val result = vfs.mount(
-                context,
-                devPath,
-                Devfs.name,
-                MountOptions(flags = devfsFlags),
-            )
-        ) {
+        when (val result = vfs.mount(context, devPath, Devfs.name, MountOptions(flags = devfsFlags))) {
             is VfsResult.Ok -> Unit
             is VfsResult.Err -> {
                 println("VFS: failed to mount devfs at /dev: ${result.error}")
                 return false
             }
         }
-
         kernelContext = context
-        ProcessManager.getKernelProcess()!!.context = kernelContext
-        println("VFS: mounted tmpfs at '/'")
+        ProcessManager.getKernelProcess()!!.context = context
+        println("VFS: mounted zstd SquashFS with tmpfs overlay at '/'")
         return true
     }
 

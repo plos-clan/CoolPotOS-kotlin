@@ -84,6 +84,11 @@ data class ElfInterpreterLoadResult(
         get() = image.entryPoint
 }
 
+data class UserProcessImage(
+    val entryPoint: ULong,
+    val stackPointer: ULong,
+)
+
 object ElfLoader {
     fun inspect(data: ByteArray): ElfImageInfo? {
         val image = parseImage(data, reportErrors = true) ?: return null
@@ -94,6 +99,44 @@ object ElfLoader {
         parseImage(data, reportErrors = false)?.let { image ->
             inspectImage(data, image, reportErrors = false)?.requiresInterpreter
         } ?: false
+
+    fun loadProcess(
+        path: String,
+        process: Process,
+        arguments: List<String> = listOf(path),
+        environment: List<String> = emptyList(),
+    ): UserProcessImage? {
+        val data = readFile(path) ?: return null
+        val info = inspect(data) ?: return null
+        process.vma.clear()
+
+        val executable = loadExecutorElf(
+            data = data,
+            directory = process.vma.pageDirectory,
+            process = process,
+        ) ?: return null
+        var entryPoint = executable.entryPoint
+        val interpreter = if (info.requiresInterpreter) {
+            loadInterpreterElf(
+                executableData = data,
+                directory = process.vma.pageDirectory,
+                process = process,
+            ) ?: return null
+        } else {
+            null
+        }
+        if (interpreter != null) entryPoint = interpreter.entryPoint
+
+        val stack = UserStackBuilder.build(
+            process = process,
+            arguments = arguments.ifEmpty { listOf(path) },
+            environment = environment,
+            executablePath = path,
+            executable = executable,
+            interpreter = interpreter,
+        ) ?: return null
+        return UserProcessImage(entryPoint, stack.stackPointer)
+    }
 
     fun loadInterpreterElf(
         executableData: ByteArray,
@@ -295,7 +338,7 @@ object ElfLoader {
         )
     }
 
-    private fun readFile(path: String): ByteArray? {
+    internal fun readFile(path: String): ByteArray? {
         val context = FileSystemManager.kernelContext ?: run {
             println("ELF: VFS is not initialized")
             return null

@@ -14,7 +14,6 @@ import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.mem.RuntimeMemory
 import org.plos_clan.cpos.fault.ErrorHandler
 import org.plos_clan.cpos.fs.FileSystemManager
-import org.plos_clan.cpos.fs.Initrd
 import org.plos_clan.cpos.module.Init
 import org.plos_clan.cpos.module.ModuleManager
 import org.plos_clan.cpos.syscall.Syscall
@@ -67,7 +66,9 @@ fun kernelMain() {
     }
     Acpi.enumerateDevices()
     ModuleManager.initialize()
-    Initrd.initialize()
+    if (!FileSystemManager.mountRootfs()) {
+        return
+    }
     println("Kernel load done!")
     Init.setupInitProgram()
     KernelCoroutines.launchAmlEventWorker()

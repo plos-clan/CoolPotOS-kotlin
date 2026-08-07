@@ -3,6 +3,8 @@
 package org.plos_clan.cpos.tasks
 
 import bridge.get_kernel_idle_entry_address
+import kotlinx.cinterop.addressOf
+import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.fs.FileDescriptorTable
 import org.plos_clan.cpos.fs.FileSystemContext
 import org.plos_clan.cpos.fs.FileSystemManager
@@ -40,6 +42,9 @@ class Thread(
 ) {
     /** Address cleared to zero when this thread exits, if set by set_tid_address. */
     var clearChildTid: ULong = 0uL
+
+    /** Userspace robust-futex list registered by set_robust_list. */
+    var robustListHead: ULong = 0uL
 
     val nativeContext: ULong = bridge.fast_handoff_create_task(
         id.toULong(),
@@ -93,6 +98,24 @@ class Thread(
             fsBase,
         )
     }
+
+    fun initializeUserContext(
+        registers: ULongArray,
+        stackPointer: ULong,
+        fsBase: ULong = 0uL,
+    ) {
+        require(!process.isKernelProcess) { "Kernel process cannot own a user context" }
+        require(registers.size == org.plos_clan.cpos.utils.PtraceRegisters.REGISTER_COUNT)
+        registers.usePinned { snapshot ->
+            bridge.fast_handoff_init_user_registers(
+                nativeContext,
+                snapshot.addressOf(0),
+                stackPointer,
+                fsBase,
+            )
+        }
+    }
+
 }
 
 class Process internal constructor(
@@ -101,16 +124,24 @@ class Process internal constructor(
     val isKernelProcess: Boolean,
     pageDirectory: PageDirectory,
     var context: FileSystemContext?,
-    var uid: Int = 0,
-    var euid: Int = 0,
     var ruid: Int = 0,
+    var euid: Int = 0,
+    var suid: Int = 0,
+    var fsuid: Int = euid,
     var egid: Int = 0,
     var rgid: Int = 0,
     var sgid: Int = 0,
-    var sid: Int = 0
+    var fsgid: Int = egid,
+    var sessionId: Int = id,
+    var processGroupId: Int = id,
+    val parentId: Int = 0,
 ) {
     val threads = mutableListOf<Thread>()
     var state: TaskState = TaskState.READY
+    var signalMask: ULong = 0uL
+    val signalActions = arrayOfNulls<ByteArray>(64)
+    val resourceLimits = ProcessLimits()
+    var exitCode: Int = 0
 
     val fdTable = FileDescriptorTable()
 
@@ -125,12 +156,35 @@ class Process internal constructor(
     }
 
     fun getFSContext() : FileSystemContext = context!! // 不得在 FileSystemManager 初始化之前调用
+
+    fun setFilesystemUid(requested: Int?): Int {
+        val previous = fsuid
+        if (requested != null &&
+            (euid == 0 || requested == ruid || requested == euid ||
+                requested == suid || requested == fsuid)
+        ) {
+            fsuid = requested
+        }
+        return previous
+    }
+
+    fun setFilesystemGid(requested: Int?): Int {
+        val previous = fsgid
+        if (requested != null &&
+            (euid == 0 || requested == rgid || requested == egid ||
+                requested == sgid || requested == fsgid)
+        ) {
+            fsgid = requested
+        }
+        return previous
+    }
 }
 
 object ProcessManager {
     private var nextThreadId = AtomicInt(0)
     private var nextProcessId = AtomicInt(0)
     private val process = mutableListOf<Process>()
+    private val processLock = IrqSpinLock()
     private val threadTable = mutableMapOf<Int, Thread>()
     private val threadTableLock = IrqSpinLock()
     private var bootstrapThread: Thread? = null
@@ -138,7 +192,7 @@ object ProcessManager {
     private var kernelProcess: Process? = null
 
     fun initialize() {
-        if (process.isNotEmpty()) {
+        if (processLock.withLock { process.isNotEmpty() }) {
             return
         }
 
@@ -197,14 +251,23 @@ object ProcessManager {
         thread.state = TaskState.READY
     }
 
-    fun createUserProcess(name: String, clone: PageDirectory? = null): Process =
-        newProcess(
+    fun createUserProcess(
+        name: String,
+        clone: PageDirectory? = null,
+        parent: Process? = null,
+    ): Process = newProcess(
             name = name,
             pageDirectory = clone?.cloneDirectory()
                 ?: KernelPageDirectory.getDirectory().createUserDirectory(),
             isKernelProcess = false,
-            FileSystemManager.kernelContext
-        )
+            context = parent?.context?.fork() ?: FileSystemManager.kernelContext,
+            parentId = parent?.id ?: 0,
+        ).also { child ->
+            if (parent != null) {
+                check(parent.fdTable.copyInto(child.fdTable))
+                check(child.vma.insertAll(parent.vma.chunks))
+            }
+        }
 
     fun createUserThread(
         process: Process,
@@ -212,6 +275,7 @@ object ProcessManager {
         stackPointer: ULong,
         fsBase: ULong = 0uL,
         kernelStackPages: ULong = DEFAULT_THREAD_STACK_PAGES,
+        registers: ULongArray? = null,
     ): Thread? {
         if (process.isKernelProcess || entryPoint == 0uL || stackPointer == 0uL) {
             return null
@@ -233,14 +297,34 @@ object ProcessManager {
             kernelStackPages = stack.pages,
             kernelFsBase = kernelFsBase,
         ).also { thread ->
-            thread.initializeUserContext(entryPoint, stackPointer, fsBase)
+            if (registers == null) {
+                thread.initializeUserContext(entryPoint, stackPointer, fsBase)
+            } else {
+                thread.initializeUserContext(registers, stackPointer, fsBase)
+            }
         }.also(Scheduler::enqueueThread)
     }
 
     fun findProcess(pid: Int) : Process? {
-        for (proc in process)
-            if(proc.id == pid) return proc
-        return null
+        return processLock.withLock { process.firstOrNull { it.id == pid } }
+    }
+
+    fun childrenOf(parentId: Int): List<Process> =
+        processLock.withLock { process.filter { it.parentId == parentId } }
+
+    fun markExited(process: Process, status: Int) {
+        processLock.withLock {
+            process.exitCode = status and 0xff
+            process.state = TaskState.ZOMBIE
+        }
+    }
+
+    fun reapChild(parentId: Int, child: Process): Boolean = processLock.withLock {
+        if (child.parentId != parentId || child.state != TaskState.ZOMBIE) {
+            false
+        } else {
+            process.remove(child)
+        }
     }
 
     private fun createKernelThread(
@@ -285,14 +369,16 @@ object ProcessManager {
         name: String,
         pageDirectory: PageDirectory,
         isKernelProcess: Boolean,
-        context: FileSystemContext?
+        context: FileSystemContext?,
+        parentId: Int = 0,
     ): Process = Process(
         id = nextProcessId.fetchAndAdd(1),
         name = name,
         isKernelProcess = isKernelProcess,
         pageDirectory = pageDirectory,
         context,
-    ).also { process += it }
+        parentId = parentId,
+    ).also { created -> processLock.withLock { process += created } }
 
     private fun newThread(
         process: Process,

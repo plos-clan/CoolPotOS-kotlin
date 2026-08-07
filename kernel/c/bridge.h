@@ -76,6 +76,12 @@ void fast_handoff_init_user(
     uint64_t rsp,
     uint64_t fs_base
 );
+void fast_handoff_init_user_registers(
+    uint64_t task,
+    const uint64_t *registers,
+    uint64_t rsp,
+    uint64_t fs_base
+);
 bool fast_handoff_bind_current(
     uint64_t task,
     uint64_t lapic_id,
@@ -97,6 +103,9 @@ void asm_syscall_handle(void);
 
 void *malloc(size_t size);
 void free(void *ptr);
+
+int cp_zstd_decompress(void *destination, size_t capacity,
+                       const void *source, size_t size);
 
 void register_interrupt_handler(
     uint16_t vector,

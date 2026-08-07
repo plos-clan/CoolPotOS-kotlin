@@ -9,8 +9,9 @@ import org.plos_clan.cpos.utils.hex
 import org.plos_clan.cpos.utils.toPointer
 
 object RuntimeMemory {
-    private const val TARGET_POOL_FRAMES = 32_768uL
-    private const val FALLBACK_POOL_FRAMES = 16_384uL
+    private const val TARGET_POOL_BYTES = 1_073_741_824uL
+    private const val MINIMUM_POOL_BYTES = 67_108_864uL
+    private val poolChunkFrames = ulongArrayOf(65_536uL, 16_384uL)
 
     private var initialized = false
     private var poolBytes = 0uL
@@ -22,15 +23,12 @@ object RuntimeMemory {
             return false
         }
 
-        if (addPool(TARGET_POOL_FRAMES)) {
-            initialized = true
-            return true
+        for (frameCount in poolChunkFrames) {
+            while (poolBytes < TARGET_POOL_BYTES && addPool(frameCount)) {
+                // Keep adding independently backed regions until this chunk size no longer fits.
+            }
         }
-
-        repeat(2) {
-            if (!addPool(FALLBACK_POOL_FRAMES)) return@repeat
-        }
-        initialized = poolBytes >= FALLBACK_POOL_FRAMES * PAGE_SIZE_BYTES
+        initialized = poolBytes >= MINIMUM_POOL_BYTES
         if (!initialized) {
             println("Runtime memory: failed to reserve a Buddy-backed pool")
         }

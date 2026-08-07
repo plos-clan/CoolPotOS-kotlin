@@ -4,7 +4,6 @@ package org.plos_clan.cpos.syscall
 
 import KERNEL_NAME
 import kotlinx.cinterop.ExperimentalForeignApi
-import org.plos_clan.cpos.drivers.Hpet
 import org.plos_clan.cpos.drivers.acpi.Fadt
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.syscall.Syscall.errno
@@ -139,30 +138,5 @@ fun sysUname(regs: PtraceRegisters, process: Process): Long {
         domainname = ""
     )
 
-    return if (userBuffer.copyToUser(utsName.toNativeBytes())) errno(Errno.EFAULT)
-    else errno(Errno.EOK)
-}
-
-fun sysNanoSleep(regs: PtraceRegisters, process: Process): Long {
-    val time = UserMemory(process.vma, regs[PtraceRegisters.IDX_RDI])
-    val destination = ByteArray(TimeSpec.NATIVE_SIZE)
-
-    if (!time.copyFromUser(destination = destination, 0, TimeSpec.NATIVE_SIZE)) {
-        return errno(Errno.EFAULT)
-    }
-
-    val timeSpec = TimeSpec(0, 0).also {
-        spec -> spec.updateFromNativeBytes(destination)
-    }
-
-    if(timeSpec.nsec >= 1000000000L) return errno(Errno.EINVAL)
-
-    val nsec = timeSpec.sec.toULong() * 1000000000UL + timeSpec.nsec.toULong()
-    val end = Hpet.nanoTime() + nsec
-
-    while (Hpet.nanoTime() >= end) {
-        bridge.cpu_relax()
-    }
-
-    return errno(Errno.EOK)
+    return if (userBuffer.copyToUser(utsName.toNativeBytes())) 0L else errno(Errno.EFAULT)
 }

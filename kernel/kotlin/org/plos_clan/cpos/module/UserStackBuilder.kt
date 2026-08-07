@@ -2,7 +2,6 @@
 
 package org.plos_clan.cpos.module
 
-import org.plos_clan.cpos.drivers.Hpet
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.MemChunk
@@ -14,6 +13,7 @@ import org.plos_clan.cpos.mem.VMA_WRITE
 import org.plos_clan.cpos.mem.VmaType
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
+import org.plos_clan.cpos.utils.KernelRandom
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.isPageAligned
 import kotlinx.cinterop.UByteVar
@@ -140,7 +140,10 @@ object UserStackBuilder {
             return null
         }
 
-        val random = randomBytes ?: createRandomBytes(process, stackTop)
+        val random = randomBytes ?: KernelRandom.bytes(
+            AUX_RANDOM_SIZE,
+            salt = stackTop xor process.id.toULong(),
+        )
         if (random.size != AUX_RANDOM_SIZE) {
             println("UserStack: AT_RANDOM must contain exactly $AUX_RANDOM_SIZE bytes")
             rollback(process, mappedPages, allocatedFrames)
@@ -276,19 +279,5 @@ private class StackWriter(
         }
         cursor = address
         return address
-    }
-}
-
-private fun createRandomBytes(process: Process, stackTop: ULong): ByteArray {
-    var state = Hpet.nanoTime() xor stackTop xor
-        (process.id.toULong() * 0x9e37_79b9_7f4a_7c15uL)
-    if (state == 0uL) {
-        state = 0xa5a5_5a5a_c3c3_3c3cuL
-    }
-    return ByteArray(AUX_RANDOM_SIZE) {
-        state = state xor (state shl 13)
-        state = state xor (state shr 7)
-        state = state xor (state shl 17)
-        state.toByte()
     }
 }

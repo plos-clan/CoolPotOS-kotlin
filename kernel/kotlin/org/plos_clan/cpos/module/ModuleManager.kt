@@ -13,18 +13,19 @@ import kotlinx.cinterop.pointed
 import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.toKString
 import kotlinx.cinterop.usePinned
+import org.plos_clan.cpos.fs.FileContent
 import platform.posix.memcpy
 
 class ModuleData internal constructor(
     private val address: CPointer<UByteVar>,
-    val size: Int,
-) {
+    override val size: Int,
+) : FileContent {
     operator fun get(index: Int): Byte {
         require(index in 0 until size)
         return address[index].toByte()
     }
 
-    fun copyInto(
+    override fun copyInto(
         destination: ByteArray,
         destinationOffset: Int,
         sourceOffset: Int,

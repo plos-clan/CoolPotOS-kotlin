@@ -314,6 +314,27 @@ void fast_handoff_init_user(
     initialize_fpu(task);
 }
 
+void fast_handoff_init_user_registers(
+    uint64_t handle,
+    const uint64_t *registers,
+    uint64_t rsp,
+    uint64_t fs_base
+) {
+    fast_task_t *task = task_from_handle(handle);
+    if (!task || !registers || !rsp) return;
+    __builtin_memcpy(&task->regs, registers, sizeof(task->regs));
+    task->regs.rax = 0;
+    task->regs.func = 0;
+    task->regs.errcode = 0;
+    task->regs.rsp = rsp;
+    if (fs_base) task->regs.fs_base = fs_base;
+    task->user_context = 1;
+    task_state_store(task, task_ready);
+    __atomic_store_n(&task->context_valid, 1, __ATOMIC_RELEASE);
+    initialize_fpu(task);
+}
+
+
 bool fast_handoff_bind_current(
     uint64_t handle,
     uint64_t lapic_id,
@@ -424,7 +445,7 @@ void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
         &yield_requested[slot], 0, __ATOMIC_ACQ_REL) != 0;
     const bool preemptible = (regs->cs & 3) != 0 || voluntary;
 
-    if (preemptible && !syscall_in_progress &&
+    if (preemptible && (!syscall_in_progress || voluntary) &&
         __atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) && cpu->bound) {
         lock_cpu(cpu);
         fast_task_t *previous = cpu->current;

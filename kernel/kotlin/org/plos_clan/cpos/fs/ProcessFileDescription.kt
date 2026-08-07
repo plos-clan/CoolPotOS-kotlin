@@ -80,6 +80,31 @@ class FileDescriptorTable {
     fun get(fd: Int): OpenFileDescription? =
         lock.withLock { entries[fd]?.file }
 
+    fun descriptorFlags(fd: Int): ULong? = lock.withLock { entries[fd]?.flags }
+
+    fun setDescriptorFlags(fd: Int, flags: ULong): Boolean = lock.withLock {
+        val descriptor = entries[fd] ?: return@withLock false
+        entries[fd] = descriptor.copy(flags = flags)
+        true
+    }
+
+    fun duplicate(fd: Int, minimum: Int, flags: ULong): Int? = lock.withLock {
+        if (minimum !in 0 until MAX_FILE_DESCRIPTORS) {
+            return@withLock null
+        }
+        val source = entries[fd] ?: return@withLock null
+        if (!source.file.retain()) {
+            return@withLock null
+        }
+        val target = (minimum until MAX_FILE_DESCRIPTORS).firstOrNull { it !in entries }
+        if (target == null) {
+            source.file.release()
+            return@withLock null
+        }
+        entries[target] = FileDescriptor(source.file, flags)
+        target
+    }
+
     fun acquire(fd: Int): OpenFileDescription? = lock.withLock {
         val file = entries[fd]?.file ?: return@withLock null
         if (file.retain()) file else null
@@ -118,7 +143,37 @@ class FileDescriptorTable {
         return true
     }
 
-    private companion object {
-        const val MAX_FILE_DESCRIPTORS = 1024
+    fun copyInto(destination: FileDescriptorTable): Boolean {
+        val descriptors = lock.withLock {
+            entries.map { (fd, descriptor) ->
+                check(descriptor.file.retain())
+                fd to descriptor
+            }
+        }
+        return destination.lock.withLock {
+            if (descriptors.any { (fd, _) -> destination.entries.containsKey(fd) }) {
+                descriptors.forEach { (_, descriptor) -> descriptor.file.release() }
+                false
+            } else {
+                descriptors.forEach { (fd, descriptor) -> destination.entries[fd] = descriptor }
+                true
+            }
+        }
+    }
+
+    fun closeOnExec() {
+        val files = lock.withLock {
+            val selected = entries.filter { (_, descriptor) ->
+                descriptor.flags and FileDescriptorFlags.FD_CLOEXEC != 0uL
+            }
+            selected.keys.forEach(entries::remove)
+            selected.values.map(FileDescriptor::file)
+        }
+        files.forEach(OpenFileDescription::release)
+    }
+
+    companion object {
+        const val LIMIT = 1024
+        private const val MAX_FILE_DESCRIPTORS = LIMIT
     }
 }

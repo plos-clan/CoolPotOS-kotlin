@@ -90,6 +90,21 @@ class VMA internal constructor(
     val used: ULong
         get() = lock.withLock { regions.fold(0uL) { total, region -> total + region.length } }
 
+    fun clear() {
+        lock.withLock {
+            regions.toList().forEach { region ->
+                var address = region.start
+                while (address < region.end) {
+                    pageDirectory.unmapPage(address)?.let { physicalAddress ->
+                        BuddyFrameAllocator.freeFrames(physicalAddress, 1uL)
+                    }
+                    address += PAGE_SIZE_BYTES
+                }
+            }
+            regions.clear()
+        }
+    }
+
     fun find(address: ULong): MemChunk? = lock.withLock {
         findLocked(address)?.copy()
     }
