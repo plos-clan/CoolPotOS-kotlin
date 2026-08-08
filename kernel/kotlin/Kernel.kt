@@ -6,6 +6,7 @@ import bridge.get_sys_clone_tls_at
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.FrameBuffer
 import org.plos_clan.cpos.drivers.NullDev
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.acpi.Acpi
 import org.plos_clan.cpos.drivers.char.TtyManager
 import org.plos_clan.cpos.tasks.ProcessManager
@@ -43,6 +44,9 @@ fun kernelMain() {
     BuddyFrameAllocator.initialize()
     KernelPageDirectory.initialize()
     if (!RuntimeMemory.initialize()) {
+        return
+    }
+    if (!TscClock.initialize()) {
         return
     }
     if (!Acpi.initialize()) {

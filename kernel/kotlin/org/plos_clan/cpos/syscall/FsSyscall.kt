@@ -20,7 +20,7 @@ import org.plos_clan.cpos.fs.VfsError
 import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsPath
 import org.plos_clan.cpos.fs.VfsResult
-import org.plos_clan.cpos.drivers.Hpet
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.syscall.Syscall.copyPath
 import org.plos_clan.cpos.syscall.Syscall.errno
@@ -901,7 +901,7 @@ fun sysPoll(regs: PtraceRegisters, process: Process): Long {
     val descriptors = userFds.copyFromUser(byteCount)
         ?: return errno(Errno.EFAULT)
     val timeoutMilliseconds = regs[PtraceRegisters.IDX_RDX].toInt()
-    if (timeoutMilliseconds > 0 && !Hpet.isReady) {
+    if (timeoutMilliseconds > 0 && !TscClock.isReady) {
         return errno(Errno.EIO)
     }
 
@@ -910,12 +910,12 @@ fun sysPoll(regs: PtraceRegisters, process: Process): Long {
     } else {
         0uL
     }
-    val startTime = if (timeoutMilliseconds > 0) Hpet.nanoTime() else 0uL
+    val startTime = if (timeoutMilliseconds > 0) TscClock.nanoTime() else 0uL
 
     while (true) {
         val ready = scanPollDescriptors(process, descriptors, count)
         val timedOut = timeoutMilliseconds == 0 ||
-            (timeoutMilliseconds > 0 && Hpet.nanoTime() - startTime >= timeoutNanoseconds)
+            (timeoutMilliseconds > 0 && TscClock.nanoTime() - startTime >= timeoutNanoseconds)
         if (ready != 0 || timedOut) {
             return if (userFds.copyToUser(descriptors)) ready.toLong()
             else errno(Errno.EFAULT)
@@ -968,7 +968,7 @@ fun sysPselect6(regs: PtraceRegisters, process: Process): Long {
             requestedExcept.copyInto(readyExcept)
             val ready = scanSelectDescriptors(process, nfds, readyRead, readyWrite, readyExcept)
             if (ready < 0) return errno(-ready)
-            val expired = deadline != null && Hpet.nanoTime() >= deadline
+            val expired = deadline != null && TscClock.nanoTime() >= deadline
             if (ready != 0 || timeout?.isZero == true || expired) {
                 if (!copyFdSet(process, regs[PtraceRegisters.IDX_RSI], readyRead, setSize) ||
                     !copyFdSet(process, regs[PtraceRegisters.IDX_RDX], readyWrite, setSize) ||
@@ -1025,7 +1025,7 @@ private fun timeoutDeadline(timeout: SelectTimeout): ULong {
     } else {
         seconds * 1_000_000_000uL + timeout.nanoseconds.toULong()
     }
-    val now = Hpet.nanoTime()
+    val now = TscClock.nanoTime()
     return if (duration > ULong.MAX_VALUE - now) ULong.MAX_VALUE else now + duration
 }
 

@@ -3,7 +3,7 @@
 package org.plos_clan.cpos.drivers.acpi.aml
 
 import bridge.asm_pause
-import org.plos_clan.cpos.drivers.Hpet
+import org.plos_clan.cpos.drivers.TscClock
 
 private const val AML_LOCAL0_OP = 0x60u
 private const val AML_LOCAL7_OP = 0x67u
@@ -693,7 +693,7 @@ internal class AmlEvaluator(
             }
             AML_EXT_REVISION_OP -> AmlInteger(2uL)
             AML_EXT_DEBUG_OP -> AmlReference({ AmlUninitialized }, { true })
-            AML_EXT_TIMER_OP -> AmlInteger(Hpet.nanoTime() / 100uL)
+            AML_EXT_TIMER_OP -> AmlInteger(TscClock.nanoTime() / 100uL)
             else -> null
         }
     }
@@ -711,11 +711,11 @@ internal class AmlEvaluator(
         if (duration == 0uL) {
             return true
         }
-        if (!Hpet.isReady) {
+        if (!TscClock.isReady) {
             return false
         }
-        val start = Hpet.nanoTime()
-        while (Hpet.nanoTime() - start < duration) {
+        val start = TscClock.nanoTime()
+        while (TscClock.nanoTime() - start < duration) {
             asm_pause()
         }
         return true

@@ -9,7 +9,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
-import org.plos_clan.cpos.drivers.Hpet
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.acpi.aml.Aml
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 
@@ -30,12 +30,12 @@ object KernelCoroutines {
         if (activeScope != null) {
             return true
         }
-        if (!Hpet.isReady) {
-            println("Kernel coroutines: HPET is unavailable")
+        if (!TscClock.isReady) {
+            println("Kernel coroutines: TSC clock is unavailable")
             return false
         }
-        if (!LocalApic.isBspPeriodicTimerReady) {
-            println("Kernel coroutines: BSP LAPIC periodic timer is unavailable")
+        if (!LocalApic.isBspDeadlineTimerReady) {
+            println("Kernel coroutines: BSP LAPIC TSC-deadline timer is unavailable")
             return false
         }
 
@@ -70,10 +70,14 @@ object KernelCoroutines {
         val dispatcher = dispatcher
         while (true) {
             dispatcher.runReadyBatch()
+            val wakeSequence = bridge.fast_handoff_wake_sequence()
             if (dispatcher.hasReadyWork()) {
                 continue
             }
-            bridge.fast_handoff_park_kotlin()
+            bridge.fast_handoff_park_kotlin(
+                dispatcher.nextDeadlineNanos() ?: 0uL,
+                wakeSequence,
+            )
         }
     }
 

@@ -6,8 +6,6 @@ import kotlinx.cinterop.*
 import org.plos_clan.cpos.drivers.acpi.apic.LAPIC_TIMER_FREQUENCY_HZ
 import org.plos_clan.cpos.drivers.acpi.apic.LAPIC_TIMER_INTERRUPT_VECTOR
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
-import org.plos_clan.cpos.drivers.acpi.apic.LocalApic.calibrateTimer
-import org.plos_clan.cpos.drivers.acpi.apic.LocalApic.configurePeriodicTimer
 import org.plos_clan.cpos.syscall.Syscall
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -23,26 +21,28 @@ class CpuLocal(val lapicId: Long, val isBsp: Boolean) {
 @CName("kt_ap_start")
 fun apStart() {
     bridge.disable_interrupt()
-    val lapicId = LocalApic.destinationApicId
+    val lapicId = LocalApic.localApicId
     bridge.ap_gdt_setup(lapicId.toULong())
     Syscall.initialize(lapicId.toULong(), false)
     LocalApic.enableController()
-    val timerInitialCount = calibrateTimer(LAPIC_TIMER_FREQUENCY_HZ)
-    if (timerInitialCount != 0uL && LAPIC_TIMER_INTERRUPT_VECTOR <= UByte.MAX_VALUE.toUInt()) {
-        configurePeriodicTimer(
+    val timerReady = LAPIC_TIMER_INTERRUPT_VECTOR <= UByte.MAX_VALUE.toUInt() &&
+        LocalApic.configureDeadlineTimer(
             vector = LAPIC_TIMER_INTERRUPT_VECTOR.toUByte(),
-            initialCount = timerInitialCount,
-            masked = false,
+            frequencyHz = LAPIC_TIMER_FREQUENCY_HZ,
         )
-    }
     SMProcessor.load_done.incrementAndFetch()
+    if (!timerReady) {
+        println("APIC: failed to configure AP $lapicId TSC-deadline timer")
+        return
+    }
     SMProcessor.currentLocal().scheduler.waitUntilEnabled()
     if (!Scheduler.apInitialize()) {
         return
     }
     bridge.enable_interrupt()
     while (true) {
-        bridge.fast_handoff_park_kotlin()
+        val sequence = bridge.fast_handoff_wake_sequence()
+        bridge.fast_handoff_park_kotlin(0uL, sequence)
     }
 }
 
@@ -53,8 +53,8 @@ object SMProcessor {
     var locals = mutableMapOf<UInt,CpuLocal>() // <lapic_id, local_info>
 
     fun currentLocal() : CpuLocal {
-        val local: CpuLocal = locals[LocalApic.destinationApicId] ?: run {
-            println("error: cannot get cpu${LocalApic.destinationApicId} local info.")
+        val local: CpuLocal = locals[LocalApic.localApicId] ?: run {
+            println("error: cannot get cpu${LocalApic.localApicId} local info.")
             while (true) bridge.wait_for_interrupt()
             error("get cpu local null")
         }

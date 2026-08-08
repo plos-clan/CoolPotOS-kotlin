@@ -23,8 +23,6 @@
 #define MAP_ANONYMOUS 0x20
 #define MAP_FIXED_NOREPLACE 0x100000
 #define NS_PER_SEC ((uint64_t)1000000000)
-#define FEMTOSECONDS_PER_NANOSECOND ((uint64_t)1000000)
-#define HPET_MAIN_COUNTER_OFFSET 0xf0u
 #define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 1
 #define CLOCK_MONOTONIC_RAW 4
@@ -58,10 +56,6 @@ static struct vm_block *vm_free_list;
 static uint8_t vm_lock;
 static uint64_t futex_epoch;
 static uint64_t futex_waiter_count;
-static volatile uint64_t *runtime_hpet_counter;
-static uint64_t runtime_hpet_period_femtoseconds;
-static uint64_t runtime_clock_offset_ns;
-static uint64_t runtime_clock_last_ns;
 void cpu_relax(void) { __asm__ volatile("pause" : : : "memory"); }
 
 static void spin_lock(uint8_t *lock) {
@@ -166,55 +160,6 @@ bool runtime_vm_add_region(void *base, size_t size) {
     return true;
 }
 
-static uint64_t hpet_ticks_to_ns(uint64_t ticks, uint64_t period_femtoseconds) {
-    const uint64_t whole = ticks / FEMTOSECONDS_PER_NANOSECOND;
-    const uint64_t remainder = ticks % FEMTOSECONDS_PER_NANOSECOND;
-    if (whole > UINT64_MAX / period_femtoseconds) return UINT64_MAX;
-
-    const uint64_t whole_ns = whole * period_femtoseconds;
-    const uint64_t remainder_ns = remainder * period_femtoseconds /
-        FEMTOSECONDS_PER_NANOSECOND;
-    if (remainder_ns > UINT64_MAX - whole_ns) return UINT64_MAX;
-    return whole_ns + remainder_ns;
-}
-
-static uint64_t publish_clock(uint64_t candidate) {
-    uint64_t previous = __atomic_load_n(&runtime_clock_last_ns, __ATOMIC_ACQUIRE);
-    while (candidate > previous) {
-        if (__atomic_compare_exchange_n(&runtime_clock_last_ns, &previous, candidate,
-                false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
-            return candidate;
-    }
-    return previous;
-}
-
-static uint64_t clock_now_ns(void) {
-    const uint64_t period = __atomic_load_n(
-        &runtime_hpet_period_femtoseconds, __ATOMIC_ACQUIRE);
-    volatile uint64_t *counter = runtime_hpet_counter;
-    if (period && counter) {
-        const uint64_t raw = hpet_ticks_to_ns(*counter, period);
-        const uint64_t offset = runtime_clock_offset_ns;
-        return publish_clock(raw > UINT64_MAX - offset ? UINT64_MAX : raw + offset);
-    }
-
-    return __atomic_add_fetch(&runtime_clock_last_ns, 1000u, __ATOMIC_ACQ_REL);
-}
-
-void runtime_clock_configure_hpet(void *base, uint64_t period_femtoseconds) {
-    if (!base || !period_femtoseconds) return;
-
-    volatile uint64_t *counter = (volatile uint64_t *)
-        ((uintptr_t)base + HPET_MAIN_COUNTER_OFFSET);
-    const uint64_t raw = hpet_ticks_to_ns(*counter, period_femtoseconds);
-    const uint64_t previous = __atomic_load_n(&runtime_clock_last_ns, __ATOMIC_ACQUIRE);
-
-    runtime_hpet_counter = counter;
-    runtime_clock_offset_ns = previous > raw ? previous - raw : 0;
-    __atomic_store_n(&runtime_hpet_period_femtoseconds,
-        period_femtoseconds, __ATOMIC_RELEASE);
-}
-
 static inline bool interrupts_enabled(void) {
     uint64_t flags;
     __asm__ volatile("pushfq; popq %0" : "=r"(flags) : : "memory");
@@ -240,7 +185,7 @@ static long futex_deadline(const struct timespec_arg *time, uint64_t *deadline) 
     const uint64_t nsec = time->tv_nsec;
     const uint64_t timeout = sec > (UINT64_MAX - nsec) / NS_PER_SEC
         ? UINT64_MAX : sec * NS_PER_SEC + nsec;
-    const uint64_t now = clock_now_ns();
+    const uint64_t now = runtime_clock_nanos();
     *deadline = timeout > UINT64_MAX - now ? UINT64_MAX : now + timeout;
     return 0;
 }
@@ -273,7 +218,7 @@ static long futex_call(int *pointer, int operation, int expected, const struct t
             __atomic_sub_fetch(&futex_waiter_count, 1u, __ATOMIC_ACQ_REL);
             return 0;
         }
-        if (time && clock_now_ns() >= deadline) {
+        if (time && runtime_clock_nanos() >= deadline) {
             __atomic_sub_fetch(&futex_waiter_count, 1u, __ATOMIC_ACQ_REL);
             return -ETIMEDOUT;
         }
@@ -402,7 +347,7 @@ static long clock_gettime_call(int clock_id, struct timespec_arg *tp) {
         clock_id != CLOCK_MONOTONIC_COARSE && clock_id != CLOCK_BOOTTIME)
         return -EINVAL;
 
-    const uint64_t now = clock_now_ns();
+    const uint64_t now = runtime_clock_nanos();
     tp->tv_sec = (int64_t)(now / NS_PER_SEC);
     tp->tv_nsec = (int64_t)(now % NS_PER_SEC);
     return 0;

@@ -175,8 +175,8 @@ uint64_t get_sys_clone_tls_at(uint64_t index) { return index < clone_count ? clo
 
 static __attribute__((noreturn)) void kernel_idle_thread_entry(void) {
     for (;;) {
-        fast_handoff_yield();
-        __asm__ volatile("hlt");
+        const uint64_t sequence = fast_handoff_wake_sequence();
+        fast_handoff_park_kotlin(0, sequence);
     }
 }
 

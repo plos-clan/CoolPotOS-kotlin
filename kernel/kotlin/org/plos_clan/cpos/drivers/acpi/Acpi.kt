@@ -4,7 +4,6 @@ package org.plos_clan.cpos.drivers.acpi
 
 import bridge.rsdp_request
 import kotlinx.cinterop.*
-import org.plos_clan.cpos.drivers.Hpet
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.drivers.acpi.aml.Aml
 import org.plos_clan.cpos.drivers.acpi.apic.Apic
@@ -27,8 +26,6 @@ private const val MCFG_ENTRY_SEGMENT_GROUP_OFFSET = 8
 private const val MCFG_ENTRY_START_BUS_OFFSET = 10
 private const val MCFG_ENTRY_END_BUS_OFFSET = 11
 private const val MADT_HEADER_LENGTH = SDT_HEADER_LENGTH + 8
-private const val HPET_GAS_SPACE_ID_OFFSET = SDT_HEADER_LENGTH + 4
-private const val HPET_GAS_ADDRESS_OFFSET = SDT_HEADER_LENGTH + 8
 private const val SPCR_GAS_ADDRESS_OFFSET = SDT_HEADER_LENGTH + 8
 
 data class AcpiTable(
@@ -88,11 +85,6 @@ private data class MadtInfo(
 private data class McfgInfo(
     val totalRegionCount: Int,
     val regions: List<PcieEcamRegion>,
-)
-
-private data class HpetGasAddress(
-    val spaceId: UInt,
-    val address: ULong,
 )
 
 interface AcpiTableParser<out T> {
@@ -175,19 +167,6 @@ private object MadtParser : AcpiTableParser<MadtInfo> {
     }
 }
 
-private object HpetParser : AcpiTableParser<HpetGasAddress> {
-    override val signature: String = "HPET"
-
-    override fun parse(table: AcpiTable): HpetGasAddress? {
-        if (!table.hasLength(HPET_GAS_ADDRESS_OFFSET + ULong.SIZE_BYTES)) {
-            return null
-        }
-        val spaceId = table.pointer.readU8(HPET_GAS_SPACE_ID_OFFSET).toUInt()
-        val address = table.pointer.readU64(HPET_GAS_ADDRESS_OFFSET)
-        return HpetGasAddress(spaceId = spaceId, address = address)
-    }
-}
-
 private object SpcrParser : AcpiTableParser<ULong> {
     override val signature: String = "SPCR"
 
@@ -218,14 +197,6 @@ object Acpi {
 
         if (!Aml.initialize()) {
             println("ACPI: AML namespace initialization failed")
-        }
-
-        parseIfFound(HpetParser) { hpetGasAddress ->
-            println("ACPI: HPET address=${hpetGasAddress.address.hex()}")
-            Hpet.initialize(
-                baseAddress = hpetGasAddress.address,
-                spaceId = hpetGasAddress.spaceId,
-            )
         }
 
         parseIfFound(MadtParser) { madt ->

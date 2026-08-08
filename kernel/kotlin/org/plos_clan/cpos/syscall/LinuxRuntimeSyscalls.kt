@@ -2,7 +2,7 @@
 
 package org.plos_clan.cpos.syscall
 
-import org.plos_clan.cpos.drivers.Hpet
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.Process
@@ -255,7 +255,7 @@ object LinuxRuntimeSyscalls {
         CLOCK_BOOTTIME,
     )
 
-    private fun clockNow(): ULong? = Hpet.nanoTime().takeIf { Hpet.isReady }
+    private fun clockNow(): ULong? = TscClock.nanoTime().takeIf { TscClock.isReady }
 
     private fun copyToUser(process: Process, address: ULong, bytes: ByteArray): Long =
         if (UserMemory(process.addressSpace, address).copyToUser(bytes)) 0L else Syscall.errno(Errno.EFAULT)

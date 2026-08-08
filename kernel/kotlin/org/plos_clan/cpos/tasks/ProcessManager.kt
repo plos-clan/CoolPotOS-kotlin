@@ -4,7 +4,7 @@ package org.plos_clan.cpos.tasks
 
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
-import org.plos_clan.cpos.drivers.Hpet
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.FileDescriptorTable
 import org.plos_clan.cpos.fs.FileSystemContext
 import org.plos_clan.cpos.fs.FileSystemManager
@@ -415,7 +415,7 @@ object ProcessManager {
         addressSpace = addressSpace,
         context,
         parentId = parentId,
-        startTimeTicks = Hpet.nanoTime() / NANOSECONDS_PER_USER_TICK,
+        startTimeTicks = TscClock.nanoTime() / NANOSECONDS_PER_USER_TICK,
     ).also { created ->
         inherit?.let(created::inherit)
         processLock.withLock { process += created }

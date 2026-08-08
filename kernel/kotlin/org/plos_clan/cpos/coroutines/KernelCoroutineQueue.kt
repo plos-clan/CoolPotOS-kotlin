@@ -82,6 +82,11 @@ internal class KernelCoroutineQueue {
 
     fun hasImmediateWork(): Boolean = immediate.isNotEmpty()
 
+    fun nextDeadline(): ULong? {
+        discardDisposed()
+        return delayed.firstOrNull()?.deadlineNanos
+    }
+
     private fun heapPush(task: DelayedCoroutineTask) {
         delayed += task
         var childIndex = delayed.lastIndex
@@ -124,6 +129,12 @@ internal class KernelCoroutineQueue {
             parentIndex = firstChildIndex
         }
         return root
+    }
+
+    private fun discardDisposed() {
+        while (delayed.firstOrNull()?.state == DelayedTaskState.DISPOSED) {
+            heapPop()
+        }
     }
 
     private fun swap(firstIndex: Int, secondIndex: Int) {

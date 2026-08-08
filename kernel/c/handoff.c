@@ -5,9 +5,15 @@ extern void do_irq(void *regs, uint64_t irq_num);
 
 enum {
     timer_irq = 1,
+    scheduler_vector = 32,
     spurious_irq = 224,
     lapic_id_register = 0x20,
     lapic_eoi_register = 0xb0,
+    lapic_icr_register = 0x300,
+    lapic_icr_high_register = 0x310,
+    lapic_timer_register = 0x320,
+    lapic_delivery_pending = 1u << 12,
+    lapic_timer_tsc_deadline = 1u << 18,
     x2apic_msr_base = 0x800,
     fpu_state_offset = 208,
     fpu_state_size = 512,
@@ -64,6 +70,8 @@ typedef struct {
     uint8_t is_bsp;
     enum fast_cpu_state state;
     uint8_t lock;
+    uint64_t timer_deadline;
+    uint64_t wake_sequence;
 } __attribute__((aligned(64))) fast_cpu_t;
 
 static fast_cpu_t fast_cpus[cpu_slot_count];
@@ -71,6 +79,8 @@ static uint8_t handoff_enabled;
 static uint8_t yield_requested[cpu_slot_count];
 static uint8_t lapic_x2apic;
 static uint64_t lapic_mmio_base;
+static uint64_t scheduler_tick_cycles;
+static uint64_t bsp_lapic_id = UINT64_MAX;
 static uint8_t ps2_queue[ps2_queue_capacity];
 static uint16_t ps2_queue_head;
 static uint16_t ps2_queue_tail;
@@ -116,13 +126,65 @@ static uint64_t current_lapic_id(void) {
     return *(volatile uint32_t *)(uintptr_t)(lapic_mmio_base + lapic_id_register) >> 24;
 }
 
+static uint32_t lapic_read(uint32_t reg) {
+    if (lapic_x2apic)
+        return (uint32_t)rdmsr(x2apic_msr_base + (reg >> 4));
+    if (!lapic_mmio_base) return 0;
+    return *(volatile uint32_t *)(uintptr_t)(lapic_mmio_base + reg);
+}
+
+static void lapic_write(uint32_t reg, uint64_t value) {
+    if (lapic_x2apic) {
+        wrmsr(x2apic_msr_base + (reg >> 4), value);
+    } else if (lapic_mmio_base) {
+        *(volatile uint32_t *)(uintptr_t)(lapic_mmio_base + reg) = value;
+    }
+}
+
 static void lapic_eoi(uint64_t irq_num) {
     if (irq_num == spurious_irq) return;
+    lapic_write(lapic_eoi_register, 0);
+}
+
+static void lapic_send_reschedule(uint64_t lapic_id) {
     if (lapic_x2apic) {
-        wrmsr(x2apic_msr_base + (lapic_eoi_register >> 4), 0);
-    } else if (lapic_mmio_base) {
-        *(volatile uint32_t *)(uintptr_t)(lapic_mmio_base + lapic_eoi_register) = 0;
+        lapic_write(lapic_icr_register, lapic_id << 32 | scheduler_vector);
+        return;
     }
+
+    while (lapic_read(lapic_icr_register) & lapic_delivery_pending)
+        __asm__ volatile("pause");
+    lapic_write(lapic_icr_high_register, (lapic_id & 0xffu) << 24);
+    lapic_write(lapic_icr_register, scheduler_vector);
+}
+
+static void set_timer_deadline(fast_cpu_t *cpu, uint64_t deadline) {
+    cpu->timer_deadline = deadline;
+    wrmsr(ia32_tsc_deadline_msr, deadline);
+}
+
+static void update_scheduler_timer(fast_cpu_t *cpu) {
+    if (!scheduler_tick_cycles || cpu->state != cpu_online ||
+        cpu->current == cpu->idle) {
+        set_timer_deadline(cpu, 0);
+        return;
+    }
+
+    const uint64_t now = read_tsc();
+    const uint64_t latest = now > UINT64_MAX - scheduler_tick_cycles
+        ? UINT64_MAX : now + scheduler_tick_cycles;
+    if (cpu->timer_deadline > now && cpu->timer_deadline <= latest) return;
+    set_timer_deadline(cpu, latest);
+}
+
+static void wake_cpu(uint64_t lapic_id) {
+    fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
+    __atomic_add_fetch(&cpu->wake_sequence, 1, __ATOMIC_RELEASE);
+    if (cpu->state == cpu_offline) return;
+
+    __atomic_store_n(
+        &yield_requested[lapic_id % cpu_slot_count], 1, __ATOMIC_RELEASE);
+    if (lapic_id != current_lapic_id()) lapic_send_reschedule(lapic_id);
 }
 
 static bool queue_push(fast_cpu_t *cpu, fast_task_t *task) {
@@ -199,6 +261,21 @@ static void initialize_fpu(fast_task_t *task) {
 void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base) {
     lapic_x2apic = x2apic != 0;
     lapic_mmio_base = mmio_base;
+}
+
+bool fast_handoff_configure_timer(uint8_t vector, uint32_t frequency_hz) {
+    const uint64_t tsc_hz = runtime_clock_frequency();
+    if (vector != scheduler_vector || !frequency_hz || tsc_hz < frequency_hz)
+        return false;
+
+    scheduler_tick_cycles = (tsc_hz + frequency_hz - 1) / frequency_hz;
+    lapic_write(
+        lapic_timer_register,
+        vector | lapic_timer_tsc_deadline
+    );
+    fast_cpu_t *cpu = &fast_cpus[current_lapic_id() % cpu_slot_count];
+    set_timer_deadline(cpu, 0);
+    return true;
 }
 
 void fast_handoff_yield(void) {
@@ -298,10 +375,35 @@ bool fast_handoff_unpark(uint64_t handle, uint64_t lapic_id) {
     }
 }
 
+uint64_t fast_handoff_wake_sequence(void) {
+    fast_cpu_t *cpu = &fast_cpus[current_lapic_id() % cpu_slot_count];
+    return __atomic_load_n(&cpu->wake_sequence, __ATOMIC_ACQUIRE);
+}
+
+void fast_handoff_wake_bsp(void) {
+    const uint64_t lapic_id = __atomic_load_n(&bsp_lapic_id, __ATOMIC_ACQUIRE);
+    if (lapic_id != UINT64_MAX) wake_cpu(lapic_id);
+}
+
 /* The Kotlin/Native interop wrapper keeps this entire call in Native state. */
-void fast_handoff_park_kotlin(void) {
+void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence) {
+    const uint64_t flags = interrupt_save();
     fast_handoff_yield();
-    __asm__ volatile("hlt" : : : "memory");
+
+    fast_cpu_t *cpu = &fast_cpus[current_lapic_id() % cpu_slot_count];
+    lock_cpu(cpu);
+    const bool idle = cpu->state == cpu_online && cpu->current == cpu->idle &&
+        !cpu->head && wake_sequence ==
+            __atomic_load_n(&cpu->wake_sequence, __ATOMIC_ACQUIRE);
+    const uint64_t deadline = idle
+        ? runtime_clock_deadline(deadline_ns) : 0;
+    const bool sleep = idle && (!deadline || deadline > read_tsc());
+    if (idle) set_timer_deadline(cpu, sleep ? deadline : 0);
+    unlock_cpu(cpu);
+
+    if (sleep && (flags & (1u << 9)))
+        __asm__ volatile("sti; hlt; cli" : : : "memory");
+    interrupt_restore(flags);
 }
 
 void fast_handoff_configure_ps2(
@@ -462,6 +564,8 @@ bool fast_handoff_bind_current(
     cpu->current = task;
     cpu->idle = task;
     cpu->is_bsp = is_bsp != 0;
+    if (cpu->is_bsp)
+        __atomic_store_n(&bsp_lapic_id, lapic_id, __ATOMIC_RELEASE);
     cpu->state = cpu_bootstrapping;
     if (!task->kernel_fs_base)
         task->kernel_fs_base = rdmsr(ia32_fs_base_msr);
@@ -499,6 +603,7 @@ bool fast_handoff_enqueue(uint64_t handle, uint64_t lapic_id) {
         state != task_zombie && queue_push(cpu, task);
     if (accepted) task_state_store(task, task_ready);
     unlock_cpu(cpu);
+    if (accepted) wake_cpu(lapic_id);
     interrupt_restore(flags);
     return accepted;
 }
@@ -577,6 +682,7 @@ void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
         (regs->cs & 3) == 0;
 
     if (irq_num != timer_irq) {
+        __atomic_add_fetch(&cpu->wake_sequence, 1, __ATOMIC_RELEASE);
         if (fast_handoff_ps2_irq(irq_num)) {
             lock_cpu(cpu);
             wake_idle_worker(cpu);
@@ -664,5 +770,6 @@ void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
         }
     }
 
+    update_scheduler_timer(cpu);
     lapic_eoi(irq_num);
 }

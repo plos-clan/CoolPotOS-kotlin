@@ -5,7 +5,7 @@ package org.plos_clan.cpos.syscall
 import kotlinx.coroutines.DisposableHandle
 import kotlinx.coroutines.Runnable
 import org.plos_clan.cpos.coroutines.KernelCoroutines
-import org.plos_clan.cpos.drivers.Hpet
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
@@ -165,7 +165,7 @@ object Futex {
             when {
                 current == null -> validationError = Errno.EFAULT
                 current != expected -> validationError = Errno.EAGAIN
-                expiresAt != null && expiresAt <= Hpet.nanoTime() ->
+                expiresAt != null && expiresAt <= TscClock.nanoTime() ->
                     validationError = Errno.ETIMEDOUT
                 else -> {
                     queues.getOrPut(address.key) { ArrayDeque() }.addLast(waiter)
@@ -323,7 +323,7 @@ object Futex {
         }
         if (absolute) return TimeoutResult.Value(value)
 
-        val now = Hpet.nanoTime()
+        val now = TscClock.nanoTime()
         return TimeoutResult.Value(
             if (value > ULong.MAX_VALUE - now) ULong.MAX_VALUE else now + value,
         )

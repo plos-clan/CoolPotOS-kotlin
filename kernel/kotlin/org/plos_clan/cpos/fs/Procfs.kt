@@ -1,7 +1,7 @@
 package org.plos_clan.cpos.fs
 
 import KERNEL_NAME
-import org.plos_clan.cpos.drivers.Hpet
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.char.TtyManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.tasks.Process
@@ -259,7 +259,7 @@ private enum class RootFile(
         }
         STATISTICS -> "cpu  0 0 0 0 0 0 0 0 0 0\n".encodeToByteArray()
         UPTIME -> {
-            val centiseconds = Hpet.nanoTime() / 10_000_000uL
+            val centiseconds = TscClock.nanoTime() / 10_000_000uL
             val seconds = centiseconds / 100uL
             val fraction = (centiseconds % 100uL).toString().padStart(2, '0')
             "$seconds.$fraction $seconds.$fraction\n".encodeToByteArray()

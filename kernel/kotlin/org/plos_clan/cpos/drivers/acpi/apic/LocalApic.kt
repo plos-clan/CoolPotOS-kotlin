@@ -10,7 +10,6 @@ import kotlinx.cinterop.UIntVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.pointed
 import kotlinx.cinterop.set
-import org.plos_clan.cpos.drivers.Hpet
 import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.utils.hex
 import org.plos_clan.cpos.utils.toPointer
@@ -23,35 +22,22 @@ private const val X2APIC_MSR_BASE = 0x800u
 private const val LAPIC_REG_ID = 0x20u
 private const val LAPIC_REG_EOI = 0xB0u
 private const val LAPIC_REG_SPURIOUS = 0xF0u
-private const val LAPIC_REG_TIMER = 0x320u
-private const val LAPIC_REG_TIMER_INITCNT = 0x380u
-private const val LAPIC_REG_TIMER_CURCNT = 0x390u
-private const val LAPIC_REG_TIMER_DIV = 0x3E0u
-
 private const val LAPIC_SPURIOUS_VECTOR = 0xFFu
 private const val LAPIC_SPURIOUS_ENABLE_BIT = 0x100uL
-private const val LAPIC_TIMER_MASK_BIT = 0x1_0000uL
-private const val LAPIC_TIMER_PERIODIC_BIT = 0x2_0000uL
-private const val LAPIC_TIMER_DIVIDE_BY_1 = 0b1011uL
-private const val LAPIC_TIMER_CALIBRATION_NS = 1_000_000uL
 private const val LAPIC_MIN_INTERRUPT_VECTOR = 32u
 private const val LAPIC_ID_MASK = 0xFFu
 private const val LAPIC_ID_MASK_LONG = 0xFFuL
-private val LAPIC_TIMER_MAX_INITIAL_COUNT = UInt.MAX_VALUE.toULong()
 
 object LocalApic {
     private var x2ApicMode = false
     private var mmioBaseVirtualAddress = 0uL
-    private var timerInitialCount = 0uL
-    private var bspPeriodicTimerReady = false
-
-    private var is_bsp = false
+    private var bspDeadlineTimerReady = false
 
     val isX2ApicMode: Boolean
         get() = x2ApicMode
 
-    val isBspPeriodicTimerReady: Boolean
-        get() = bspPeriodicTimerReady
+    val isBspDeadlineTimerReady: Boolean
+        get() = bspDeadlineTimerReady
 
     val localApicId: UInt
         get() {
@@ -67,9 +53,7 @@ object LocalApic {
         timerVector: UInt,
         timerFrequencyHz: UInt,
     ): Boolean {
-        bspPeriodicTimerReady = false
-        timerInitialCount = 0uL
-        is_bsp = false
+        bspDeadlineTimerReady = false
         x2ApicMode = detectX2ApicMode()
         if (x2ApicMode) {
             mmioBaseVirtualAddress = 0uL
@@ -92,17 +76,11 @@ object LocalApic {
             println("APIC: invalid LAPIC timer vector=$timerVector")
             return false
         }
-        timerInitialCount = calibrateTimer(timerFrequencyHz)
-        if (timerInitialCount == 0uL) {
-            println("APIC: LAPIC periodic timer calibration failed")
+        if (!configureDeadlineTimer(timerVector.toUByte(), timerFrequencyHz)) {
+            println("APIC: failed to configure BSP TSC-deadline timer")
             return false
         }
-        if (!configurePeriodicTimerRegisters(timerVector.toUByte(), timerInitialCount, masked = false)) {
-            println("APIC: failed to configure BSP LAPIC periodic timer")
-            return false
-        }
-        bspPeriodicTimerReady = true
-        is_bsp = true
+        bspDeadlineTimerReady = true
         return true
     }
 
@@ -110,72 +88,18 @@ object LocalApic {
         write(LAPIC_REG_EOI, 0uL)
     }
 
-    fun configurePeriodicTimer(
+    fun configureDeadlineTimer(
         vector: UByte,
-        initialCount: ULong = timerInitialCount,
-        masked: Boolean = false,
-    ) {
-        configurePeriodicTimerRegisters(vector, initialCount, masked)
-    }
-
-    private fun configurePeriodicTimerRegisters(
-        vector: UByte,
-        initialCount: ULong,
-        masked: Boolean,
+        frequencyHz: UInt,
     ): Boolean {
-        if (vector.toUInt() !in LAPIC_MIN_INTERRUPT_VECTOR until LAPIC_SPURIOUS_VECTOR ||
-            initialCount == 0uL
-        ) {
+        if (vector.toUInt() !in LAPIC_MIN_INTERRUPT_VECTOR until LAPIC_SPURIOUS_VECTOR) {
             return false
         }
-
-        val timerConfig = vector.toULong() or
-                LAPIC_TIMER_PERIODIC_BIT or
-                (if (masked) LAPIC_TIMER_MASK_BIT else 0uL)
-
-        if (!write(LAPIC_REG_TIMER_DIV, LAPIC_TIMER_DIVIDE_BY_1) ||
-            !write(LAPIC_REG_TIMER, timerConfig) ||
-            !write(LAPIC_REG_TIMER_INITCNT, initialCount)
-        ) {
-            return false
-        }
-        if (!is_bsp) println("APIC: LAPIC timer vector=${vector.toUInt()} initial_count=$initialCount masked=$masked")
-        return true
+        return bridge.fast_handoff_configure_timer(vector, frequencyHz)
     }
 
     fun enableController() {
         write(LAPIC_REG_SPURIOUS, LAPIC_SPURIOUS_VECTOR.toULong() or LAPIC_SPURIOUS_ENABLE_BIT)
-    }
-
-    fun calibrateTimer(timerFrequencyHz: UInt): ULong {
-        if (timerFrequencyHz == 0u) {
-            return 0uL
-        }
-        if (!Hpet.isReady) {
-            println("APIC: HPET unavailable, skip LAPIC timer calibration")
-            return 0uL
-        }
-
-        write(LAPIC_REG_TIMER_DIV, LAPIC_TIMER_DIVIDE_BY_1)
-        write(LAPIC_REG_TIMER, LAPIC_TIMER_MASK_BIT)
-        write(LAPIC_REG_TIMER_INITCNT, LAPIC_TIMER_MAX_INITIAL_COUNT)
-
-        val start = Hpet.nanoTime()
-        while (Hpet.nanoTime() - start < LAPIC_TIMER_CALIBRATION_NS) {
-        }
-
-        val elapsedTicks = LAPIC_TIMER_MAX_INITIAL_COUNT - read(LAPIC_REG_TIMER_CURCNT)
-        if (elapsedTicks == 0uL) {
-            println("APIC: LAPIC timer calibration produced zero ticks")
-            return 0uL
-        }
-
-        val calibratedInitialCount = minOf(
-            elapsedTicks * 1_000uL / timerFrequencyHz.toULong(),
-            LAPIC_TIMER_MAX_INITIAL_COUNT,
-        )
-        if (!is_bsp) println("APIC: calibrated LAPIC timer initial_count=$calibratedInitialCount")
-        return calibratedInitialCount
     }
 
     private fun detectX2ApicMode(): Boolean {

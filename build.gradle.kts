@@ -80,11 +80,11 @@ private class BuildPaths(project: Project) {
     val limineUefi = limine.resolve("boot/limine-uefi-cd.bin")
     val limineEfi = limine.resolve("boot/BOOTX64.EFI")
     val limineArchive = Archive(
-        "https://codeberg.org/Limine/Limine/archive/v10.x-binary.tar.gz",
-        downloads.resolve("limine-v10.x-binary.tar.gz"),
+        "https://github.com/limine-bootloader/limine/archive/refs/heads/v11.x-binary.tar.gz",
+        downloads.resolve("limine-v11.x-binary.tar.gz"),
     )
     val limineProtocol = Archive(
-        "https://codeberg.org/Limine/limine-protocol/archive/trunk.tar.gz",
+        "https://github.com/limine-bootloader/limine-protocol/archive/refs/heads/trunk.tar.gz",
         downloads.resolve("limine-protocol-trunk.tar.gz"),
     )
 
@@ -161,7 +161,7 @@ private class KernelConfig(
     toolRoot: File,
 ) {
     val sources = listOf(
-        "boot.c", "shim.c", "syscall.c", "gdt.c",
+        "boot.c", "shim.c", "clock.c", "syscall.c", "gdt.c",
         "idt.c", "handoff.c", "smp.c", "zstd_bridge.c",
     ).map(paths.kernelC::resolve)
     val objects = sources.map { paths.cObjects.resolve("${it.nameWithoutExtension}.o") }
@@ -253,11 +253,11 @@ private class BuildConfig(private val project: Project) {
         executable = tools.qemu,
         flags = listOf(
             "-m", setting("qemuMemory", "QEMU_MEMORY", "2g"),
-            "-M", "q35", "-cpu", "qemu64,+x2apic",
+            "-M", "q35", "-cpu", "host", "-enable-kvm",
             "-no-reboot", "-smp", "4",
             "-drive",
             "if=pflash,format=raw,readonly=on,file=${paths.assets.resolve("ovmf-code.fd")}",
-        ) + if (debug) listOf("-s", "-S") else listOf("-enable-kvm"),
+        ) + if (debug) listOf("-s", "-S") else emptyList(),
     )
 
     private fun setting(prop: String, env: String, default: String): String = listOfNotNull(

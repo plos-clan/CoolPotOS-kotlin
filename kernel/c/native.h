@@ -9,6 +9,7 @@ enum {
     ia32_fs_base_msr = 0xc0000100u,
     ia32_gs_base_msr = 0xc0000101u,
     ia32_kernel_gs_base_msr = 0xc0000102u,
+    ia32_tsc_deadline_msr = 0x6e0u,
     irq_stack_size = 16 * 1024,
     syscall_stack_size = 32 * 1024
 };
@@ -94,7 +95,10 @@ void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num);
 void fast_handoff_yield(void);
 bool fast_handoff_park_current(void);
 bool fast_handoff_unpark(uint64_t task, uint64_t lapic_id);
-void fast_handoff_park_kotlin(void);
+uint64_t fast_handoff_wake_sequence(void);
+void fast_handoff_wake_bsp(void);
+void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence);
+bool fast_handoff_configure_timer(uint8_t vector, uint32_t frequency_hz);
 bool fast_handoff_finish_bootstrap(uint64_t task);
 bool fast_handoff_replace_address_space(uint64_t task, uint64_t cr3);
 bool capture_sys_clone_context(uint64_t stack, uint64_t tls);
@@ -103,5 +107,9 @@ uint64_t create_kernel_runtime_tcb(void);
 void set_kernel_runtime_fs_base(uint64_t pointer);
 void serial_print(const char *buffer, size_t size);
 bool runtime_vm_add_region(void *base, size_t size);
-void runtime_clock_configure_hpet(void *base, uint64_t period_femtoseconds);
+uint64_t read_tsc(void);
+uint64_t runtime_clock_initialize(uint64_t frequency);
+uint64_t runtime_clock_frequency(void);
+uint64_t runtime_clock_nanos(void);
+uint64_t runtime_clock_deadline(uint64_t nanoseconds);
 void wrmsr(uint32_t msr, uint64_t value);

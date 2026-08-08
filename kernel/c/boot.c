@@ -26,7 +26,10 @@ LIMINE_REQUEST(limine_rsdp_request, rsdp_request, .id = LIMINE_RSDP_REQUEST_ID);
 LIMINE_REQUEST(limine_executable_file_request, executable_file_request,
     .id = LIMINE_EXECUTABLE_FILE_REQUEST_ID);
 LIMINE_REQUEST(limine_module_request, module_request, .id = LIMINE_MODULE_REQUEST_ID);
-LIMINE_REQUEST(limine_executable_cmdline_request, cmdline_request, .id = LIMINE_EXECUTABLE_CMDLINE_REQUEST_ID);
+LIMINE_REQUEST(limine_executable_cmdline_request, cmdline_request,
+    .id = LIMINE_EXECUTABLE_CMDLINE_REQUEST_ID);
+LIMINE_REQUEST(limine_tsc_frequency_request, tsc_frequency_request,
+    .id = LIMINE_TSC_FREQUENCY_REQUEST_ID);
 LIMINE_ITEM(".limine_requests_start")
 static volatile uint64_t limine_requests_start_marker[] = LIMINE_REQUESTS_START_MARKER;
 LIMINE_ITEM(".limine_requests_end")

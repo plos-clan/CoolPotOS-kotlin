@@ -15,6 +15,7 @@ extern volatile struct limine_rsdp_request rsdp_request;
 extern volatile struct limine_executable_file_request executable_file_request;
 extern volatile struct limine_module_request module_request;
 extern volatile struct limine_executable_cmdline_request cmdline_request;
+extern volatile struct limine_tsc_frequency_request tsc_frequency_request;
 
 void gdt_setup(void);
 void idt_setup(void);
@@ -51,7 +52,10 @@ void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base);
 void fast_handoff_yield(void);
 bool fast_handoff_park_current(void);
 bool fast_handoff_unpark(uint64_t task, uint64_t lapic_id);
-void fast_handoff_park_kotlin(void);
+uint64_t fast_handoff_wake_sequence(void);
+void fast_handoff_wake_bsp(void);
+void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence);
+bool fast_handoff_configure_timer(uint8_t vector, uint32_t frequency_hz);
 void fast_handoff_configure_ps2(
     uint64_t irq_num,
     uint16_t data_port,
@@ -99,7 +103,9 @@ uint8_t fast_handoff_task_has_context(uint64_t task);
 uint64_t fast_handoff_current_task_id(void);
 bool fast_handoff_replace_address_space(uint64_t task, uint64_t cr3);
 bool runtime_vm_add_region(void *base, size_t size);
-void runtime_clock_configure_hpet(void *base, uint64_t period_femtoseconds);
+uint64_t runtime_clock_initialize(uint64_t frequency);
+uint64_t runtime_clock_frequency(void);
+uint64_t runtime_clock_nanos(void);
 extern void (*ap_start_ptr)(struct limine_mp_info *);
 void *__rtld_allocateTcb(void);
 void asm_syscall_handle(void);

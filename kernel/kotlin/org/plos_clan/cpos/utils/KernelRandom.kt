@@ -1,6 +1,6 @@
 package org.plos_clan.cpos.utils
 
-import org.plos_clan.cpos.drivers.Hpet
+import org.plos_clan.cpos.drivers.TscClock
 
 /** Small boot-time entropy source used until a hardware entropy driver exists. */
 object KernelRandom {
@@ -23,7 +23,7 @@ object KernelRandom {
     ) {
         require(offset >= 0 && size >= 0 && offset <= destination.size - size)
         lock.withLock {
-            state = mix(state xor Hpet.nanoTime() xor salt)
+            state = mix(state xor TscClock.nanoTime() xor salt)
             var cursor = offset
             val end = offset + size
             while (cursor < end) {

@@ -12,7 +12,7 @@ import kotlinx.cinterop.ptr
 import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.set
 import kotlinx.cinterop.staticCFunction
-import org.plos_clan.cpos.drivers.Hpet
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.ProcessManager
@@ -556,10 +556,10 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
     }
 
     private fun timeoutDeadline(deciseconds: Int): ULong =
-        Hpet.nanoTime() + deciseconds.toULong() * NANOSECONDS_PER_DECISECOND
+        TscClock.nanoTime() + deciseconds.toULong() * NANOSECONDS_PER_DECISECOND
 
     private fun deadlineReached(deadline: ULong): Boolean =
-        Hpet.isReady && Hpet.nanoTime() >= deadline
+        TscClock.isReady && TscClock.nanoTime() >= deadline
 
     private fun waitForInterrupt() {
         bridge.fast_handoff_yield()

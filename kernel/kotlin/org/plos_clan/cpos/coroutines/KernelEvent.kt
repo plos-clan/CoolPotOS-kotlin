@@ -5,13 +5,16 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.resume
 
-class KernelEvent internal constructor() {
+class KernelEvent internal constructor(
+    private val wakeup: () -> Unit,
+) {
     private val lock = IrqSpinLock()
     private var pending = false
     private var waiter: Continuation<Unit>? = null
 
     fun signal() {
         lock.withLock { pending = true }
+        wakeup()
     }
 
     suspend fun await() {

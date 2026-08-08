@@ -23,15 +23,17 @@ Release mode is the default; the commands below specify it explicitly.
 **Build and run in one command**
 
 ```shell
-./gradlew run -PdebugMode=false
+./gradlew run
 ```
 
 **Or step by step**
 
 ```shell
-./gradlew buildIso -PdebugMode=false
-./gradlew run -PdebugMode=false
+./gradlew buildIso
+./gradlew run
 ```
+
+Use `./gradlew run -PdebugMode=true` to start QEMU paused with its GDB server enabled.
 
 You need to install:
 - Kotlin/Native (`konanc`, `cinterop`)
