@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build kernel
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: jetbrains
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        env:
+          GRADLE_USER_HOME: ${{ github.workspace }}/.gradle
+
+      - name: Cache Kotlin/Native toolchain
+        uses: actions/cache@v6
+        with:
+          path: ~/.konan
+          key: ${{ runner.os }}-${{ runner.arch }}-konan-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-konan-
+
+      - name: Install latest stable LLVM and Clang
+        uses: ZhongRuoyu/setup-llvm@v0
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            meson \
+            ninja-build
+
+      - name: Build kernel
+        run: >-
+          ./gradlew build
+          --no-daemon
+          --no-configuration-cache
+          --console=plain
+          --stacktrace
+
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: CoolPotOS-build-diagnostics-${{ github.sha }}
+          path: |
+            build/mlibc-x86_64/meson-logs/
+            build/reports/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload kernel ELF
+        uses: actions/upload-artifact@v7
+        with:
+          name: CoolPotOS-kernel-${{ github.sha }}
+          path: build/kernel.elf
+          if-no-files-found: error
+          retention-days: 7
