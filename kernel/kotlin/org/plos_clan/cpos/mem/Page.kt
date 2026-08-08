@@ -29,6 +29,113 @@ internal const val USER_VIRTUAL_ADDRESS_LIMIT = 0x0000_8000_0000_0000uL
 private val PTE_PARENT_FLAGS = PTE_PRESENT or PTE_WRITABLE or PTE_USER
 private val MMIO_PTE_FLAGS = PTE_PRESENT or PTE_WRITABLE or PTE_NO_CACHE or PTE_NO_EXECUTE
 
+internal object UserFrameReferences {
+    private const val PAGE_SHIFT = 12
+    private const val SECTION_FRAME_BITS = 12
+    private const val SECTION_FRAME_COUNT = 1 shl SECTION_FRAME_BITS
+    private const val SECTION_FRAME_MASK = SECTION_FRAME_COUNT - 1
+
+    private val sections = mutableMapOf<ULong, IntArray>()
+    private val lock = IrqSpinLock()
+
+    fun retain(frame: ULong) = lock.withLock {
+        val counts = section(frame)
+        val index = sectionIndex(frame)
+        counts[index]++
+    }
+
+    fun shareAll(frames: Iterable<ULong>) = lock.withLock {
+        var currentKey = ULong.MAX_VALUE
+        var current = IntArray(0)
+        frames.forEach { frame ->
+            val key = sectionKey(frame)
+            if (key != currentKey) {
+                currentKey = key
+                current = sections.getOrPut(key) { IntArray(SECTION_FRAME_COUNT) }
+            }
+            val index = sectionIndex(frame)
+            current[index] = maxOf(current[index], 1) + 1
+        }
+    }
+
+    fun release(frame: ULong) {
+        if (lock.withLock { releaseLocked(frame) }) {
+            BuddyFrameAllocator.freeFrames(frame, 1uL)
+        }
+    }
+
+    fun releaseAll(frames: Iterable<ULong>) {
+        val reclaimed = lock.withLock {
+            val result = mutableListOf<ULong>()
+            var currentKey = ULong.MAX_VALUE
+            var current: IntArray? = null
+            frames.forEach { frame ->
+                val key = sectionKey(frame)
+                if (key != currentKey) {
+                    currentKey = key
+                    current = sections[key]
+                }
+                val counts = current
+                val index = sectionIndex(frame)
+                if (counts == null || counts[index] <= 1) {
+                    counts?.set(index, 0)
+                    result += frame
+                } else {
+                    counts[index]--
+                }
+            }
+            result
+        }
+        BuddyFrameAllocator.freeFrames(reclaimed)
+    }
+
+    fun isExclusive(frame: ULong): Boolean = lock.withLock {
+        referenceCount(frame) <= 1
+    }
+
+    fun copyOnWrite(frame: ULong): ULong? = lock.withLock {
+        if (referenceCount(frame) <= 1) {
+            return@withLock frame
+        }
+
+        val replacement = BuddyFrameAllocator.allocateFrames(1uL)
+            ?: return@withLock null
+        val source = Hhdm.toVirtualPointer<UByteVar>(frame)
+        val destination = Hhdm.toVirtualPointer<UByteVar>(replacement)
+        if (source == null || destination == null) {
+            BuddyFrameAllocator.freeFrames(replacement, 1uL)
+            return@withLock null
+        }
+
+        memcpy(destination, source, PAGE_SIZE_BYTES)
+        section(replacement)[sectionIndex(replacement)] = 1
+        replacement
+    }
+
+    private fun releaseLocked(frame: ULong): Boolean {
+        val counts = sections[sectionKey(frame)] ?: return true
+        val index = sectionIndex(frame)
+        if (counts[index] <= 1) {
+            counts[index] = 0
+            return true
+        }
+        counts[index]--
+        return false
+    }
+
+    private fun referenceCount(frame: ULong): Int =
+        sections[sectionKey(frame)]?.get(sectionIndex(frame)) ?: 0
+
+    private fun section(frame: ULong): IntArray =
+        sections.getOrPut(sectionKey(frame)) { IntArray(SECTION_FRAME_COUNT) }
+
+    private fun sectionKey(frame: ULong): ULong =
+        frame shr (PAGE_SHIFT + SECTION_FRAME_BITS)
+
+    private fun sectionIndex(frame: ULong): Int =
+        ((frame shr PAGE_SHIFT).toInt() and SECTION_FRAME_MASK)
+}
+
 private enum class PageTableLevel(val shift: Int) {
     PML4(39),
     PDPT(30),
@@ -37,6 +144,11 @@ private enum class PageTableLevel(val shift: Int) {
 
     fun index(address: ULong): Int = ((address shr shift) and PAGE_TABLE_INDEX_MASK).toInt()
 }
+
+private data class ModifiedPage(
+    val address: ULong,
+    val entry: ULong,
+)
 
 data class PageDirectory(val pml4PhysicalAddress: ULong) {
 
@@ -95,29 +207,11 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
         val flags = PTE_USER or
             (if (writable) PTE_WRITABLE else 0uL) or
             (if (executable) 0uL else PTE_NO_EXECUTE)
-        return mapPage(virtualAddress, physicalAddress, flags)
-    }
-
-    fun mapUserRange(
-        virtualAddress: ULong,
-        physicalAddress: ULong,
-        byteLength: ULong,
-        writable: Boolean,
-        executable: Boolean,
-    ): Boolean {
-        if (byteLength == 0uL) {
-            return true
-        }
-        if (virtualAddress >= USER_VIRTUAL_ADDRESS_LIMIT ||
-            byteLength > USER_VIRTUAL_ADDRESS_LIMIT - virtualAddress
-        ) {
-            println("Paging: user range exceeds the user half")
+        if (!mapPage(virtualAddress, physicalAddress, flags)) {
             return false
         }
-        val flags = PTE_USER or
-            (if (writable) PTE_WRITABLE else 0uL) or
-            (if (executable) 0uL else PTE_NO_EXECUTE)
-        return mapRange(virtualAddress, physicalAddress, byteLength, flags)
+        UserFrameReferences.retain(physicalAddress)
+        return true
     }
 
     fun unmapPage(virtualAddress: ULong): ULong? {
@@ -153,32 +247,54 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
         return physicalAddress
     }
 
-    fun protectUserPage(
+    internal fun releaseUserPage(virtualAddress: ULong): Boolean =
+        unmapPage(virtualAddress)?.let { physicalAddress ->
+            UserFrameReferences.release(physicalAddress)
+            true
+        } ?: false
+
+    internal fun clearUserMappings() {
+        val pml4 = pml4Table() ?: return
+        val userFrames = mutableListOf<ULong>()
+        val tableFrames = mutableListOf<ULong>()
+        for (index in 0 until KERNEL_PML4_START_INDEX) {
+            val entry = pml4[index]
+            if ((entry and PTE_PRESENT) == 0uL) continue
+            check((entry and PTE_HUGE) == 0uL) { "Paging: huge page in user PML4" }
+            collectUserTable(
+                physicalAddress = entry and PTE_ADDR_MASK,
+                level = PageTableLevel.PDPT,
+                userFrames = userFrames,
+                tableFrames = tableFrames,
+            )
+            pml4[index] = 0uL
+        }
+        UserFrameReferences.releaseAll(userFrames)
+        BuddyFrameAllocator.freeFrames(tableFrames)
+        if ((read_cr3() and PTE_ADDR_MASK) == pml4PhysicalAddress) {
+            bridge.write_cr3(pml4PhysicalAddress)
+        }
+    }
+
+    internal fun destroyUserDirectory() {
+        check((read_cr3() and PTE_ADDR_MASK) != pml4PhysicalAddress) {
+            "Paging: cannot destroy the active directory"
+        }
+        clearUserMappings()
+        BuddyFrameAllocator.freeFrames(pml4PhysicalAddress, 1uL)
+    }
+
+    internal fun protectUserPage(
         virtualAddress: ULong,
         accessible: Boolean,
         writable: Boolean,
         executable: Boolean,
+        privateMapping: Boolean,
     ): Boolean {
         if (!virtualAddress.isPageAligned() || virtualAddress >= USER_VIRTUAL_ADDRESS_LIMIT) {
             return false
         }
-
-        val pml4 = pml4Table() ?: return false
-        val pml4Entry = pml4[PageTableLevel.PML4.index(virtualAddress)]
-        if ((pml4Entry and PTE_PRESENT) == 0uL || (pml4Entry and PTE_HUGE) != 0uL) {
-            return false
-        }
-        val pdpt = (pml4Entry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return false
-        val pdptEntry = pdpt[PageTableLevel.PDPT.index(virtualAddress)]
-        if ((pdptEntry and PTE_PRESENT) == 0uL || (pdptEntry and PTE_HUGE) != 0uL) {
-            return false
-        }
-        val pd = (pdptEntry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return false
-        val pdEntry = pd[PageTableLevel.PD.index(virtualAddress)]
-        if ((pdEntry and PTE_PRESENT) == 0uL || (pdEntry and PTE_HUGE) != 0uL) {
-            return false
-        }
-        val pt = (pdEntry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return false
+        val pt = userPageTable(virtualAddress) ?: return false
         val index = PageTableLevel.PT.index(virtualAddress)
         val entry = pt[index]
         val physicalAddress = entry and PTE_ADDR_MASK
@@ -186,9 +302,11 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
             return false
         }
 
+        val writeEnabled = writable &&
+            (!privateMapping || UserFrameReferences.isExclusive(physicalAddress))
         pt[index] = physicalAddress or PTE_USER or
             (if (accessible) PTE_PRESENT else 0uL) or
-            (if (writable) PTE_WRITABLE else 0uL) or
+            (if (writeEnabled) PTE_WRITABLE else 0uL) or
             (if (executable) 0uL else PTE_NO_EXECUTE)
         invlpg(virtualAddress)
         return true
@@ -323,11 +441,44 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
         return (entry and PTE_ADDR_MASK).takeIf { it != 0uL }
     }
 
-    fun cloneDirectory(): PageDirectory {
+    internal fun makeUserPageWritable(
+        virtualAddress: ULong,
+        privateMapping: Boolean,
+    ): Boolean {
+        if (!virtualAddress.isPageAligned() || virtualAddress >= USER_VIRTUAL_ADDRESS_LIMIT) {
+            return false
+        }
+        val pt = userPageTable(virtualAddress) ?: return false
+        val index = PageTableLevel.PT.index(virtualAddress)
+        val entry = pt[index]
+        if ((entry and PTE_USER) == 0uL || (entry and PTE_ADDR_MASK) == 0uL) {
+            return false
+        }
+        val frame = entry and PTE_ADDR_MASK
+        if ((entry and PTE_PRESENT) != 0uL && (entry and PTE_WRITABLE) != 0uL) {
+            return true
+        }
+
+        val replacement = if (privateMapping) {
+            UserFrameReferences.copyOnWrite(frame)
+        } else {
+            frame
+        } ?: return false
+        pt[index] = (entry and PTE_ADDR_MASK.inv()) or replacement or
+            PTE_PRESENT or PTE_WRITABLE
+        if (replacement != frame) {
+            UserFrameReferences.release(frame)
+        }
+        invlpg(virtualAddress)
+        return true
+    }
+
+    internal fun cloneDirectory(sharedRegions: List<MemoryRegion>): PageDirectory {
         val sourcePml4 = pml4Table()
             ?: error("Paging: source PML4 is unavailable")
         val allocatedFrames = mutableListOf<ULong>()
-        val clonedTables = mutableMapOf<ULong, ULong>()
+        val sharedFrames = mutableListOf<ULong>()
+        val modifiedPages = mutableListOf<ModifiedPage>()
 
         val clonedPml4PhysicalAddress = allocateTableFrame(allocatedFrames)
             ?: error("Paging: failed to allocate cloned PML4")
@@ -335,21 +486,29 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
             releaseTableFrames(allocatedFrames)
             error("Paging: cloned PML4 is unavailable")
         }
-        clonedTables[pml4PhysicalAddress and PTE_ADDR_MASK] = clonedPml4PhysicalAddress
+        memcpy(clonedPml4, sourcePml4, PAGE_SIZE_BYTES)
 
         for (index in 0 until KERNEL_PML4_START_INDEX) {
-            if (!cloneEntry(
-                    sourceTable = sourcePml4,
-                    destinationTable = clonedPml4,
-                    index = index,
-                    level = PageTableLevel.PML4,
-                    allocatedFrames = allocatedFrames,
-                    clonedTables = clonedTables,
-                )
-            ) {
-                releaseTableFrames(allocatedFrames)
+            val entry = sourcePml4[index]
+            if ((entry and PTE_PRESENT) == 0uL) continue
+            if ((entry and PTE_HUGE) != 0uL) {
+                rollbackClone(allocatedFrames, modifiedPages)
+                error("Paging: invalid huge-page bit in user PML4")
+            }
+            val child = cloneTable(
+                sourcePhysicalAddress = entry and PTE_ADDR_MASK,
+                level = PageTableLevel.PDPT,
+                virtualBase = index.toULong() shl PageTableLevel.PML4.shift,
+                sharedRegions = sharedRegions,
+                allocatedFrames = allocatedFrames,
+                sharedFrames = sharedFrames,
+                modifiedPages = modifiedPages,
+            )
+            if (child == null) {
+                rollbackClone(allocatedFrames, modifiedPages)
                 error("Paging: failed to clone user page-table hierarchy")
             }
+            clonedPml4[index] = replaceEntryAddress(entry, child)
         }
 
         for (index in KERNEL_PML4_START_INDEX until PTE_COUNT) {
@@ -364,90 +523,106 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
                 }
         }
 
+        UserFrameReferences.shareAll(sharedFrames)
+        if (modifiedPages.isNotEmpty() &&
+            (read_cr3() and PTE_ADDR_MASK) == pml4PhysicalAddress
+        ) {
+            bridge.write_cr3(pml4PhysicalAddress)
+        }
         return PageDirectory(clonedPml4PhysicalAddress)
     }
 
     private fun pml4Table(): CPointer<ULongVar>? = pml4PhysicalAddress.toVirtualPointer()
 
-    private fun cloneEntry(
-        sourceTable: CPointer<ULongVar>,
-        destinationTable: CPointer<ULongVar>,
-        index: Int,
+    private fun userPageTable(virtualAddress: ULong): CPointer<ULongVar>? {
+        val pml4 = pml4Table() ?: return null
+        val pml4Entry = pml4[PageTableLevel.PML4.index(virtualAddress)]
+        if (!pml4Entry.allowsUserAccess(false) || (pml4Entry and PTE_HUGE) != 0uL) {
+            return null
+        }
+        val pdpt = (pml4Entry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return null
+        val pdptEntry = pdpt[PageTableLevel.PDPT.index(virtualAddress)]
+        if (!pdptEntry.allowsUserAccess(false) || (pdptEntry and PTE_HUGE) != 0uL) {
+            return null
+        }
+        val pd = (pdptEntry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return null
+        val pdEntry = pd[PageTableLevel.PD.index(virtualAddress)]
+        if (!pdEntry.allowsUserAccess(false) || (pdEntry and PTE_HUGE) != 0uL) {
+            return null
+        }
+        return (pdEntry and PTE_ADDR_MASK).toVirtualPointer()
+    }
+
+    private fun cloneTable(
+        sourcePhysicalAddress: ULong,
         level: PageTableLevel,
+        virtualBase: ULong,
+        sharedRegions: List<MemoryRegion>,
         allocatedFrames: MutableList<ULong>,
-        clonedTables: MutableMap<ULong, ULong>,
-    ): Boolean {
-        val entry = sourceTable[index]
-        if ((entry and PTE_PRESENT) == 0uL ||
-            level != PageTableLevel.PT && (entry and PTE_HUGE) != 0uL
+        sharedFrames: MutableList<ULong>,
+        modifiedPages: MutableList<ModifiedPage>,
+    ): ULong? {
+        val source = sourcePhysicalAddress.toVirtualPointer<ULongVar>() ?: return null
+        val destinationPhysicalAddress = allocateTableFrame(allocatedFrames) ?: return null
+        val destination = destinationPhysicalAddress.toVirtualPointer<ULongVar>() ?: return null
+        memcpy(destination, source, PAGE_SIZE_BYTES)
+        for (index in 0 until PTE_COUNT) {
+            val entry = source[index]
+            val child = entry and PTE_ADDR_MASK
+            if (child == 0uL) continue
+
+            if (level == PageTableLevel.PT) {
+                if ((entry and PTE_USER) == 0uL) continue
+                val address = virtualBase + (index.toULong() shl PageTableLevel.PT.shift)
+                sharedFrames += child
+                val privateWritable = (entry and PTE_WRITABLE) != 0uL &&
+                    sharedRegions.none { address >= it.start && address < it.end }
+                if (privateWritable) {
+                    val readOnlyEntry = entry and PTE_WRITABLE.inv()
+                    source[index] = readOnlyEntry
+                    destination[index] = readOnlyEntry
+                    modifiedPages += ModifiedPage(address, entry)
+                }
+                continue
+            }
+
+            if ((entry and PTE_PRESENT) == 0uL) continue
+            if ((entry and PTE_HUGE) != 0uL) {
+                return null
+            }
+            val nextLevel = when (level) {
+                PageTableLevel.PDPT -> PageTableLevel.PD
+                PageTableLevel.PD -> PageTableLevel.PT
+                else -> return null
+            }
+            val clonedChild = cloneTable(
+                sourcePhysicalAddress = child,
+                level = nextLevel,
+                virtualBase = virtualBase + (index.toULong() shl level.shift),
+                sharedRegions = sharedRegions,
+                allocatedFrames = allocatedFrames,
+                sharedFrames = sharedFrames,
+                modifiedPages = modifiedPages,
+            ) ?: return null
+            destination[index] = replaceEntryAddress(entry, clonedChild)
+        }
+        return destinationPhysicalAddress
+    }
+
+    private fun rollbackClone(
+        allocatedFrames: List<ULong>,
+        modifiedPages: List<ModifiedPage>,
+    ) {
+        modifiedPages.asReversed().forEach { page ->
+            val table = userPageTable(page.address) ?: return@forEach
+            table[PageTableLevel.PT.index(page.address)] = page.entry
+        }
+        if (modifiedPages.isNotEmpty() &&
+            (read_cr3() and PTE_ADDR_MASK) == pml4PhysicalAddress
         ) {
-            destinationTable[index] = entry
-            return true
+            bridge.write_cr3(pml4PhysicalAddress)
         }
-
-        if (level == PageTableLevel.PT) {
-            if ((entry and PTE_USER) == 0uL) {
-                destinationTable[index] = entry
-                return true
-            }
-
-            val sourcePhysicalAddress = entry and PTE_ADDR_MASK
-            if (sourcePhysicalAddress == 0uL) {
-                println("Paging: user page entry has no frame at index=$index")
-                return false
-            }
-            val sourcePage = sourcePhysicalAddress.toVirtualPointer<UByteVar>() ?: return false
-            val clonedPhysicalAddress = allocateTableFrame(allocatedFrames) ?: return false
-            val clonedPage = clonedPhysicalAddress.toVirtualPointer<UByteVar>() ?: return false
-            memcpy(clonedPage, sourcePage, PAGE_SIZE_BYTES)
-            destinationTable[index] = replaceEntryAddress(entry, clonedPhysicalAddress)
-            return true
-        }
-
-        if (level == PageTableLevel.PML4 && (entry and PTE_HUGE) != 0uL) {
-            println("Paging: invalid huge-page bit in PML4 entry index=$index")
-            return false
-        }
-
-        val sourceChildPhysicalAddress = entry and PTE_ADDR_MASK
-        if (sourceChildPhysicalAddress == 0uL) {
-            println("Paging: present page-table entry has no frame at level=$level index=$index")
-            return false
-        }
-
-        val existingClone = clonedTables[sourceChildPhysicalAddress]
-        if (existingClone != null) {
-            destinationTable[index] = replaceEntryAddress(entry, existingClone)
-            return true
-        }
-
-        val sourceChild = sourceChildPhysicalAddress.toVirtualPointer<ULongVar>() ?: return false
-        val clonedChildPhysicalAddress = allocateTableFrame(allocatedFrames) ?: return false
-        val clonedChild = clonedChildPhysicalAddress.toVirtualPointer<ULongVar>() ?: return false
-        clonedTables[sourceChildPhysicalAddress] = clonedChildPhysicalAddress
-        destinationTable[index] = replaceEntryAddress(entry, clonedChildPhysicalAddress)
-
-        val childLevel = when (level) {
-            PageTableLevel.PML4 -> PageTableLevel.PDPT
-            PageTableLevel.PDPT -> PageTableLevel.PD
-            PageTableLevel.PD -> PageTableLevel.PT
-            PageTableLevel.PT -> return false
-        }
-
-        for (childIndex in 0 until PTE_COUNT) {
-            if (!cloneEntry(
-                    sourceTable = sourceChild,
-                    destinationTable = clonedChild,
-                    index = childIndex,
-                    level = childLevel,
-                    allocatedFrames = allocatedFrames,
-                    clonedTables = clonedTables,
-                )
-            ) {
-                return false
-            }
-        }
-        return true
+        releaseTableFrames(allocatedFrames)
     }
 
     private fun allocateTableFrame(allocatedFrames: MutableList<ULong>): ULong? {
@@ -468,6 +643,38 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
         for (index in allocatedFrames.lastIndex downTo 0) {
             BuddyFrameAllocator.freeFrames(allocatedFrames[index], 1uL)
         }
+    }
+
+    private fun collectUserTable(
+        physicalAddress: ULong,
+        level: PageTableLevel,
+        userFrames: MutableList<ULong>,
+        tableFrames: MutableList<ULong>,
+    ) {
+        val table = physicalAddress.toVirtualPointer<ULongVar>()
+            ?: error("Paging: user table is unavailable at ${physicalAddress.hex()}")
+        for (index in 0 until PTE_COUNT) {
+            val entry = table[index]
+            val child = entry and PTE_ADDR_MASK
+            if (child == 0uL) continue
+            if (level == PageTableLevel.PT) {
+                if ((entry and PTE_USER) != 0uL) userFrames += child
+                continue
+            }
+            if ((entry and PTE_PRESENT) == 0uL) continue
+            check((entry and PTE_HUGE) == 0uL) { "Paging: user huge pages are unsupported" }
+            collectUserTable(
+                physicalAddress = child,
+                level = when (level) {
+                    PageTableLevel.PDPT -> PageTableLevel.PD
+                    PageTableLevel.PD -> PageTableLevel.PT
+                    else -> error("Paging: invalid user table level $level")
+                },
+                userFrames = userFrames,
+                tableFrames = tableFrames,
+            )
+        }
+        tableFrames += physicalAddress
     }
 
     private fun replaceEntryAddress(entry: ULong, physicalAddress: ULong): ULong =

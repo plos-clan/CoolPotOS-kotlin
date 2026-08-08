@@ -2,22 +2,18 @@
 
 package org.plos_clan.cpos.module
 
-import org.plos_clan.cpos.mem.BuddyFrameAllocator
-import org.plos_clan.cpos.mem.Hhdm
-import org.plos_clan.cpos.mem.MemChunk
+import org.plos_clan.cpos.mem.MemoryRegion
 import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.mem.UserMemory
-import org.plos_clan.cpos.mem.VMA_READ
-import org.plos_clan.cpos.mem.VMA_STACK
-import org.plos_clan.cpos.mem.VMA_WRITE
-import org.plos_clan.cpos.mem.VmaType
+import org.plos_clan.cpos.mem.VirtualAddressSpace
+import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
+import org.plos_clan.cpos.mem.MEMORY_REGION_WRITABLE
+import org.plos_clan.cpos.mem.MemoryRegionType
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.KernelRandom
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.isPageAligned
-import kotlinx.cinterop.UByteVar
-import platform.posix.memset
 
 const val DEFAULT_USER_STACK_SIZE = 0x0080_0000uL
 const val DEFAULT_USER_STACK_TOP = 0x0000_7fff_ffff_f000uL
@@ -58,6 +54,7 @@ object UserStackBuilder {
         stackTop: ULong = DEFAULT_USER_STACK_TOP,
         stackSize: ULong = DEFAULT_USER_STACK_SIZE,
         randomBytes: ByteArray? = null,
+        addressSpace: VirtualAddressSpace = process.addressSpace,
     ): UserStackResult? {
         if (!validateStackRange(stackTop, stackSize)) {
             println("UserStack: invalid stack range")
@@ -65,10 +62,6 @@ object UserStackBuilder {
         }
         if (process.isKernelProcess) {
             println("UserStack: kernel process cannot own a user stack")
-            return null
-        }
-        if (!Hhdm.isReady) {
-            println("UserStack: HHDM is not initialized")
             return null
         }
         if (executable.programHeaderAddress == null) {
@@ -85,49 +78,21 @@ object UserStackBuilder {
 
         val stackStart = stackTop - stackSize
         val guardPage = stackStart - PAGE_SIZE_BYTES
-        val directory = process.vma.pageDirectory
-        var address = guardPage
-        while (address < stackTop) {
-            if (directory.resolveUserPhysicalAddress(address, false) != null) {
-                println("UserStack: stack range overlaps an existing mapping")
-                return null
-            }
-            address += PAGE_SIZE_BYTES
+        if (!addressSpace.insert(
+                MemoryRegion(
+                    start = stackStart,
+                    end = stackTop,
+                    access = MEMORY_REGION_READABLE or MEMORY_REGION_WRITABLE,
+                    name = "[stack]",
+                    type = MemoryRegionType.STACK,
+                ),
+            )
+        ) {
+            println("UserStack: stack range overlaps an existing mapping")
+            return null
         }
 
-        val mappedPages = mutableListOf<ULong>()
-        val allocatedFrames = mutableListOf<ULong>()
-        address = stackStart
-        while (address < stackTop) {
-            val physicalAddress = BuddyFrameAllocator.allocateFrames(1uL) ?: run {
-                println("UserStack: cannot allocate stack page")
-                rollback(process, mappedPages, allocatedFrames)
-                return null
-            }
-            val destination = Hhdm.toVirtualPointer<UByteVar>(physicalAddress) ?: run {
-                BuddyFrameAllocator.freeFrames(physicalAddress, 1uL)
-                rollback(process, mappedPages, allocatedFrames)
-                println("UserStack: cannot access stack page through HHDM")
-                return null
-            }
-            memset(destination, 0, PAGE_SIZE_BYTES)
-            allocatedFrames += physicalAddress
-            if (!directory.mapUserPage(
-                    virtualAddress = address,
-                    physicalAddress = physicalAddress,
-                    writable = true,
-                    executable = false,
-                )
-            ) {
-                println("UserStack: cannot map stack page")
-                rollback(process, mappedPages, allocatedFrames)
-                return null
-            }
-            mappedPages += address
-            address += PAGE_SIZE_BYTES
-        }
-
-        val writer = StackWriter(process, stackStart, stackTop)
+        val writer = StackWriter(addressSpace, stackStart, stackTop)
         val execfnAddress = writer.pushCString(executablePath)
         val argumentAddresses = arguments.map { writer.pushCString(it) }
         val environmentAddresses = environment.map { writer.pushCString(it) }
@@ -136,7 +101,7 @@ object UserStackBuilder {
             environmentAddresses.any { it == null }
         ) {
             println("UserStack: strings do not fit in the stack")
-            rollback(process, mappedPages, allocatedFrames)
+            rollback(addressSpace, stackStart, stackSize)
             return null
         }
 
@@ -146,12 +111,12 @@ object UserStackBuilder {
         )
         if (random.size != AUX_RANDOM_SIZE) {
             println("UserStack: AT_RANDOM must contain exactly $AUX_RANDOM_SIZE bytes")
-            rollback(process, mappedPages, allocatedFrames)
+            rollback(addressSpace, stackStart, stackSize)
             return null
         }
         val randomAddress = writer.push(random) ?: run {
             println("UserStack: random data does not fit in the stack")
-            rollback(process, mappedPages, allocatedFrames)
+            rollback(addressSpace, stackStart, stackSize)
             return null
         }
 
@@ -173,10 +138,10 @@ object UserStackBuilder {
         auxiliary(AT_PAGESZ, PAGE_SIZE_BYTES)
         interpreter?.let { auxiliary(AT_BASE, it.loadBias) }
         auxiliary(AT_ENTRY, executable.entryPoint)
-        auxiliary(AT_UID, 0uL)
-        auxiliary(AT_EUID, 0uL)
-        auxiliary(AT_GID, 0uL)
-        auxiliary(AT_EGID, 0uL)
+        auxiliary(AT_UID, process.ruid.toUInt().toULong())
+        auxiliary(AT_EUID, process.euid.toUInt().toULong())
+        auxiliary(AT_GID, process.rgid.toUInt().toULong())
+        auxiliary(AT_EGID, process.egid.toUInt().toULong())
         auxiliary(AT_SECURE, 0uL)
         auxiliary(AT_RANDOM, randomAddress)
         auxiliary(AT_EXECFN, execfnAddress)
@@ -184,21 +149,7 @@ object UserStackBuilder {
 
         val stackPointer = writer.pushAlignedWords(words) ?: run {
             println("UserStack: initial process vector does not fit in the stack")
-            rollback(process, mappedPages, allocatedFrames)
-            return null
-        }
-        if (!process.vma.insert(
-                MemChunk(
-                    start = stackStart,
-                    end = stackTop,
-                    flags = VMA_READ or VMA_WRITE or VMA_STACK,
-                    name = "[stack]",
-                    type = VmaType.STACK,
-                ),
-            )
-        ) {
-            println("UserStack: cannot record stack in the process VMA")
-            rollback(process, mappedPages, allocatedFrames)
+            rollback(addressSpace, stackStart, stackSize)
             return null
         }
         return UserStackResult(
@@ -219,24 +170,16 @@ object UserStackBuilder {
 
     private fun validCString(value: String): Boolean = '\u0000' !in value
 
-    private fun rollback(
-        process: Process,
-        mappedPages: List<ULong>,
-        allocatedFrames: List<ULong>,
-    ) {
-        mappedPages.asReversed().forEach(process.vma.pageDirectory::unmapPage)
-        allocatedFrames.asReversed().forEach { physicalAddress ->
-            BuddyFrameAllocator.freeFrames(physicalAddress, 1uL)
-        }
+    private fun rollback(addressSpace: VirtualAddressSpace, start: ULong, length: ULong) {
+        addressSpace.unmap(start, length)
     }
 }
 
 private class StackWriter(
-    process: Process,
+    private val addressSpace: VirtualAddressSpace,
     private val bottom: ULong,
     top: ULong,
 ) {
-    private val directory = process.vma.pageDirectory
     private var cursor = top
 
     fun pushCString(value: String): ULong? {
@@ -252,7 +195,7 @@ private class StackWriter(
             return null
         }
         val address = cursor - size
-        if (!UserMemory(directory, address).copyToUser(bytes)) {
+        if (!UserMemory(addressSpace, address).copyToUser(bytes)) {
             return null
         }
         cursor = address
@@ -274,7 +217,7 @@ private class StackWriter(
             return null
         }
         val address = (cursor - bytes.size.toULong()).alignDown(INITIAL_STACK_ALIGNMENT)
-        if (address < bottom || !UserMemory(directory, address).copyToUser(bytes)) {
+        if (address < bottom || !UserMemory(addressSpace, address).copyToUser(bytes)) {
             return null
         }
         cursor = address

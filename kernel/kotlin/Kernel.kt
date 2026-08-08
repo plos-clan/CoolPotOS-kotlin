@@ -52,7 +52,9 @@ fun kernelMain() {
         Syscall.initialize(local.lapicId.toULong(), local.isBsp)
     }
     ProcessManager.initialize()
-    Scheduler.initialize()
+    if (!Scheduler.initialize()) {
+        return
+    }
     startCapturedCloneThreads()
     Scheduler.enableScheduler()
     Cmdline.initialize()
@@ -72,6 +74,9 @@ fun kernelMain() {
     println("Kernel load done!")
     Init.setupInitProgram()
     KernelCoroutines.launchAmlEventWorker()
+    if (!Scheduler.finishBootstrap()) {
+        return
+    }
     bridge.enable_interrupt()
     KernelCoroutines.runEventLoop()
 }

@@ -2,7 +2,6 @@
 
 package org.plos_clan.cpos.tasks
 
-import bridge.get_kernel_idle_entry_address
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.fs.FileDescriptorTable
@@ -11,8 +10,7 @@ import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.KernelPageDirectory
-import org.plos_clan.cpos.mem.PageDirectory
-import org.plos_clan.cpos.mem.VMA
+import org.plos_clan.cpos.mem.VirtualAddressSpace
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
@@ -20,10 +18,6 @@ import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 private const val DEFAULT_THREAD_STACK_PAGES = 64uL
-
-private val idleThreadEntryPoint: ULong by lazy(LazyThreadSafetyMode.NONE) {
-    get_kernel_idle_entry_address()
-}
 
 enum class TaskState {
     READY,
@@ -48,7 +42,7 @@ class Thread(
 
     val nativeContext: ULong = bridge.fast_handoff_create_task(
         id.toULong(),
-        process.vma.pageDirectory.pml4PhysicalAddress,
+        process.addressSpace.pageDirectory.pml4PhysicalAddress,
         kernelStackTop,
         kernelFsBase,
     ).also { handle ->
@@ -116,13 +110,18 @@ class Thread(
         }
     }
 
+    internal fun replaceAddressSpace(addressSpace: VirtualAddressSpace): Boolean =
+        bridge.fast_handoff_replace_address_space(
+            nativeContext,
+            addressSpace.pageDirectory.pml4PhysicalAddress,
+        )
 }
 
 class Process internal constructor(
     val id: Int,
     val name: String,
     val isKernelProcess: Boolean,
-    pageDirectory: PageDirectory,
+    addressSpace: VirtualAddressSpace,
     var context: FileSystemContext?,
     var ruid: Int = 0,
     var euid: Int = 0,
@@ -136,6 +135,9 @@ class Process internal constructor(
     var processGroupId: Int = id,
     val parentId: Int = 0,
 ) {
+    var addressSpace = addressSpace
+        internal set
+
     val threads = mutableListOf<Thread>()
     var state: TaskState = TaskState.READY
     var signalMask: ULong = 0uL
@@ -145,8 +147,6 @@ class Process internal constructor(
 
     val fdTable = FileDescriptorTable()
 
-    val vma = VMA(pageDirectory)
-
     fun addThread(thread: Thread) {
         require(thread.process === this) { "Thread ${thread.id} belongs to another process" }
         if (thread in threads) {
@@ -155,7 +155,9 @@ class Process internal constructor(
         threads += thread
     }
 
-    fun getFSContext() : FileSystemContext = context!! // 不得在 FileSystemManager 初始化之前调用
+    fun getFSContext(): FileSystemContext = requireNotNull(context) {
+        "Filesystem context is unavailable before VFS initialization"
+    }
 
     fun setFilesystemUid(requested: Int?): Int {
         val previous = fsuid
@@ -181,8 +183,8 @@ class Process internal constructor(
 }
 
 object ProcessManager {
-    private var nextThreadId = AtomicInt(0)
-    private var nextProcessId = AtomicInt(0)
+    private val nextThreadId = AtomicInt(0)
+    private val nextProcessId = AtomicInt(0)
     private val process = mutableListOf<Process>()
     private val processLock = IrqSpinLock()
     private val threadTable = mutableMapOf<Int, Thread>()
@@ -198,7 +200,7 @@ object ProcessManager {
 
         val systemProcess = newProcess(
             name = "{system}",
-            pageDirectory = KernelPageDirectory.getDirectory(),
+            addressSpace = VirtualAddressSpace(KernelPageDirectory.getDirectory()),
             isKernelProcess = true,
             null
         ).also { process ->
@@ -209,11 +211,6 @@ object ProcessManager {
         bootstrapThread = newThread(systemProcess).also { thread ->
             thread.state = TaskState.RUNNING
         }
-
-        createKernelThread(
-            name = "idle",
-            entryPoint = idleThreadEntryPoint,
-        )
 
         println("ProcessManager initialized.")
     }
@@ -235,7 +232,7 @@ object ProcessManager {
 
     fun getBootstrapThread(): Thread? = bootstrapThread
 
-    fun getKernelProcess() : Process? = bootstrapThread?.process
+    fun getKernelProcess(): Process? = bootstrapThread?.process
 
     fun currentThread(): Thread? {
         val id = bridge.fast_handoff_current_task_id()
@@ -253,21 +250,23 @@ object ProcessManager {
 
     fun createUserProcess(
         name: String,
-        clone: PageDirectory? = null,
         parent: Process? = null,
-    ): Process = newProcess(
+    ): Process {
+        val addressSpace = parent?.addressSpace?.fork()
+            ?: VirtualAddressSpace(KernelPageDirectory.getDirectory().createUserDirectory())
+        val context = parent?.context?.fork() ?: FileSystemManager.kernelContext
+        val child = newProcess(
             name = name,
-            pageDirectory = clone?.cloneDirectory()
-                ?: KernelPageDirectory.getDirectory().createUserDirectory(),
+            addressSpace = addressSpace,
             isKernelProcess = false,
-            context = parent?.context?.fork() ?: FileSystemManager.kernelContext,
+            context = context,
             parentId = parent?.id ?: 0,
-        ).also { child ->
-            if (parent != null) {
-                check(parent.fdTable.copyInto(child.fdTable))
-                check(child.vma.insertAll(parent.vma.chunks))
-            }
-        }
+        )
+        if (parent == null) return child
+
+        check(parent.fdTable.copyInto(child.fdTable))
+        return child
+    }
 
     fun createUserThread(
         process: Process,
@@ -289,7 +288,6 @@ object ProcessManager {
             BuddyFrameAllocator.freeFrames(stack.physicalBase, stack.pages)
             return null
         }
-
         return newThread(
             process = process,
             kernelStackTop = stack.top,
@@ -305,7 +303,25 @@ object ProcessManager {
         }.also(Scheduler::enqueueThread)
     }
 
-    fun findProcess(pid: Int) : Process? {
+    fun installUserAddressSpace(process: Process, replacement: VirtualAddressSpace): Boolean {
+        if (process.threads.isNotEmpty()) {
+            val current = currentThread() ?: return false
+            val hasLiveSibling = process.threads.any { thread ->
+                thread !== current && thread.state != TaskState.ZOMBIE
+            }
+            if (current.process !== process || hasLiveSibling) {
+                return false
+            }
+            if (!current.replaceAddressSpace(replacement)) return false
+        }
+
+        val previous = process.addressSpace
+        process.addressSpace = replacement
+        previous.destroy()
+        return true
+    }
+
+    fun findProcess(pid: Int): Process? {
         return processLock.withLock { process.firstOrNull { it.id == pid } }
     }
 
@@ -319,31 +335,16 @@ object ProcessManager {
         }
     }
 
-    fun reapChild(parentId: Int, child: Process): Boolean = processLock.withLock {
-        if (child.parentId != parentId || child.state != TaskState.ZOMBIE) {
-            false
-        } else {
-            process.remove(child)
+    fun reapChild(parentId: Int, child: Process): Boolean {
+        val reaped = processLock.withLock {
+            child.parentId == parentId &&
+                child.state == TaskState.ZOMBIE &&
+                process.remove(child)
         }
-    }
-
-    private fun createKernelThread(
-        name: String,
-        entryPoint: ULong,
-        argument: ULong = 0uL,
-        stackPages: ULong = DEFAULT_THREAD_STACK_PAGES,
-    ): Thread? {
-        val stack = allocateKernelStack(name, stackPages) ?: return null
-
-        val process = kernelProcess ?: return null
-        return newThread(
-            process = process,
-            kernelStackTop = stack.top,
-            kernelStackPhysicalBase = stack.physicalBase,
-            kernelStackPages = stack.pages,
-        ).also { thread ->
-            thread.initializeContext(entryPoint, stack.top, argument)
-        }.also(Scheduler::enqueueThread)
+        if (reaped) {
+            child.addressSpace.destroy()
+        }
+        return reaped
     }
 
     private fun allocateKernelStack(name: String, stackPages: ULong): KernelStack? {
@@ -367,7 +368,7 @@ object ProcessManager {
 
     private fun newProcess(
         name: String,
-        pageDirectory: PageDirectory,
+        addressSpace: VirtualAddressSpace,
         isKernelProcess: Boolean,
         context: FileSystemContext?,
         parentId: Int = 0,
@@ -375,7 +376,7 @@ object ProcessManager {
         id = nextProcessId.fetchAndAdd(1),
         name = name,
         isKernelProcess = isKernelProcess,
-        pageDirectory = pageDirectory,
+        addressSpace = addressSpace,
         context,
         parentId = parentId,
     ).also { created -> processLock.withLock { process += created } }

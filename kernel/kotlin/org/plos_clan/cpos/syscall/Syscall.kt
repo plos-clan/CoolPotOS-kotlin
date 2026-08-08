@@ -189,7 +189,6 @@ object Syscall {
         }
         val result = when {
             handler == null -> {
-                if(number != 12UL) println("SYSCALL: no implement $number")
                 errno(Errno.ENOSYS)
             }
 
@@ -203,7 +202,7 @@ object Syscall {
         val bytes = ByteArray(ULong.SIZE_BYTES) { index ->
             (value shr (index * Byte.SIZE_BITS)).toByte()
         }
-        return if (UserMemory(process.vma, address).copyToUser(bytes)) {
+        return if (UserMemory(process.addressSpace, address).copyToUser(bytes)) {
             0L
         } else {
             errno(Errno.EFAULT)
@@ -211,13 +210,13 @@ object Syscall {
     }
 
     fun copyPath(process: Process, address: ULong): ByteArray? =
-        UserMemory(process.vma, address).copyCStringFromUser(PATH_MAX)
+        UserMemory(process.addressSpace, address).copyCStringFromUser(PATH_MAX)
 
     fun userMemory(process: Process, base: ULong, offset: ULong): UserMemory? {
         if (offset > ULong.MAX_VALUE - base) {
             return null
         }
-        return UserMemory(process.vma, base + offset)
+        return UserMemory(process.addressSpace, base + offset)
     }
 
     fun fileDescriptor(value: ULong): Int? =

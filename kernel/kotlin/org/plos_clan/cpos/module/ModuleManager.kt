@@ -48,6 +48,11 @@ class ModuleData internal constructor(
             copyInto(destination, 0, startIndex, destination.size)
         }
     }
+
+    internal fun addressAt(offset: Int, count: Int): CPointer<UByteVar> {
+        require(offset >= 0 && count >= 0 && offset <= size - count)
+        return requireNotNull(address + offset)
+    }
 }
 
 data class Module(val name: String, val path: String, val data: ModuleData)

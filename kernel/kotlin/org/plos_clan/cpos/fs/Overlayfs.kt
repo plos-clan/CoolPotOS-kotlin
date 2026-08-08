@@ -23,22 +23,22 @@ object Overlayfs : FileSystemType {
     }
 }
 
-private class OverlayInstance(private val options: OverlayfsOptions) : SuperBlockBackend {
+private class OverlayInstance(options: OverlayfsOptions) : SuperBlockBackend {
     private val whiteouts = mutableSetOf<Whiteout>()
-    private val inodes = mutableMapOf<Location, Inode>()
     private val root = Location(options.lower, options.upper, null, null)
 
     private fun inode(superBlock: SuperBlock, location: Location): Inode {
-        return inodes.getOrPut(location) {
-            val source = location.upper ?: location.lower ?: error("overlay inode has no layer")
-            val metadata = source.inode?.metadata() ?: error("overlay layer inode is missing")
-            val backend = when (location.type) {
-                InodeType.DIRECTORY -> DirectoryBackend(this, superBlock, location)
-                InodeType.REGULAR -> FileBackend(this, location)
-                InodeType.SYMLINK -> SymlinkBackend(location)
-                else -> UnsupportedBackend(location.type)
-            }
-            Inode(InodeId(nextInodeId++), superBlock, backend, metadata)
+        location.overlayInode?.let { return it }
+        val source = location.upper ?: location.lower ?: error("overlay inode has no layer")
+        val metadata = source.inode?.metadata() ?: error("overlay layer inode is missing")
+        val backend = when (location.type) {
+            InodeType.DIRECTORY -> DirectoryBackend(this, superBlock, location)
+            InodeType.REGULAR -> FileBackend(this, location)
+            InodeType.SYMLINK -> SymlinkBackend(location)
+            else -> UnsupportedBackend(location.type)
+        }
+        return Inode(InodeId(nextInodeId++), superBlock, backend, metadata).also {
+            location.overlayInode = it
         }
     }
 
@@ -53,9 +53,8 @@ private class OverlayInstance(private val options: OverlayfsOptions) : SuperBloc
 
     private fun entries(superBlock: SuperBlock, directory: Location): List<DirectoryEntry> {
         val names = linkedSetOf<VfsName>()
-        for (layer in listOf(directory.upper, directory.lower)) {
-            layerEntries(layer).forEach { names += it.name }
-        }
+        layerEntries(directory.upper).forEach { names += it.name }
+        layerEntries(directory.lower).forEach { names += it.name }
         return names.mapNotNull { name ->
             val child = childLocation(directory, name) ?: return@mapNotNull null
             val inode = inode(superBlock, child)
@@ -69,7 +68,7 @@ private class OverlayInstance(private val options: OverlayfsOptions) : SuperBloc
         val backend = parent.backend as? org.plos_clan.cpos.fs.DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
         val result = backend.create(parent, name, mode)
-        if (result is VfsResult.Ok) whiteouts.remove(Whiteout(directory, name))
+        if (result is VfsResult.Ok) reveal(directory, name)
         return result
     }
 
@@ -79,7 +78,7 @@ private class OverlayInstance(private val options: OverlayfsOptions) : SuperBloc
         val backend = parent.backend as? org.plos_clan.cpos.fs.DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
         val result = backend.mkdir(parent, name, mode)
-        if (result is VfsResult.Ok) whiteouts.remove(Whiteout(directory, name))
+        if (result is VfsResult.Ok) reveal(directory, name)
         return result
     }
 
@@ -89,7 +88,7 @@ private class OverlayInstance(private val options: OverlayfsOptions) : SuperBloc
         val backend = parent.backend as? org.plos_clan.cpos.fs.DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
         val result = backend.symlink(parent, name, target)
-        if (result is VfsResult.Ok) whiteouts.remove(Whiteout(directory, name))
+        if (result is VfsResult.Ok) reveal(directory, name)
         return result
     }
 
@@ -112,7 +111,13 @@ private class OverlayInstance(private val options: OverlayfsOptions) : SuperBloc
         } else VfsResult.Ok(Unit)
         if (result is VfsResult.Err) return result
         if (child.lower != null) whiteouts += Whiteout(directory, name)
+        directory.invalidate(name)
         return VfsResult.Ok(Unit)
+    }
+
+    private fun reveal(directory: Location, name: VfsName) {
+        whiteouts.remove(Whiteout(directory, name))
+        directory.invalidate(name)
     }
 
     private fun open(location: Location, inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> {
@@ -206,8 +211,14 @@ private class OverlayInstance(private val options: OverlayfsOptions) : SuperBloc
                 val count = minOf(buffer.size.toULong(), size - copied).toInt()
                 val read = sourceHandle.read(source, buffer, 0, count, position)
                 if (!read.isSuccess || read.bytesTransferred == 0) break
-                val write = destinationHandle.write(destination, buffer, 0, read.bytesTransferred,
-                    FilePosition(copied.toLong()), false)
+                val write = destinationHandle.write(
+                    destination,
+                    buffer,
+                    0,
+                    read.bytesTransferred,
+                    FilePosition(copied.toLong()),
+                    false,
+                )
                 if (!write.isSuccess || write.bytesTransferred != read.bytesTransferred) break
                 copied += read.bytesTransferred.toULong()
             }
@@ -238,13 +249,13 @@ private class OverlayInstance(private val options: OverlayfsOptions) : SuperBloc
 
     private fun childLocation(directory: Location, name: VfsName): Location? {
         if (whiteouts.contains(Whiteout(directory, name))) return null
+        directory.cached(name)?.let { return it }
         val upper = layerChild(directory.upper, name)
         val lower = layerChild(directory.lower, name)
         if (upper == null && lower == null) return null
-        val lowerForMerge = if (upper == null ||
-            (upper.inode?.type == InodeType.DIRECTORY && lower?.inode?.type == InodeType.DIRECTORY)
-        ) lower else null
-        return Location(lowerForMerge, upper, directory, name)
+        return Location(lower, upper, directory, name).also {
+            directory.cache(name, it)
+        }
     }
 
     private fun layerChild(parent: VfsPath?, name: VfsName): VfsPath? {
@@ -265,8 +276,14 @@ private class OverlayInstance(private val options: OverlayfsOptions) : SuperBloc
             is VfsResult.Err -> return emptyList()
         }
         val result = mutableListOf<DirectoryEntry>()
-        handle.iterate(inode, FilePosition()) { entry, _ -> result += entry; true }
-        handle.release()
+        try {
+            handle.iterate(inode, FilePosition()) { entry, _ ->
+                result += entry
+                true
+            }
+        } finally {
+            handle.release()
+        }
         return result
     }
 
@@ -278,8 +295,21 @@ private class OverlayInstance(private val options: OverlayfsOptions) : SuperBloc
         val parent: Location?,
         val name: VfsName?,
     ) {
+        private val children = mutableMapOf<VfsName, Location>()
+        var overlayInode: Inode? = null
+
         val type: InodeType
             get() = (upper ?: lower)?.inode?.type ?: InodeType.REGULAR
+
+        fun cached(name: VfsName): Location? = children[name]
+
+        fun cache(name: VfsName, location: Location) {
+            children[name] = location
+        }
+
+        fun invalidate(name: VfsName) {
+            children.remove(name)
+        }
     }
 
     private class DirectoryBackend(
@@ -291,7 +321,7 @@ private class OverlayInstance(private val options: OverlayfsOptions) : SuperBloc
         override fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?> =
             VfsResult.Ok(instance.child(superBlock, location, name))
         override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
-            VfsResult.Ok(Handle(instance, superBlock, location))
+            VfsResult.Ok(Handle(instance.entries(superBlock, location)))
         override fun create(directory: Inode, name: VfsName, mode: FileMode): VfsResult<Inode> =
             instance.mapResult(instance.create(location, name, mode), superBlock, location, name)
         override fun mkdir(directory: Inode, name: VfsName, mode: FileMode): VfsResult<Inode> =
@@ -305,13 +335,13 @@ private class OverlayInstance(private val options: OverlayfsOptions) : SuperBloc
     }
 
     private class Handle(
-        private val instance: OverlayInstance,
-        private val superBlock: SuperBlock,
-        private val location: Location,
+        private val entries: List<DirectoryEntry>,
     ) : OpenFileBackend {
-        override fun iterate(inode: Inode, position: FilePosition,
-            emit: (DirectoryEntry, Long) -> Boolean): VfsResult<Unit> {
-            val entries = instance.entries(superBlock, location)
+        override fun iterate(
+            inode: Inode,
+            position: FilePosition,
+            emit: (DirectoryEntry, Long) -> Boolean,
+        ): VfsResult<Unit> {
             var index = position.value.coerceAtLeast(0).toInt()
             while (index < entries.size) {
                 val next = index.toLong() + 1
@@ -323,7 +353,10 @@ private class OverlayInstance(private val options: OverlayfsOptions) : SuperBloc
         }
     }
 
-    private class FileBackend(private val instance: OverlayInstance, private val location: Location) : TruncatableBackend {
+    private class FileBackend(
+        private val instance: OverlayInstance,
+        private val location: Location,
+    ) : TruncatableBackend {
         override val type: InodeType = InodeType.REGULAR
         override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
             instance.open(location, inode, options)
@@ -336,15 +369,30 @@ private class OverlayInstance(private val options: OverlayfsOptions) : SuperBloc
         private val target: Inode,
         private val delegate: OpenFileBackend,
     ) : OpenFileBackend {
-        override fun read(inode: Inode, destination: ByteArray, destinationOffset: Int,
-            count: Int, position: FilePosition): IoResult =
+        override val immutablePageSource: Any?
+            get() = delegate.immutablePageSource
+
+        override fun read(
+            inode: Inode,
+            destination: ByteArray,
+            destinationOffset: Int,
+            count: Int,
+            position: FilePosition,
+        ): IoResult =
             delegate.read(target, destination, destinationOffset, count, position)
-        override fun write(inode: Inode, source: ByteArray, sourceOffset: Int, count: Int,
-            position: FilePosition, append: Boolean): IoResult = delegate.write(
-            target, source, sourceOffset, count, position, append
-        ).also { result ->
-            if (result.isSuccess) inode.updateMetadata { it.copy(size = target.metadata().size) }
-        }
+
+        override fun write(
+            inode: Inode,
+            source: ByteArray,
+            sourceOffset: Int,
+            count: Int,
+            position: FilePosition,
+            append: Boolean,
+        ): IoResult =
+            delegate.write(target, source, sourceOffset, count, position, append).also { result ->
+                if (result.isSuccess) inode.updateMetadata { it.copy(size = target.metadata().size) }
+            }
+
         override fun release() = delegate.release()
     }
 
@@ -371,7 +419,8 @@ private class OverlayInstance(private val options: OverlayfsOptions) : SuperBloc
         directory: Location,
         name: VfsName,
     ): VfsResult<Inode> = when (result) {
-        is VfsResult.Ok -> VfsResult.Ok(child(superBlock, directory, name) ?: result.value)
+        is VfsResult.Ok -> child(superBlock, directory, name)?.let { VfsResult.Ok(it) }
+            ?: VfsResult.Err(VfsError.IO)
         is VfsResult.Err -> result
     }
 }

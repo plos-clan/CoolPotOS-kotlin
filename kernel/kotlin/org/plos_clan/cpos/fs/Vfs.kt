@@ -306,6 +306,10 @@ interface FileContent {
 }
 
 interface OpenFileBackend {
+    /** Stable identity for immutable file pages that may be shared by mappings. */
+    val immutablePageSource: Any?
+        get() = null
+
     fun read(
         inode: Inode,
         destination: ByteArray,
@@ -506,6 +510,9 @@ class OpenFileDescription internal constructor(
 
     val offset: Long
         get() = positionLock.withLock { position.value }
+
+    internal val immutablePageSource: Any?
+        get() = backend.immutablePageSource
 
     fun getStatusFlags(): Int = positionLock.withLock { statusFlags }
 

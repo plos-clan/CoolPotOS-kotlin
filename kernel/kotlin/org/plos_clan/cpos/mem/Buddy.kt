@@ -45,12 +45,16 @@ private enum class MemmapType(
 
 object BuddyFrameAllocator {
     private const val MAX_BUDDY_ORDER = 30
+    private const val PAGE_CACHE_ORDER = 8
+    private const val PAGE_CACHE_CAPACITY = 1 shl PAGE_CACHE_ORDER
     private const val BYTES_PER_MIB = 1_048_576uL
     private const val LOW_MEMORY_GUARD = PAGE_SIZE_BYTES
 
     private val freeLists = Array(MAX_BUDDY_ORDER + 1) { linkedSetOf<ULong>() }
+    private val pageCache = ULongArray(PAGE_CACHE_CAPACITY)
     private val lock = IrqSpinLock()
 
+    private var cachedPages = 0
     private var usableFrames = 0uL
     private var initialized = false
 
@@ -98,10 +102,20 @@ object BuddyFrameAllocator {
         }
 
         val targetOrder = requiredOrder(frameCount) ?: return@withLock null
-        val sourceOrder = firstNonEmptyOrder(targetOrder) ?: return@withLock null
+        if (targetOrder == 0 && (cachedPages != 0 || refillPageCacheLocked())) {
+            usableFrames--
+            return@withLock pageCache[--cachedPages]
+        }
 
-        val blockStart = removeFirstBlock(sourceOrder) ?: return@withLock null
-        var order = sourceOrder
+        var sourceOrder = firstNonEmptyOrder(targetOrder)
+        if (sourceOrder == null && cachedPages != 0) {
+            drainPageCacheLocked()
+            sourceOrder = firstNonEmptyOrder(targetOrder)
+        }
+        val allocatedOrder = sourceOrder ?: return@withLock null
+
+        val blockStart = removeFirstBlock(allocatedOrder) ?: return@withLock null
+        var order = allocatedOrder
         while (order > targetOrder) {
             order -= 1
             val buddyStart = blockStart + (1uL shl order)
@@ -113,14 +127,31 @@ object BuddyFrameAllocator {
     }
 
     fun freeFrames(physicalAddress: ULong, frameCount: ULong): Boolean = lock.withLock {
+        freeFramesLocked(physicalAddress, frameCount)
+    }
+
+    fun freeFrames(physicalAddresses: Iterable<ULong>): Boolean = lock.withLock {
+        var succeeded = true
+        physicalAddresses.forEach { address ->
+            succeeded = freeFramesLocked(address, 1uL) && succeeded
+        }
+        succeeded
+    }
+
+    private fun freeFramesLocked(physicalAddress: ULong, frameCount: ULong): Boolean {
         if (frameCount == 0uL || !physicalAddress.isPageAligned()) {
-            return@withLock false
+            return false
         }
         if (!ensureInitializedLocked()) {
-            return@withLock false
+            return false
         }
 
-        val requestedOrder = requiredOrder(frameCount) ?: return@withLock false
+        val requestedOrder = requiredOrder(frameCount) ?: return false
+        if (requestedOrder == 0 && cachedPages < PAGE_CACHE_CAPACITY) {
+            pageCache[cachedPages++] = physicalAddress
+            usableFrames++
+            return true
+        }
         var order = requestedOrder
         var frameStart = physicalAddress / PAGE_SIZE_BYTES
 
@@ -135,7 +166,7 @@ object BuddyFrameAllocator {
 
         freeLists[order].add(frameStart)
         usableFrames += 1uL shl requestedOrder
-        true
+        return true
     }
 
     private fun analyzeMemmap(): MemmapDecision? {
@@ -222,6 +253,7 @@ object BuddyFrameAllocator {
 
     private fun reset() {
         freeLists.forEach { it.clear() }
+        cachedPages = 0
         usableFrames = 0uL
         initialized = false
     }
@@ -269,6 +301,35 @@ object BuddyFrameAllocator {
 
     private fun firstNonEmptyOrder(order: Int): Int? =
         (order..MAX_BUDDY_ORDER).firstOrNull { freeLists[it].isNotEmpty() }
+
+    private fun refillPageCacheLocked(): Boolean {
+        val sourceOrder = firstNonEmptyOrder(PAGE_CACHE_ORDER) ?: return false
+        val blockStart = removeFirstBlock(sourceOrder) ?: return false
+        var order = sourceOrder
+        while (order > PAGE_CACHE_ORDER) {
+            order--
+            freeLists[order].add(blockStart + (1uL shl order))
+        }
+        for (index in pageCache.indices) {
+            pageCache[index] = (blockStart + index.toULong()) * PAGE_SIZE_BYTES
+        }
+        cachedPages = PAGE_CACHE_CAPACITY
+        return true
+    }
+
+    private fun drainPageCacheLocked() {
+        while (cachedPages != 0) {
+            var frameStart = pageCache[--cachedPages] / PAGE_SIZE_BYTES
+            var order = 0
+            while (order < MAX_BUDDY_ORDER) {
+                val buddyStart = frameStart xor (1uL shl order)
+                if (!freeLists[order].remove(buddyStart)) break
+                frameStart = minOf(frameStart, buddyStart)
+                order++
+            }
+            freeLists[order].add(frameStart)
+        }
+    }
 
     private fun removeFirstBlock(order: Int): ULong? {
         val blockStart = freeLists[order].firstOrNull() ?: return null

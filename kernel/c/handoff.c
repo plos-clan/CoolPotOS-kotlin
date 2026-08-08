@@ -13,11 +13,16 @@ enum {
     fpu_state_size = 512,
     task_ready = 0,
     task_running = 1,
-    task_blocked = 2,
     task_zombie = 3,
     ps2_queue_capacity = 256,
     ps2_queue_mask = ps2_queue_capacity - 1,
     ps2_queue_empty = 0x100,
+};
+
+enum fast_cpu_state {
+    cpu_offline,
+    cpu_bootstrapping,
+    cpu_online,
 };
 
 typedef struct fast_task fast_task_t;
@@ -46,11 +51,12 @@ _Static_assert(
 
 typedef struct {
     fast_task_t *current;
+    fast_task_t *idle;
     fast_task_t *head;
     fast_task_t *tail;
     uint64_t queue_size;
     uint8_t is_bsp;
-    uint8_t bound;
+    enum fast_cpu_state state;
     uint8_t lock;
 } __attribute__((aligned(64))) fast_cpu_t;
 
@@ -193,7 +199,7 @@ void fast_handoff_yield(void) {
     if (!__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE)) return;
 
     const uint64_t slot = current_lapic_id() % cpu_slot_count;
-    if (!fast_cpus[slot].bound) return;
+    if (fast_cpus[slot].state == cpu_offline) return;
     __atomic_store_n(&yield_requested[slot], 1, __ATOMIC_RELEASE);
     __asm__ volatile("int $0x20" : : : "memory");
 }
@@ -244,6 +250,16 @@ static bool fast_handoff_ps2_irq(uint64_t irq_num) {
         __atomic_store_n(&ps2_queue_head, next, __ATOMIC_RELEASE);
     }
     return true;
+}
+
+static void wake_idle_worker(fast_cpu_t *cpu) {
+    fast_task_t *idle = cpu->idle;
+    if (cpu->state != cpu_online || !idle || idle == cpu->current ||
+        !__atomic_load_n(&idle->context_valid, __ATOMIC_ACQUIRE))
+        return;
+
+    task_state_store(idle, task_ready);
+    queue_push(cpu, idle);
 }
 
 uint64_t fast_handoff_create_task(
@@ -334,7 +350,6 @@ void fast_handoff_init_user_registers(
     initialize_fpu(task);
 }
 
-
 bool fast_handoff_bind_current(
     uint64_t handle,
     uint64_t lapic_id,
@@ -345,14 +360,15 @@ bool fast_handoff_bind_current(
     fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
     const uint64_t flags = interrupt_save();
     lock_cpu(cpu);
-    if (cpu->bound) {
+    if (cpu->state != cpu_offline) {
         unlock_cpu(cpu);
         interrupt_restore(flags);
         return false;
     }
     cpu->current = task;
+    cpu->idle = task;
     cpu->is_bsp = is_bsp != 0;
-    cpu->bound = 1;
+    cpu->state = cpu_bootstrapping;
     if (!task->kernel_fs_base)
         task->kernel_fs_base = rdmsr(ia32_fs_base_msr);
     task_state_store(task, task_running);
@@ -360,6 +376,21 @@ bool fast_handoff_bind_current(
     unlock_cpu(cpu);
     interrupt_restore(flags);
     return true;
+}
+
+bool fast_handoff_finish_bootstrap(uint64_t handle) {
+    fast_task_t *task = task_from_handle(handle);
+    if (!task) return false;
+
+    fast_cpu_t *cpu = &fast_cpus[current_lapic_id() % cpu_slot_count];
+    const uint64_t flags = interrupt_save();
+    lock_cpu(cpu);
+    const bool finished = cpu->state == cpu_bootstrapping &&
+        cpu->current == task && cpu->idle == task;
+    if (finished) cpu->state = cpu_online;
+    unlock_cpu(cpu);
+    interrupt_restore(flags);
+    return finished;
 }
 
 bool fast_handoff_enqueue(uint64_t handle, uint64_t lapic_id) {
@@ -382,11 +413,14 @@ void fast_handoff_set_enabled(uint8_t enabled) {
     __atomic_store_n(&handoff_enabled, enabled != 0, __ATOMIC_RELEASE);
 }
 
-uint64_t fast_handoff_queue_size(uint64_t lapic_id) {
+uint64_t fast_handoff_cpu_load(uint64_t lapic_id) {
     fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
     const uint64_t flags = interrupt_save();
     lock_cpu(cpu);
-    const uint64_t result = cpu->queue_size;
+    const uint64_t result = cpu->state != cpu_offline
+        ? cpu->queue_size +
+            (cpu->state != cpu_online || cpu->current != cpu->idle)
+        : UINT64_MAX;
     unlock_cpu(cpu);
     interrupt_restore(flags);
     return result;
@@ -424,6 +458,21 @@ uint64_t fast_handoff_current_task_id(void) {
     return id;
 }
 
+bool fast_handoff_replace_address_space(uint64_t handle, uint64_t cr3) {
+    fast_task_t *task = task_from_handle(handle);
+    if (!task || !cr3) return false;
+
+    fast_cpu_t *cpu = &fast_cpus[current_lapic_id() % cpu_slot_count];
+    const uint64_t flags = interrupt_save();
+    lock_cpu(cpu);
+    const bool current = cpu->current == task;
+    if (current) task->cr3 = cr3;
+    unlock_cpu(cpu);
+    if (current) write_cr3(cr3);
+    interrupt_restore(flags);
+    return current;
+}
+
 void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
     const uint64_t lapic_id = current_lapic_id();
     const uint64_t slot = lapic_id % cpu_slot_count;
@@ -434,10 +483,16 @@ void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
         (regs->cs & 3) == 0;
 
     if (irq_num != timer_irq) {
-        if (fast_handoff_ps2_irq(irq_num) || irq_num == spurious_irq)
+        if (fast_handoff_ps2_irq(irq_num)) {
+            lock_cpu(cpu);
+            wake_idle_worker(cpu);
+            unlock_cpu(cpu);
             lapic_eoi(irq_num);
-        else
+        } else if (irq_num == spurious_irq) {
+            lapic_eoi(irq_num);
+        } else {
             do_irq(regs, irq_num);
+        }
         return;
     }
 
@@ -446,12 +501,16 @@ void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
     const bool preemptible = (regs->cs & 3) != 0 || voluntary;
 
     if (preemptible && (!syscall_in_progress || voluntary) &&
-        __atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) && cpu->bound) {
+        __atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) &&
+        cpu->state != cpu_offline) {
         lock_cpu(cpu);
         fast_task_t *previous = cpu->current;
+        const bool previous_is_idle = cpu->state == cpu_online &&
+            previous == cpu->idle;
         if (previous) {
             save_task(previous, regs);
-            if (task_state_load(previous) == task_running &&
+            if (!previous_is_idle &&
+                task_state_load(previous) == task_running &&
                 queue_push(cpu, previous)) {
                 task_state_store(previous, task_ready);
             }
@@ -461,9 +520,15 @@ void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
         if (next && __atomic_load_n(&next->context_valid, __ATOMIC_ACQUIRE)) {
             cpu->current = next;
         } else {
-            next = previous;
+            next = previous && task_state_load(previous) == task_running
+                ? previous : NULL;
+            if (!next && cpu->state == cpu_online) next = cpu->idle;
             if (next) task_state_store(next, task_running);
+            cpu->current = next;
         }
+        if (previous_is_idle && next != previous &&
+            task_state_load(previous) == task_running)
+            task_state_store(previous, task_ready);
         unlock_cpu(cpu);
 
         if (next && __atomic_load_n(&next->context_valid, __ATOMIC_ACQUIRE)) {

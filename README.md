@@ -9,7 +9,7 @@ This project uses Gradle for kernel build, ISO packaging, and QEMU run.
 
 **Available Gradle tasks:**
 - `./gradlew build`: Build kernel ELF
-- `./gradlew prepareUserland`: Build the CachyOS SquashFS root filesystem
+- `./gradlew prepareUserland`: Build the CachyOS EROFS root filesystem
 - `./gradlew buildIso`: Build the UEFI ISO image
 - `./gradlew run`: Run the ISO image in QEMU
 - `./gradlew clean`: Clean kernel build outputs
@@ -41,18 +41,18 @@ You need to install:
 - Git and Gradle (included with Kotlin/Native)
 
 The ISO contains a zstd-compressed CachyOS x86_64 root filesystem at
-`/boot/cachyos-rootfs-x86_64.squashfs`. The build pulls a pinned official OCI
+`/boot/cachyos-rootfs-x86_64.erofs`. The build pulls the latest official OCI
 image through rootless Podman, installs the exact Bash/Coreutils runtime package
 set into an empty root through the USTC Arch Linux and CachyOS mirrors, removes
 development files, documentation, package metadata, and other build-time
-content, then emits a read-only SquashFS image. The kernel reads its metadata
-and data blocks on demand and mounts a writable tmpfs overlay above it. The
-package set and rootfs pruning rules are kept in `assets/userland.sh`; Gradle
-only invokes that script and checks its SquashFS output. Override the image with
-`-PuserlandImage=...` or `USERLAND_IMAGE`. QEMU uses
-2 GiB by default so the kernel can retain the compressed rootfs module and
-allocate the writable overlay;
-override it with `-PqemuMemory=...` or `QEMU_MEMORY`.
+content, then emits a read-only EROFS image with 1 MiB zstd pclusters, packed
+fragments, and deduplication. The kernel reads its metadata and data on demand
+and mounts a writable tmpfs overlay above it. The package set and rootfs pruning
+rules are kept in `assets/userland.sh`; Gradle only invokes that script and
+checks its EROFS output. Override the image with `-PuserlandImage=...` or
+`USERLAND_IMAGE`. QEMU uses 2 GiB by default so the kernel can retain the
+compressed rootfs module and allocate the writable overlay; override it with
+`-PqemuMemory=...` or `QEMU_MEMORY`.
 
 ## Kernel coroutines
 

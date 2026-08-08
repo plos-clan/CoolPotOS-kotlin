@@ -228,7 +228,7 @@ private class BuildConfig(private val project: Project) {
             ),
         ),
     )
-    private val rootfsName = "cachyos-rootfs-$arch.squashfs"
+    private val rootfsName = "cachyos-rootfs-$arch.erofs"
     val kernel = KernelConfig(paths, mlibc, tools, arch, debug, toolRoot)
     val userland = UserlandConfig(
         image = setting(
@@ -331,7 +331,7 @@ val downloadFreestndHeaders = tasks.register<DownloadFileTask>("downloadFreestnd
 
 val prepareUserland = tasks.register<Exec>("prepareUserland") {
     group = "build"
-    description = "Builds a zstd-compressed CachyOS SquashFS root filesystem."
+    description = "Builds a zstd-compressed CachyOS EROFS root filesystem."
 
     inputs.property("image", config.userland.image)
     inputs.property("platform", config.userland.platform)
@@ -528,7 +528,7 @@ tasks.named("build") {
 
 val stageIso = tasks.register<Sync>("stageIso") {
     group = "build"
-    description = "Stages the kernel, SquashFS root filesystem, and Limine assets into the ISO directory."
+    description = "Stages the kernel, EROFS root filesystem, and Limine assets into the ISO directory."
     dependsOn(linkKernel, prepareLimine, prepareUserland)
 
     into(config.paths.iso)

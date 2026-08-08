@@ -37,7 +37,9 @@ fun apStart() {
     }
     SMProcessor.load_done.incrementAndFetch()
     SMProcessor.currentLocal().scheduler.waitUntilEnabled()
-    Scheduler.apInitialize()
+    if (!Scheduler.apInitialize()) {
+        return
+    }
     bridge.enable_interrupt()
     while (true) {
         bridge.fast_handoff_park_kotlin()

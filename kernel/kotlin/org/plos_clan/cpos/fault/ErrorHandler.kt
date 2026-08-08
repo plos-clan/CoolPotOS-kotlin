@@ -6,7 +6,7 @@ import bridge.read_cr2
 import bridge.read_cr3
 import bridge.register_interrupt_handler
 import kotlinx.cinterop.*
-import org.plos_clan.cpos.mem.VmaFaultResult
+import org.plos_clan.cpos.mem.PageFaultResult
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.utils.InterruptFrame
@@ -23,6 +23,7 @@ private const val PAGE_FAULT_VECTOR: UShort = 14u
 private const val PAGE_FAULT_PRESENT = 0x01uL
 private const val PAGE_FAULT_WRITE = 0x02uL
 private const val PAGE_FAULT_USER = 0x04uL
+private const val PAGE_FAULT_RESERVED = 0x08uL
 private const val PAGE_FAULT_INSTRUCTION = 0x10uL
 
 private data class StackWindow(val rsp: ULong) {
@@ -106,16 +107,20 @@ fun pageFault(frame: COpaquePointer?, ecode: ULong, interruptedRbp: ULong) {
     val interruptFrame = InterruptFrame(requireNotNull(frame).reinterpret())
     val cameFromUser = (ecode and PAGE_FAULT_USER) != 0uL &&
         (interruptFrame.cs and 0x3uL) == 0x3uL
-    if (cameFromUser && (ecode and PAGE_FAULT_PRESENT) == 0uL) {
+    val canResolve = (ecode and PAGE_FAULT_RESERVED) == 0uL &&
+        ((ecode and PAGE_FAULT_PRESENT) == 0uL ||
+            (ecode and PAGE_FAULT_WRITE) != 0uL ||
+            (ecode and PAGE_FAULT_INSTRUCTION) != 0uL)
+    if (cameFromUser && canResolve) {
         val resolution = ProcessManager.currentProcess()
             ?.takeUnless { it.isKernelProcess }
-            ?.vma
+            ?.addressSpace
             ?.faultIn(
                 address = read_cr2(),
                 write = (ecode and PAGE_FAULT_WRITE) != 0uL,
                 execute = (ecode and PAGE_FAULT_INSTRUCTION) != 0uL,
             )
-        if (resolution == VmaFaultResult.RESOLVED) {
+        if (resolution == PageFaultResult.RESOLVED) {
             return
         }
         println("PageFault: demand paging failed: $resolution")

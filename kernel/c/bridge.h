@@ -8,7 +8,6 @@ extern "C" {
 #endif
 
 extern volatile struct limine_framebuffer_request framebuffer_request;
-extern volatile struct limine_stack_size_request stack_size_request;
 extern volatile struct limine_hhdm_request hhdm_request;
 extern volatile struct limine_memmap_request memmap_request;
 extern volatile struct limine_mp_request mp_request;
@@ -87,14 +86,16 @@ bool fast_handoff_bind_current(
     uint64_t lapic_id,
     uint8_t is_bsp
 );
+bool fast_handoff_finish_bootstrap(uint64_t task);
 bool fast_handoff_enqueue(uint64_t task, uint64_t lapic_id);
 void fast_handoff_set_enabled(uint8_t enabled);
-uint64_t fast_handoff_queue_size(uint64_t lapic_id);
+uint64_t fast_handoff_cpu_load(uint64_t lapic_id);
 uint8_t fast_handoff_task_state(uint64_t task);
 void fast_handoff_set_task_state(uint64_t task, uint8_t state);
 uint8_t fast_handoff_task_is_queued(uint64_t task);
 uint8_t fast_handoff_task_has_context(uint64_t task);
 uint64_t fast_handoff_current_task_id(void);
+bool fast_handoff_replace_address_space(uint64_t task, uint64_t cr3);
 bool runtime_vm_add_region(void *base, size_t size);
 void runtime_clock_configure_hpet(void *base, uint64_t period_femtoseconds);
 extern void (*ap_start_ptr)(struct limine_mp_info *);

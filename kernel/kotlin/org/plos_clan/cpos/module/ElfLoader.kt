@@ -1,31 +1,25 @@
-@file:OptIn(ExperimentalForeignApi::class)
-
 package org.plos_clan.cpos.module
 
-import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.UByteVar
-import kotlinx.cinterop.addressOf
-import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.fs.AccessMode
 import org.plos_clan.cpos.fs.FileSystemManager
+import org.plos_clan.cpos.fs.OpenFileDescription
 import org.plos_clan.cpos.fs.OpenOptions
 import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsResult
-import org.plos_clan.cpos.mem.BuddyFrameAllocator
-import org.plos_clan.cpos.mem.Hhdm
-import org.plos_clan.cpos.mem.MemChunk
-import org.plos_clan.cpos.mem.PageDirectory
+import org.plos_clan.cpos.mem.KernelPageDirectory
+import org.plos_clan.cpos.mem.MemoryRegion
 import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
-import org.plos_clan.cpos.mem.VMA_EXEC
-import org.plos_clan.cpos.mem.VMA_READ
-import org.plos_clan.cpos.mem.VMA_WRITE
-import org.plos_clan.cpos.mem.VmaType
+import org.plos_clan.cpos.mem.VirtualAddressSpace
+import org.plos_clan.cpos.mem.MEMORY_REGION_EXECUTABLE
+import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
+import org.plos_clan.cpos.mem.MEMORY_REGION_WRITABLE
+import org.plos_clan.cpos.mem.MemoryRegionBacking
+import org.plos_clan.cpos.mem.MemoryRegionType
 import org.plos_clan.cpos.tasks.Process
+import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.alignUp
-import platform.posix.memcpy
-import platform.posix.memset
 
 private const val ELF64_HEADER_SIZE = 64
 private const val ELF64_PROGRAM_HEADER_SIZE = 56
@@ -42,28 +36,9 @@ private const val PROGRAM_TYPE_PHDR = 6u
 private const val PROGRAM_FLAG_EXECUTABLE = 0x1u
 private const val PROGRAM_FLAG_WRITABLE = 0x2u
 private const val PROGRAM_FLAG_READABLE = 0x4u
+private const val EIO = 5
 
 const val DEFAULT_INTERPRETER_LOAD_BIAS = 0x0000_1000_0000_0000uL
-
-enum class ElfObjectType {
-    EXECUTABLE,
-    DYNAMIC,
-}
-
-data class ElfImageInfo(
-    val type: ElfObjectType,
-    val entryPoint: ULong,
-    val programHeaderOffset: ULong,
-    val programHeaderEntrySize: UShort,
-    val programHeaderCount: UShort,
-    val interpreterPath: String?,
-) {
-    val isPositionIndependent: Boolean
-        get() = type == ElfObjectType.DYNAMIC
-
-    val requiresInterpreter: Boolean
-        get() = interpreterPath != null
-}
 
 data class ElfLoadResult(
     val entryPoint: ULong,
@@ -72,7 +47,6 @@ data class ElfLoadResult(
     val programHeaderAddress: ULong?,
     val programHeaderEntrySize: UShort,
     val programHeaderCount: UShort,
-    val requiresInterpreter: Boolean,
 )
 
 data class ElfInterpreterLoadResult(
@@ -90,183 +64,127 @@ data class UserProcessImage(
 )
 
 object ElfLoader {
-    fun inspect(data: ByteArray): ElfImageInfo? {
-        val image = parseImage(data, reportErrors = true) ?: return null
-        return inspectImage(data, image, reportErrors = true)
-    }
-
-    fun isDynamic(data: ByteArray): Boolean =
-        parseImage(data, reportErrors = false)?.let { image ->
-            inspectImage(data, image, reportErrors = false)?.requiresInterpreter
-        } ?: false
-
     fun loadProcess(
         path: String,
         process: Process,
         arguments: List<String> = listOf(path),
         environment: List<String> = emptyList(),
     ): UserProcessImage? {
-        val data = readFile(path) ?: return null
-        val info = inspect(data) ?: return null
-        process.vma.clear()
+        val addressSpace = VirtualAddressSpace(KernelPageDirectory.getDirectory().createUserDirectory())
+        var installed = false
+        try {
+            val executableFile = open(process, path) ?: return null
 
-        val executable = loadExecutorElf(
-            data = data,
-            directory = process.vma.pageDirectory,
-            process = process,
-        ) ?: return null
-        var entryPoint = executable.entryPoint
-        val interpreter = if (info.requiresInterpreter) {
-            loadInterpreterElf(
-                executableData = data,
-                directory = process.vma.pageDirectory,
-                process = process,
-            ) ?: return null
-        } else {
-            null
-        }
-        if (interpreter != null) entryPoint = interpreter.entryPoint
+            val executable = try {
+                loadImage(executableFile, addressSpace, path, 0uL)
+            } finally {
+                executableFile.file.release()
+            } ?: return null
 
-        val stack = UserStackBuilder.build(
-            process = process,
-            arguments = arguments.ifEmpty { listOf(path) },
-            environment = environment,
-            executablePath = path,
-            executable = executable,
-            interpreter = interpreter,
-        ) ?: return null
-        return UserProcessImage(entryPoint, stack.stackPointer)
-    }
-
-    fun loadInterpreterElf(
-        executableData: ByteArray,
-        directory: PageDirectory,
-        offset: ULong = DEFAULT_INTERPRETER_LOAD_BIAS,
-        process: Process? = null,
-    ): ElfInterpreterLoadResult? {
-        val executableInfo = inspect(executableData) ?: return null
-        val path = executableInfo.interpreterPath ?: run {
-            println("ELF: executable does not request an interpreter")
-            return null
-        }
-        val interpreterData = readFile(path) ?: return null
-        val interpreterInfo = inspect(interpreterData) ?: run {
-            println("ELF: interpreter $path is not a valid ELF64 image")
-            return null
-        }
-        if (interpreterInfo.type != ElfObjectType.DYNAMIC) {
-            println("ELF: interpreter $path is not an ET_DYN image")
-            return null
-        }
-
-        val loaded = loadExecutorElf(
-            data = interpreterData,
-            directory = directory,
-            offset = offset,
-            process = process,
-        ) ?: return null
-        return ElfInterpreterLoadResult(
-            path = path,
-            loadBias = offset,
-            image = loaded,
-        )
-    }
-
-    fun loadExecutorElf(
-        data: ByteArray,
-        directory: PageDirectory,
-        offset: ULong = 0uL,
-        process: Process? = null,
-    ): ElfLoadResult? {
-        if (process != null &&
-            process.vma.pageDirectory.pml4PhysicalAddress != directory.pml4PhysicalAddress
-        ) {
-            println("ELF: process and target page directory do not match")
-            return null
-        }
-        if (!Hhdm.isReady) {
-            println("ELF: HHDM is not initialized")
-            return null
-        }
-
-        val image = parseImage(data, reportErrors = true) ?: return null
-        val imageInfo = inspectImage(data, image, reportErrors = true) ?: return null
-
-        val segments = mutableListOf<LoadSegment>()
-        for (programHeader in image.programHeaders) {
-            if (programHeader.type != PROGRAM_TYPE_LOAD || programHeader.memorySize == 0uL) {
-                continue
+            val interpreter = executableFile.image.interpreterPath?.let { interpreterPath ->
+                val interpreterFile = open(process, interpreterPath) ?: return null
+                try {
+                    if (interpreterFile.image.type != ElfObjectType.DYNAMIC) {
+                        println("ELF: interpreter $interpreterPath is not ET_DYN")
+                        return null
+                    }
+                    loadImage(
+                        file = interpreterFile,
+                        addressSpace = addressSpace,
+                        name = interpreterPath,
+                        loadBias = DEFAULT_INTERPRETER_LOAD_BIAS,
+                    )?.let { loaded ->
+                        ElfInterpreterLoadResult(
+                            path = interpreterPath,
+                            loadBias = DEFAULT_INTERPRETER_LOAD_BIAS,
+                            image = loaded,
+                        )
+                    }
+                } finally {
+                    interpreterFile.file.release()
+                }
             }
-            val segment = validateLoadSegment(data.size, programHeader, offset) ?: return null
-            segments += segment
+            if (executableFile.image.interpreterPath != null && interpreter == null) return null
+
+            val stack = UserStackBuilder.build(
+                process = process,
+                arguments = arguments.ifEmpty { listOf(path) },
+                environment = environment,
+                executablePath = path,
+                executable = executable,
+                interpreter = interpreter,
+                addressSpace = addressSpace,
+            ) ?: return null
+
+            if (!ProcessManager.installUserAddressSpace(process, addressSpace)) return null
+            installed = true
+            return UserProcessImage(
+                entryPoint = interpreter?.entryPoint ?: executable.entryPoint,
+                stackPointer = stack.stackPointer,
+            )
+        } finally {
+            if (!installed) addressSpace.destroy()
+        }
+    }
+
+    private fun open(process: Process, path: String): ElfFile? {
+        val file = when (
+            val result = FileSystemManager.vfs.open(
+                context = process.getFSContext(),
+                pathname = VfsPathname.fromString(path),
+                options = OpenOptions(access = AccessMode.READ),
+            )
+        ) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> {
+                println("ELF: cannot open $path: ${result.error}")
+                return null
+            }
+        }
+        val image = parseImage(file, path) ?: run {
+            file.release()
+            return null
+        }
+        return ElfFile(file, image)
+    }
+
+    private fun loadImage(
+        file: ElfFile,
+        addressSpace: VirtualAddressSpace,
+        name: String,
+        loadBias: ULong,
+    ): ElfLoadResult? {
+        val segments = file.image.programHeaders.mapNotNull { header ->
+            if (header.type != PROGRAM_TYPE_LOAD || header.memorySize == 0uL) {
+                null
+            } else {
+                validateLoadSegment(file.file.inode.metadata().size, header, loadBias)
+                    ?: return null
+            }
         }
         if (segments.isEmpty()) {
-            println("ELF: image has no loadable segment")
+            println("ELF: $name has no loadable segment")
             return null
         }
 
-        val entryPoint = checkedAdd(image.header.entryPoint, offset) ?: run {
-            println("ELF: entry point overflows")
-            return null
-        }
+        val entryPoint = checkedAdd(file.image.header.entryPoint, loadBias) ?: return null
         if (entryPoint >= USER_VIRTUAL_ADDRESS_LIMIT ||
-            segments.none {
-                it.executable && entryPoint >= it.start && entryPoint < it.end
-            }
+            segments.none { it.executable && entryPoint >= it.start && entryPoint < it.end }
         ) {
             println("ELF: entry point is outside executable segments")
             return null
         }
 
         val pages = planPages(segments)
-        if (pages.keys.any { directory.resolveUserPhysicalAddress(it, false) != null }) {
-            println("ELF: loadable segment overlaps an existing user mapping")
-            return null
+        val backing = ElfBacking(file.file, segments)
+        val regions = pageRegions(pages, name, backing)
+        val inserted = try {
+            addressSpace.insertAll(regions)
+        } finally {
+            backing.release()
         }
-
-        val allocatedFrames = mutableListOf<ULong>()
-        val mappedPages = mutableListOf<ULong>()
-        for ((virtualAddress, page) in pages) {
-            val physicalAddress = BuddyFrameAllocator.allocateFrames(1uL) ?: run {
-                println("ELF: cannot allocate a segment page")
-                rollback(directory, mappedPages, allocatedFrames)
-                return null
-            }
-            val destination = Hhdm.toVirtualPointer<UByteVar>(physicalAddress) ?: run {
-                BuddyFrameAllocator.freeFrames(physicalAddress, 1uL)
-                rollback(directory, mappedPages, allocatedFrames)
-                println("ELF: cannot access a segment page through HHDM")
-                return null
-            }
-            memset(destination, 0, PAGE_SIZE_BYTES)
-            page.physicalAddress = physicalAddress
-            allocatedFrames += physicalAddress
-
-            if (!directory.mapUserPage(
-                    virtualAddress = virtualAddress,
-                    physicalAddress = physicalAddress,
-                    writable = page.writable,
-                    executable = page.executable,
-                )
-            ) {
-                println("ELF: cannot map segment page at $virtualAddress")
-                rollback(directory, mappedPages, allocatedFrames)
-                return null
-            }
-            mappedPages += virtualAddress
-        }
-
-        for (segment in segments) {
-            if (!copySegmentData(data, segment, pages) || !zeroSegmentBss(segment, pages)) {
-                println("ELF: cannot populate a loadable segment")
-                rollback(directory, mappedPages, allocatedFrames)
-                return null
-            }
-        }
-
-        if (process != null && !process.vma.insertAll(pageChunks(pages, process.name))) {
-            println("ELF: cannot record loadable segments in the process VMA")
-            rollback(directory, mappedPages, allocatedFrames)
+        if (!inserted) {
+            println("ELF: loadable segments overlap an existing mapping")
             return null
         }
 
@@ -276,233 +194,132 @@ object ElfLoader {
             entryPoint = entryPoint,
             loadStart = loadStart,
             loadSize = loadEnd - loadStart,
-            programHeaderAddress = programHeaderAddress(image, segments, offset),
-            programHeaderEntrySize = image.header.programHeaderEntrySize,
-            programHeaderCount = image.header.programHeaderCount,
-            requiresInterpreter = imageInfo.requiresInterpreter,
+            programHeaderAddress = programHeaderAddress(file.image, segments, loadBias),
+            programHeaderEntrySize = file.image.header.programHeaderEntrySize,
+            programHeaderCount = file.image.header.programHeaderCount,
         )
     }
 
-    private fun inspectImage(
-        data: ByteArray,
-        image: ElfImage,
-        reportErrors: Boolean,
-    ): ElfImageInfo? {
-        fun reject(message: String): ElfImageInfo? {
-            if (reportErrors) {
-                println("ELF: $message")
-            }
-            return null
-        }
-
-        val type = when (image.header.type.toUInt()) {
-            ELF_TYPE_EXECUTABLE -> ElfObjectType.EXECUTABLE
-            ELF_TYPE_SHARED_OBJECT -> ElfObjectType.DYNAMIC
-            else -> return reject("unsupported object type ${image.header.type}")
-        }
-        val interpreterHeaders = image.programHeaders.filter {
-            it.type == PROGRAM_TYPE_INTERPRETER
-        }
-        if (interpreterHeaders.size > 1) {
-            return reject("image contains more than one PT_INTERP segment")
-        }
-
-        val interpreterPath = interpreterHeaders.firstOrNull()?.let { header ->
-            if (header.fileSize < 2uL ||
-                !fitsInImage(header.fileOffset, header.fileSize, data.size)
-            ) {
-                return reject("PT_INTERP data is truncated")
-            }
-            val start = header.fileOffset.toInt()
-            val end = start + header.fileSize.toInt()
-            if (data[end - 1] != 0.toByte()) {
-                return reject("PT_INTERP path is not null-terminated")
-            }
-            val pathBytes = data.copyOfRange(start, end - 1)
-            if (pathBytes.isEmpty() ||
-                pathBytes[0] != '/'.code.toByte() ||
-                pathBytes.any { byte -> byte == 0.toByte() }
-            ) {
-                return reject("PT_INTERP path is invalid")
-            }
-            pathBytes.decodeToString()
-        }
-
-        return ElfImageInfo(
-            type = type,
-            entryPoint = image.header.entryPoint,
-            programHeaderOffset = image.header.programHeaderOffset,
-            programHeaderEntrySize = image.header.programHeaderEntrySize,
-            programHeaderCount = image.header.programHeaderCount,
-            interpreterPath = interpreterPath,
-        )
-    }
-
-    internal fun readFile(path: String): ByteArray? {
-        val context = FileSystemManager.kernelContext ?: run {
-            println("ELF: VFS is not initialized")
-            return null
-        }
-        val file = when (
-            val result = FileSystemManager.vfs.open(
-                context = context,
-                pathname = VfsPathname.fromString(path),
-                options = OpenOptions(access = AccessMode.READ),
-            )
-        ) {
-            is VfsResult.Ok -> result.value
-            is VfsResult.Err -> {
-                println("ELF: cannot open interpreter $path: ${result.error}")
-                return null
-            }
-        }
-
-        try {
-            val size = file.inode.metadata().size
-            if (size > Int.MAX_VALUE.toULong()) {
-                println("ELF: interpreter $path is too large")
-                return null
-            }
-            val data = ByteArray(size.toInt())
-            var offset = 0
-            while (offset < data.size) {
-                val result = file.read(data, offset, data.size - offset)
-                if (!result.isSuccess) {
-                    println("ELF: cannot read interpreter $path: ${result.error}")
-                    return null
-                }
-                if (result.bytesTransferred == 0) {
-                    println("ELF: unexpected EOF while reading interpreter $path")
-                    return null
-                }
-                offset += result.bytesTransferred
-            }
-            return data
-        } finally {
-            file.release()
-        }
-    }
-
-    private fun parseImage(data: ByteArray, reportErrors: Boolean): ElfImage? {
+    private fun parseImage(file: OpenFileDescription, path: String): ElfImage? {
         fun reject(message: String): ElfImage? {
-            if (reportErrors) {
-                println("ELF: $message")
-            }
+            println("ELF: $path: $message")
             return null
         }
 
-        if (data.size < ELF64_HEADER_SIZE) {
-            return reject("header is truncated")
-        }
-        if (data[0].toUByte() != 0x7fu.toUByte() ||
-            data[1] != 'E'.code.toByte() ||
-            data[2] != 'L'.code.toByte() ||
-            data[3] != 'F'.code.toByte()
-        ) {
-            return reject("invalid magic")
-        }
-        if (data[4].toUByte().toUInt() != ELF_CLASS_64 ||
-            data[5].toUByte().toUInt() != ELF_DATA_LITTLE_ENDIAN ||
-            data[6].toUByte().toUInt() != ELF_VERSION_CURRENT
-        ) {
-            return reject("unsupported class, byte order, or identification version")
-        }
+        val size = file.inode.metadata().size
+        val headerData = readExact(file, 0uL, ELF64_HEADER_SIZE)
+            ?: return reject("header is truncated")
+        if (headerData[0].toUByte() != 0x7fu.toUByte() ||
+            headerData[1] != 'E'.code.toByte() ||
+            headerData[2] != 'L'.code.toByte() ||
+            headerData[3] != 'F'.code.toByte()
+        ) return reject("invalid magic")
+        if (headerData[4].toUByte().toUInt() != ELF_CLASS_64 ||
+            headerData[5].toUByte().toUInt() != ELF_DATA_LITTLE_ENDIAN ||
+            headerData[6].toUByte().toUInt() != ELF_VERSION_CURRENT
+        ) return reject("unsupported class, byte order, or version")
 
         val header = ElfHeader(
-            type = data.readU16(16),
-            machine = data.readU16(18),
-            version = data.readU32(20),
-            entryPoint = data.readU64(24),
-            programHeaderOffset = data.readU64(32),
-            headerSize = data.readU16(52),
-            programHeaderEntrySize = data.readU16(54),
-            programHeaderCount = data.readU16(56),
+            type = headerData.readU16(16),
+            machine = headerData.readU16(18),
+            version = headerData.readU32(20),
+            entryPoint = headerData.readU64(24),
+            programHeaderOffset = headerData.readU64(32),
+            headerSize = headerData.readU16(52),
+            programHeaderEntrySize = headerData.readU16(54),
+            programHeaderCount = headerData.readU16(56),
         )
+        val type = when (header.type.toUInt()) {
+            ELF_TYPE_EXECUTABLE -> ElfObjectType.EXECUTABLE
+            ELF_TYPE_SHARED_OBJECT -> ElfObjectType.DYNAMIC
+            else -> return reject("unsupported object type ${header.type}")
+        }
         if (header.machine.toUInt() != ELF_MACHINE_X86_64 ||
             header.version != ELF_VERSION_CURRENT ||
             header.headerSize.toInt() != ELF64_HEADER_SIZE ||
             header.programHeaderEntrySize.toInt() != ELF64_PROGRAM_HEADER_SIZE
-        ) {
-            return reject("unsupported machine, version, or header layout")
-        }
+        ) return reject("unsupported machine, version, or header layout")
 
-        val tableSize = header.programHeaderCount.toULong() *
-            header.programHeaderEntrySize.toULong()
-        if (header.programHeaderCount > 0u && header.programHeaderOffset == 0uL) {
-            return reject("program header table has no offset")
-        }
-        if (!fitsInImage(header.programHeaderOffset, tableSize, data.size)) {
-            return reject("program header table is truncated")
-        }
-
-        val programHeaders = ArrayList<ProgramHeader>(header.programHeaderCount.toInt())
-        var cursor = header.programHeaderOffset.toInt()
-        repeat(header.programHeaderCount.toInt()) {
-            programHeaders += ProgramHeader(
-                type = data.readU32(cursor),
-                flags = data.readU32(cursor + 4),
-                fileOffset = data.readU64(cursor + 8),
-                virtualAddress = data.readU64(cursor + 16),
-                fileSize = data.readU64(cursor + 32),
-                memorySize = data.readU64(cursor + 40),
-                alignment = data.readU64(cursor + 48),
+        val tableSize = header.programHeaderCount.toULong() * ELF64_PROGRAM_HEADER_SIZE.toULong()
+        if (header.programHeaderCount > 0u && header.programHeaderOffset == 0uL ||
+            !fitsInFile(header.programHeaderOffset, tableSize, size)
+        ) return reject("program header table is truncated")
+        val table = readExact(file, header.programHeaderOffset, tableSize.toInt())
+            ?: return reject("cannot read program header table")
+        val programHeaders = List(header.programHeaderCount.toInt()) { index ->
+            val cursor = index * ELF64_PROGRAM_HEADER_SIZE
+            ProgramHeader(
+                type = table.readU32(cursor),
+                flags = table.readU32(cursor + 4),
+                fileOffset = table.readU64(cursor + 8),
+                virtualAddress = table.readU64(cursor + 16),
+                fileSize = table.readU64(cursor + 32),
+                memorySize = table.readU64(cursor + 40),
+                alignment = table.readU64(cursor + 48),
             )
-            cursor += ELF64_PROGRAM_HEADER_SIZE
         }
-        return ElfImage(header, programHeaders)
+        val interpreters = programHeaders.filter { it.type == PROGRAM_TYPE_INTERPRETER }
+        if (interpreters.size > 1) return reject("more than one PT_INTERP segment")
+        val interpreterPath = interpreters.firstOrNull()?.let { interpreter ->
+            if (interpreter.fileSize < 2uL ||
+                interpreter.fileSize > Int.MAX_VALUE.toULong() ||
+                !fitsInFile(interpreter.fileOffset, interpreter.fileSize, size)
+            ) return reject("PT_INTERP is invalid")
+            val bytes = readExact(file, interpreter.fileOffset, interpreter.fileSize.toInt())
+                ?: return reject("cannot read PT_INTERP")
+            if (bytes.last() != 0.toByte()) return reject("PT_INTERP is not null-terminated")
+            val pathBytes = bytes.copyOf(bytes.lastIndex)
+            if (pathBytes.isEmpty() || pathBytes.first() != '/'.code.toByte() ||
+                pathBytes.any { it == 0.toByte() }
+            ) return reject("PT_INTERP path is invalid")
+            pathBytes.decodeToString()
+        }
+        return ElfImage(header, programHeaders, type, interpreterPath)
     }
 
     private fun validateLoadSegment(
-        imageSize: Int,
-        programHeader: ProgramHeader,
-        offset: ULong,
+        imageSize: ULong,
+        header: ProgramHeader,
+        loadBias: ULong,
     ): LoadSegment? {
-        if (programHeader.fileSize > programHeader.memorySize) {
-            println("ELF: segment file size exceeds memory size")
-            return null
-        }
-        if (!fitsInImage(programHeader.fileOffset, programHeader.fileSize, imageSize)) {
-            println("ELF: segment data is truncated")
-            return null
-        }
-        val start = checkedAdd(programHeader.virtualAddress, offset) ?: run {
-            println("ELF: segment address overflows")
-            return null
-        }
-        val alignment = programHeader.alignment
-        if (alignment > 1uL &&
-            (!alignment.isPowerOfTwo() || start % alignment != programHeader.fileOffset % alignment)
+        if (header.fileSize > header.memorySize ||
+            !fitsInFile(header.fileOffset, header.fileSize, imageSize)
         ) {
-            println("ELF: invalid segment alignment or load offset")
+            println("ELF: invalid load segment size")
             return null
         }
-        val end = checkedAdd(start, programHeader.memorySize) ?: run {
-            println("ELF: segment size overflows")
-            return null
-        }
+        val start = checkedAdd(header.virtualAddress, loadBias) ?: return null
+        val end = checkedAdd(start, header.memorySize) ?: return null
         if (start >= USER_VIRTUAL_ADDRESS_LIMIT || end > USER_VIRTUAL_ADDRESS_LIMIT) {
-            println("ELF: segment lies outside the user address space")
+            println("ELF: load segment is outside userspace")
             return null
         }
-
+        if (header.alignment > 1uL &&
+            (!header.alignment.isPowerOfTwo() ||
+                start % header.alignment != header.fileOffset % header.alignment)
+        ) {
+            println("ELF: invalid load segment alignment")
+            return null
+        }
         return LoadSegment(
-            header = programHeader,
+            header = header,
             start = start,
             end = end,
-            writable = (programHeader.flags and PROGRAM_FLAG_WRITABLE) != 0u,
-            executable = (programHeader.flags and PROGRAM_FLAG_EXECUTABLE) != 0u,
+            executable = (header.flags and PROGRAM_FLAG_EXECUTABLE) != 0u,
         )
     }
 
-    private fun planPages(segments: List<LoadSegment>): LinkedHashMap<ULong, PagePlan> {
+    private fun planPages(segments: List<LoadSegment>): Map<ULong, PagePlan> {
         val pages = linkedMapOf<ULong, PagePlan>()
         for (segment in segments) {
             var address = segment.start.alignDown(PAGE_SIZE_BYTES)
             val end = segment.end.alignUp(PAGE_SIZE_BYTES)
             while (address < end) {
-                val page = pages.getOrPut(address) { PagePlan() }
-                page.readable = page.readable || (segment.vmaFlags and VMA_READ) != 0uL
-                page.writable = page.writable || segment.writable
+                val page = pages.getOrPut(address, ::PagePlan)
+                page.readable = page.readable ||
+                    (segment.header.flags and PROGRAM_FLAG_READABLE) != 0u
+                page.writable = page.writable ||
+                    (segment.header.flags and PROGRAM_FLAG_WRITABLE) != 0u
                 page.executable = page.executable || segment.executable
                 address += PAGE_SIZE_BYTES
             }
@@ -510,120 +327,117 @@ object ElfLoader {
         return pages
     }
 
-    private fun pageChunks(pages: Map<ULong, PagePlan>, name: String): List<MemChunk> {
-        val result = mutableListOf<MemChunk>()
-        for ((address, page) in pages.entries.sortedBy { it.key }) {
-            val flags =
-                (if (page.readable) VMA_READ else 0uL) or
-                    (if (page.writable) VMA_WRITE else 0uL) or
-                    (if (page.executable) VMA_EXEC else 0uL)
-            val previous = result.lastOrNull()
-            if (previous != null && previous.end == address && previous.flags == flags) {
+    private fun pageRegions(
+        pages: Map<ULong, PagePlan>,
+        name: String,
+        backing: MemoryRegionBacking,
+    ): List<MemoryRegion> {
+        val regions = mutableListOf<MemoryRegion>()
+        for ((address, page) in pages) {
+            val access =
+                (if (page.readable) MEMORY_REGION_READABLE else 0uL) or
+                    (if (page.writable) MEMORY_REGION_WRITABLE else 0uL) or
+                    (if (page.executable) MEMORY_REGION_EXECUTABLE else 0uL)
+            val previous = regions.lastOrNull()
+            if (previous != null && previous.end == address && previous.access == access) {
                 previous.end += PAGE_SIZE_BYTES
             } else {
-                result += MemChunk(
+                regions += MemoryRegion(
                     start = address,
                     end = address + PAGE_SIZE_BYTES,
-                    flags = flags,
+                    access = access,
                     name = name,
-                    type = VmaType.IMAGE,
+                    type = MemoryRegionType.IMAGE,
+                    offset = address,
+                    backing = backing,
                 )
             }
         }
-        return result
-    }
-
-    private fun copySegmentData(
-        data: ByteArray,
-        segment: LoadSegment,
-        pages: Map<ULong, PagePlan>,
-    ): Boolean {
-        if (segment.header.fileSize == 0uL) {
-            return true
-        }
-
-        var sourceOffset = segment.header.fileOffset.toInt()
-        var destinationAddress = segment.start
-        var remaining = segment.header.fileSize.toInt()
-        var success = true
-        data.usePinned { source ->
-            while (remaining > 0) {
-                val pageAddress = destinationAddress.alignDown(PAGE_SIZE_BYTES)
-                val pageOffset = destinationAddress - pageAddress
-                val page = pages[pageAddress]
-                val physicalAddress = page?.physicalAddress
-                if (physicalAddress == null) {
-                    success = false
-                    return@usePinned
-                }
-                val count = minOf(remaining, (PAGE_SIZE_BYTES - pageOffset).toInt())
-                val destination =
-                    Hhdm.toVirtualPointer<UByteVar>(physicalAddress + pageOffset)
-                if (destination == null) {
-                    success = false
-                    return@usePinned
-                }
-                memcpy(destination, source.addressOf(sourceOffset), count.toULong())
-                sourceOffset += count
-                destinationAddress += count.toULong()
-                remaining -= count
-            }
-        }
-        return success
-    }
-
-    private fun zeroSegmentBss(
-        segment: LoadSegment,
-        pages: Map<ULong, PagePlan>,
-    ): Boolean {
-        var destinationAddress = segment.start + segment.header.fileSize
-        var remaining = segment.header.memorySize - segment.header.fileSize
-        while (remaining > 0uL) {
-            val pageAddress = destinationAddress.alignDown(PAGE_SIZE_BYTES)
-            val pageOffset = destinationAddress - pageAddress
-            val physicalAddress = pages[pageAddress]?.physicalAddress ?: return false
-            val count = minOf(remaining, PAGE_SIZE_BYTES - pageOffset)
-            val destination =
-                Hhdm.toVirtualPointer<UByteVar>(physicalAddress + pageOffset) ?: return false
-            memset(destination, 0, count)
-            destinationAddress += count
-            remaining -= count
-        }
-        return true
+        return regions
     }
 
     private fun programHeaderAddress(
         image: ElfImage,
         segments: List<LoadSegment>,
-        offset: ULong,
+        loadBias: ULong,
     ): ULong? {
-        image.programHeaders.firstOrNull { it.type == PROGRAM_TYPE_PHDR }?.let { phdr ->
-            return checkedAdd(phdr.virtualAddress, offset)
+        image.programHeaders.firstOrNull { it.type == PROGRAM_TYPE_PHDR }?.let { header ->
+            return checkedAdd(header.virtualAddress, loadBias)
         }
-
-        val tableStart = image.header.programHeaderOffset
         val tableSize = image.header.programHeaderCount.toULong() *
             image.header.programHeaderEntrySize.toULong()
-        val tableEnd = checkedAdd(tableStart, tableSize) ?: return null
-        val containingSegment = segments.firstOrNull { segment ->
-            val fileEnd = checkedAdd(segment.header.fileOffset, segment.header.fileSize)
+        val tableEnd = checkedAdd(image.header.programHeaderOffset, tableSize) ?: return null
+        val segment = segments.firstOrNull {
+            val fileEnd = checkedAdd(it.header.fileOffset, it.header.fileSize)
                 ?: return@firstOrNull false
-            tableStart >= segment.header.fileOffset && tableEnd <= fileEnd
+            image.header.programHeaderOffset >= it.header.fileOffset && tableEnd <= fileEnd
         } ?: return null
-        return containingSegment.start + (tableStart - containingSegment.header.fileOffset)
+        return segment.start + (image.header.programHeaderOffset - segment.header.fileOffset)
     }
 
-    private fun rollback(
-        directory: PageDirectory,
-        mappedPages: List<ULong>,
-        allocatedFrames: List<ULong>,
-    ) {
-        mappedPages.asReversed().forEach(directory::unmapPage)
-        allocatedFrames.asReversed().forEach { physicalAddress ->
-            BuddyFrameAllocator.freeFrames(physicalAddress, 1uL)
+    private fun readExact(
+        file: OpenFileDescription,
+        fileOffset: ULong,
+        count: Int,
+    ): ByteArray? {
+        val data = ByteArray(count)
+        var copied = 0
+        while (copied < count) {
+            val result = file.readAt(
+                fileOffset = fileOffset + copied.toULong(),
+                destination = data,
+                offset = copied,
+                count = count - copied,
+            )
+            if (!result.isSuccess || result.bytesTransferred == 0) return null
+            copied += result.bytesTransferred
         }
+        return data
     }
 }
+
+private class ElfBacking(
+    private val file: OpenFileDescription,
+    private val segments: List<LoadSegment>,
+) : MemoryRegionBacking() {
+    init {
+        check(file.retain())
+    }
+
+    override val immutablePageSource: Any?
+        get() = file.immutablePageSource
+
+    override fun read(offset: ULong, destination: ByteArray): Int {
+        val end = checkedAdd(offset, destination.size.toULong()) ?: return -EIO
+        for (segment in segments) {
+            val fileEnd = checkedAdd(segment.start, segment.header.fileSize) ?: return -EIO
+            val start = maxOf(offset, segment.start)
+            val segmentEnd = minOf(end, fileEnd)
+            if (start >= segmentEnd) continue
+            val count = (segmentEnd - start).toInt()
+            val result = file.readAt(
+                fileOffset = segment.header.fileOffset + (start - segment.start),
+                destination = destination,
+                offset = (start - offset).toInt(),
+                count = count,
+            )
+            if (!result.isSuccess || result.bytesTransferred != count) return -EIO
+        }
+        return destination.size
+    }
+
+    override fun close() = file.release()
+}
+
+private enum class ElfObjectType {
+    EXECUTABLE,
+    DYNAMIC,
+}
+
+private data class ElfFile(
+    val file: OpenFileDescription,
+    val image: ElfImage,
+)
 
 private data class ElfHeader(
     val type: UShort,
@@ -649,48 +463,38 @@ private data class ProgramHeader(
 private data class ElfImage(
     val header: ElfHeader,
     val programHeaders: List<ProgramHeader>,
+    val type: ElfObjectType,
+    val interpreterPath: String?,
 )
 
 private data class LoadSegment(
     val header: ProgramHeader,
     val start: ULong,
     val end: ULong,
-    val writable: Boolean,
     val executable: Boolean,
-) {
-    val vmaFlags: ULong
-        get() =
-            (if ((header.flags and PROGRAM_FLAG_READABLE) != 0u) VMA_READ else 0uL) or
-                (if (writable) VMA_WRITE else 0uL) or
-                (if (executable) VMA_EXEC else 0uL)
-}
+)
 
 private data class PagePlan(
     var readable: Boolean = false,
     var writable: Boolean = false,
     var executable: Boolean = false,
-    var physicalAddress: ULong? = null,
 )
 
 private fun checkedAdd(left: ULong, right: ULong): ULong? =
     if (left > ULong.MAX_VALUE - right) null else left + right
 
-private fun fitsInImage(offset: ULong, size: ULong, imageSize: Int): Boolean =
-    offset <= imageSize.toULong() && size <= imageSize.toULong() - offset
+private fun fitsInFile(offset: ULong, size: ULong, fileSize: ULong): Boolean =
+    offset <= fileSize && size <= fileSize - offset
 
-private fun ULong.isPowerOfTwo(): Boolean = this != 0uL && (this and (this - 1uL)) == 0uL
+private fun ULong.isPowerOfTwo(): Boolean =
+    this != 0uL && (this and (this - 1uL)) == 0uL
 
 private fun ByteArray.readU16(offset: Int): UShort =
-    (readUnsigned(offset) or (readUnsigned(offset + 1) shl 8)).toUShort()
+    ((this[offset].toInt() and 0xff) or
+        ((this[offset + 1].toInt() and 0xff) shl Byte.SIZE_BITS)).toUShort()
 
 private fun ByteArray.readU32(offset: Int): UInt =
-    (0 until UInt.SIZE_BYTES).fold(0u) { value, index ->
-        value or (readUnsigned(offset + index).toUInt() shl (index * Byte.SIZE_BITS))
-    }
+    readU16(offset).toUInt() or (readU16(offset + UShort.SIZE_BYTES).toUInt() shl 16)
 
 private fun ByteArray.readU64(offset: Int): ULong =
-    (0 until ULong.SIZE_BYTES).fold(0uL) { value, index ->
-        value or (readUnsigned(offset + index) shl (index * Byte.SIZE_BITS))
-    }
-
-private fun ByteArray.readUnsigned(offset: Int): ULong = this[offset].toUByte().toULong()
+    readU32(offset).toULong() or (readU32(offset + UInt.SIZE_BYTES).toULong() shl 32)

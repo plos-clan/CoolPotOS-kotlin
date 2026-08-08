@@ -281,7 +281,7 @@ fun sysPipe2(regs: PtraceRegisters, process: Process): Long {
         bytes.writeI32LE(0, readFd)
         bytes.writeI32LE(Int.SIZE_BYTES, writeFd)
     }
-    if (!UserMemory(process.vma, regs[PtraceRegisters.IDX_RDI]).copyToUser(output)) {
+    if (!UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI]).copyToUser(output)) {
         process.fdTable.close(readFd)
         process.fdTable.close(writeFd)
         return errno(Errno.EFAULT)
@@ -524,7 +524,7 @@ fun sysNewfstatat(regs: PtraceRegisters, process: Process): Long {
         }
     }
     val inode = target.inode ?: return errno(Errno.ENOENT)
-    return if (UserMemory(process.vma, regs[PtraceRegisters.IDX_RDX]).copyToUser(
+    return if (UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDX]).copyToUser(
             LinuxStat(inode).toNativeBytes(),
         )
     ) {
@@ -571,7 +571,7 @@ fun sysFstat(regs: PtraceRegisters, process: Process): Long {
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
     return try {
         val data = LinuxStat(file.inode).toNativeBytes()
-        if (UserMemory(process.vma, regs[PtraceRegisters.IDX_RSI]).copyToUser(data)) {
+        if (UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI]).copyToUser(data)) {
             0L
         } else {
             errno(Errno.EFAULT)
@@ -589,7 +589,7 @@ fun sysGetdents64(regs: PtraceRegisters, process: Process): Long {
 
     val capacity = minOf(requested, IO_CHUNK_SIZE.toULong()).toInt()
     if (capacity < DIRENT64_MIN_SIZE) return errno(Errno.EINVAL)
-    val user = UserMemory(process.vma, regs[PtraceRegisters.IDX_RSI])
+    val user = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
     if (!user.isWritable(capacity)) return errno(Errno.EFAULT)
 
     val output = ByteArray(capacity)
@@ -640,7 +640,7 @@ private fun statPath(
         is VfsResult.Err -> return errno(result.error.errno)
     }
     val inode = path.inode ?: return errno(Errno.ENOENT)
-    return if (UserMemory(process.vma, statAddress).copyToUser(LinuxStat(inode).toNativeBytes())) {
+    return if (UserMemory(process.addressSpace, statAddress).copyToUser(LinuxStat(inode).toNativeBytes())) {
         0L
     } else {
         errno(Errno.EFAULT)
@@ -771,7 +771,7 @@ fun sysPoll(regs: PtraceRegisters, process: Process): Long {
     val count = countValue.toInt()
     val byteCount = count * POLL_FD_SIZE
     val userFds = UserMemory(
-        process.vma,
+        process.addressSpace,
         regs[PtraceRegisters.IDX_RDI],
     )
     val descriptors = userFds.copyFromUser(byteCount)
@@ -862,17 +862,17 @@ fun sysPselect6(regs: PtraceRegisters, process: Process): Long {
 
 private fun copyFdSet(process: Process, address: ULong, size: Int): ByteArray? =
     if (address == 0uL || size == 0) ByteArray(size)
-    else UserMemory(process.vma, address).copyFromUser(size)
+    else UserMemory(process.addressSpace, address).copyFromUser(size)
 
 private fun copyFdSet(process: Process, address: ULong, value: ByteArray, size: Int): Boolean =
-    address == 0uL || size == 0 || UserMemory(process.vma, address).copyToUser(value)
+    address == 0uL || size == 0 || UserMemory(process.addressSpace, address).copyToUser(value)
 
 private data class SelectTimeout(val seconds: Long, val nanoseconds: Long) {
     val isZero: Boolean get() = seconds == 0L && nanoseconds == 0L
 }
 
 private fun readPselectTimeout(process: Process, address: ULong): VfsResult<SelectTimeout> {
-    val bytes = UserMemory(process.vma, address).copyFromUser(TimeSpec.NATIVE_SIZE)
+    val bytes = UserMemory(process.addressSpace, address).copyFromUser(TimeSpec.NATIVE_SIZE)
         ?: return VfsResult.Err(VfsError.FAULT)
     val value = TimeSpec(0, 0)
     if (!value.updateFromNativeBytes(bytes)) return VfsResult.Err(VfsError.FAULT)
@@ -883,13 +883,13 @@ private fun readPselectTimeout(process: Process, address: ULong): VfsResult<Sele
 }
 
 private fun readPselectSignalMask(process: Process, address: ULong): VfsResult<ULong> {
-    val descriptor = UserMemory(process.vma, address).copyFromUser(ULong.SIZE_BYTES * 2)
+    val descriptor = UserMemory(process.addressSpace, address).copyFromUser(ULong.SIZE_BYTES * 2)
         ?: return VfsResult.Err(VfsError.FAULT)
     val signalSet = descriptor.readU64LE(0)
     val size = descriptor.readU64LE(ULong.SIZE_BYTES)
     if (signalSet == 0uL) return VfsResult.Ok(process.signalMask)
     if (size != ULong.SIZE_BYTES.toULong()) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-    val mask = UserMemory(process.vma, signalSet).copyFromUser(ULong.SIZE_BYTES)
+    val mask = UserMemory(process.addressSpace, signalSet).copyFromUser(ULong.SIZE_BYTES)
         ?: return VfsResult.Err(VfsError.FAULT)
     return VfsResult.Ok(mask.readU64LE(0))
 }
@@ -1123,7 +1123,7 @@ fun sysReadv(regs: PtraceRegisters, process: Process): Long {
 
         val vectorCount = vectorCountValue.toInt()
         val vectors = UserMemory(
-            process.vma,
+            process.addressSpace,
             regs[PtraceRegisters.IDX_RSI],
         ).copyFromUser(vectorCount * IO_VECTOR_SIZE)
             ?: return errno(Errno.EFAULT)
@@ -1191,7 +1191,7 @@ fun sysWritev(regs: PtraceRegisters, process: Process): Long {
 
         val vectorCount = vectorCountValue.toInt()
         val vectors = UserMemory(
-            process.vma,
+            process.addressSpace,
             regs[PtraceRegisters.IDX_RSI],
         ).copyFromUser(vectorCount * IO_VECTOR_SIZE)
             ?: return errno(Errno.EFAULT)
@@ -1270,7 +1270,7 @@ fun sysIoctl(regs: PtraceRegisters, process: Process): Long {
         file.ioctl(
             command = regs[PtraceRegisters.IDX_RSI].toInt(),
             args = UserMemory(
-                process.vma,
+                process.addressSpace,
                 regs[PtraceRegisters.IDX_RDX],
             ),
         )
@@ -1302,7 +1302,7 @@ fun sysGetCWD(regs: PtraceRegisters, process: Process): Long {
     }
 
     if (!UserMemory(
-            process.vma,
+            process.addressSpace,
             userAddress,
         ).copyToUser(result)
     ) {

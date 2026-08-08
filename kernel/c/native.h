@@ -84,7 +84,6 @@ typedef struct cpu_local {
 } cpu_local_t;
 
 extern cpu_local_t locals[cpu_slot_count];
-extern uint64_t kernel_runtime_fs_base;
 extern uint64_t kernel_runtime_fs_bases[cpu_slot_count];
 
 void setup_simd(void);
@@ -94,6 +93,8 @@ void do_irq(void *regs, uint64_t irq_num);
 void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num);
 void fast_handoff_yield(void);
 void fast_handoff_park_kotlin(void);
+bool fast_handoff_finish_bootstrap(uint64_t task);
+bool fast_handoff_replace_address_space(uint64_t task, uint64_t cr3);
 bool capture_sys_clone_context(uint64_t stack, uint64_t tls);
 uint64_t allocate_runtime_tid(void);
 uint64_t create_kernel_runtime_tcb(void);

@@ -4,12 +4,11 @@ package org.plos_clan.cpos.syscall
 
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.InodeType
-import org.plos_clan.cpos.mem.VMA_EXEC
-import org.plos_clan.cpos.mem.VMA_READ
-import org.plos_clan.cpos.mem.VMA_WRITE
-import org.plos_clan.cpos.mem.VmaMapRequest
-import org.plos_clan.cpos.mem.VmaResult
-import org.plos_clan.cpos.mem.VmaType
+import org.plos_clan.cpos.mem.MEMORY_REGION_ACCESS_MASK
+import org.plos_clan.cpos.mem.MemoryRegionBacking
+import org.plos_clan.cpos.mem.MemoryMapRequest
+import org.plos_clan.cpos.mem.MemoryMapResult
+import org.plos_clan.cpos.mem.MemoryRegionType
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.tasks.Process
@@ -40,14 +39,30 @@ private const val PROT_READ = 0x1uL
 private const val PROT_WRITE = 0x2uL
 private const val PROT_EXEC = 0x4uL
 
-private fun mmapResult(result: VmaResult<ULong>): Long = when (result) {
-    is VmaResult.Ok -> result.value.toLong()
-    is VmaResult.Err -> errno(result.errno)
+private class MappedFile(private val file: org.plos_clan.cpos.fs.OpenFileDescription) : MemoryRegionBacking() {
+    init {
+        check(file.retain())
+    }
+
+    override val immutablePageSource: Any?
+        get() = file.immutablePageSource
+
+    override fun read(offset: ULong, destination: ByteArray): Int {
+        val result = file.readAt(offset, destination)
+        return if (result.isSuccess) result.bytesTransferred else result.raw.toInt()
+    }
+
+    override fun close() = file.release()
 }
 
-private fun vmaStatus(result: VmaResult<Unit>): Long = when (result) {
-    is VmaResult.Ok -> 0L
-    is VmaResult.Err -> errno(result.errno)
+private fun mmapResult(result: MemoryMapResult<ULong>): Long = when (result) {
+    is MemoryMapResult.Ok -> result.value.toLong()
+    is MemoryMapResult.Err -> errno(result.errno)
+}
+
+private fun memoryMapStatus(result: MemoryMapResult<Unit>): Long = when (result) {
+    is MemoryMapResult.Ok -> 0L
+    is MemoryMapResult.Err -> errno(result.errno)
 }
 
 fun sysMprotect(regs: PtraceRegisters, process: Process): Long {
@@ -55,18 +70,18 @@ fun sysMprotect(regs: PtraceRegisters, process: Process): Long {
     if ((protection and SUPPORTED_PROT.inv()) != 0uL) {
         return errno(Errno.EINVAL)
     }
-    return vmaStatus(
-        process.vma.protect(
+    return memoryMapStatus(
+        process.addressSpace.protect(
             address = regs[PtraceRegisters.IDX_RDI],
             length = regs[PtraceRegisters.IDX_RSI],
-            access = protection and (VMA_READ or VMA_WRITE or VMA_EXEC),
+            access = protection and MEMORY_REGION_ACCESS_MASK,
         ),
     )
 }
 
 fun sysMunmap(regs: PtraceRegisters, process: Process): Long =
-    vmaStatus(
-        process.vma.unmap(
+    memoryMapStatus(
+        process.addressSpace.unmap(
             address = regs[PtraceRegisters.IDX_RDI],
             length = regs[PtraceRegisters.IDX_RSI],
         ),
@@ -117,15 +132,15 @@ fun sysMmap(regs: PtraceRegisters, process: Process): Long {
 
     if (anonymous) {
         return mmapResult(
-            process.vma.map(
-                VmaMapRequest(
+            process.addressSpace.map(
+                MemoryMapRequest(
                     hint = hint,
                     length = length,
                     access = access,
                     fixed = fixed,
                     noReplace = noReplace,
                     shared = shared,
-                    type = VmaType.ANONYMOUS,
+                    type = MemoryRegionType.ANONYMOUS,
                     populate = (flags and (MAP_POPULATE or MAP_LOCKED)) != 0uL,
                 ),
             ),
@@ -148,24 +163,27 @@ fun sysMmap(regs: PtraceRegisters, process: Process): Long {
             return errno(Errno.ENOTSUP)
         }
 
-        return mmapResult(
-            process.vma.map(
-                VmaMapRequest(
-                    hint = hint,
-                    length = length,
-                    access = access,
-                    fixed = fixed,
-                    noReplace = noReplace,
-                    shared = shared,
-                    type = VmaType.FILE,
-                    offset = offset,
-                    pageReader = { pageOffset, destination ->
-                        val result = file.readAt(pageOffset, destination)
-                        if (result.isSuccess) result.bytesTransferred else result.raw.toInt()
-                    },
+        val backing = MappedFile(file)
+        return try {
+            mmapResult(
+                process.addressSpace.map(
+                    MemoryMapRequest(
+                        hint = hint,
+                        length = length,
+                        access = access,
+                        fixed = fixed,
+                        noReplace = noReplace,
+                        shared = shared,
+                        type = MemoryRegionType.FILE,
+                        offset = offset,
+                        backing = backing,
+                        populate = (flags and (MAP_POPULATE or MAP_LOCKED)) != 0uL,
+                    ),
                 ),
-            ),
-        )
+            )
+        } finally {
+            backing.release()
+        }
     } finally {
         file.release()
     }

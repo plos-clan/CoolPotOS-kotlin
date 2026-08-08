@@ -127,7 +127,7 @@ fun sysReboot(regs: PtraceRegisters, process: Process): Long {
 }
 
 fun sysUname(regs: PtraceRegisters, process: Process): Long {
-    val userBuffer = UserMemory(process.vma, regs[PtraceRegisters.IDX_RDI])
+    val userBuffer = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI])
 
     val utsName = UtsName(
         sysname = "CoolPotOS",

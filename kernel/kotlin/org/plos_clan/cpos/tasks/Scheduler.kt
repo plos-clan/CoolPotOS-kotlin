@@ -10,7 +10,6 @@ import kotlin.concurrent.atomics.ExperimentalAtomicApi
 class PerCpuScheduler {
     var bootstrapThread: Thread? = null
     val scheduled = AtomicBoolean(false)
-    var initialized = false
 
     fun waitUntilEnabled() {
         while (!scheduled.load()) {
@@ -20,7 +19,6 @@ class PerCpuScheduler {
 }
 
 object Scheduler {
-    private val scheduled = AtomicBoolean(false)
     private val nextCpuIndex = AtomicInt(0)
     private val schedulingCpus by lazy(LazyThreadSafetyMode.NONE) {
         SMProcessor.locals.values.sortedWith(
@@ -32,15 +30,9 @@ object Scheduler {
     fun enableScheduler() {
         prepareApBootstrapThreads()
         bridge.fast_handoff_set_enabled(1u.toUByte())
-        scheduled.store(true)
         SMProcessor.locals.values.forEach { local ->
             local.scheduler.scheduled.store(true)
         }
-    }
-
-    fun disableScheduler() {
-        bridge.fast_handoff_set_enabled(0u.toUByte())
-        scheduled.store(false)
     }
 
     fun enqueueThread(thread: Thread) {
@@ -59,27 +51,26 @@ object Scheduler {
         )
     }
 
-    fun apInitialize() {
-        initializeCurrentCpu(
-            SMProcessor.currentLocal().scheduler.bootstrapThread,
-            false,
-        )
+    fun apInitialize(): Boolean {
+        val thread = SMProcessor.currentLocal().scheduler.bootstrapThread
+        return initializeCurrentCpu(thread, false) && finishBootstrap()
     }
 
-    fun initialize() {
+    fun initialize(): Boolean =
         initializeCurrentCpu(ProcessManager.getBootstrapThread(), true)
+
+    fun finishBootstrap(): Boolean {
+        val local = SMProcessor.currentLocal()
+        val thread = local.scheduler.bootstrapThread ?: return false
+        return bridge.fast_handoff_finish_bootstrap(thread.nativeContext)
     }
 
-    private fun initializeCurrentCpu(bootstrapThread: Thread?, isBsp: Boolean) {
+    private fun initializeCurrentCpu(bootstrapThread: Thread?, isBsp: Boolean): Boolean {
         val local = SMProcessor.currentLocal()
         val localScheduler = local.scheduler
-        if (localScheduler.initialized) {
-            return
-        }
-
         val thread = bootstrapThread ?: run {
             println("Scheduler: core ${local.lapicId} has no bootstrap thread")
-            return
+            return false
         }
         if (!bridge.fast_handoff_bind_current(
                 thread.nativeContext,
@@ -88,19 +79,15 @@ object Scheduler {
             )
         ) {
             println("Scheduler: cannot bind bootstrap thread on core ${local.lapicId}")
-            return
+            return false
         }
 
         localScheduler.bootstrapThread = thread
-        localScheduler.initialized = true
-        localScheduler.scheduled.store(true)
 
         if (isBsp) {
-            println(
-                "Scheduler: initialized policy=RRS-fast-handoff " +
-                    "core=${local.lapicId} queue=${bridge.fast_handoff_queue_size(local.lapicId.toULong())}",
-            )
+            println("Scheduler: initialized policy=RRS-fast-handoff core=${local.lapicId}")
         }
+        return true
     }
 
     private fun prepareApBootstrapThreads() {
@@ -119,7 +106,20 @@ object Scheduler {
             return SMProcessor.currentLocal()
         }
 
-        val index = nextCpuIndex.fetchAndAdd(1).toUInt() % schedulingCpus.size.toUInt()
-        return schedulingCpus[index.toInt()]
+        val start = (nextCpuIndex.fetchAndAdd(1).toUInt() % schedulingCpus.size.toUInt()).toInt()
+        var selected = schedulingCpus[start]
+        var selectedLoad = bridge.fast_handoff_cpu_load(selected.lapicId.toULong())
+        if (selectedLoad == 0uL) return selected
+
+        for (offset in 1 until schedulingCpus.size) {
+            val candidate = schedulingCpus[(start + offset) % schedulingCpus.size]
+            val load = bridge.fast_handoff_cpu_load(candidate.lapicId.toULong())
+            if (load < selectedLoad) {
+                selected = candidate
+                selectedLoad = load
+                if (load == 0uL) break
+            }
+        }
+        return selected
     }
 }

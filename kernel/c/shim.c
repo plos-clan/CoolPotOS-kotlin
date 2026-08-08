@@ -11,23 +11,12 @@
 #endif
 
 extern void *realloc(void *ptr, size_t size);
-extern void free(void *);
-int get_nprocs(void);
-int __fxstat(int version, int fd, void *statbuf);
-int isnan(double x);
-int __unorddf2(double a, double b);
-void _ZdlPv(void *ptr);
-void _ZdlPvm(void *ptr, size_t size);
-void _ZdlPvj(void *ptr, unsigned int size);
-int __pthread_key_create(uint32_t *key, void (*destructor)(void *));
 
-uint64_t kernel_runtime_fs_base;
 uint64_t kernel_runtime_fs_bases[cpu_slot_count];
 
 void set_kernel_runtime_fs_base(uint64_t pointer) {
     uint32_t eax = 1, ebx;
     __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx) : "c"(0) : "edx", "memory");
-    kernel_runtime_fs_base = pointer;
     kernel_runtime_fs_bases[ebx >> 24] = pointer;
 }
 
@@ -60,9 +49,6 @@ void _ZdlPv(void *ptr) { free(ptr); }
 void _ZdaPv(void *ptr) __attribute__((alias("_ZdlPv")));
 void _ZdlPvm(void *ptr, size_t size) { (void)size; free(ptr); }
 void _ZdaPvm(void *ptr, size_t size) __attribute__((alias("_ZdlPvm")));
-void _ZdlPvj(void *ptr, unsigned int size) { (void)size; free(ptr); }
-void _ZdaPvj(void *ptr, unsigned int size) __attribute__((alias("_ZdlPvj")));
-
 #define DEFINE_CR_READER(reg) \
     uint64_t read_cr##reg(void) { \
         uint64_t value; \

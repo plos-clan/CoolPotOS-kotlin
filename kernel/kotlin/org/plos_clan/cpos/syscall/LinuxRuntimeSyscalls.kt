@@ -109,7 +109,7 @@ object LinuxRuntimeSyscalls {
     }
 
     fun nanoSleep(regs: PtraceRegisters, process: Process): Long {
-        val source = UserMemory(process.vma, regs[PtraceRegisters.IDX_RDI])
+        val source = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI])
         val bytes = source.copyFromUser(TimeSpec.NATIVE_SIZE) ?: return Syscall.errno(Errno.EFAULT)
         val time = TimeSpec(0, 0).also { require(it.updateFromNativeBytes(bytes)) }
         if (time.sec < 0 || time.nsec !in 0 until NS_PER_SECOND.toLong()) {
@@ -179,7 +179,7 @@ object LinuxRuntimeSyscalls {
         val replacement = if (regs[PtraceRegisters.IDX_RDX] == 0uL) {
             null
         } else {
-            val bytes = UserMemory(process.vma, regs[PtraceRegisters.IDX_RDX])
+            val bytes = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDX])
                 .copyFromUser(ResourceLimitValue.NATIVE_SIZE)
                 ?: return Syscall.errno(Errno.EFAULT)
             val soft = bytes.readU64LE(0)
@@ -189,7 +189,7 @@ object LinuxRuntimeSyscalls {
         }
         val current = target.resourceLimits.get(resource)
         if (regs[PtraceRegisters.IDX_R10] != 0uL &&
-            !UserMemory(process.vma, regs[PtraceRegisters.IDX_R10]).copyToUser(
+            !UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_R10]).copyToUser(
                 ResourceLimitValue(current).toNativeBytes(),
             )
         ) {
@@ -209,13 +209,13 @@ object LinuxRuntimeSyscalls {
         val action = if (regs[PtraceRegisters.IDX_RSI] == 0uL) {
             null
         } else {
-            UserMemory(process.vma, regs[PtraceRegisters.IDX_RSI]).copyFromUser(SIGACTION_SIZE)
+            UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI]).copyFromUser(SIGACTION_SIZE)
                 ?: return Syscall.errno(Errno.EFAULT)
         }
         val oldAddress = regs[PtraceRegisters.IDX_RDX]
         if (oldAddress != 0uL) {
             val old = process.signalActions[index] ?: ByteArray(SIGACTION_SIZE)
-            if (!UserMemory(process.vma, oldAddress).copyToUser(old)) {
+            if (!UserMemory(process.addressSpace, oldAddress).copyToUser(old)) {
                 return Syscall.errno(Errno.EFAULT)
             }
         }
@@ -234,7 +234,7 @@ object LinuxRuntimeSyscalls {
         }
         val setAddress = regs[PtraceRegisters.IDX_RSI]
         if (setAddress == 0uL) return 0L
-        val set = UserMemory(process.vma, setAddress).copyFromUser(ULong.SIZE_BYTES)
+        val set = UserMemory(process.addressSpace, setAddress).copyFromUser(ULong.SIZE_BYTES)
             ?: return Syscall.errno(Errno.EFAULT)
         val mask = set.readU64LE(0)
         process.signalMask = when (regs[PtraceRegisters.IDX_RDI].toInt()) {
@@ -258,7 +258,7 @@ object LinuxRuntimeSyscalls {
     private fun clockNow(): ULong? = Hpet.nanoTime().takeIf { Hpet.isReady }
 
     private fun copyToUser(process: Process, address: ULong, bytes: ByteArray): Long =
-        if (UserMemory(process.vma, address).copyToUser(bytes)) 0L else Syscall.errno(Errno.EFAULT)
+        if (UserMemory(process.addressSpace, address).copyToUser(bytes)) 0L else Syscall.errno(Errno.EFAULT)
 
     private fun ByteArray.readU64LE(offset: Int): ULong {
         var value = 0uL

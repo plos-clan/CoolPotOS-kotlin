@@ -152,7 +152,7 @@ fun sysClone(regs: PtraceRegisters, process: Process): Long {
     val parentTid = regs[PtraceRegisters.IDX_RDX]
     val childTid = regs[PtraceRegisters.IDX_R10]
     if (flags and CLONE_PARENT_SETTID != 0uL &&
-        !UserMemory(process.vma, parentTid).isWritable(Int.SIZE_BYTES)
+        !UserMemory(process.addressSpace, parentTid).isWritable(Int.SIZE_BYTES)
     ) return errno(Errno.EFAULT)
 
     val stack = regs[PtraceRegisters.IDX_RSI].takeUnless { it == 0uL } ?: regs[PtraceRegisters.IDX_RSP]
@@ -160,7 +160,6 @@ fun sysClone(regs: PtraceRegisters, process: Process): Long {
 
     val child = ProcessManager.createUserProcess(
         name = process.name,
-        clone = process.vma.pageDirectory,
         parent = process,
     )
     val registers = ULongArray(PtraceRegisters.REGISTER_COUNT).also(regs::copyInto)
@@ -194,7 +193,7 @@ fun sysGetResGID(regs: PtraceRegisters, process: Process): Long = copyIds(
 )
 
 private fun copyIds(process: Process, address: ULong, ids: IdTriplet): Long =
-    if (UserMemory(process.vma, address).copyToUser(ids.toNativeBytes())) {
+    if (UserMemory(process.addressSpace, address).copyToUser(ids.toNativeBytes())) {
         0L
     } else {
         errno(Errno.EFAULT)
@@ -284,7 +283,7 @@ fun sysWait4(regs: PtraceRegisters, process: Process): Long {
         if (exited != null) {
             val status = regs[PtraceRegisters.IDX_RSI]
             if (status != 0uL &&
-                !UserMemory(process.vma, status).copyToUser(
+                !UserMemory(process.addressSpace, status).copyToUser(
                     byteArrayOf(
                         0,
                         (exited.exitCode and 0xff).toByte(),
@@ -307,13 +306,13 @@ private fun readStringVector(process: Process, address: ULong): List<String>? {
     val values = mutableListOf<String>()
     repeat(256) { index ->
         val pointerBytes = UserMemory(
-            process.vma,
+            process.addressSpace,
             address + index.toULong() * ULong.SIZE_BYTES.toULong(),
         )
             .copyFromUser(ULong.SIZE_BYTES) ?: return null
         val pointer = pointerBytes.readU64LE(0)
         if (pointer == 0uL) return values
-        val value = UserMemory(process.vma, pointer).copyCStringFromUser(4096)
+        val value = UserMemory(process.addressSpace, pointer).copyCStringFromUser(4096)
             ?: return null
         values += value.decodeToString()
     }

@@ -11,26 +11,26 @@ object FileSystemManager {
         private set
 
     fun initialize(): Boolean {
-        return register(Tmpfs) && register(Devfs) && register(Squashfs) && register(Overlayfs)
+        return register(Tmpfs) && register(Devfs) && register(Erofs) && register(Overlayfs)
     }
 
     fun mountRootfs(): Boolean {
         if (kernelContext != null) return true
-        val moduleName = Cmdline["rootfs"] ?: "cachyos-rootfs-x86_64.squashfs"
+        val moduleName = Cmdline["rootfs"] ?: "cachyos-rootfs-x86_64.erofs"
         val module = ModuleManager[moduleName] ?: run {
             println("VFS: rootfs module '$moduleName' is unavailable")
             return false
         }
         val lower = when (val result = vfs.createContext(
-            Squashfs.name,
+            Erofs.name,
             MountOptions(
                 flags = MountFlags.READ_ONLY,
-                fileSystem = SquashfsOptions(module.data),
+                fileSystem = ErofsOptions(module.data),
             ),
         )) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> {
-                println("VFS: failed to mount SquashFS: ${result.error}")
+                println("VFS: failed to mount EROFS: ${result.error}")
                 return false
             }
         }
@@ -70,7 +70,7 @@ object FileSystemManager {
         }
         kernelContext = context
         ProcessManager.getKernelProcess()!!.context = context
-        println("VFS: mounted zstd SquashFS with tmpfs overlay at '/'")
+        println("VFS: mounted zstd EROFS with tmpfs overlay at '/'")
         return true
     }
 
