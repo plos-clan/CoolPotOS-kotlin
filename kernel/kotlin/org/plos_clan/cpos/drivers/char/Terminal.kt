@@ -15,6 +15,7 @@ import kotlinx.cinterop.staticCFunction
 import org.plos_clan.cpos.drivers.Hpet
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PollEvents
@@ -178,10 +179,12 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
 
         IoctlConstants.TIOCSPGRP -> {
             val processGroup = copyIntFromUser(args)
+            val process = ProcessManager.currentProcess()
             when {
                 processGroup == null -> -Errno.EFAULT
-                !session.attachCurrentProcess() -> -Errno.ENOTTY
-                !session.setForegroundProcessGroup(processGroup) -> -Errno.EINVAL
+                process == null -> -Errno.ESRCH
+                session.sessionId != process.sessionId -> -Errno.ENOTTY
+                !session.setForegroundProcessGroup(process, processGroup) -> -Errno.EINVAL
                 else -> Errno.EOK
             }
         }

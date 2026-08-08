@@ -7,6 +7,7 @@ data class OverlayfsOptions(
 
 object Overlayfs : FileSystemType {
     override val name: String = "overlay"
+    override val magic: ULong = 0x794c_7630uL
 
     override fun createSuperBlock(options: FileSystemOptions): VfsResult<SuperBlock> {
         val configuration = options as? OverlayfsOptions

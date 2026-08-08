@@ -68,6 +68,7 @@ object Init {
             println("Init: cannot load executable $rdinit")
             return
         }
+        process.installExecutable(rdinit, listOf(rdinit))
 
         initializeStdio(process)
 

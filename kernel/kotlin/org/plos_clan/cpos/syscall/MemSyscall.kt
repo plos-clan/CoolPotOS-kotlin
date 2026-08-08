@@ -47,6 +47,9 @@ private class MappedFile(private val file: org.plos_clan.cpos.fs.OpenFileDescrip
     override val immutablePageSource: Any?
         get() = file.immutablePageSource
 
+    override val sharedMemoryIdentity: Any
+        get() = file.inode
+
     override fun read(offset: ULong, destination: ByteArray): Int {
         val result = file.readAt(offset, destination)
         return if (result.isSuccess) result.bytesTransferred else result.raw.toInt()

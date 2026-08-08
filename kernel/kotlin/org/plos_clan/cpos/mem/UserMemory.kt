@@ -100,6 +100,19 @@ class UserMemory private constructor(
         return true
     }
 
+    fun readUIntLE(): UInt? {
+        if (!validUserRange(UInt.SIZE_BYTES)) return null
+        var value = 0u
+        repeat(UInt.SIZE_BYTES) { index ->
+            val currentAddress = address + index.toULong()
+            val physicalAddress = resolveUserPhysicalAddress(currentAddress, false)
+                ?: return null
+            val source = physicalAddress.toVirtualPointer<UByteVar>() ?: return null
+            value = value or (source[0].toUInt() shl (index * Byte.SIZE_BITS))
+        }
+        return value
+    }
+
     fun copyCStringFromUser(maxLength: Int): ByteArray? {
         if (maxLength <= 0 || address >= USER_VIRTUAL_ADDRESS_LIMIT) {
             return null

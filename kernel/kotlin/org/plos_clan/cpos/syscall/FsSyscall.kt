@@ -15,6 +15,7 @@ import org.plos_clan.cpos.fs.MountFlags
 import org.plos_clan.cpos.fs.OpenFlags
 import org.plos_clan.cpos.fs.OpenOptions
 import org.plos_clan.cpos.fs.SeekOrigin
+import org.plos_clan.cpos.fs.SymlinkBackend
 import org.plos_clan.cpos.fs.VfsError
 import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsPath
@@ -58,6 +59,7 @@ private const val F_DUPFD_CLOEXEC = 1_030
 private const val F_GETFD_FLAGS = FileDescriptorFlags.FD_CLOEXEC
 
 private const val STAT_SIZE = 144
+private const val STATFS_SIZE = 120
 private const val STAT_BLOCK_SIZE = 512uL
 private const val STAT_BLKSIZE = 4096uL
 private const val DIRENT64_HEADER_SIZE = 19
@@ -71,6 +73,11 @@ private const val S_IFBLK = 0x6000u
 private const val S_IFREG = 0x8000u
 private const val S_IFLNK = 0xA000u
 private const val S_IFSOCK = 0xC000u
+
+private const val ST_RDONLY = 0x1uL
+private const val ST_NOSUID = 0x2uL
+private const val ST_NODEV = 0x4uL
+private const val ST_NOEXEC = 0x8uL
 
 /** Linux x86_64 struct stat (144 bytes). */
 private class LinuxStat(private val inode: Inode) : NativeStruct() {
@@ -108,6 +115,28 @@ private class LinuxStat(private val inode: Inode) : NativeStruct() {
         } else {
             (size + STAT_BLOCK_SIZE - 1uL) / STAT_BLOCK_SIZE
         }
+}
+
+/** Linux x86_64 struct statfs (120 bytes). */
+private class LinuxStatFs(private val path: VfsPath) : NativeStruct() {
+    override fun toNativeBytes(): ByteArray = ByteArray(STATFS_SIZE).also { buffer ->
+        putU64LE(buffer, 0, path.mount.superBlock.type.magic)
+        putU64LE(buffer, 8, STAT_BLKSIZE)
+        putU64LE(buffer, 64, 255uL)
+        putU64LE(buffer, 72, STAT_BLKSIZE)
+        putU64LE(buffer, 80, path.mount.flags.toStatFsFlags())
+    }
+
+    override fun updateFromNativeBytes(buffer: ByteArray): Boolean = false
+
+    private fun MountFlags.toStatFsFlags(): ULong {
+        var result = 0uL
+        if (MountFlags.READ_ONLY in this) result = result or ST_RDONLY
+        if (MountFlags.NO_SUID in this) result = result or ST_NOSUID
+        if (MountFlags.NO_DEVICE in this) result = result or ST_NODEV
+        if (MountFlags.NO_EXEC in this) result = result or ST_NOEXEC
+        return result
+    }
 }
 
 private class LinuxDirent64(
@@ -192,19 +221,21 @@ private fun open(
     if (flags and SUPPORTED_OPEN_FLAGS.inv() != 0) {
         return errno(Errno.EINVAL)
     }
-    if (flags and OpenFlags.O_PATH != 0 ||
-        flags and OpenFlags.O_TMPFILE == OpenFlags.O_TMPFILE
-    ) {
+    if (flags and OpenFlags.O_TMPFILE == OpenFlags.O_TMPFILE) {
         return errno(Errno.ENOTSUP)
     }
 
-    val access = when (flags and OpenFlags.O_ACCMODE) {
+    val pathOnly = flags and OpenFlags.O_PATH != 0
+    val access = if (pathOnly) {
+        AccessMode.PATH
+    } else when (flags and OpenFlags.O_ACCMODE) {
         OpenFlags.O_RDONLY -> AccessMode.READ
         OpenFlags.O_WRONLY -> AccessMode.WRITE
         OpenFlags.O_RDWR -> AccessMode.READ_WRITE
         else -> return errno(Errno.EINVAL)
     }
     val create = when {
+        pathOnly -> CreateDisposition.OPEN_EXISTING
         flags and OpenFlags.O_CREAT == 0 -> CreateDisposition.OPEN_EXISTING
         flags and OpenFlags.O_EXCL != 0 -> CreateDisposition.CREATE_NEW
         else -> CreateDisposition.OPEN_OR_CREATE
@@ -216,8 +247,8 @@ private fun open(
         access = access,
         create = create,
         createMode = FileMode(rawMode.toUInt() and 0x1ffu),
-        truncate = flags and OpenFlags.O_TRUNC != 0,
-        append = flags and OpenFlags.O_APPEND != 0,
+        truncate = !pathOnly && flags and OpenFlags.O_TRUNC != 0,
+        append = !pathOnly && flags and OpenFlags.O_APPEND != 0,
         directoryOnly = flags and OpenFlags.O_DIRECTORY != 0,
         followFinalSymlink = flags and OpenFlags.O_NOFOLLOW == 0,
     )
@@ -407,6 +438,38 @@ fun sysLstat(regs: PtraceRegisters, process: Process): Long = statPath(
     followFinalSymlink = false,
 )
 
+fun sysStatfs(regs: PtraceRegisters, process: Process): Long {
+    val pathname = copyPath(process, regs[PtraceRegisters.IDX_RDI])
+        ?: return errno(Errno.EFAULT)
+    if (pathname.isEmpty()) return errno(Errno.ENOENT)
+    val path = when (val result = FileSystemManager.vfs.resolve(
+        process.getFSContext(),
+        VfsPathname.fromBytes(pathname),
+    )) {
+        is VfsResult.Ok -> result.value
+        is VfsResult.Err -> return errno(result.error.errno)
+    }
+    return copyStatFs(process, regs[PtraceRegisters.IDX_RSI], path)
+}
+
+fun sysFstatfs(regs: PtraceRegisters, process: Process): Long {
+    val descriptor = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
+        ?: return errno(Errno.EBADF)
+    val file = process.fdTable.acquire(descriptor) ?: return errno(Errno.EBADF)
+    return try {
+        copyStatFs(process, regs[PtraceRegisters.IDX_RSI], file.path)
+    } finally {
+        file.release()
+    }
+}
+
+private fun copyStatFs(process: Process, address: ULong, path: VfsPath): Long =
+    if (UserMemory(process.addressSpace, address).copyToUser(LinuxStatFs(path).toNativeBytes())) {
+        0L
+    } else {
+        errno(Errno.EFAULT)
+    }
+
 fun sysAccess(regs: PtraceRegisters, process: Process): Long {
     val mode = regs[PtraceRegisters.IDX_RSI]
     if (mode > 0x7uL) {
@@ -529,6 +592,66 @@ fun sysNewfstatat(regs: PtraceRegisters, process: Process): Long {
         )
     ) {
         0L
+    } else {
+        errno(Errno.EFAULT)
+    }
+}
+
+fun sysReadlink(regs: PtraceRegisters, process: Process): Long = readlinkAt(
+    process = process,
+    dirFd = AT_FDCWD,
+    pathnameAddress = regs[PtraceRegisters.IDX_RDI],
+    bufferAddress = regs[PtraceRegisters.IDX_RSI],
+    bufferSize = regs[PtraceRegisters.IDX_RDX],
+)
+
+fun sysReadlinkat(regs: PtraceRegisters, process: Process): Long = readlinkAt(
+    process = process,
+    dirFd = regs[PtraceRegisters.IDX_RDI].toUInt().toInt(),
+    pathnameAddress = regs[PtraceRegisters.IDX_RSI],
+    bufferAddress = regs[PtraceRegisters.IDX_RDX],
+    bufferSize = regs[PtraceRegisters.IDX_R10],
+)
+
+private fun readlinkAt(
+    process: Process,
+    dirFd: Int,
+    pathnameAddress: ULong,
+    bufferAddress: ULong,
+    bufferSize: ULong,
+): Long {
+    if (bufferSize == 0uL) return errno(Errno.EINVAL)
+    val pathname = copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
+    val path = if (pathname.isEmpty()) {
+        if (dirFd == AT_FDCWD) return errno(Errno.ENOENT)
+        if (dirFd < 0) return errno(Errno.EBADF)
+        val file = process.fdTable.acquire(dirFd) ?: return errno(Errno.EBADF)
+        try {
+            file.path
+        } finally {
+            file.release()
+        }
+    } else {
+        when (val result = resolveAt(
+            process,
+            dirFd,
+            VfsPathname.fromBytes(pathname),
+            followFinalSymlink = false,
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return errno(result.error.errno)
+        }
+    }
+    val inode = path.inode ?: return errno(Errno.ENOENT)
+    if (inode.type != InodeType.SYMLINK) return errno(Errno.EINVAL)
+    val backend = inode.backend as? SymlinkBackend ?: return errno(Errno.EINVAL)
+    val target = when (val result = backend.readLink(inode)) {
+        is VfsResult.Ok -> result.value.copyBytes()
+        is VfsResult.Err -> return errno(result.error.errno)
+    }
+    val count = minOf(bufferSize, target.size.toULong()).toInt()
+    return if (UserMemory(process.addressSpace, bufferAddress).copyToUser(target, size = count)) {
+        count.toLong()
     } else {
         errno(Errno.EFAULT)
     }
@@ -737,6 +860,7 @@ fun sysFcntl(regs: PtraceRegisters, process: Process): Long {
                     AccessMode.READ -> OpenFlags.O_RDONLY
                     AccessMode.WRITE -> OpenFlags.O_WRONLY
                     AccessMode.READ_WRITE -> OpenFlags.O_RDWR
+                    AccessMode.PATH -> OpenFlags.O_PATH
                 }
                 (access or file.getStatusFlags() or OpenFlags.O_LARGEFILE).toLong()
             } finally {

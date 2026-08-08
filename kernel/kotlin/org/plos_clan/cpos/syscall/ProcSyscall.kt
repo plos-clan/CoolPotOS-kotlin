@@ -256,6 +256,7 @@ fun sysExecve(regs: PtraceRegisters, process: Process): Long {
         arguments = arguments,
         environment = environment,
     ) ?: return errno(Errno.ENOEXEC)
+    process.installExecutable(executablePath, arguments.ifEmpty { listOf(executablePath) })
     process.fdTable.closeOnExec()
     regs[PtraceRegisters.IDX_RIP] = image.entryPoint
     regs[PtraceRegisters.IDX_RSP] = image.stackPointer

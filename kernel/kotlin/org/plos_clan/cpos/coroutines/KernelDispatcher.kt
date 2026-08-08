@@ -38,6 +38,11 @@ class KernelDispatcher internal constructor(
         lock.withLock { pollers += poller }
     }
 
+    internal fun scheduleAt(deadlineNanos: ULong, block: Runnable): DisposableHandle {
+        val task = lock.withLock { queue.scheduleAt(deadlineNanos, block) }
+        return QueueDisposableHandle { lock.withLock { queue.dispose(task) } }
+    }
+
     override fun dispatch(context: CoroutineContext, block: Runnable) {
         lock.withLock { queue.enqueue(block) }
     }

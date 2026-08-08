@@ -26,13 +26,17 @@ internal class KernelCoroutineQueue {
     }
 
     fun schedule(nowNanos: ULong, delayMillis: Long, runnable: Runnable): DelayedCoroutineTask {
+        return scheduleAt(deadlineNanos(nowNanos, delayMillis), runnable)
+    }
+
+    fun scheduleAt(deadlineNanos: ULong, runnable: Runnable): DelayedCoroutineTask {
         if (delayed.isEmpty()) {
             nextSequence = 0uL
         } else {
             check(nextSequence != ULong.MAX_VALUE) { "delayed task sequence exhausted" }
         }
         val task = DelayedCoroutineTask(
-            deadlineNanos = deadlineNanos(nowNanos, delayMillis),
+            deadlineNanos = deadlineNanos,
             sequence = nextSequence++,
             runnable = runnable,
         )

@@ -4,7 +4,8 @@
 enum {
     idt_vector_count = 256,
     irq_vector_base = 32,
-    irq_stub_size = 10
+    irq_stub_size = 10,
+    fpu_state_size = 512
 };
 
 struct idt_entry {
@@ -49,6 +50,9 @@ static void dispatch_kotlin_handler(
     uint64_t error_code,
     uint64_t rbp
 ) {
+    uint8_t fpu_state[fpu_state_size] __attribute__((aligned(16)));
+    __asm__ volatile("fxsave64 %0" : "=m"(fpu_state));
+
     const bool from_user = (frame->cs & 3u) != 0;
     uint64_t user_fs_base = 0;
 
@@ -66,6 +70,8 @@ static void dispatch_kotlin_handler(
         wrmsr(ia32_fs_base_msr, user_fs_base);
         __asm__ volatile("swapgs" : : : "memory");
     }
+
+    __asm__ volatile("fxrstor64 %0" : : "m"(fpu_state));
 }
 
 static __attribute__((noreturn)) void halt_forever(void) {

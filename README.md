@@ -18,17 +18,19 @@ This project uses Gradle for kernel build, ISO packaging, and QEMU run.
 
 **Quick start:**
 
+Release mode is the default; the commands below specify it explicitly.
+
 **Build and run in one command**
 
 ```shell
-./gradlew run
+./gradlew run -PdebugMode=false
 ```
 
 **Or step by step**
 
 ```shell
-./gradlew buildIso
-./gradlew run
+./gradlew buildIso -PdebugMode=false
+./gradlew run -PdebugMode=false
 ```
 
 You need to install:

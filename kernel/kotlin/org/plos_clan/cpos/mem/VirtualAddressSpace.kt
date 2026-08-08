@@ -46,6 +46,7 @@ data class MemoryRegion(
     var offset: ULong = 0uL,
     val shared: Boolean = false,
     internal val backing: MemoryRegionBacking? = null,
+    internal val sharedIdentity: Any? = null,
 ) {
     val length: ULong
         get() = end - start
@@ -58,6 +59,9 @@ abstract class MemoryRegionBacking {
     /** Non-null only when the backing bytes are immutable for its lifetime. */
     internal open val immutablePageSource: Any?
         get() = null
+
+    internal open val sharedMemoryIdentity: Any
+        get() = this
 
     internal fun retain(): Boolean {
         var observed = references.load()
@@ -168,6 +172,11 @@ sealed interface MemoryMapResult<out T> {
     data class Err(val errno: Int) : MemoryMapResult<Nothing>
 }
 
+internal data class SharedMemoryLocation(
+    val identity: Any,
+    val offset: ULong,
+)
+
 enum class PageFaultResult {
     RESOLVED,
     INVALID_ADDRESS,
@@ -225,6 +234,16 @@ class VirtualAddressSpace internal constructor(
     fun findIntersection(start: ULong, end: ULong): MemoryRegion? = lock.withLock {
         findIntersectionLocked(start, end)?.copy()
     }
+
+    internal fun sharedMemoryLocation(address: ULong, size: ULong): SharedMemoryLocation? =
+        lock.withLock {
+            val region = findLocked(address) ?: return@withLock null
+            if (!region.shared || size > region.end - address) return@withLock null
+            SharedMemoryLocation(
+                identity = region.sharedIdentity ?: return@withLock null,
+                offset = region.offset + (address - region.start),
+            )
+        }
 
     fun insert(region: MemoryRegion): Boolean = insertAll(listOf(region))
 
@@ -298,6 +317,11 @@ class VirtualAddressSpace internal constructor(
                 offset = request.offset,
                 shared = request.shared,
                 backing = request.backing,
+                sharedIdentity = if (request.shared) {
+                    request.backing?.sharedMemoryIdentity ?: Any()
+                } else {
+                    null
+                },
             )
             if (request.backing?.retain() == false) {
                 null
@@ -595,6 +619,7 @@ class VirtualAddressSpace internal constructor(
             left.name == right.name &&
             left.type == right.type &&
             left.shared == right.shared &&
+            left.sharedIdentity === right.sharedIdentity &&
             left.backing === right.backing &&
             (left.type != MemoryRegionType.FILE || left.offset + left.length == right.offset)
 

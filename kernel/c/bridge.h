@@ -49,6 +49,8 @@ void cpu_relax(void);
 void asm_pause(void);
 void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base);
 void fast_handoff_yield(void);
+bool fast_handoff_park_current(void);
+bool fast_handoff_unpark(uint64_t task, uint64_t lapic_id);
 void fast_handoff_park_kotlin(void);
 void fast_handoff_configure_ps2(
     uint64_t irq_num,

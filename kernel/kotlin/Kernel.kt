@@ -5,6 +5,7 @@ import bridge.get_sys_clone_stack_at
 import bridge.get_sys_clone_tls_at
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.FrameBuffer
+import org.plos_clan.cpos.drivers.NullDev
 import org.plos_clan.cpos.drivers.acpi.Acpi
 import org.plos_clan.cpos.drivers.char.TtyManager
 import org.plos_clan.cpos.tasks.ProcessManager
@@ -63,6 +64,7 @@ fun kernelMain() {
     }
     FrameBuffer.initialize()
     TtyManager.initialize()
+    NullDev.initialize()
     if (!KernelCoroutines.initialize()) {
         return
     }

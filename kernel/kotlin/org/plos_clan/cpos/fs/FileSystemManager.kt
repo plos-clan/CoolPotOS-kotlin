@@ -11,7 +11,8 @@ object FileSystemManager {
         private set
 
     fun initialize(): Boolean {
-        return register(Tmpfs) && register(Devfs) && register(Erofs) && register(Overlayfs)
+        return register(Tmpfs) && register(Devfs) && register(Procfs) &&
+            register(Erofs) && register(Overlayfs)
     }
 
     fun mountRootfs(): Boolean {
@@ -52,22 +53,13 @@ object FileSystemManager {
             }
         }
 
-        val devPath = VfsPathname.fromString("/dev")
-        when (val result = vfs.mkdir(context, devPath)) {
-            is VfsResult.Ok -> Unit
-            is VfsResult.Err -> if (result.error != VfsError.ALREADY_EXISTS) {
-                println("VFS: failed to create /dev in overlay: ${result.error}")
-                return false
-            }
-        }
-        val devfsFlags = MountFlags(MountFlags.NO_EXEC.bits or MountFlags.NO_SUID.bits)
-        when (val result = vfs.mount(context, devPath, Devfs.name, MountOptions(flags = devfsFlags))) {
-            is VfsResult.Ok -> Unit
-            is VfsResult.Err -> {
-                println("VFS: failed to mount devfs at /dev: ${result.error}")
-                return false
-            }
-        }
+        val devFlags = MountFlags(MountFlags.NO_EXEC.bits or MountFlags.NO_SUID.bits)
+        if (!mount(context, "/dev", Devfs, devFlags)) return false
+
+        val procFlags = MountFlags(
+            MountFlags.NO_EXEC.bits or MountFlags.NO_DEVICE.bits or MountFlags.NO_SUID.bits,
+        )
+        if (!mount(context, "/proc", Procfs, procFlags)) return false
         kernelContext = context
         ProcessManager.getKernelProcess()!!.context = context
         println("VFS: mounted zstd EROFS with tmpfs overlay at '/'")
@@ -84,4 +76,30 @@ object FileSystemManager {
                 false
             }
         }
+
+    private fun mount(
+        context: FileSystemContext,
+        path: String,
+        fileSystem: FileSystemType,
+        flags: MountFlags,
+    ): Boolean {
+        val target = VfsPathname.fromString(path)
+        val created = vfs.mkdir(context, target)
+        if (created is VfsResult.Err && created.error != VfsError.ALREADY_EXISTS) {
+            println("VFS: failed to create $path in overlay: ${created.error}")
+            return false
+        }
+        return when (val result = vfs.mount(
+            context,
+            target,
+            fileSystem.name,
+            MountOptions(flags = flags),
+        )) {
+            is VfsResult.Ok -> true
+            is VfsResult.Err -> {
+                println("VFS: failed to mount ${fileSystem.name} at $path: ${result.error}")
+                false
+            }
+        }
+    }
 }

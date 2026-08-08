@@ -13,7 +13,12 @@ enum {
     fpu_state_size = 512,
     task_ready = 0,
     task_running = 1,
+    task_blocked = 2,
     task_zombie = 3,
+    park_idle = 0,
+    park_requested = 1,
+    park_parked = 2,
+    park_notified = 3,
     ps2_queue_capacity = 256,
     ps2_queue_mask = ps2_queue_capacity - 1,
     ps2_queue_empty = 0x100,
@@ -39,6 +44,7 @@ struct fast_task {
     uint8_t queued;
     uint8_t context_valid;
     uint8_t user_context;
+    uint8_t park_state;
 };
 _Static_assert(
     offsetof(fast_task_t, fpu) == fpu_state_offset,
@@ -202,6 +208,94 @@ void fast_handoff_yield(void) {
     if (fast_cpus[slot].state == cpu_offline) return;
     __atomic_store_n(&yield_requested[slot], 1, __ATOMIC_RELEASE);
     __asm__ volatile("int $0x20" : : : "memory");
+}
+
+bool fast_handoff_park_current(void) {
+    if (!__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE)) return false;
+
+    const uint64_t flags = interrupt_save();
+    const uint64_t slot = current_lapic_id() % cpu_slot_count;
+    fast_cpu_t *cpu = &fast_cpus[slot];
+    fast_task_t *task = cpu->current;
+    if (cpu->state == cpu_offline || !task || task == cpu->idle) {
+        interrupt_restore(flags);
+        return false;
+    }
+
+    uint8_t expected = park_idle;
+    if (__atomic_compare_exchange_n(
+            &task->park_state,
+            &expected,
+            park_requested,
+            false,
+            __ATOMIC_ACQ_REL,
+            __ATOMIC_ACQUIRE
+        )) {
+        __atomic_store_n(&yield_requested[slot], 1, __ATOMIC_RELEASE);
+        __asm__ volatile("int $0x20" : : : "memory");
+        interrupt_restore(flags);
+        return true;
+    }
+    if (expected != park_notified || !__atomic_compare_exchange_n(
+            &task->park_state,
+            &expected,
+            park_idle,
+            false,
+            __ATOMIC_ACQ_REL,
+            __ATOMIC_ACQUIRE
+        )) {
+        interrupt_restore(flags);
+        return false;
+    }
+    interrupt_restore(flags);
+    return true;
+}
+
+bool fast_handoff_unpark(uint64_t handle, uint64_t lapic_id) {
+    fast_task_t *task = task_from_handle(handle);
+    if (!task) return false;
+
+    for (;;) {
+        if (task_state_load(task) == task_zombie) return false;
+
+        uint8_t parked = __atomic_load_n(&task->park_state, __ATOMIC_ACQUIRE);
+        if (parked == park_notified) return true;
+        if (parked != park_parked) {
+            if (__atomic_compare_exchange_n(
+                    &task->park_state,
+                    &parked,
+                    park_notified,
+                    false,
+                    __ATOMIC_ACQ_REL,
+                    __ATOMIC_ACQUIRE
+                ))
+                return true;
+            continue;
+        }
+        if (!__atomic_compare_exchange_n(
+                &task->park_state,
+                &parked,
+                park_idle,
+                false,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_ACQUIRE
+            ))
+            continue;
+
+        uint8_t state = task_blocked;
+        if (!__atomic_compare_exchange_n(
+                &task->state,
+                &state,
+                task_ready,
+                false,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_ACQUIRE
+            ))
+            return state != task_zombie;
+
+        return fast_handoff_enqueue(handle, lapic_id) ||
+            __atomic_load_n(&task->queued, __ATOMIC_ACQUIRE) != 0;
+    }
 }
 
 /* The Kotlin/Native interop wrapper keeps this entire call in Native state. */
@@ -509,6 +603,33 @@ void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
             previous == cpu->idle;
         if (previous) {
             save_task(previous, regs);
+            uint8_t parked = __atomic_load_n(
+                &previous->park_state, __ATOMIC_ACQUIRE);
+            if (parked == park_requested) {
+                task_state_store(previous, task_blocked);
+                if (!__atomic_compare_exchange_n(
+                        &previous->park_state,
+                        &parked,
+                        park_parked,
+                        false,
+                        __ATOMIC_RELEASE,
+                        __ATOMIC_ACQUIRE
+                    )) {
+                    task_state_store(previous, task_running);
+                    if (parked == park_notified)
+                        __atomic_store_n(
+                            &previous->park_state, park_idle, __ATOMIC_RELEASE);
+                }
+            } else if (parked == park_notified) {
+                __atomic_compare_exchange_n(
+                    &previous->park_state,
+                    &parked,
+                    park_idle,
+                    false,
+                    __ATOMIC_ACQ_REL,
+                    __ATOMIC_ACQUIRE
+                );
+            }
             if (!previous_is_idle &&
                 task_state_load(previous) == task_running &&
                 queue_push(cpu, previous)) {

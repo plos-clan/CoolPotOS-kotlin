@@ -4,6 +4,7 @@ package org.plos_clan.cpos.tasks
 
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
+import org.plos_clan.cpos.drivers.Hpet
 import org.plos_clan.cpos.fs.FileDescriptorTable
 import org.plos_clan.cpos.fs.FileSystemContext
 import org.plos_clan.cpos.fs.FileSystemManager
@@ -119,7 +120,7 @@ class Thread(
 
 class Process internal constructor(
     val id: Int,
-    val name: String,
+    name: String,
     val isKernelProcess: Boolean,
     addressSpace: VirtualAddressSpace,
     var context: FileSystemContext?,
@@ -134,11 +135,16 @@ class Process internal constructor(
     var sessionId: Int = id,
     var processGroupId: Int = id,
     val parentId: Int = 0,
+    val startTimeTicks: ULong,
 ) {
+    var name = name
+        internal set
     var addressSpace = addressSpace
         internal set
 
     val threads = mutableListOf<Thread>()
+    var commandLine: ByteArray = name.encodeToByteArray() + byteArrayOf(0)
+        internal set
     var state: TaskState = TaskState.READY
     var signalMask: ULong = 0uL
     val signalActions = arrayOfNulls<ByteArray>(64)
@@ -179,6 +185,30 @@ class Process internal constructor(
             fsgid = requested
         }
         return previous
+    }
+
+    internal fun inherit(parent: Process) {
+        ruid = parent.ruid
+        euid = parent.euid
+        suid = parent.suid
+        fsuid = parent.fsuid
+        rgid = parent.rgid
+        egid = parent.egid
+        sgid = parent.sgid
+        fsgid = parent.fsgid
+        sessionId = parent.sessionId
+        processGroupId = parent.processGroupId
+        signalMask = parent.signalMask
+        parent.signalActions.forEachIndexed { index, action ->
+            signalActions[index] = action?.copyOf()
+        }
+        commandLine = parent.commandLine.copyOf()
+    }
+
+    internal fun installExecutable(path: String, arguments: List<String>) {
+        name = path.substringAfterLast('/').ifEmpty { path }
+        commandLine = arguments.joinToString(separator = "\u0000", postfix = "\u0000")
+            .encodeToByteArray()
     }
 }
 
@@ -261,6 +291,7 @@ object ProcessManager {
             isKernelProcess = false,
             context = context,
             parentId = parent?.id ?: 0,
+            inherit = parent,
         )
         if (parent == null) return child
 
@@ -325,6 +356,10 @@ object ProcessManager {
         return processLock.withLock { process.firstOrNull { it.id == pid } }
     }
 
+    fun snapshotProcesses(): List<Process> = processLock.withLock {
+        process.filterNot(Process::isKernelProcess).sortedBy(Process::id)
+    }
+
     fun childrenOf(parentId: Int): List<Process> =
         processLock.withLock { process.filter { it.parentId == parentId } }
 
@@ -372,6 +407,7 @@ object ProcessManager {
         isKernelProcess: Boolean,
         context: FileSystemContext?,
         parentId: Int = 0,
+        inherit: Process? = null,
     ): Process = Process(
         id = nextProcessId.fetchAndAdd(1),
         name = name,
@@ -379,7 +415,11 @@ object ProcessManager {
         addressSpace = addressSpace,
         context,
         parentId = parentId,
-    ).also { created -> processLock.withLock { process += created } }
+        startTimeTicks = Hpet.nanoTime() / NANOSECONDS_PER_USER_TICK,
+    ).also { created ->
+        inherit?.let(created::inherit)
+        processLock.withLock { process += created }
+    }
 
     private fun newThread(
         process: Process,
@@ -406,3 +446,5 @@ private data class KernelStack(
     val pages: ULong,
     val top: ULong,
 )
+
+private const val NANOSECONDS_PER_USER_TICK = 10_000_000uL

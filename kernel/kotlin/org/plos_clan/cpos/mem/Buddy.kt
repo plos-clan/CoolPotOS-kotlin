@@ -23,6 +23,11 @@ private data class MemmapDecision(
     val totalsByType: Map<ULong, ULong>,
 )
 
+data class PhysicalMemoryStatistics(
+    val totalBytes: ULong,
+    val availableBytes: ULong,
+)
+
 private enum class MemmapType(
     val id: ULong,
     val label: String,
@@ -55,6 +60,7 @@ object BuddyFrameAllocator {
     private val lock = IrqSpinLock()
 
     private var cachedPages = 0
+    private var managedFrames = 0uL
     private var usableFrames = 0uL
     private var initialized = false
 
@@ -83,6 +89,7 @@ object BuddyFrameAllocator {
                 return@forEach
             }
             addRange(range.base / PAGE_SIZE_BYTES, range.frameCount)
+            managedFrames += range.frameCount
             usableFrames += range.frameCount
         }
 
@@ -136,6 +143,13 @@ object BuddyFrameAllocator {
             succeeded = freeFramesLocked(address, 1uL) && succeeded
         }
         succeeded
+    }
+
+    fun statistics(): PhysicalMemoryStatistics = lock.withLock {
+        PhysicalMemoryStatistics(
+            totalBytes = managedFrames * PAGE_SIZE_BYTES,
+            availableBytes = usableFrames * PAGE_SIZE_BYTES,
+        )
     }
 
     private fun freeFramesLocked(physicalAddress: ULong, frameCount: ULong): Boolean {
@@ -254,6 +268,7 @@ object BuddyFrameAllocator {
     private fun reset() {
         freeLists.forEach { it.clear() }
         cachedPages = 0
+        managedFrames = 0uL
         usableFrames = 0uL
         initialized = false
     }

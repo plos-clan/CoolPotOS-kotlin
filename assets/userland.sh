@@ -14,7 +14,14 @@ packages=(
     libcap
     ncurses
     openssl
+    procps-ng
     readline
+    systemd-libs
+    libgcc
+    libgcrypt
+    libgpg-error
+    lz4
+    xz
     zlib
     zstd
 )

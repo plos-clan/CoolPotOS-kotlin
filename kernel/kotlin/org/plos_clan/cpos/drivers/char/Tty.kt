@@ -321,33 +321,47 @@ class TtySession(
 
     fun keyboardInput(data: CharArray) = backend.keyboardInput(this, data)
 
-    fun attach(process: Process) {
-        stateLock.withLock {
-            controllingSessionId = process.id
-            foregroundProcessGroupId = process.id
+    fun attach(process: Process): Boolean = stateLock.withLock {
+        if (process.sessionId != process.id ||
+            controllingSessionId != 0 && controllingSessionId != process.sessionId
+        ) {
+            return@withLock false
         }
+        controllingSessionId = process.sessionId
+        if (foregroundProcessGroupId == 0) {
+            foregroundProcessGroupId = process.processGroupId
+        }
+        true
     }
 
     fun attachCurrentProcess(): Boolean {
         val process = ProcessManager.currentProcess() ?: return false
-        attach(process)
-        return true
+        return attach(process)
     }
 
-    fun setForegroundProcessGroup(processGroup: Int): Boolean {
+    fun setForegroundProcessGroup(process: Process, processGroup: Int): Boolean {
         if (processGroup <= 0) {
             return false
         }
-        stateLock.withLock {
-            foregroundProcessGroupId = processGroup
+        if (ProcessManager.snapshotProcesses().none {
+                it.sessionId == process.sessionId && it.processGroupId == processGroup
+            }
+        ) {
+            return false
         }
-        return true
+        return stateLock.withLock {
+            if (controllingSessionId != process.sessionId) {
+                return@withLock false
+            }
+            foregroundProcessGroupId = processGroup
+            true
+        }
     }
 
     fun detachCurrentProcess(): Boolean {
         val process = ProcessManager.currentProcess() ?: return false
         return stateLock.withLock {
-            if (controllingSessionId != process.id) {
+            if (controllingSessionId != process.sessionId) {
                 return@withLock false
             }
             controllingSessionId = 0
@@ -358,6 +372,11 @@ class TtySession(
 }
 
 data class TtyDevice(val name: String, val device: TtyPhysicalDevice, val type: TtyDeviceType)
+
+data class ProcessTerminal(
+    val deviceNumber: ULong,
+    val foregroundProcessGroup: Int,
+)
 
 interface TtySessionBackend {
     fun keyboardInput(session: TtySession, data: CharArray)
@@ -395,8 +414,16 @@ object TtyManager {
 
     fun attachProcessToVT(index: Int, process: Process): Boolean {
         val session = vts.getOrNull(index) ?: return false
-        session.attach(process)
-        return true
+        return session.attach(process)
+    }
+
+    fun processTerminal(process: Process): ProcessTerminal? {
+        val session = vts.firstOrNull { it.sessionId == process.sessionId } ?: return null
+        val device = DeviceManager.snapshotDevices()
+            .filter { it.handle === session }
+            .minByOrNull(Device::dev)
+            ?: return null
+        return ProcessTerminal(device.dev, session.foregroundProcessGroup)
     }
 
     fun installTtyDevice(device: TtyDevice) {

@@ -92,6 +92,8 @@ void kt_ap_start(void);
 void do_irq(void *regs, uint64_t irq_num);
 void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num);
 void fast_handoff_yield(void);
+bool fast_handoff_park_current(void);
+bool fast_handoff_unpark(uint64_t task, uint64_t lapic_id);
 void fast_handoff_park_kotlin(void);
 bool fast_handoff_finish_bootstrap(uint64_t task);
 bool fast_handoff_replace_address_space(uint64_t task, uint64_t cr3);

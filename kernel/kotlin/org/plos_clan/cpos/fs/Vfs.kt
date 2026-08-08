@@ -108,6 +108,8 @@ class VfsPathname private constructor(private val bytes: ByteArray) {
     val size: Int
         get() = bytes.size
 
+    fun copyBytes(): ByteArray = bytes.copyOf()
+
     internal fun components(): VfsResult<List<VfsName>> {
         if (bytes.any { it == 0.toByte() }) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
@@ -172,13 +174,14 @@ data class InodeMetadata(
 enum class AccessMode {
     READ,
     WRITE,
-    READ_WRITE;
+    READ_WRITE,
+    PATH;
 
     internal val canRead: Boolean
-        get() = this != WRITE
+        get() = this == READ || this == READ_WRITE
 
     internal val canWrite: Boolean
-        get() = this != READ
+        get() = this == WRITE || this == READ_WRITE
 }
 
 enum class CreateDisposition {
@@ -220,6 +223,7 @@ data class MountOptions(
 
 interface FileSystemType {
     val name: String
+    val magic: ULong
 
     fun createSuperBlock(options: FileSystemOptions): VfsResult<SuperBlock>
 }
@@ -867,11 +871,15 @@ class Vfs(
             return VfsResult.Err(VfsError.NOT_FOUND)
         }
 
-        val backend = when (val result = inode.backend.open(inode, options)) {
-            is VfsResult.Ok -> result.value
-            is VfsResult.Err -> {
-                inode.releaseOpenReference()
-                return result
+        val backend = if (options.access == AccessMode.PATH) {
+            PathOnlyHandle
+        } else {
+            when (val result = inode.backend.open(inode, options)) {
+                is VfsResult.Ok -> result.value
+                is VfsResult.Err -> {
+                    inode.releaseOpenReference()
+                    return result
+                }
             }
         }
 
@@ -1328,6 +1336,8 @@ class Vfs(
         return VfsPath(current.mount, parent)
     }
 }
+
+private data object PathOnlyHandle : OpenFileBackend
 
 private class PipeInode(
     private val state: PipeState,

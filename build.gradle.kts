@@ -78,6 +78,7 @@ private class BuildPaths(project: Project) {
     val limineInclude = limine.resolve("include")
     val limineHeader = limineInclude.resolve("limine.h")
     val limineUefi = limine.resolve("boot/limine-uefi-cd.bin")
+    val limineEfi = limine.resolve("boot/BOOTX64.EFI")
     val limineArchive = Archive(
         "https://codeberg.org/Limine/Limine/archive/v10.x-binary.tar.gz",
         downloads.resolve("limine-v10.x-binary.tar.gz"),
@@ -100,7 +101,6 @@ private class BuildPaths(project: Project) {
     val mlibcPatch = assets.resolve("mlibc.patch")
     val mlibcSyscallHeader = mlibc.resolve("sysdeps/template/include/sys/syscall.h")
     val cObjects = root.resolve("c-objects")
-    val kotlinLibrary = root.resolve("bin/native/debugStatic/libkernel.a")
     val kernelElf = root.resolve("kernel.elf")
     val isoImage = root.resolve("${project.name}.iso")
 }
@@ -117,16 +117,18 @@ private class MlibcConfig(
     paths: BuildPaths,
     tools: ToolSettings,
     arch: String,
+    debug: Boolean,
     val prefix: File,
 ) {
     val source = paths.mlibc
     val build = paths.root.resolve("mlibc-$arch")
     val crossFile = build.resolve("cross_file.txt")
+    val buildType = if (debug) "debug" else "release"
     val path = "${build.absolutePath}:${System.getenv("PATH").orEmpty()}"
     val cc = "${tools.cc} -target $arch-unknown-none"
     val cxx = "${tools.cxx} -target $arch-unknown-none"
     val cFlags = listOf(
-        "-g", "-O2", "-pipe",
+        "-pipe",
         "-Wall", "-Wextra", "-nostdinc", "-ffreestanding",
         "-fno-stack-protector", "-fno-stack-check", "-fno-lto", "-fno-PIC",
         "-ffunction-sections", "-fdata-sections",
@@ -163,6 +165,10 @@ private class KernelConfig(
         "idt.c", "handoff.c", "smp.c", "zstd_bridge.c",
     ).map(paths.kernelC::resolve)
     val objects = sources.map { paths.cObjects.resolve("${it.nameWithoutExtension}.o") }
+    val kotlinLinkTask = if (debug) "linkDebugStaticNative" else "linkReleaseStaticNative"
+    val kotlinLibrary = paths.root.resolve(
+        "bin/native/${if (debug) "debugStatic" else "releaseStatic"}/libkernel.a",
+    )
     val staticLibraries = listOf(
         "libos_terminal-embedfont-x86_64.a",
         "libzstd-decompress-x86_64.a",
@@ -172,7 +178,7 @@ private class KernelConfig(
         File(toolRoot, "lib/gcc/$arch-unknown-linux-gnu/8.3.0/libgcc.a"),
         File(toolRoot, "lib/gcc/$arch-unknown-linux-gnu/8.3.0/libgcc_eh.a"),
     )
-    val linkInputs = objects + paths.kotlinLibrary + runtimeLibraries + staticLibraries
+    val linkInputs = objects + kotlinLibrary + runtimeLibraries + staticLibraries
     val compileArgs = listOf(
         "-target", "$arch-freestanding",
         "-std=c23", "-ffreestanding", "-nostdinc", "-fno-builtin",
@@ -189,6 +195,7 @@ private class KernelConfig(
     val linkArgs = listOf(
         "-m", "elf_$arch", "-nostdlib", "--eh-frame-hdr",
         "-z", "max-page-size=0x1000", "--gc-sections",
+        "-u", "sched_yield", "-u", "frg_panic",
         "-T", paths.linkerScript.absolutePath,
     )
     val linker = tools.linker
@@ -220,6 +227,7 @@ private class BuildConfig(private val project: Project) {
         paths,
         tools,
         arch,
+        debug,
         project.file(
             setting(
                 "mlibcPrefix",
@@ -249,7 +257,7 @@ private class BuildConfig(private val project: Project) {
             "-no-reboot", "-smp", "4",
             "-drive",
             "if=pflash,format=raw,readonly=on,file=${paths.assets.resolve("ovmf-code.fd")}",
-        ) + if (debug) listOf("-s", "-S") else emptyList(),
+        ) + if (debug) listOf("-s", "-S") else listOf("-enable-kvm"),
     )
 
     private fun setting(prop: String, env: String, default: String): String = listOfNotNull(
@@ -263,7 +271,6 @@ private class BuildConfig(private val project: Project) {
             "0", "false", "no", "off" -> false
             else -> throw GradleException("Expected boolean for $prop/$env, got '$value'.")
         }
-
 }
 
 private val config = BuildConfig(project)
@@ -378,12 +385,8 @@ val prepareLimine = tasks.register<Sync>("prepareLimine") {
     from({
         tarTree(resources.gzip(config.paths.limineArchive.file))
     }) {
-        include("*/limine-uefi-cd.bin")
-        eachFile {
-            if (name == "limine-uefi-cd.bin") {
-                path = "boot/limine-uefi-cd.bin"
-            }
-        }
+        include("*/limine-uefi-cd.bin", "*/BOOTX64.EFI")
+        eachFile { path = "boot/$name" }
         includeEmptyDirs = false
     }
     from({
@@ -408,6 +411,7 @@ val buildMlibc = tasks.register("buildMlibc") {
     description = "Builds the mlibc C library."
     notCompatibleWithConfigurationCache("Runs an external source build.")
 
+    inputs.property("buildType", config.mlibc.buildType)
     inputs.file(config.paths.mlibcPatch)
     inputs.dir(config.mlibc.source)
     outputs.dir(config.mlibc.prefix)
@@ -453,7 +457,7 @@ val buildMlibc = tasks.register("buildMlibc") {
             val meson = listOf(
                 "meson", "setup", source.path,
                 "--cross-file", crossFile.path,
-                "--buildtype=debug",
+                "--buildtype=$buildType",
                 "--prefix=${prefix.path}",
                 "-Ddefault_library=static",
                 "-Dlibgcc_dependency=false",
@@ -472,6 +476,8 @@ val compileC = tasks.register("compileC") {
     dependsOn(prepareLimine, prepareFreestndHeaders, buildMlibc)
     notCompatibleWithConfigurationCache("Runs an external compiler.")
 
+    inputs.property("compiler", config.tools.cc)
+    inputs.property("compileArgs", config.kernel.compileArgs)
     inputs.files(config.kernel.sources)
         .withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.files(
@@ -501,7 +507,7 @@ val compileC = tasks.register("compileC") {
 val linkKernel = tasks.register<Exec>("linkKernel") {
     group = "build"
     description = "Links the kernel and runtime libraries into an ELF executable."
-    dependsOn("linkDebugStaticNative", compileC, buildMlibc)
+    dependsOn(config.kernel.kotlinLinkTask, compileC, buildMlibc)
 
     inputs.files(config.kernel.linkInputs)
     inputs.file(config.paths.linkerScript)
@@ -513,7 +519,7 @@ val linkKernel = tasks.register<Exec>("linkKernel") {
         add("-o")
         add(config.paths.kernelElf.absolutePath)
         addAll(config.kernel.objects.map(File::getAbsolutePath))
-        add(config.paths.kotlinLibrary.absolutePath)
+        add(config.kernel.kotlinLibrary.absolutePath)
         add("--start-group")
         addAll(config.kernel.staticLibraries.map(File::getAbsolutePath))
         addAll(config.kernel.runtimeLibraries.map(File::getAbsolutePath))
@@ -534,6 +540,7 @@ val stageIso = tasks.register<Sync>("stageIso") {
     into(config.paths.iso)
     from(config.paths.assets.resolve("limine.conf")) { into("limine") }
     from(config.paths.limineUefi) { into("limine") }
+    from(config.paths.limineEfi) { into("EFI/BOOT") }
     from(config.userland.archive) { into("boot") }
     from(config.paths.kernelElf)
 }

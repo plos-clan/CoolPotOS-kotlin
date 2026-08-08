@@ -51,6 +51,16 @@ object Scheduler {
         )
     }
 
+    fun parkCurrent(): Boolean = bridge.fast_handoff_park_current()
+
+    fun wake(thread: Thread): Boolean {
+        val target = selectTargetCpu()
+        return bridge.fast_handoff_unpark(
+            thread.nativeContext,
+            target.lapicId.toULong(),
+        )
+    }
+
     fun apInitialize(): Boolean {
         val thread = SMProcessor.currentLocal().scheduler.bootstrapThread
         return initializeCurrentCpu(thread, false) && finishBootstrap()
