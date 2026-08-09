@@ -59,12 +59,6 @@ class Thread(
             value.ordinal.toUByte(),
         )
 
-    val isQueued: Boolean
-        get() = bridge.fast_handoff_task_is_queued(nativeContext) != 0u.toUByte()
-
-    val hasSavedContext: Boolean
-        get() = bridge.fast_handoff_task_has_context(nativeContext) != 0u.toUByte()
-
     fun initializeContext(
         entryPoint: ULong,
         stackTop: ULong,

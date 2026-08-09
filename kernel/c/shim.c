@@ -253,6 +253,7 @@ void setup_syscall_cpu(uint64_t lapic_id, uint8_t is_bsp) {
     state->user_rsp = 0;
     state->user_rax = 0;
     state->kernel_fs_base = rdmsr(ia32_fs_base_msr);
+    state->scheduler_cpu = 0;
 
     set_kernel_stack(lapic_id, stack_top, is_bsp);
     wrmsr(ia32_gs_base_msr, (uintptr_t)state);
@@ -335,29 +336,61 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "movl $0x1b, %eax\n"
         "movw %ax, %ds\n"
         "movw %ax, %es\n"
-        "pushq $0x1b\n"
+
+        "cmpq $0x23, 168(%r13)\n"
+        "jne 1f\n"
+        "cmpq $0x1b, 192(%r13)\n"
+        "jne 1f\n"
+        "movabsq $0x0000800000000000, %rax\n"
+        "cmpq %rax, 160(%r13)\n"
+        "jae 1f\n"
+        "cmpq %rax, 184(%r13)\n"
+        "jae 1f\n"
+        "testq $0x30100, 176(%r13)\n"
+        "jnz 1f\n"
+
+        "movq $1, %gs:16\n"
+        "movq 160(%r13), %rcx\n"
+        "movq 176(%r13), %r11\n"
+        "andq $-159745, %r11\n"
+        "orq $2, %r11\n"
+        "jmp 2f\n"
+
+        "1:\n"
+        "movq $0, %gs:16\n"
+        "pushq 192(%r13)\n"
         "pushq 184(%r13)\n"
         "movq 176(%r13), %rax\n"
         "andq $-159745, %rax\n"
         "orq $2, %rax\n"
         "pushq %rax\n"
-        "pushq $0x23\n"
+        "pushq 168(%r13)\n"
         "pushq 160(%r13)\n"
 
+        "2:\n"
         "movq 0(%r13), %r15\n"
         "movq 8(%r13), %r14\n"
         "movq 24(%r13), %r12\n"
-        "movq 32(%r13), %r11\n"
         "movq 40(%r13), %r10\n"
         "movq 48(%r13), %r9\n"
         "movq 56(%r13), %r8\n"
         "movq 64(%r13), %rbx\n"
-        "movq 72(%r13), %rcx\n"
         "movq 80(%r13), %rdx\n"
         "movq 88(%r13), %rsi\n"
         "movq 96(%r13), %rdi\n"
         "movq 104(%r13), %rbp\n"
         "movq 136(%r13), %rax\n"
+
+        "cmpq $0, %gs:16\n"
+        "je 3f\n"
+        "movq 184(%r13), %rsp\n"
+        "movq 16(%r13), %r13\n"
+        "swapgs\n"
+        "sysretq\n"
+
+        "3:\n"
+        "movq 32(%r13), %r11\n"
+        "movq 72(%r13), %rcx\n"
         "movq 16(%r13), %r13\n"
         "swapgs\n"
         "iretq\n"

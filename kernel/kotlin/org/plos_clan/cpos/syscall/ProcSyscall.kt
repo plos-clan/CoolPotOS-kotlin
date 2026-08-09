@@ -163,11 +163,16 @@ fun sysClone(regs: PtraceRegisters, process: Process): Long {
         parent = process,
     )
     val registers = ULongArray(PtraceRegisters.REGISTER_COUNT).also(regs::copyInto)
+    val fsBase = if (flags and CLONE_SETTLS != 0uL) {
+        regs[PtraceRegisters.IDX_R8]
+    } else {
+        regs[PtraceRegisters.IDX_FS_BASE]
+    }
     val childThread = ProcessManager.createUserThread(
         process = child,
         entryPoint = regs[PtraceRegisters.IDX_RIP],
         stackPointer = stack,
-        fsBase = if (flags and CLONE_SETTLS != 0uL) regs[PtraceRegisters.IDX_R8] else 0uL,
+        fsBase = fsBase,
         registers = registers,
     ) ?: return errno(Errno.ENOMEM)
     if (flags and CLONE_PARENT_SETTID != 0uL &&

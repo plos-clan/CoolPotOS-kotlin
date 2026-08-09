@@ -15,7 +15,6 @@ enum {
     lapic_delivery_pending = 1u << 12,
     lapic_timer_tsc_deadline = 1u << 18,
     x2apic_msr_base = 0x800,
-    fpu_state_offset = 208,
     fpu_state_size = 512,
     task_ready = 0,
     task_running = 1,
@@ -37,31 +36,42 @@ enum fast_cpu_state {
 };
 
 typedef struct fast_task fast_task_t;
+typedef struct fast_cpu fast_cpu_t;
+
+typedef struct {
+    uint64_t r15;
+    uint64_t r14;
+    uint64_t r13;
+    uint64_t r12;
+    uint64_t rbx;
+    uint64_t rbp;
+    uint64_t rip;
+} switch_frame_t;
+_Static_assert(sizeof(switch_frame_t) == 56, "invalid switch frame layout");
 
 struct fast_task {
-    pt_regs_t regs;
-    uint8_t fpu[fpu_state_size] __attribute__((aligned(16)));
+    uint64_t rsp;
     uint64_t cr3;
     uint64_t kernel_rsp;
     uint64_t kernel_fs_base;
     uint64_t id;
     fast_task_t *next;
+    fast_cpu_t *cpu;
     uint8_t state;
     uint8_t queued;
-    uint8_t context_valid;
-    uint8_t user_context;
     uint8_t park_state;
+    uint8_t fpu[fpu_state_size] __attribute__((aligned(16)));
 };
-_Static_assert(
-    offsetof(fast_task_t, fpu) == fpu_state_offset,
-    "fast handoff FPU state must match the IRQ frame layout"
-);
 _Static_assert(
     _Alignof(fast_task_t) >= 16,
     "FXSAVE/FXRSTOR require a 16-byte-aligned task context"
 );
+_Static_assert(
+    offsetof(fast_task_t, fpu) == 64,
+    "scheduler metadata must fit in one cache line"
+);
 
-typedef struct {
+struct fast_cpu {
     fast_task_t *current;
     fast_task_t *idle;
     fast_task_t *head;
@@ -70,13 +80,13 @@ typedef struct {
     uint8_t is_bsp;
     enum fast_cpu_state state;
     uint8_t lock;
+    uint64_t lapic_id;
     uint64_t timer_deadline;
     uint64_t wake_sequence;
-} __attribute__((aligned(64))) fast_cpu_t;
+} __attribute__((aligned(64)));
 
 static fast_cpu_t fast_cpus[cpu_slot_count];
 static uint8_t handoff_enabled;
-static uint8_t yield_requested[cpu_slot_count];
 static uint8_t lapic_x2apic;
 static uint64_t lapic_mmio_base;
 static uint64_t scheduler_tick_cycles;
@@ -87,6 +97,78 @@ static uint16_t ps2_queue_tail;
 static uint16_t ps2_data_port;
 static uint16_t ps2_status_port;
 static uint64_t ps2_irq_num;
+
+static void fast_handoff_schedule(fast_cpu_t *cpu);
+static void wake_idle_worker(fast_cpu_t *cpu);
+
+__attribute__((naked, noinline))
+static void fast_switch_to(uint64_t *, uint64_t) {
+    __asm__ volatile(
+        "pushq %rbp\n"
+        "pushq %rbx\n"
+        "pushq %r12\n"
+        "pushq %r13\n"
+        "pushq %r14\n"
+        "pushq %r15\n"
+        "movq %rsp, (%rdi)\n"
+        "movq %rsi, %rsp\n"
+        "popq %r15\n"
+        "popq %r14\n"
+        "popq %r13\n"
+        "popq %r12\n"
+        "popq %rbx\n"
+        "popq %rbp\n"
+        "retq\n"
+    );
+}
+
+__attribute__((naked, noreturn))
+static void fast_kernel_task_entry(void) {
+    __asm__ volatile(
+        "sti\n"
+        "movq %r12, %rdi\n"
+        "jmpq *%r13\n"
+    );
+}
+
+__attribute__((naked, noreturn))
+static void fast_user_task_entry(void) {
+    __asm__ volatile(
+        "movq %rsp, %r13\n"
+        "movq 128(%r13), %rax\n"
+        "movq %rax, %rdx\n"
+        "shrq $32, %rdx\n"
+        "movl $0xc0000100, %ecx\n"
+        "wrmsr\n"
+        "leaq 200(%r13), %rsp\n"
+        "pushq 192(%r13)\n"
+        "pushq 184(%r13)\n"
+        "pushq 176(%r13)\n"
+        "pushq 168(%r13)\n"
+        "pushq 160(%r13)\n"
+        "movq 112(%r13), %rax\n"
+        "movw %ax, %ds\n"
+        "movq 120(%r13), %rax\n"
+        "movw %ax, %es\n"
+        "movq 0(%r13), %r15\n"
+        "movq 8(%r13), %r14\n"
+        "movq 24(%r13), %r12\n"
+        "movq 32(%r13), %r11\n"
+        "movq 40(%r13), %r10\n"
+        "movq 48(%r13), %r9\n"
+        "movq 56(%r13), %r8\n"
+        "movq 64(%r13), %rbx\n"
+        "movq 72(%r13), %rcx\n"
+        "movq 80(%r13), %rdx\n"
+        "movq 88(%r13), %rsi\n"
+        "movq 96(%r13), %rdi\n"
+        "movq 104(%r13), %rbp\n"
+        "movq 136(%r13), %rax\n"
+        "movq 16(%r13), %r13\n"
+        "swapgs\n"
+        "iretq\n"
+    );
+}
 
 static inline fast_task_t *task_from_handle(uint64_t handle) {
     return (fast_task_t *)(uintptr_t)handle;
@@ -124,6 +206,12 @@ static uint64_t current_lapic_id(void) {
         return rdmsr(x2apic_msr_base + (lapic_id_register >> 4));
     if (!lapic_mmio_base) return 0;
     return *(volatile uint32_t *)(uintptr_t)(lapic_mmio_base + lapic_id_register) >> 24;
+}
+
+static fast_cpu_t *current_cpu(void) {
+    fast_cpu_t *cpu;
+    __asm__ volatile("movq %%gs:32, %0" : "=r"(cpu));
+    return cpu;
 }
 
 static uint32_t lapic_read(uint32_t reg) {
@@ -177,14 +265,11 @@ static void update_scheduler_timer(fast_cpu_t *cpu) {
     set_timer_deadline(cpu, latest);
 }
 
-static void wake_cpu(uint64_t lapic_id) {
-    fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
+static void wake_cpu(fast_cpu_t *cpu) {
     __atomic_add_fetch(&cpu->wake_sequence, 1, __ATOMIC_RELEASE);
     if (cpu->state == cpu_offline) return;
-
-    __atomic_store_n(
-        &yield_requested[lapic_id % cpu_slot_count], 1, __ATOMIC_RELEASE);
-    if (lapic_id != current_lapic_id()) lapic_send_reschedule(lapic_id);
+    if (cpu != current_cpu())
+        lapic_send_reschedule(cpu->lapic_id);
 }
 
 static bool queue_push(fast_cpu_t *cpu, fast_task_t *task) {
@@ -231,31 +316,102 @@ static fast_task_t *queue_pop(fast_cpu_t *cpu) {
     return NULL;
 }
 
-static void save_task(fast_task_t *task, pt_regs_t *regs) {
-    task->regs = *regs;
-    __builtin_memcpy(
-        task->fpu,
-        (const uint8_t *)regs + fpu_state_offset,
-        fpu_state_size
-    );
-    __atomic_store_n(&task->context_valid, 1, __ATOMIC_RELEASE);
-}
-
-static void restore_task(const fast_task_t *task, pt_regs_t *regs) {
-    *regs = task->regs;
-    __builtin_memcpy(
-        (uint8_t *)regs + fpu_state_offset,
-        task->fpu,
-        fpu_state_size
-    );
-}
-
 static void initialize_fpu(fast_task_t *task) {
     __builtin_memset(task->fpu, 0, sizeof(task->fpu));
     task->fpu[0] = 0x7f;
     task->fpu[1] = 0x03;
     task->fpu[24] = 0x80;
     task->fpu[25] = 0x1f;
+}
+
+static void fast_handoff_schedule(fast_cpu_t *cpu) {
+    const uint64_t flags = interrupt_save();
+    if (!__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) ||
+        cpu->state == cpu_offline || !cpu->current) {
+        interrupt_restore(flags);
+        return;
+    }
+
+    lock_cpu(cpu);
+    fast_task_t *previous = cpu->current;
+    const bool previous_is_idle = cpu->state == cpu_online &&
+        previous == cpu->idle;
+
+    uint8_t parked = __atomic_load_n(&previous->park_state, __ATOMIC_ACQUIRE);
+    if (parked == park_requested) {
+        if (__atomic_compare_exchange_n(
+                &previous->park_state,
+                &parked,
+                park_parked,
+                false,
+                __ATOMIC_ACQ_REL,
+                __ATOMIC_ACQUIRE
+            )) {
+            task_state_store(previous, task_blocked);
+        } else if (parked == park_notified) {
+            __atomic_store_n(&previous->park_state, park_idle, __ATOMIC_RELEASE);
+        }
+    } else if (parked == park_notified) {
+        __atomic_compare_exchange_n(
+            &previous->park_state,
+            &parked,
+            park_idle,
+            false,
+            __ATOMIC_ACQ_REL,
+            __ATOMIC_ACQUIRE
+        );
+    }
+
+    fast_task_t *next = previous;
+    if (cpu->head || task_state_load(previous) != task_running) {
+        if (!previous_is_idle && task_state_load(previous) == task_running) {
+            task_state_store(previous, task_ready);
+            if (!queue_push(cpu, previous))
+                task_state_store(previous, task_running);
+        }
+
+        next = queue_pop(cpu);
+        if (!next && task_state_load(previous) == task_running) next = previous;
+        if (!next && cpu->state == cpu_online && cpu->idle && cpu->idle->rsp) {
+            next = cpu->idle;
+            task_state_store(next, task_running);
+        }
+        if (!next) {
+            task_state_store(previous, task_running);
+            next = previous;
+        }
+    }
+    if (previous_is_idle && next != previous &&
+        task_state_load(previous) == task_running) {
+        task_state_store(previous, task_ready);
+    }
+    cpu->current = next;
+    update_scheduler_timer(cpu);
+    unlock_cpu(cpu);
+
+    if (next != previous) {
+        __asm__ volatile("fxsave64 %0" : "=m"(previous->fpu));
+        if (previous->cr3 != next->cr3) write_cr3(next->cr3);
+        if (next->kernel_rsp) {
+            set_kernel_stack(cpu->lapic_id, next->kernel_rsp, cpu->is_bsp);
+            locals[cpu->lapic_id % cpu_slot_count].syscall.kernel_rsp =
+                next->kernel_rsp;
+        }
+        const uint64_t runtime_fs_base =
+            kernel_runtime_fs_bases[cpu->lapic_id % cpu_slot_count];
+        const uint64_t previous_fs_base = previous->kernel_fs_base
+            ? previous->kernel_fs_base : runtime_fs_base;
+        const uint64_t kernel_fs_base = next->kernel_fs_base
+            ? next->kernel_fs_base
+            : runtime_fs_base;
+        locals[cpu->lapic_id % cpu_slot_count].syscall.kernel_fs_base =
+            kernel_fs_base;
+        __asm__ volatile("fxrstor64 %0" : : "m"(next->fpu));
+        if (previous_fs_base != kernel_fs_base)
+            wrmsr(ia32_fs_base_msr, kernel_fs_base);
+        fast_switch_to(&previous->rsp, next->rsp);
+    }
+    interrupt_restore(flags);
 }
 
 void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base) {
@@ -281,18 +437,16 @@ bool fast_handoff_configure_timer(uint8_t vector, uint32_t frequency_hz) {
 void fast_handoff_yield(void) {
     if (!__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE)) return;
 
-    const uint64_t slot = current_lapic_id() % cpu_slot_count;
-    if (fast_cpus[slot].state == cpu_offline) return;
-    __atomic_store_n(&yield_requested[slot], 1, __ATOMIC_RELEASE);
-    __asm__ volatile("int $0x20" : : : "memory");
+    fast_cpu_t *cpu = current_cpu();
+    if (cpu->state == cpu_offline) return;
+    fast_handoff_schedule(cpu);
 }
 
 bool fast_handoff_park_current(void) {
     if (!__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE)) return false;
 
     const uint64_t flags = interrupt_save();
-    const uint64_t slot = current_lapic_id() % cpu_slot_count;
-    fast_cpu_t *cpu = &fast_cpus[slot];
+    fast_cpu_t *cpu = current_cpu();
     fast_task_t *task = cpu->current;
     if (cpu->state == cpu_offline || !task || task == cpu->idle) {
         interrupt_restore(flags);
@@ -308,8 +462,7 @@ bool fast_handoff_park_current(void) {
             __ATOMIC_ACQ_REL,
             __ATOMIC_ACQUIRE
         )) {
-        __atomic_store_n(&yield_requested[slot], 1, __ATOMIC_RELEASE);
-        __asm__ volatile("int $0x20" : : : "memory");
+        fast_handoff_schedule(cpu);
         interrupt_restore(flags);
         return true;
     }
@@ -328,7 +481,7 @@ bool fast_handoff_park_current(void) {
     return true;
 }
 
-bool fast_handoff_unpark(uint64_t handle, uint64_t lapic_id) {
+bool fast_handoff_unpark(uint64_t handle) {
     fast_task_t *task = task_from_handle(handle);
     if (!task) return false;
 
@@ -370,27 +523,44 @@ bool fast_handoff_unpark(uint64_t handle, uint64_t lapic_id) {
             ))
             return state != task_zombie;
 
-        return fast_handoff_enqueue(handle, lapic_id) ||
-            __atomic_load_n(&task->queued, __ATOMIC_ACQUIRE) != 0;
+        fast_cpu_t *cpu = __atomic_load_n(&task->cpu, __ATOMIC_ACQUIRE);
+        if (!cpu) return false;
+
+        const uint64_t flags = interrupt_save();
+        lock_cpu(cpu);
+        const bool queued = queue_push(cpu, task);
+        unlock_cpu(cpu);
+        if (queued) wake_cpu(cpu);
+        interrupt_restore(flags);
+        return queued || __atomic_load_n(&task->queued, __ATOMIC_ACQUIRE) != 0;
     }
 }
 
 uint64_t fast_handoff_wake_sequence(void) {
-    fast_cpu_t *cpu = &fast_cpus[current_lapic_id() % cpu_slot_count];
+    fast_cpu_t *cpu = current_cpu();
     return __atomic_load_n(&cpu->wake_sequence, __ATOMIC_ACQUIRE);
 }
 
 void fast_handoff_wake_bsp(void) {
     const uint64_t lapic_id = __atomic_load_n(&bsp_lapic_id, __ATOMIC_ACQUIRE);
-    if (lapic_id != UINT64_MAX) wake_cpu(lapic_id);
+    if (lapic_id == UINT64_MAX) return;
+
+    fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
+    const uint64_t flags = interrupt_save();
+    lock_cpu(cpu);
+    wake_idle_worker(cpu);
+    unlock_cpu(cpu);
+    wake_cpu(cpu);
+    interrupt_restore(flags);
 }
 
 /* The Kotlin/Native interop wrapper keeps this entire call in Native state. */
 void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence) {
     const uint64_t flags = interrupt_save();
-    fast_handoff_yield();
-
-    fast_cpu_t *cpu = &fast_cpus[current_lapic_id() % cpu_slot_count];
+    fast_cpu_t *cpu = current_cpu();
+    if (__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) &&
+        cpu->state != cpu_offline)
+        fast_handoff_schedule(cpu);
     lock_cpu(cpu);
     const bool idle = cpu->state == cpu_online && cpu->current == cpu->idle &&
         !cpu->head && wake_sequence ==
@@ -451,7 +621,7 @@ static bool fast_handoff_ps2_irq(uint64_t irq_num) {
 static void wake_idle_worker(fast_cpu_t *cpu) {
     fast_task_t *idle = cpu->idle;
     if (cpu->state != cpu_online || !idle || idle == cpu->current ||
-        !__atomic_load_n(&idle->context_valid, __ATOMIC_ACQUIRE))
+        !__atomic_load_n(&idle->rsp, __ATOMIC_ACQUIRE))
         return;
 
     task_state_store(idle, task_ready);
@@ -484,22 +654,32 @@ void fast_handoff_init_kernel(
     uint64_t fs_base
 ) {
     fast_task_t *task = task_from_handle(handle);
-    if (!task) return;
-    __builtin_memset(&task->regs, 0, sizeof(task->regs));
-    task->regs.rip = entry;
-    task->regs.rsp = rsp;
-    task->regs.rbp = rsp;
-    task->regs.rflags = 0x202;
-    task->regs.cs = 0x08;
-    task->regs.ss = 0x10;
-    task->regs.ds = 0x10;
-    task->regs.es = 0x10;
-    task->regs.fs_base = fs_base;
+    if (!task || !entry || rsp < sizeof(switch_frame_t)) return;
+    switch_frame_t *frame = (switch_frame_t *)(uintptr_t)
+        (rsp - sizeof(switch_frame_t));
+    *frame = (switch_frame_t){
+        .r13 = entry,
+        .r12 = argument,
+        .rip = (uintptr_t)&fast_kernel_task_entry,
+    };
+    task->kernel_rsp = rsp;
     task->kernel_fs_base = fs_base;
-    task->regs.rdi = argument;
-    task->user_context = 0;
+    __atomic_store_n(&task->rsp, (uintptr_t)frame, __ATOMIC_RELEASE);
     task_state_store(task, task_ready);
-    __atomic_store_n(&task->context_valid, 1, __ATOMIC_RELEASE);
+    initialize_fpu(task);
+}
+
+static void install_user_registers(fast_task_t *task, const pt_regs_t *registers) {
+    const uintptr_t frame_address =
+        (task->kernel_rsp - sizeof(pt_regs_t)) & ~0xfULL;
+    pt_regs_t *frame = (pt_regs_t *)frame_address;
+    *frame = *registers;
+    switch_frame_t *context = (switch_frame_t *)frame - 1;
+    *context = (switch_frame_t){
+        .rip = (uintptr_t)&fast_user_task_entry,
+    };
+    __atomic_store_n(&task->rsp, (uintptr_t)context, __ATOMIC_RELEASE);
+    task_state_store(task, task_ready);
     initialize_fpu(task);
 }
 
@@ -510,20 +690,18 @@ void fast_handoff_init_user(
     uint64_t fs_base
 ) {
     fast_task_t *task = task_from_handle(handle);
-    if (!task) return;
-    __builtin_memset(&task->regs, 0, sizeof(task->regs));
-    task->regs.rip = entry;
-    task->regs.rsp = rsp;
-    task->regs.rflags = 0x202;
-    task->regs.cs = 0x23;
-    task->regs.ss = 0x1b;
-    task->regs.ds = 0x1b;
-    task->regs.es = 0x1b;
-    task->regs.fs_base = fs_base;
-    task->user_context = 1;
-    task_state_store(task, task_ready);
-    __atomic_store_n(&task->context_valid, 1, __ATOMIC_RELEASE);
-    initialize_fpu(task);
+    if (!task || !entry || !rsp || !task->kernel_rsp) return;
+    const pt_regs_t registers = {
+        .ds = 0x1b,
+        .es = 0x1b,
+        .fs_base = fs_base,
+        .rip = entry,
+        .cs = 0x23,
+        .rflags = 0x202,
+        .rsp = rsp,
+        .ss = 0x1b,
+    };
+    install_user_registers(task, &registers);
 }
 
 void fast_handoff_init_user_registers(
@@ -533,17 +711,15 @@ void fast_handoff_init_user_registers(
     uint64_t fs_base
 ) {
     fast_task_t *task = task_from_handle(handle);
-    if (!task || !registers || !rsp) return;
-    __builtin_memcpy(&task->regs, registers, sizeof(task->regs));
-    task->regs.rax = 0;
-    task->regs.func = 0;
-    task->regs.errcode = 0;
-    task->regs.rsp = rsp;
-    if (fs_base) task->regs.fs_base = fs_base;
-    task->user_context = 1;
-    task_state_store(task, task_ready);
-    __atomic_store_n(&task->context_valid, 1, __ATOMIC_RELEASE);
-    initialize_fpu(task);
+    if (!task || !registers || !rsp || !task->kernel_rsp) return;
+    pt_regs_t snapshot;
+    __builtin_memcpy(&snapshot, registers, sizeof(snapshot));
+    snapshot.rax = 0;
+    snapshot.func = 0;
+    snapshot.errcode = 0;
+    snapshot.rsp = rsp;
+    snapshot.fs_base = fs_base;
+    install_user_registers(task, &snapshot);
 }
 
 bool fast_handoff_bind_current(
@@ -564,6 +740,9 @@ bool fast_handoff_bind_current(
     cpu->current = task;
     cpu->idle = task;
     cpu->is_bsp = is_bsp != 0;
+    cpu->lapic_id = lapic_id;
+    locals[lapic_id % cpu_slot_count].syscall.scheduler_cpu = (uintptr_t)cpu;
+    __atomic_store_n(&task->cpu, cpu, __ATOMIC_RELEASE);
     if (cpu->is_bsp)
         __atomic_store_n(&bsp_lapic_id, lapic_id, __ATOMIC_RELEASE);
     cpu->state = cpu_bootstrapping;
@@ -578,9 +757,9 @@ bool fast_handoff_bind_current(
 
 bool fast_handoff_finish_bootstrap(uint64_t handle) {
     fast_task_t *task = task_from_handle(handle);
-    if (!task) return false;
+    if (!task || !task->cpu) return false;
 
-    fast_cpu_t *cpu = &fast_cpus[current_lapic_id() % cpu_slot_count];
+    fast_cpu_t *cpu = task->cpu;
     const uint64_t flags = interrupt_save();
     lock_cpu(cpu);
     const bool finished = cpu->state == cpu_bootstrapping &&
@@ -593,17 +772,34 @@ bool fast_handoff_finish_bootstrap(uint64_t handle) {
 
 bool fast_handoff_enqueue(uint64_t handle, uint64_t lapic_id) {
     fast_task_t *task = task_from_handle(handle);
-    if (!task || !__atomic_load_n(&task->context_valid, __ATOMIC_ACQUIRE))
+    if (!task || !__atomic_load_n(&task->rsp, __ATOMIC_ACQUIRE))
         return false;
     fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
     const uint64_t flags = interrupt_save();
     lock_cpu(cpu);
+    fast_cpu_t *owner = __atomic_load_n(&task->cpu, __ATOMIC_ACQUIRE);
+    if (!owner) {
+        fast_cpu_t *unassigned = NULL;
+        if (__atomic_compare_exchange_n(
+                &task->cpu,
+                &unassigned,
+                cpu,
+                false,
+                __ATOMIC_RELEASE,
+                __ATOMIC_ACQUIRE
+            )) {
+            owner = cpu;
+        } else {
+            owner = unassigned;
+        }
+    }
     const uint8_t state = task_state_load(task);
-    const bool accepted = task != cpu->current && state != task_running &&
+    const bool accepted = owner == cpu && task != cpu->current &&
+        state != task_running &&
         state != task_zombie && queue_push(cpu, task);
     if (accepted) task_state_store(task, task_ready);
     unlock_cpu(cpu);
-    if (accepted) wake_cpu(lapic_id);
+    if (accepted) wake_cpu(cpu);
     interrupt_restore(flags);
     return accepted;
 }
@@ -636,32 +832,20 @@ void fast_handoff_set_task_state(uint64_t handle, uint8_t state) {
         __atomic_store_n(&task->state, state, __ATOMIC_RELEASE);
 }
 
-uint8_t fast_handoff_task_is_queued(uint64_t handle) {
-    fast_task_t *task = task_from_handle(handle);
-    return task ? __atomic_load_n(&task->queued, __ATOMIC_ACQUIRE) : 0;
-}
-
-uint8_t fast_handoff_task_has_context(uint64_t handle) {
-    fast_task_t *task = task_from_handle(handle);
-    return task ? __atomic_load_n(&task->context_valid, __ATOMIC_ACQUIRE) : 0;
-}
-
 uint64_t fast_handoff_current_task_id(void) {
-    fast_cpu_t *cpu = &fast_cpus[current_lapic_id() % cpu_slot_count];
-    const uint64_t flags = interrupt_save();
-    lock_cpu(cpu);
-    const fast_task_t *task = cpu->current;
-    const uint64_t id = task ? task->id : UINT64_MAX;
-    unlock_cpu(cpu);
-    interrupt_restore(flags);
-    return id;
+    if (!__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE)) return UINT64_MAX;
+    const fast_task_t *task = __atomic_load_n(
+        &current_cpu()->current,
+        __ATOMIC_ACQUIRE
+    );
+    return task ? task->id : UINT64_MAX;
 }
 
 bool fast_handoff_replace_address_space(uint64_t handle, uint64_t cr3) {
     fast_task_t *task = task_from_handle(handle);
     if (!task || !cr3) return false;
 
-    fast_cpu_t *cpu = &fast_cpus[current_lapic_id() % cpu_slot_count];
+    fast_cpu_t *cpu = current_cpu();
     const uint64_t flags = interrupt_save();
     lock_cpu(cpu);
     const bool current = cpu->current == task;
@@ -673,13 +857,7 @@ bool fast_handoff_replace_address_space(uint64_t handle, uint64_t cr3) {
 }
 
 void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
-    const uint64_t lapic_id = current_lapic_id();
-    const uint64_t slot = lapic_id % cpu_slot_count;
-    fast_cpu_t *cpu = &fast_cpus[slot];
-
-    const fast_task_t *current = cpu->current;
-    const bool syscall_in_progress = current && current->user_context &&
-        (regs->cs & 3) == 0;
+    fast_cpu_t *cpu = current_cpu();
 
     if (irq_num != timer_irq) {
         __atomic_add_fetch(&cpu->wake_sequence, 1, __ATOMIC_RELEASE);
@@ -696,80 +874,11 @@ void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
         return;
     }
 
-    const bool voluntary = __atomic_exchange_n(
-        &yield_requested[slot], 0, __ATOMIC_ACQ_REL) != 0;
-    const bool preemptible = (regs->cs & 3) != 0 || voluntary;
-
-    if (preemptible && (!syscall_in_progress || voluntary) &&
-        __atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) &&
-        cpu->state != cpu_offline) {
-        lock_cpu(cpu);
-        fast_task_t *previous = cpu->current;
-        const bool previous_is_idle = cpu->state == cpu_online &&
-            previous == cpu->idle;
-        if (previous) {
-            save_task(previous, regs);
-            uint8_t parked = __atomic_load_n(
-                &previous->park_state, __ATOMIC_ACQUIRE);
-            if (parked == park_requested) {
-                task_state_store(previous, task_blocked);
-                if (!__atomic_compare_exchange_n(
-                        &previous->park_state,
-                        &parked,
-                        park_parked,
-                        false,
-                        __ATOMIC_RELEASE,
-                        __ATOMIC_ACQUIRE
-                    )) {
-                    task_state_store(previous, task_running);
-                    if (parked == park_notified)
-                        __atomic_store_n(
-                            &previous->park_state, park_idle, __ATOMIC_RELEASE);
-                }
-            } else if (parked == park_notified) {
-                __atomic_compare_exchange_n(
-                    &previous->park_state,
-                    &parked,
-                    park_idle,
-                    false,
-                    __ATOMIC_ACQ_REL,
-                    __ATOMIC_ACQUIRE
-                );
-            }
-            if (!previous_is_idle &&
-                task_state_load(previous) == task_running &&
-                queue_push(cpu, previous)) {
-                task_state_store(previous, task_ready);
-            }
-        }
-
-        fast_task_t *next = queue_pop(cpu);
-        if (next && __atomic_load_n(&next->context_valid, __ATOMIC_ACQUIRE)) {
-            cpu->current = next;
-        } else {
-            next = previous && task_state_load(previous) == task_running
-                ? previous : NULL;
-            if (!next && cpu->state == cpu_online) next = cpu->idle;
-            if (next) task_state_store(next, task_running);
-            cpu->current = next;
-        }
-        if (previous_is_idle && next != previous &&
-            task_state_load(previous) == task_running)
-            task_state_store(previous, task_ready);
-        unlock_cpu(cpu);
-
-        if (next && __atomic_load_n(&next->context_valid, __ATOMIC_ACQUIRE)) {
-            if (!previous || previous->cr3 != next->cr3) write_cr3(next->cr3);
-            if (next->kernel_rsp) {
-                set_kernel_stack(lapic_id, next->kernel_rsp, cpu->is_bsp);
-                locals[lapic_id % cpu_slot_count].syscall.kernel_rsp = next->kernel_rsp;
-            }
-            locals[slot].syscall.kernel_fs_base = next->kernel_fs_base
-                ? next->kernel_fs_base : kernel_runtime_fs_bases[slot];
-            restore_task(next, regs);
-        }
-    }
-
-    update_scheduler_timer(cpu);
     lapic_eoi(irq_num);
+    if (__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) &&
+        cpu->state != cpu_offline) {
+        fast_handoff_schedule(cpu);
+    } else {
+        update_scheduler_timer(cpu);
+    }
 }

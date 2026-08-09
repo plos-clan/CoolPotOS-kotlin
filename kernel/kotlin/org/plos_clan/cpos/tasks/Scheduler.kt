@@ -54,11 +54,7 @@ object Scheduler {
     fun parkCurrent(): Boolean = bridge.fast_handoff_park_current()
 
     fun wake(thread: Thread): Boolean {
-        val target = selectTargetCpu()
-        return bridge.fast_handoff_unpark(
-            thread.nativeContext,
-            target.lapicId.toULong(),
-        )
+        return bridge.fast_handoff_unpark(thread.nativeContext)
     }
 
     fun apInitialize(): Boolean {

@@ -31,8 +31,6 @@ class PtraceRegisters(private val registers: CPointer<ULongVar>) {
         const val IDX_RSP = 23
         const val IDX_SS = 24
         const val REGISTER_COUNT = IDX_SS + 1
-        const val FPU_STATE_SIZE = 512
-        private const val FPU_STATE_OFFSET = 208
         private val VALID_REGISTER_INDEXES = 0 until REGISTER_COUNT
     }
 
@@ -58,18 +56,4 @@ class PtraceRegisters(private val registers: CPointer<ULongVar>) {
         repeat(minOf(source.size, REGISTER_COUNT)) { index ->
             registers[index] = source[index]
         }
-
-    fun copyFpuInto(destination: ByteArray) {
-        val source = requireNotNull(registers.reinterpret<UByteVar>())
-        repeat(minOf(destination.size, FPU_STATE_SIZE)) { index ->
-            destination[index] = source[FPU_STATE_OFFSET + index].toByte()
-        }
-    }
-
-    fun restoreFpuFrom(source: ByteArray) {
-        val destination = requireNotNull(registers.reinterpret<UByteVar>())
-        repeat(minOf(source.size, FPU_STATE_SIZE)) { index ->
-            destination[FPU_STATE_OFFSET + index] = source[index].toUByte()
-        }
-    }
 }

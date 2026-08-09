@@ -178,15 +178,21 @@ static __attribute__((naked, used)) void irq_common_entry(void) {
         "movq 24(%rdx), %rax\n"
         "movq %rax, 176(%rsp)\n"
 
+        "testb $3, 16(%rdx)\n"
+        "jz 1f\n"
         "movq 32(%rdx), %rax\n"
         "movq %rax, 184(%rsp)\n"
         "movq 40(%rdx), %rax\n"
         "movq %rax, 192(%rsp)\n"
-
-        "testb $3, 16(%rdx)\n"
-        "jz 1f\n"
         "swapgs\n"
+        "jmp 2f\n"
         "1:\n"
+        "leaq 32(%rdx), %rax\n"
+        "movq %rax, 184(%rsp)\n"
+        "xorq %rax, %rax\n"
+        "movw %ss, %ax\n"
+        "movq %rax, 192(%rsp)\n"
+        "2:\n"
         "movq %gs:24, %rax\n"
         "movq %rax, %rdx\n"
         "shrq $32, %rdx\n"
@@ -206,22 +212,22 @@ static __attribute__((naked, used)) void irq_common_entry(void) {
         "movl $0xc0000100, %ecx\n"
         "wrmsr\n"
 
-        "leaq -40(%r13), %r12\n"
+        "movq 200(%r13), %r12\n"
         "movq 160(%r13), %rax\n"
-        "movq %rax, 0(%r12)\n"
-        "movq 168(%r13), %rax\n"
         "movq %rax, 8(%r12)\n"
-        "movq 176(%r13), %rax\n"
+        "movq 168(%r13), %rax\n"
         "movq %rax, 16(%r12)\n"
-        "movq 184(%r13), %rax\n"
+        "movq 176(%r13), %rax\n"
         "movq %rax, 24(%r12)\n"
-        "movq 192(%r13), %rax\n"
-        "movq %rax, 32(%r12)\n"
 
         "testb $3, 168(%r13)\n"
-        "jz 2f\n"
+        "jz 3f\n"
+        "movq 184(%r13), %rax\n"
+        "movq %rax, 32(%r12)\n"
+        "movq 192(%r13), %rax\n"
+        "movq %rax, 40(%r12)\n"
         "swapgs\n"
-        "2:\n"
+        "3:\n"
         "movq 112(%r13), %rax\n"
         "movw %ax, %ds\n"
         "movq 120(%r13), %rax\n"
@@ -238,8 +244,8 @@ static __attribute__((naked, used)) void irq_common_entry(void) {
         "movq 96(%r13), %rdi\n"
         "movq 104(%r13), %rbp\n"
         "movq 136(%r13), %rax\n"
-        "movq %r12, %rsp\n"
         "movq 80(%r13), %rdx\n"
+        "leaq 8(%r12), %rsp\n"
         "movq 24(%r13), %r12\n"
         "movq 16(%r13), %r13\n"
         "iretq\n"
@@ -274,7 +280,7 @@ void idt_setup(void) {
         const uint16_t irq_index = (uint16_t)(vector - irq_vector_base);
         uint8_t *stub = irq_stub_base + ((uint64_t)irq_index * irq_stub_size);
 
-        set_idt_gate(vector, stub, 2, 0x8e);
+        set_idt_gate(vector, stub, 0, 0x8e);
     }
     idt_load();
 }

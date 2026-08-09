@@ -10,12 +10,10 @@ enum {
     ia32_gs_base_msr = 0xc0000101u,
     ia32_kernel_gs_base_msr = 0xc0000102u,
     ia32_tsc_deadline_msr = 0x6e0u,
-    irq_stack_size = 16 * 1024,
     syscall_stack_size = 32 * 1024
 };
 typedef uint64_t gdt_entries_t[7];
 typedef uint8_t tss_stack_t[4096];
-typedef uint8_t irq_stack_t[irq_stack_size];
 typedef uint8_t syscall_stack_t[syscall_stack_size];
 
 typedef struct {
@@ -69,17 +67,18 @@ typedef struct syscall_cpu_state {
     uint64_t user_rsp;
     uint64_t user_rax;
     uint64_t kernel_fs_base;
+    uint64_t scheduler_cpu;
 } syscall_cpu_state_t;
 _Static_assert(offsetof(syscall_cpu_state_t, kernel_rsp) == 0, "invalid syscall kernel RSP offset");
 _Static_assert(offsetof(syscall_cpu_state_t, user_rsp) == 8, "invalid syscall user RSP offset");
 _Static_assert(offsetof(syscall_cpu_state_t, user_rax) == 16, "invalid syscall RAX offset");
 _Static_assert(offsetof(syscall_cpu_state_t, kernel_fs_base) == 24, "invalid syscall FS offset");
+_Static_assert(offsetof(syscall_cpu_state_t, scheduler_cpu) == 32, "invalid scheduler CPU offset");
 
 typedef struct cpu_local {
     gdt_entries_t gdt_entries;
     tss_t tss0;
     tss_stack_t tss_stack __attribute__((aligned(16)));
-    irq_stack_t irq_stack __attribute__((aligned(16)));
     syscall_cpu_state_t syscall;
     syscall_stack_t syscall_stack __attribute__((aligned(16)));
 } cpu_local_t;
@@ -94,7 +93,7 @@ void do_irq(void *regs, uint64_t irq_num);
 void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num);
 void fast_handoff_yield(void);
 bool fast_handoff_park_current(void);
-bool fast_handoff_unpark(uint64_t task, uint64_t lapic_id);
+bool fast_handoff_unpark(uint64_t task);
 uint64_t fast_handoff_wake_sequence(void);
 void fast_handoff_wake_bsp(void);
 void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence);
