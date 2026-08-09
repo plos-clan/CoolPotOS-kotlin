@@ -14,7 +14,7 @@ struct tcb_layout {
 static __attribute__((noreturn)) void ap_start(struct limine_mp_info *info) {
     disable_interrupt();
     idt_load();
-    setup_simd();
+    setup_xstate();
     wrmsr(ia32_fs_base_msr, info->extra_argument);
     kernel_runtime_fs_bases[info->lapic_id % cpu_slot_count] = info->extra_argument;
     ((struct tcb_layout *)info->extra_argument)->tid = (int)allocate_runtime_tid();

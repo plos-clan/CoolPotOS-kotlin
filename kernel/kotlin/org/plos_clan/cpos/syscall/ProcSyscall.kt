@@ -267,6 +267,7 @@ fun sysExecve(regs: PtraceRegisters, process: Process): Long {
     regs[PtraceRegisters.IDX_RSP] = image.stackPointer
     regs[PtraceRegisters.IDX_RAX] = 0uL
     regs[PtraceRegisters.IDX_FS_BASE] = 0uL
+    bridge.fast_handoff_reset_user_xstate()
     return 0L
 }
 

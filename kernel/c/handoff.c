@@ -15,7 +15,6 @@ enum {
     lapic_delivery_pending = 1u << 12,
     lapic_timer_tsc_deadline = 1u << 18,
     x2apic_msr_base = 0x800,
-    fpu_state_size = 512,
     task_ready = 0,
     task_running = 1,
     task_blocked = 2,
@@ -60,14 +59,9 @@ struct fast_task {
     uint8_t state;
     uint8_t queued;
     uint8_t park_state;
-    uint8_t fpu[fpu_state_size] __attribute__((aligned(16)));
 };
 _Static_assert(
-    _Alignof(fast_task_t) >= 16,
-    "FXSAVE/FXRSTOR require a 16-byte-aligned task context"
-);
-_Static_assert(
-    offsetof(fast_task_t, fpu) == 64,
+    sizeof(fast_task_t) == 64,
     "scheduler metadata must fit in one cache line"
 );
 
@@ -98,7 +92,7 @@ static uint16_t ps2_data_port;
 static uint16_t ps2_status_port;
 static uint64_t ps2_irq_num;
 
-static void fast_handoff_schedule(fast_cpu_t *cpu);
+static bool fast_handoff_schedule(fast_cpu_t *cpu, xstate_t *interrupted_xstate);
 static void wake_idle_worker(fast_cpu_t *cpu);
 
 __attribute__((naked, noinline))
@@ -135,6 +129,9 @@ __attribute__((naked, noreturn))
 static void fast_user_task_entry(void) {
     __asm__ volatile(
         "movq %rsp, %r13\n"
+        "movl $3, %eax\n"
+        "xorl %edx, %edx\n"
+        "xrstor64 256(%r13)\n"
         "movq 128(%r13), %rax\n"
         "movq %rax, %rdx\n"
         "shrq $32, %rdx\n"
@@ -316,20 +313,15 @@ static fast_task_t *queue_pop(fast_cpu_t *cpu) {
     return NULL;
 }
 
-static void initialize_fpu(fast_task_t *task) {
-    __builtin_memset(task->fpu, 0, sizeof(task->fpu));
-    task->fpu[0] = 0x7f;
-    task->fpu[1] = 0x03;
-    task->fpu[24] = 0x80;
-    task->fpu[25] = 0x1f;
-}
-
-static void fast_handoff_schedule(fast_cpu_t *cpu) {
+static bool fast_handoff_schedule(
+    fast_cpu_t *cpu,
+    xstate_t *interrupted_xstate
+) {
     const uint64_t flags = interrupt_save();
     if (!__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) ||
         cpu->state == cpu_offline || !cpu->current) {
         interrupt_restore(flags);
-        return;
+        return false;
     }
 
     lock_cpu(cpu);
@@ -390,7 +382,11 @@ static void fast_handoff_schedule(fast_cpu_t *cpu) {
     unlock_cpu(cpu);
 
     if (next != previous) {
-        __asm__ volatile("fxsave64 %0" : "=m"(previous->fpu));
+        if (interrupted_xstate) {
+            initialize_xstate_header(interrupted_xstate);
+            save_xstate(interrupted_xstate);
+            restore_xstate(&initial_xstate);
+        }
         if (previous->cr3 != next->cr3) write_cr3(next->cr3);
         if (next->kernel_rsp) {
             set_kernel_stack(cpu->lapic_id, next->kernel_rsp, cpu->is_bsp);
@@ -406,12 +402,12 @@ static void fast_handoff_schedule(fast_cpu_t *cpu) {
             : runtime_fs_base;
         locals[cpu->lapic_id % cpu_slot_count].syscall.kernel_fs_base =
             kernel_fs_base;
-        __asm__ volatile("fxrstor64 %0" : : "m"(next->fpu));
         if (previous_fs_base != kernel_fs_base)
             wrmsr(ia32_fs_base_msr, kernel_fs_base);
         fast_switch_to(&previous->rsp, next->rsp);
     }
     interrupt_restore(flags);
+    return next != previous && interrupted_xstate != NULL;
 }
 
 void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base) {
@@ -439,7 +435,7 @@ void fast_handoff_yield(void) {
 
     fast_cpu_t *cpu = current_cpu();
     if (cpu->state == cpu_offline) return;
-    fast_handoff_schedule(cpu);
+    fast_handoff_schedule(cpu, NULL);
 }
 
 bool fast_handoff_park_current(void) {
@@ -462,7 +458,7 @@ bool fast_handoff_park_current(void) {
             __ATOMIC_ACQ_REL,
             __ATOMIC_ACQUIRE
         )) {
-        fast_handoff_schedule(cpu);
+        fast_handoff_schedule(cpu, NULL);
         interrupt_restore(flags);
         return true;
     }
@@ -560,7 +556,7 @@ void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence) {
     fast_cpu_t *cpu = current_cpu();
     if (__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) &&
         cpu->state != cpu_offline)
-        fast_handoff_schedule(cpu);
+        fast_handoff_schedule(cpu, NULL);
     lock_cpu(cpu);
     const bool idle = cpu->state == cpu_online && cpu->current == cpu->idle &&
         !cpu->head && wake_sequence ==
@@ -642,7 +638,6 @@ uint64_t fast_handoff_create_task(
     task->kernel_rsp = kernel_rsp;
     task->kernel_fs_base = kernel_fs_base;
     task_state_store(task, task_ready);
-    initialize_fpu(task);
     return (uintptr_t)task;
 }
 
@@ -666,21 +661,25 @@ void fast_handoff_init_kernel(
     task->kernel_fs_base = fs_base;
     __atomic_store_n(&task->rsp, (uintptr_t)frame, __ATOMIC_RELEASE);
     task_state_store(task, task_ready);
-    initialize_fpu(task);
 }
 
-static void install_user_registers(fast_task_t *task, const pt_regs_t *registers) {
+static void install_user_registers(
+    fast_task_t *task,
+    const pt_regs_t *registers,
+    const xstate_t *xstate
+) {
     const uintptr_t frame_address =
-        (task->kernel_rsp - sizeof(pt_regs_t)) & ~0xfULL;
-    pt_regs_t *frame = (pt_regs_t *)frame_address;
-    *frame = *registers;
+        (task->kernel_rsp - sizeof(kernel_entry_frame_t)) & ~0x3fULL;
+    kernel_entry_frame_t *frame = (kernel_entry_frame_t *)frame_address;
+    __builtin_memset(frame, 0, sizeof(*frame));
+    frame->regs = *registers;
+    frame->xstate = *xstate;
     switch_frame_t *context = (switch_frame_t *)frame - 1;
     *context = (switch_frame_t){
         .rip = (uintptr_t)&fast_user_task_entry,
     };
     __atomic_store_n(&task->rsp, (uintptr_t)context, __ATOMIC_RELEASE);
     task_state_store(task, task_ready);
-    initialize_fpu(task);
 }
 
 void fast_handoff_init_user(
@@ -701,7 +700,7 @@ void fast_handoff_init_user(
         .rsp = rsp,
         .ss = 0x1b,
     };
-    install_user_registers(task, &registers);
+    install_user_registers(task, &registers, &initial_xstate);
 }
 
 void fast_handoff_init_user_registers(
@@ -719,7 +718,15 @@ void fast_handoff_init_user_registers(
     snapshot.errcode = 0;
     snapshot.rsp = rsp;
     snapshot.fs_base = fs_base;
-    install_user_registers(task, &snapshot);
+    const fast_task_t *parent = current_cpu()->current;
+    const xstate_t *parent_xstate = (const xstate_t *)(uintptr_t)
+        (parent->kernel_rsp - sizeof(kernel_entry_frame_t) +
+            offsetof(kernel_entry_frame_t, xstate));
+    install_user_registers(
+        task,
+        &snapshot,
+        parent_xstate
+    );
 }
 
 bool fast_handoff_bind_current(
@@ -856,7 +863,15 @@ bool fast_handoff_replace_address_space(uint64_t handle, uint64_t cr3) {
     return current;
 }
 
-void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
+void fast_handoff_reset_user_xstate(void) {
+    const fast_task_t *task = current_cpu()->current;
+    xstate_t *state = (xstate_t *)(uintptr_t)
+        (task->kernel_rsp - sizeof(kernel_entry_frame_t) +
+            offsetof(kernel_entry_frame_t, xstate));
+    *state = initial_xstate;
+}
+
+bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
     fast_cpu_t *cpu = current_cpu();
 
     if (irq_num != timer_irq) {
@@ -869,16 +884,25 @@ void fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
         } else if (irq_num == spurious_irq) {
             lapic_eoi(irq_num);
         } else {
+            xstate_t *xstate = &((kernel_entry_frame_t *)regs)->xstate;
+            initialize_xstate_header(xstate);
+            save_xstate(xstate);
+            restore_xstate(&initial_xstate);
             do_irq(regs, irq_num);
+            restore_xstate(xstate);
         }
-        return;
+        return false;
     }
 
     lapic_eoi(irq_num);
     if (__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) &&
         cpu->state != cpu_offline) {
-        fast_handoff_schedule(cpu);
+        return fast_handoff_schedule(
+            cpu,
+            &((kernel_entry_frame_t *)regs)->xstate
+        );
     } else {
         update_scheduler_timer(cpu);
     }
+    return false;
 }

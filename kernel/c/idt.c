@@ -5,7 +5,6 @@ enum {
     idt_vector_count = 256,
     irq_vector_base = 32,
     irq_stub_size = 10,
-    fpu_state_size = 512
 };
 
 struct idt_entry {
@@ -50,8 +49,10 @@ static void dispatch_kotlin_handler(
     uint64_t error_code,
     uint64_t rbp
 ) {
-    uint8_t fpu_state[fpu_state_size] __attribute__((aligned(16)));
-    __asm__ volatile("fxsave64 %0" : "=m"(fpu_state));
+    xstate_t xstate;
+    initialize_xstate_header(&xstate);
+    save_xstate(&xstate);
+    restore_xstate(&initial_xstate);
 
     const bool from_user = (frame->cs & 3u) != 0;
     uint64_t user_fs_base = 0;
@@ -71,7 +72,7 @@ static void dispatch_kotlin_handler(
         __asm__ volatile("swapgs" : : : "memory");
     }
 
-    __asm__ volatile("fxrstor64 %0" : : "m"(fpu_state));
+    restore_xstate(&xstate);
 }
 
 static __attribute__((noreturn)) void halt_forever(void) {
@@ -134,8 +135,8 @@ static __attribute__((naked, used)) void irq_common_entry(void) {
     __asm__ volatile(
         "pushq %rax\n"
         "leaq 8(%rsp), %rax\n"
-        "andq $-16, %rsp\n"
-        "subq $720, %rsp\n"
+        "andq $-64, %rsp\n"
+        "subq $832, %rsp\n"
         "movq %r15, 0(%rsp)\n"
         "movq %r14, 8(%rsp)\n"
         "movq %r13, 16(%rsp)\n"
@@ -153,7 +154,6 @@ static __attribute__((naked, used)) void irq_common_entry(void) {
         "movq -8(%rax), %rdx\n"
         "movq %rdx, 136(%rsp)\n"
         "movq %rax, 200(%rsp)\n"
-        "fxsave64 208(%rsp)\n"
         "xorq %rax, %rax\n"
         "movw %ds, %ax\n"
         "movq %rax, 112(%rsp)\n"
@@ -205,7 +205,12 @@ static __attribute__((naked, used)) void irq_common_entry(void) {
         "andq $-16, %rsp\n"
         "call fast_handoff_irq\n"
         "movq %r13, %rsp\n"
-        "fxrstor64 208(%r13)\n"
+        "testb %al, %al\n"
+        "jz 4f\n"
+        "movl $3, %eax\n"
+        "xorl %edx, %edx\n"
+        "xrstor64 256(%r13)\n"
+        "4:\n"
         "movq 128(%r13), %rax\n"
         "movq %rax, %rdx\n"
         "shrq $32, %rdx\n"

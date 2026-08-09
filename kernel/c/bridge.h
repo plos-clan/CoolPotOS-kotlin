@@ -100,6 +100,7 @@ uint8_t fast_handoff_task_state(uint64_t task);
 void fast_handoff_set_task_state(uint64_t task, uint8_t state);
 uint64_t fast_handoff_current_task_id(void);
 bool fast_handoff_replace_address_space(uint64_t task, uint64_t cr3);
+void fast_handoff_reset_user_xstate(void);
 bool runtime_vm_add_region(void *base, size_t size);
 uint64_t runtime_clock_initialize(uint64_t frequency);
 uint64_t runtime_clock_frequency(void);

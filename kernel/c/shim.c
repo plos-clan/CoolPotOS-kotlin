@@ -247,7 +247,7 @@ void setup_syscall_cpu(uint64_t lapic_id, uint8_t is_bsp) {
     syscall_cpu_state_t *state = &local->syscall;
     const uint64_t user_gs_base = rdmsr(ia32_gs_base_msr);
     const uintptr_t stack_top =
-        ((uintptr_t)local->syscall_stack + sizeof(local->syscall_stack)) & ~0xfULL;
+        ((uintptr_t)local->syscall_stack + sizeof(local->syscall_stack)) & ~0x3fULL;
 
     state->kernel_rsp = stack_top;
     state->user_rsp = 0;
@@ -274,7 +274,7 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "movq %rax, %gs:16\n"
         "movq %gs:0, %rsp\n"
 
-        "subq $208, %rsp\n"
+        "subq $832, %rsp\n"
         "movq %r15, 0(%rsp)\n"
         "movq %r14, 8(%rsp)\n"
         "movq %r13, 16(%rsp)\n"
@@ -289,6 +289,15 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "movq %rsi, 88(%rsp)\n"
         "movq %rdi, 96(%rsp)\n"
         "movq %rbp, 104(%rsp)\n"
+
+        "leaq 768(%rsp), %rdi\n"
+        "xorl %eax, %eax\n"
+        "movl $8, %ecx\n"
+        "rep stosq\n"
+        "movl $3, %eax\n"
+        "xorl %edx, %edx\n"
+        "xsaveopt64 256(%rsp)\n"
+        "xrstor64 initial_xstate(%rip)\n"
 
         "xorq %rax, %rax\n"
         "movw %ds, %ax\n"
@@ -368,6 +377,9 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "pushq 160(%r13)\n"
 
         "2:\n"
+        "movl $3, %eax\n"
+        "xorl %edx, %edx\n"
+        "xrstor64 256(%r13)\n"
         "movq 0(%r13), %r15\n"
         "movq 8(%r13), %r14\n"
         "movq 24(%r13), %r12\n"

@@ -37,7 +37,11 @@ static volatile uint64_t limine_requests_end_marker[] = LIMINE_REQUESTS_END_MARK
 #undef LIMINE_REQUEST
 #undef LIMINE_ITEM
 
-static const uint32_t default_mxcsr = 0x1f80;
+const xstate_t initial_xstate = {
+    .legacy.control_word = 0x037f,
+    .legacy.mxcsr = 0x1f80,
+    .header.state_bv = xstate_mask,
+};
 static char boot_argv0[] = "kernel";
 
 static uint8_t boot_random[16] = "ARny-MLIBC-TLS!";
@@ -81,17 +85,23 @@ struct elf64_ehdr {
     uint16_t e_shstrndx;
 };
 
-void setup_simd(void) {
+void setup_xstate(void) {
     uint64_t cr0, cr4;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
     cr0 = (cr0 & ~((1u << 2) | (1u << 3))) |
         (1u << 1) | (1u << 5) | (1u << 16);
-    cr4 |= (1u << 9) | (1u << 10);
+    cr4 |= (1u << 9) | (1u << 10) | (1u << 18);
     __asm__ volatile("mov %0, %%cr0" : : "r"(cr0) : "memory");
     __asm__ volatile("mov %0, %%cr4" : : "r"(cr4) : "memory");
+    __asm__ volatile(
+        "xsetbv"
+        :
+        : "c"(0), "a"(xstate_mask), "d"(0)
+        : "memory"
+    );
     wrmsr(0xc0000080u, rdmsr(0xc0000080u) | (1ULL << 11));
-    __asm__ volatile("fninit; ldmxcsr %0" : : "m"(default_mxcsr));
+    restore_xstate(&initial_xstate);
 }
 
 static __attribute__((noreturn)) void halt_forever(void) {
@@ -150,7 +160,7 @@ void _start(void) {
         halt_forever();
     }
 
-    setup_simd();
+    setup_xstate();
     __dlapi_enter(entry_stack);
     kernel_main();
     halt_forever();
