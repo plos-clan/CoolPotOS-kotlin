@@ -354,8 +354,8 @@ kotlin {
 
     nativeTarget.binaries.staticLib {
         baseName = "kernel"
-        if (config.debug) {
-            freeCompilerArgs += "-g"
+        if (buildType.debuggable) {
+            freeCompilerArgs += listOf("-g", "-Xruntime-logs=gc=info")
         }
     }
 

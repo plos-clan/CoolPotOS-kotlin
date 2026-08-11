@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <stdbool.h>
 #include "bridge.h"
 #include "native.h"
@@ -20,7 +21,12 @@ void set_kernel_runtime_fs_base(uint64_t pointer) {
     kernel_runtime_fs_bases[ebx >> 24] = pointer;
 }
 
-int get_nprocs(void) { return 1; }
+int get_nprocs(void) {
+    const struct limine_mp_response *response = mp_request.response;
+    if (!response || response->cpu_count == 0) return 1;
+    if (response->cpu_count > INT_MAX) return INT_MAX;
+    return (int)response->cpu_count;
+}
 
 int __fxstat(int version, int fd, void *statbuf) {
     (void)version;

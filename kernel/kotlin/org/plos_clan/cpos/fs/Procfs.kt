@@ -4,6 +4,7 @@ import KERNEL_NAME
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.char.TtyManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
+import org.plos_clan.cpos.mem.RuntimeMemory
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.mem.PreparedBufferDestination
@@ -247,18 +248,7 @@ private enum class RootFile(
             val lastPid = processes.maxOfOrNull(Process::id) ?: 0
             "0.00 0.00 0.00 $runnable/${processes.size} $lastPid\n".encodeToByteArray()
         }
-        MEMORY_INFO -> BuddyFrameAllocator.statistics().let { memory ->
-            """
-            MemTotal:       ${memory.totalBytes / KIBIBYTE} kB
-            MemFree:        ${memory.availableBytes / KIBIBYTE} kB
-            MemAvailable:   ${memory.availableBytes / KIBIBYTE} kB
-            Buffers:        0 kB
-            Cached:         0 kB
-            SwapCached:     0 kB
-            SwapTotal:      0 kB
-            SwapFree:       0 kB
-            """.trimIndent().plus("\n").encodeToByteArray()
-        }
+        MEMORY_INFO -> MemoryInfoFile.render()
         STATISTICS -> "cpu  0 0 0 0 0 0 0 0 0 0\n".encodeToByteArray()
         UPTIME -> {
             val centiseconds = TscClock.nanoTime() / 10_000_000uL
@@ -271,6 +261,40 @@ private enum class RootFile(
 
     companion object {
         fun from(name: VfsName): RootFile? = entries.firstOrNull { it.fileName == name.toString() }
+    }
+}
+
+private object MemoryInfoFile {
+    fun render(): ByteArray {
+        val physical = BuddyFrameAllocator.statistics()
+        val gc = RuntimeMemory.lastCollectionStatistics()
+
+        return buildString {
+            appendMetric("MemTotal", physical.totalBytes / KIBIBYTE, "kB")
+            appendMetric("MemFree", physical.availableBytes / KIBIBYTE, "kB")
+            appendMetric("MemAvailable", physical.availableBytes / KIBIBYTE, "kB")
+            appendMetric("Buffers", 0uL, "kB")
+            appendMetric("Cached", 0uL, "kB")
+            appendMetric("SwapCached", 0uL, "kB")
+            appendMetric("SwapTotal", 0uL, "kB")
+            appendMetric("SwapFree", 0uL, "kB")
+            appendMetric("KotlinHeapBeforeGC", (gc?.heapBeforeBytes ?: 0uL) / KIBIBYTE, "kB")
+            appendMetric("KotlinHeapAfterGC", (gc?.heapAfterBytes ?: 0uL) / KIBIBYTE, "kB")
+            appendMetric("KotlinGCReclaimed", (gc?.reclaimedBytes ?: 0uL) / KIBIBYTE, "kB")
+            appendMetric("KotlinGCEpoch", gc?.epoch ?: 0uL)
+            appendMetric("KotlinGCRoots", gc?.roots ?: 0uL)
+            appendMetric("KotlinGCMarked", gc?.markedObjects ?: 0uL)
+            appendMetric("KotlinGCSwept", gc?.sweptObjects ?: 0uL)
+            appendMetric("KotlinGCKept", gc?.keptObjects ?: 0uL)
+            appendMetric("KotlinGCPause", (gc?.pauseNanoseconds ?: 0uL) / 1_000uL, "us")
+            appendMetric("KotlinGCDuration", (gc?.durationNanoseconds ?: 0uL) / 1_000uL, "us")
+        }.encodeToByteArray()
+    }
+
+    private fun StringBuilder.appendMetric(name: String, value: ULong, unit: String? = null) {
+        append(name).append(":\t").append(value)
+        if (unit != null) append(' ').append(unit)
+        append('\n')
     }
 }
 
