@@ -76,6 +76,7 @@ fun kernelMain() {
     if (!KernelCoroutines.initialize()) {
         return
     }
+    KernelCoroutines.dispatcher.registerPoller(RuntimeMemory::reclaim)
     Acpi.enumerateDevices()
     ModuleManager.initialize()
     if (!FileSystemManager.mountRootfs()) {

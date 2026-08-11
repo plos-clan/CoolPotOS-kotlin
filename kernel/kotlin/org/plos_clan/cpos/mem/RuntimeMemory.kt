@@ -7,10 +7,16 @@
 package org.plos_clan.cpos.mem
 
 import kotlin.native.runtime.GC
-import bridge.runtime_vm_add_region
+import bridge.runtime_vm_install
+import bridge.runtime_vm_take_released
+import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.UByteVar
+import kotlinx.cinterop.ULongVar
+import kotlinx.cinterop.get
+import kotlinx.cinterop.rawValue
+import kotlinx.cinterop.reinterpret
+import kotlinx.cinterop.staticCFunction
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
-import org.plos_clan.cpos.utils.hex
 import org.plos_clan.cpos.utils.toPointer
 
 internal data class GarbageCollectionStatistics(
@@ -27,12 +33,7 @@ internal data class GarbageCollectionStatistics(
 )
 
 object RuntimeMemory {
-    private const val TARGET_POOL_BYTES = 1_073_741_824uL
-    private const val MINIMUM_POOL_BYTES = 67_108_864uL
-    private val poolChunkFrames = ulongArrayOf(65_536uL, 16_384uL)
-
     private var initialized = false
-    private var poolBytes = 0uL
 
     fun initialize(): Boolean {
         if (initialized) return true
@@ -41,16 +42,51 @@ object RuntimeMemory {
             return false
         }
 
-        for (frameCount in poolChunkFrames) {
-            while (poolBytes < TARGET_POOL_BYTES && addPool(frameCount)) {
-                // Keep adding independently backed regions until this chunk size no longer fits.
-            }
-        }
-        initialized = poolBytes >= MINIMUM_POOL_BYTES
+        initialized = runtime_vm_install(runtimeAllocateCallback)
         if (!initialized) {
-            println("Runtime memory: failed to reserve a Buddy-backed pool")
+            println("Runtime memory: failed to install the physical-memory provider")
         }
         return initialized
+    }
+
+    internal fun allocate(byteLength: ULong): COpaquePointer? {
+        reclaim()
+        val frameCount = requiredFrames(byteLength)
+        if (frameCount == 0uL) {
+            return null
+        }
+
+        val physicalAddress = BuddyFrameAllocator.allocateFramesRaw(frameCount)
+        if (physicalAddress == INVALID_PHYSICAL_ADDRESS) {
+            return null
+        }
+
+        return Hhdm.toVirtual(physicalAddress).toPointer<UByteVar>()
+    }
+
+    internal fun reclaim() {
+        while (true) {
+            val pointer = runtime_vm_take_released() ?: return
+            val byteLength = pointer.reinterpret<ULongVar>()[0]
+            check(release(pointer, byteLength)) {
+                "Runtime memory provider received an invalid released block"
+            }
+        }
+    }
+
+    internal fun physicalStatistics(): PhysicalMemoryStatistics {
+        reclaim()
+        return BuddyFrameAllocator.statistics()
+    }
+
+    private fun release(pointer: COpaquePointer, byteLength: ULong): Boolean {
+        val virtualAddress = pointer.rawValue.toLong().toULong()
+        val frameCount = requiredFrames(byteLength)
+        if (frameCount == 0uL || virtualAddress < Hhdm.offset) {
+            return false
+        }
+
+        return BuddyFrameAllocator.freeFramesRaw(virtualAddress - Hhdm.offset, frameCount)
     }
 
     internal fun lastCollectionStatistics(): GarbageCollectionStatistics? {
@@ -86,22 +122,15 @@ object RuntimeMemory {
         )
     }
 
-    private fun addPool(frameCount: ULong): Boolean {
-        val physicalBase = BuddyFrameAllocator.allocateFrames(frameCount) ?: return false
-        val byteLength = frameCount * PAGE_SIZE_BYTES
-        val virtualBase = Hhdm.toVirtual(physicalBase)
-        val pointer = virtualBase.toPointer<UByteVar>()
-
-        if (pointer == null || !runtime_vm_add_region(pointer, byteLength)) {
-            BuddyFrameAllocator.freeFrames(physicalBase, frameCount)
-            return false
+    private fun requiredFrames(byteLength: ULong): ULong {
+        if (byteLength == 0uL || byteLength > ULong.MAX_VALUE - (PAGE_SIZE_BYTES - 1uL)) {
+            return 0uL
         }
-
-        poolBytes += byteLength
-        println(
-            "Runtime memory: added ${byteLength / 1_048_576uL} MiB " +
-                "pool physical=${physicalBase.hex()} virtual=${virtualBase.hex()}",
-        )
-        return true
+        return (byteLength + PAGE_SIZE_BYTES - 1uL) / PAGE_SIZE_BYTES
     }
 }
+
+private fun allocateRuntimeMemory(byteLength: ULong): COpaquePointer? =
+    RuntimeMemory.allocate(byteLength)
+
+private val runtimeAllocateCallback = staticCFunction(::allocateRuntimeMemory)

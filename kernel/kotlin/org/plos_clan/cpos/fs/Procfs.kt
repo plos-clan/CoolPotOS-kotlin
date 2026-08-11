@@ -3,7 +3,6 @@ package org.plos_clan.cpos.fs
 import KERNEL_NAME
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.char.TtyManager
-import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.RuntimeMemory
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
@@ -266,7 +265,7 @@ private enum class RootFile(
 
 private object MemoryInfoFile {
     fun render(): ByteArray {
-        val physical = BuddyFrameAllocator.statistics()
+        val physical = RuntimeMemory.physicalStatistics()
         val gc = RuntimeMemory.lastCollectionStatistics()
 
         return buildString {

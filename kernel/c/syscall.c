@@ -16,7 +16,6 @@
 
 #define PAGE_SIZE 0x1000u
 #define BOOTSTRAP_VM_ARENA_SIZE (32u * 1024u * 1024u)
-#define VM_MAX_REGIONS 8u
 #define MAP_SHARED 0x01
 #define MAP_PRIVATE 0x02
 #define MAP_FIXED 0x10
@@ -40,19 +39,14 @@ struct vm_block {
     struct vm_block *next;
 };
 
-struct vm_region {
-    uint8_t *base;
-    size_t size;
-    size_t bump;
-};
+typedef void *(*vm_allocate_fn)(size_t);
 
 static uint8_t bootstrap_vm_arena[BOOTSTRAP_VM_ARENA_SIZE]
     __attribute__((aligned(PAGE_SIZE)));
-static struct vm_region vm_regions[VM_MAX_REGIONS] = {
-    {bootstrap_vm_arena, sizeof(bootstrap_vm_arena), 0}
-};
-static size_t vm_region_count = 1;
-static struct vm_block *vm_free_list;
+static size_t bootstrap_vm_used;
+static struct vm_block *bootstrap_vm_free_list;
+static vm_allocate_fn runtime_vm_allocate;
+static struct vm_block *runtime_vm_released;
 static uint8_t vm_lock;
 static uint64_t futex_epoch;
 static uint64_t futex_waiter_count;
@@ -70,19 +64,14 @@ static inline size_t align_up(size_t n) {
     return (n + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 }
 
-static struct vm_region *vm_find_region(uintptr_t address, size_t size) {
-    for (size_t i = 0; i < vm_region_count; i++) {
-        struct vm_region *region = &vm_regions[i];
-        const uintptr_t start = (uintptr_t)region->base;
-        if (size <= region->size && address >= start &&
-            address - start <= region->size - size)
-            return region;
-    }
-    return NULL;
+static bool bootstrap_vm_contains(uintptr_t address, size_t size) {
+    const uintptr_t start = (uintptr_t)bootstrap_vm_arena;
+    return size <= sizeof(bootstrap_vm_arena) && address >= start &&
+        address - start <= sizeof(bootstrap_vm_arena) - size;
 }
 
-static void *vm_alloc_locked(size_t size) {
-    for (struct vm_block **link = &vm_free_list; *link; link = &(*link)->next) {
+static void *bootstrap_vm_alloc_locked(size_t size) {
+    for (struct vm_block **link = &bootstrap_vm_free_list; *link; link = &(*link)->next) {
         struct vm_block *block = *link;
         if (block->size < size) continue;
 
@@ -97,21 +86,16 @@ static void *vm_alloc_locked(size_t size) {
         return block;
     }
 
-    for (size_t i = vm_region_count; i > 0; i--) {
-        struct vm_region *region = &vm_regions[i - 1];
-        if (size > region->size - region->bump) continue;
-
-        void *result = region->base + region->bump;
-        region->bump += size;
-        return result;
-    }
-    return NULL;
+    if (size > sizeof(bootstrap_vm_arena) - bootstrap_vm_used) return NULL;
+    void *result = bootstrap_vm_arena + bootstrap_vm_used;
+    bootstrap_vm_used += size;
+    return result;
 }
 
-static void vm_free_locked(void *pointer, size_t size) {
+static void bootstrap_vm_free_locked(void *pointer, size_t size) {
     struct vm_block *block = (struct vm_block *)pointer;
     struct vm_block *previous = NULL;
-    struct vm_block **link = &vm_free_list;
+    struct vm_block **link = &bootstrap_vm_free_list;
 
     while (*link && (uintptr_t)*link < (uintptr_t)block) {
         previous = *link;
@@ -133,31 +117,25 @@ static void vm_free_locked(void *pointer, size_t size) {
     }
 }
 
-bool runtime_vm_add_region(void *base, size_t size) {
-    const uintptr_t address = (uintptr_t)base;
-    if (!base || !size || (address & (PAGE_SIZE - 1)) || (size & (PAGE_SIZE - 1)))
-        return false;
-    if (size > UINTPTR_MAX - address) return false;
-    const uintptr_t region_end = address + size;
+bool runtime_vm_install(vm_allocate_fn allocate) {
+    if (!allocate) return false;
 
     spin_lock(&vm_lock);
-    if (vm_region_count == VM_MAX_REGIONS) {
+    if (runtime_vm_allocate) {
         spin_unlock(&vm_lock);
         return false;
     }
-
-    for (size_t i = 0; i < vm_region_count; i++) {
-        const uintptr_t start = (uintptr_t)vm_regions[i].base;
-        const uintptr_t end = start + vm_regions[i].size;
-        if (address < end && start < region_end) {
-            spin_unlock(&vm_lock);
-            return false;
-        }
-    }
-
-    vm_regions[vm_region_count++] = (struct vm_region){base, size, 0};
+    runtime_vm_allocate = allocate;
     spin_unlock(&vm_lock);
     return true;
+}
+
+void *runtime_vm_take_released(void) {
+    spin_lock(&vm_lock);
+    struct vm_block *block = runtime_vm_released;
+    if (block) runtime_vm_released = block->next;
+    spin_unlock(&vm_lock);
+    return block;
 }
 
 static inline bool interrupts_enabled(void) {
@@ -250,45 +228,34 @@ static long mmap_call(void *hint, size_t size, int prot, int flags, int fd, int6
     size = align_up(size);
     if (!size) return -ENOMEM;
 
-    void *result = NULL;
-    long err = 0;
-
-    spin_lock(&vm_lock);
-
+    void *result;
     if (!fixed) {
-        result = vm_alloc_locked(size);
-        if (!result) {
-            err = -ENOMEM;
-            goto unlock;
-        }
+        spin_lock(&vm_lock);
+        vm_allocate_fn allocate = runtime_vm_allocate;
+        result = allocate ? NULL : bootstrap_vm_alloc_locked(size);
+        spin_unlock(&vm_lock);
+        if (allocate) result = allocate(size);
     } else {
         const uintptr_t address = (uintptr_t)hint;
-        if (address & (PAGE_SIZE - 1)) {
-            err = -EINVAL;
-            goto unlock;
-        }
+        if (address & (PAGE_SIZE - 1)) return -EINVAL;
 
-        struct vm_region *region = vm_find_region(address, size);
-        if (!region) {
-            err = -ENOMEM;
-            goto unlock;
+        spin_lock(&vm_lock);
+        if (runtime_vm_allocate || !bootstrap_vm_contains(address, size)) {
+            spin_unlock(&vm_lock);
+            return -ENOMEM;
         }
-        const size_t region_offset = address - (uintptr_t)region->base;
-        if (fixed_noreplace && region_offset < region->bump) {
-            err = -EEXIST;
-            goto unlock;
+        const size_t region_offset = address - (uintptr_t)bootstrap_vm_arena;
+        if (fixed_noreplace && region_offset < bootstrap_vm_used) {
+            spin_unlock(&vm_lock);
+            return -EEXIST;
         }
-
         const size_t map_end = region_offset + size;
-        if (map_end > region->bump)
-            region->bump = map_end;
-
+        if (map_end > bootstrap_vm_used) bootstrap_vm_used = map_end;
         result = (void *)address;
+        spin_unlock(&vm_lock);
     }
 
-unlock:
-    spin_unlock(&vm_lock);
-    if (err) return err;
+    if (!result) return -ENOMEM;
     __builtin_memset(result, 0, size);
     return (long)(uintptr_t)result;
 }
@@ -299,13 +266,22 @@ static long munmap_call(void *pointer, size_t size) {
 
     const uintptr_t address = (uintptr_t)pointer;
 
-    if (!vm_find_region(address, size))
-        return -EINVAL;
-    if (address & (PAGE_SIZE - 1))
-        return -EINVAL;
+    if (address & (PAGE_SIZE - 1)) return -EINVAL;
 
     spin_lock(&vm_lock);
-    vm_free_locked(pointer, size);
+    if (bootstrap_vm_contains(address, size)) {
+        bootstrap_vm_free_locked(pointer, size);
+        spin_unlock(&vm_lock);
+        return 0;
+    }
+    if (!runtime_vm_allocate) {
+        spin_unlock(&vm_lock);
+        return -EINVAL;
+    }
+    struct vm_block *block = (struct vm_block *)pointer;
+    block->size = size;
+    block->next = runtime_vm_released;
+    runtime_vm_released = block;
     spin_unlock(&vm_lock);
     return 0;
 }
