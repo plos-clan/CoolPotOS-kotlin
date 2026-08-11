@@ -193,11 +193,10 @@ class VirtualAddressSpace internal constructor(
     private val lock = IrqSpinLock()
     private val faultScratch = ByteArray(PAGE_SIZE_BYTES.toInt())
 
-    val memoryRegions: List<MemoryRegion>
-        get() = lock.withLock { regions.map { it.copy() } }
-
     val used: ULong
         get() = lock.withLock { regions.fold(0uL) { total, region -> total + region.length } }
+
+    fun getRegions() : List<MemoryRegion> = regions
 
     fun fork(): VirtualAddressSpace = lock.withLock {
         val directory = pageDirectory.cloneDirectory(

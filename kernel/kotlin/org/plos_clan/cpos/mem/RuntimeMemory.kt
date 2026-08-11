@@ -13,7 +13,6 @@ import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
-import kotlinx.cinterop.rawValue
 import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.staticCFunction
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -32,7 +31,7 @@ internal data class GarbageCollectionStatistics(
     val durationNanoseconds: ULong,
 )
 
-object RuntimeMemory {
+internal object RuntimeMemory : PhysicalFrameReclaimer {
     private var initialized = false
 
     fun initialize(): Boolean {
@@ -42,19 +41,21 @@ object RuntimeMemory {
             return false
         }
 
-        initialized = runtime_vm_install(runtimeAllocateCallback)
-        if (!initialized) {
+        if (!runtime_vm_install(runtimeAllocateCallback)) {
             println("Runtime memory: failed to install the physical-memory provider")
+            return false
         }
-        return initialized
+        BuddyFrameAllocator.installReclaimer(this)
+        initialized = true
+        return true
     }
 
     internal fun allocate(byteLength: ULong): COpaquePointer? {
-        reclaim()
         val frameCount = requiredFrames(byteLength)
         if (frameCount == 0uL) {
             return null
         }
+        reclaimFrames()
 
         val physicalAddress = BuddyFrameAllocator.allocateFramesRaw(frameCount)
         if (physicalAddress == INVALID_PHYSICAL_ADDRESS) {
@@ -64,7 +65,7 @@ object RuntimeMemory {
         return Hhdm.toVirtual(physicalAddress).toPointer<UByteVar>()
     }
 
-    internal fun reclaim() {
+    override fun reclaimFrames() {
         while (true) {
             val pointer = runtime_vm_take_released() ?: return
             val byteLength = pointer.reinterpret<ULongVar>()[0]
@@ -72,11 +73,6 @@ object RuntimeMemory {
                 "Runtime memory provider received an invalid released block"
             }
         }
-    }
-
-    internal fun physicalStatistics(): PhysicalMemoryStatistics {
-        reclaim()
-        return BuddyFrameAllocator.statistics()
     }
 
     private fun release(pointer: COpaquePointer, byteLength: ULong): Boolean {

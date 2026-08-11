@@ -3,10 +3,11 @@ package org.plos_clan.cpos.fs
 import KERNEL_NAME
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.char.TtyManager
+import org.plos_clan.cpos.mem.BuddyFrameAllocator
+import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.RuntimeMemory
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
-import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.tasks.TaskState
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -265,7 +266,7 @@ private enum class RootFile(
 
 private object MemoryInfoFile {
     fun render(): ByteArray {
-        val physical = RuntimeMemory.physicalStatistics()
+        val physical = BuddyFrameAllocator.statistics()
         val gc = RuntimeMemory.lastCollectionStatistics()
 
         return buildString {

@@ -37,6 +37,10 @@ data class PhysicalMemoryStatistics(
     val availableBytes: ULong,
 )
 
+internal interface PhysicalFrameReclaimer {
+    fun reclaimFrames()
+}
+
 private enum class MemmapType(
     val id: ULong,
     val label: String,
@@ -198,6 +202,7 @@ object BuddyFrameAllocator {
     private var managedFrames = 0uL
     private var usableFrames = 0uL
     private var initialized = false
+    private var reclaimer: PhysicalFrameReclaimer? = null
 
     val isReady: Boolean
         get() = initialized
@@ -205,8 +210,17 @@ object BuddyFrameAllocator {
     fun initialize(): Boolean = lock.withLock { initialized || initializeLocked() }
 
     fun allocateFrames(frameCount: ULong): ULong? {
-        val address = allocateFramesRaw(frameCount)
+        var address = allocateFramesRaw(frameCount)
+        if (address == INVALID_PHYSICAL_ADDRESS) {
+            reclaimer?.reclaimFrames()
+            address = allocateFramesRaw(frameCount)
+        }
         return if (address == INVALID_PHYSICAL_ADDRESS) null else address
+    }
+
+    internal fun installReclaimer(candidate: PhysicalFrameReclaimer) {
+        check(reclaimer == null) { "Physical frame reclaimer is already installed" }
+        reclaimer = candidate
     }
 
     internal fun allocateFramesRaw(frameCount: ULong): ULong = lock.withLock {
@@ -245,6 +259,7 @@ object BuddyFrameAllocator {
     }
 
     fun statistics(): PhysicalMemoryStatistics {
+        reclaimer?.reclaimFrames()
         var totalBytes = 0uL
         var availableBytes = 0uL
         lock.withLock {
