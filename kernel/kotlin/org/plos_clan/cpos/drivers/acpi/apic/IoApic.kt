@@ -81,7 +81,7 @@ object IoApic {
         println("APIC: route irq=$irq vector=$vector dst_apic_id=$destination masked=$masked")
     }
 
-    /** Changes only the mask bit while preserving the firmware/programmed route. */
+
     fun setMasked(irq: UInt, masked: Boolean): Boolean {
         if (mmioBaseVirtualAddress == 0uL || irq >= redirectionEntryCount) {
             return false

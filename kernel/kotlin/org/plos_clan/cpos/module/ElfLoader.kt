@@ -16,6 +16,7 @@ import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.mem.MEMORY_REGION_WRITABLE
 import org.plos_clan.cpos.mem.MemoryRegionBacking
 import org.plos_clan.cpos.mem.MemoryRegionType
+import org.plos_clan.cpos.mem.VDSFileBacking
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -400,10 +401,10 @@ object ElfLoader {
     }
 }
 
-private class ElfBacking(
+class ElfBacking(
     private val file: OpenFileDescription,
     private val segments: List<LoadSegment>,
-) : MemoryRegionBacking() {
+) : MemoryRegionBacking(), VDSFileBacking {
     init {
         check(file.retain())
     }
@@ -431,6 +432,8 @@ private class ElfBacking(
     }
 
     override fun close() = file.release()
+
+    override val getFile get() = file
 }
 
 private enum class ElfObjectType {
@@ -454,7 +457,7 @@ private data class ElfHeader(
     val programHeaderCount: UShort,
 )
 
-private data class ProgramHeader(
+data class ProgramHeader(
     val type: UInt,
     val flags: UInt,
     val fileOffset: ULong,
@@ -471,7 +474,7 @@ private data class ElfImage(
     val interpreterPath: String?,
 )
 
-private data class LoadSegment(
+data class LoadSegment(
     val header: ProgramHeader,
     val start: ULong,
     val end: ULong,

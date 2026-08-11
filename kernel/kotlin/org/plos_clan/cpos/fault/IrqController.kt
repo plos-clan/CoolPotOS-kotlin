@@ -5,6 +5,7 @@ package org.plos_clan.cpos.fault
 import kotlinx.cinterop.*
 import org.plos_clan.cpos.drivers.acpi.apic.IoApic
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
+import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.utils.PtraceRegisters
 import kotlin.experimental.ExperimentalNativeApi
 
@@ -21,8 +22,27 @@ fun doIrqHandler(frame: COpaquePointer?, irqNum: ULong) {
 
 typealias IrqHandler = (regs: PtraceRegisters, irqNum: ULong) -> Unit
 
+data class IrqAction(
+    val irq: UInt,
+    val vector: UInt,
+    val destinationApicId: UInt,
+    val name: String,
+    val type: IrqControllerType,
+    val levelTriggered: Boolean
+) {
+    val cpuCount = ULongArray(SMProcessor.cpu_count.toInt())
+}
+
+enum class IrqControllerType(val displayName: String) {
+    IO_APIC("IO-APIC"),
+    PCI_MSIX("PCI-MSIX")
+    ;
+}
+
 object IrqController {
     private val irqHandlers = arrayOfNulls<IrqHandler>(ARCH_MAX_IRQ_NUM)
+    private val actions = arrayOfNulls<IrqAction>(ARCH_MAX_IRQ_NUM)
+
 
     fun doIrq(regs: PtraceRegisters, irqNum: ULong) {
         val irqIndex = irqIndexOf(irqNum) ?: run {
@@ -36,6 +56,13 @@ object IrqController {
             return
         }
         handler(regs, irqNum)
+
+        val action = actions[irqIndex] ?: run {
+            LocalApic.endOfInterrupt()
+            return
+        }
+        action.cpuCount[LocalApic.destinationApicId.toInt()]++
+
         LocalApic.endOfInterrupt()
     }
 
@@ -45,6 +72,8 @@ object IrqController {
         masked: Boolean = false,
         levelTriggered: Boolean = false,
         activeLow: Boolean = false,
+        name: String,
+        type: IrqControllerType,
         handle: IrqHandler
     ): Boolean {
         val irqNumber = vector
@@ -63,8 +92,12 @@ object IrqController {
             levelTriggered = levelTriggered,
             activeLow = activeLow
         )
+        actions[irqIndex] =
+            IrqAction(irq, vector, LocalApic.destinationApicId, name, type, levelTriggered)
         return true
     }
+
+    fun getActions(): Array<IrqAction?> = actions
 
     private fun irqIndexOf(irq: Int): Int? =
         (irq - 1).takeIf { it in irqHandlers.indices }

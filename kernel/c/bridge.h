@@ -57,12 +57,6 @@ void fast_handoff_wake_bsp(void);
 void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence);
 _Noreturn void fast_handoff_idle(void);
 bool fast_handoff_configure_timer(uint8_t vector, uint32_t frequency_hz);
-void fast_handoff_configure_ps2(
-    uint64_t irq_num,
-    uint16_t data_port,
-    uint16_t status_port
-);
-uint16_t fast_handoff_read_ps2_scan_code(void);
 uint64_t fast_handoff_create_task(
     uint64_t id,
     uint64_t cr3,

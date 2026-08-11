@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.fs.procfs.Procfs
 import org.plos_clan.cpos.module.ModuleManager
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Cmdline
@@ -25,6 +26,7 @@ object FileSystemManager {
         val lower = when (val result = vfs.createContext(
             Erofs.name,
             MountOptions(
+                source = moduleName,
                 flags = MountFlags.READ_ONLY,
                 fileSystem = ErofsOptions(module.data),
             ),

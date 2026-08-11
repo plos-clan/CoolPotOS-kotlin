@@ -29,14 +29,9 @@ class KernelDispatcher internal constructor(
     private val lock = IrqSpinLock()
     private val queue = KernelCoroutineQueue()
     private val events = mutableListOf<KernelEvent>()
-    private val pollers = mutableListOf<() -> Unit>()
 
     internal fun createEvent(): KernelEvent = KernelEvent(::wake).also { event ->
         lock.withLock { events += event }
-    }
-
-    internal fun registerPoller(poller: () -> Unit) {
-        lock.withLock { pollers += poller }
     }
 
     internal fun scheduleAt(deadlineNanos: ULong, block: Runnable): DisposableHandle {
@@ -69,13 +64,6 @@ class KernelDispatcher internal constructor(
     ): DisposableHandle = schedule(timeMillis, block)
 
     internal fun runReadyBatch(): Int {
-        pollers.forEach { poller ->
-            try {
-                poller()
-            } catch (failure: Throwable) {
-                failureReporter(failure)
-            }
-        }
         dispatchPendingEvents()
         val nowNanos = TscClock.nanoTime()
         val ready = lock.withLock {

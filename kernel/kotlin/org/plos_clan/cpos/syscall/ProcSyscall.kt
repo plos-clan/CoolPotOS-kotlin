@@ -237,11 +237,6 @@ private fun terminate(process: Process, group: Boolean, status: Int): Nothing {
     }
 }
 
-/**
- * Record the address that the thread-exit path must clear. Linux does not
- * dereference this pointer while handling set_tid_address; the eventual exit
- * path validates it when it writes zero and wakes a possible futex waiter.
- */
 fun sysSetTidAddress(regs: PtraceRegisters, process: Process): Long {
     val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
     thread.clearChildTid = regs[PtraceRegisters.IDX_RDI]

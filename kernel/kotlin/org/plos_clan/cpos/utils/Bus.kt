@@ -1,7 +1,6 @@
 package org.plos_clan.cpos.utils
 
 object VTModeConstants {
-    // Keyboard/display mode (KD)
     const val KDGETMODE = 0x4B3B // 获取终端模式命令
     const val KDSETMODE = 0x4B3A // 设置终端模式命令
 
@@ -17,8 +16,6 @@ object VTModeConstants {
     const val K_MEDIUMRAW = 0x02 // 中等原始模式
     const val K_UNICODE = 0x03   // Unicode 模式
 
-
-    // Virtual terminal
     const val VT_OPENQRY = 0x5600   // get next available vt
     const val VT_GETMODE = 0x5601   // get mode of active vt
     const val VT_SETMODE = 0x5602
@@ -97,7 +94,6 @@ object TermiosConstants {
     const val IEXTEN = 0x010000
 }
 
-/** Linux x86 poll(2) event bits. */
 object PollEvents {
     const val POLLIN = 0x0001
     const val POLLPRI = 0x0002

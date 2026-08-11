@@ -14,6 +14,7 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 object Devfs : FileSystemType {
     override val name: String = "devfs"
     override val magic: ULong = 0x1373uL
+    override val requiresDevice: Boolean = false
 
     override fun createSuperBlock(options: FileSystemOptions): VfsResult<SuperBlock> {
         if (options != EmptyFileSystemOptions) {

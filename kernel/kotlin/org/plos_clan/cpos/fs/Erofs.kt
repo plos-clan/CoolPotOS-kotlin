@@ -21,6 +21,7 @@ data class ErofsOptions(
 object Erofs : FileSystemType {
     override val name: String = "erofs"
     override val magic: ULong = 0xe0f5_e1e2uL
+    override val requiresDevice: Boolean = true
 
     override fun createSuperBlock(options: FileSystemOptions): VfsResult<SuperBlock> {
         val configuration = options as? ErofsOptions

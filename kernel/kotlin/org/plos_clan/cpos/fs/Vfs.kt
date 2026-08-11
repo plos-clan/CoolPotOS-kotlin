@@ -1,4 +1,4 @@
-@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+@file:OptIn(ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.fs
 
@@ -14,6 +14,7 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PollEvents
 import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 enum class VfsError(val errno: Int) {
     INTERRUPTED(4),
@@ -226,6 +227,7 @@ interface FileSystemOptions
 data object EmptyFileSystemOptions : FileSystemOptions
 
 data class MountOptions(
+    val source: String? = null,
     val flags: MountFlags = MountFlags.NONE,
     val fileSystem: FileSystemOptions = EmptyFileSystemOptions,
 )
@@ -233,6 +235,7 @@ data class MountOptions(
 interface FileSystemType {
     val name: String
     val magic: ULong
+    val requiresDevice: Boolean
 
     fun createSuperBlock(options: FileSystemOptions): VfsResult<SuperBlock>
 }
@@ -306,7 +309,6 @@ data class DirectoryEntry(
     val type: InodeType,
 )
 
-/** Immutable bytes that can back a file without an eager copy. */
 interface FileContent {
     val size: Int
 
@@ -319,7 +321,6 @@ interface FileContent {
 }
 
 interface OpenFileBackend {
-    /** Stable identity for immutable file pages that may be shared by mappings. */
     val immutablePageSource: Any?
         get() = null
 
@@ -520,6 +521,7 @@ class Dentry internal constructor(
 
 class Mount internal constructor(
     val superBlock: SuperBlock,
+    val source: String,
     val root: Dentry = superBlock.root,
     val flags: MountFlags = MountFlags.NONE,
 ) {
@@ -544,23 +546,31 @@ data class VfsPath(val mount: Mount, val dentry: Dentry) {
         get() = dentry.inode()
 }
 
-private data class MountPoint(val mount: Mount, val dentry: Dentry)
-
 class MountNamespace internal constructor(val root: Mount) {
     private val lock = IrqSpinLock()
-    private val mounts = mutableMapOf<MountPoint, Mount>()
+    private val mounts = mutableMapOf<VfsPath, Mount>()
 
     internal fun mountedAt(path: VfsPath): Mount? =
-        lock.withLock { mounts[MountPoint(path.mount, path.dentry)] }
+        lock.withLock { mounts[path] }
 
-    internal fun attach(target: VfsPath, child: Mount): VfsResult<Unit> = lock.withLock {
-        val key = MountPoint(target.mount, target.dentry)
-        if (mounts.containsKey(key)) {
-            return@withLock VfsResult.Err(VfsError.BUSY)
+    internal fun attach(
+        target: VfsPath,
+        child: Mount
+    ): VfsResult<Unit> = lock.withLock {
+        if (mounts.containsKey(target)) {
+            VfsResult.Err(VfsError.BUSY)
+        } else {
+            child.attach(target.mount, target.dentry)
+            mounts[target] = child
+            VfsResult.Ok(Unit)
         }
-        child.attach(target.mount, target.dentry)
-        mounts[key] = child
-        VfsResult.Ok(Unit)
+    }
+
+    internal fun snapshotMounts() : Map<VfsPath, Mount> = lock.withLock {
+        LinkedHashMap<VfsPath, Mount>(mounts.size + 1).apply {
+            put(VfsPath(root, root.root), root)
+            putAll(mounts)
+        }
     }
 }
 
@@ -640,7 +650,6 @@ class OpenFileDescription internal constructor(
         return readBackend(destination, offset, count, position)
     }
 
-    /** Reads without changing the open file description's shared offset. */
     fun readAt(
         fileOffset: ULong,
         destination: BufferDestination,
@@ -825,6 +834,12 @@ class Vfs(
         require(maxSymlinkDepth > 0)
     }
 
+    fun snapshotFileSystems(): List<FileSystemType> =
+        registryLock.withLock {
+            fileSystems.values.toList()
+        }
+
+
     fun register(fileSystem: FileSystemType): VfsResult<Unit> = registryLock.withLock {
         if (fileSystems.containsKey(fileSystem.name)) {
             return@withLock VfsResult.Err(VfsError.ALREADY_EXISTS)
@@ -841,7 +856,11 @@ class Vfs(
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        val rootMount = Mount(superBlock, flags = options.flags)
+        val rootMount = Mount(
+            superBlock = superBlock,
+            source = options.source ?: fileSystemName,
+            flags = options.flags,
+        )
         return VfsResult.Ok(FileSystemContext(MountNamespace(rootMount)))
     }
 
@@ -899,7 +918,11 @@ class Vfs(
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        val mount = Mount(superBlock, flags = options.flags)
+        val mount = Mount(
+            superBlock = superBlock,
+            source = options.source ?: fileSystemName,
+            flags = options.flags,
+        )
         return when (val attached = context.namespace.attach(path, mount)) {
             is VfsResult.Ok -> VfsResult.Ok(mount)
             is VfsResult.Err -> {
@@ -1142,7 +1165,12 @@ class Vfs(
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        if (path.inode?.type != InodeType.DIRECTORY) {
+        return chdir(context, path)
+    }
+
+    internal fun chdir(context: FileSystemContext, path: VfsPath): VfsResult<Unit> {
+        val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        if (inode.type != InodeType.DIRECTORY) {
             return VfsResult.Err(VfsError.NOT_DIRECTORY)
         }
         context.workingDirectory = path

@@ -9,6 +9,7 @@ import org.plos_clan.cpos.drivers.acpi.readByte
 import org.plos_clan.cpos.drivers.acpi.writeByte
 import org.plos_clan.cpos.fault.IRQ_BASE_VECTOR
 import org.plos_clan.cpos.fault.IrqController
+import org.plos_clan.cpos.fault.IrqControllerType
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 private const val EVENT_QUEUE_CAPACITY = 256
@@ -33,7 +34,6 @@ object AmlEvents {
     val droppedEvents: ULong
         get() = lock.withLock { dropped }
 
-    /** Coalesces level-triggered SCI notifications while the worker is busy. */
     fun signalSci(): Boolean {
         lock.withLock { sciPending = true }
         workerWakeup?.signal()
@@ -101,6 +101,8 @@ object AmlEvents {
                 masked = true,
                 levelTriggered = true,
                 activeLow = true,
+                "aml-sci",
+                type = IrqControllerType.IO_APIC,
             ) { _, _ ->
                 IoApic.setMasked(gsi, true)
                 signalSci()

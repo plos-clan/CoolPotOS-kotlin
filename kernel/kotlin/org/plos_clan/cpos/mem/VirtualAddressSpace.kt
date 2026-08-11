@@ -5,6 +5,7 @@ package org.plos_clan.cpos.mem
 import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
+import org.plos_clan.cpos.fs.OpenFileDescription
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
@@ -35,6 +36,7 @@ enum class MemoryRegionType {
     FILE,
     IMAGE,
     STACK,
+    VDSO,
 }
 
 data class MemoryRegion(
@@ -52,11 +54,14 @@ data class MemoryRegion(
         get() = end - start
 }
 
+interface VDSFileBacking {
+    val getFile: OpenFileDescription
+}
+
 @OptIn(ExperimentalAtomicApi::class)
 abstract class MemoryRegionBacking {
     private val references = AtomicInt(1)
 
-    /** Non-null only when the backing bytes are immutable for its lifetime. */
     internal open val immutablePageSource: Any?
         get() = null
 
@@ -98,7 +103,7 @@ private data class FilePageKey(
     val offset: ULong,
 )
 
-/** Bounded cache of immutable file pages. Each entry owns one frame reference. */
+
 private object FilePageCache {
     private val lock = IrqSpinLock()
     private val frames = mutableMapOf<FilePageKey, ULong>()
@@ -163,7 +168,6 @@ data class MemoryMapRequest(
     val offset: ULong = 0uL,
     val name: String? = null,
     val backing: MemoryRegionBacking? = null,
-    /** Requests immediate population instead of demand paging. */
     val populate: Boolean = false,
 )
 
@@ -196,7 +200,11 @@ class VirtualAddressSpace internal constructor(
     val used: ULong
         get() = lock.withLock { regions.fold(0uL) { total, region -> total + region.length } }
 
-    fun getRegions() : List<MemoryRegion> = regions
+    fun snapshotRegions() : List<MemoryRegion> = lock.withLock {
+        List(regions.size) { index ->
+            regions[index].copy()
+        }
+    }
 
     fun fork(): VirtualAddressSpace = lock.withLock {
         val directory = pageDirectory.cloneDirectory(
@@ -372,7 +380,7 @@ class VirtualAddressSpace internal constructor(
         return MemoryMapResult.Ok(start)
     }
 
-    /** Materializes one page after validating the authoritative memory-region permissions. */
+
     fun faultIn(
         address: ULong,
         write: Boolean,

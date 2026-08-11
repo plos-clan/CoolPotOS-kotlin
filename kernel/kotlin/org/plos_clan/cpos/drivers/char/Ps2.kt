@@ -15,6 +15,7 @@ import org.plos_clan.cpos.drivers.acpi.aml.AcpiIrqResource
 import org.plos_clan.cpos.drivers.acpi.aml.AmlDeviceInfo
 import org.plos_clan.cpos.fault.IRQ_BASE_VECTOR
 import org.plos_clan.cpos.fault.IrqController
+import org.plos_clan.cpos.fault.IrqControllerType
 import org.plos_clan.cpos.utils.ByteRingBuffer
 import org.plos_clan.cpos.utils.PtraceRegisters
 
@@ -207,8 +208,6 @@ object Ps2Keyboard {
 
     fun startKeyboardService() = KernelCoroutines.dispatcher.createEvent().let { wakeup ->
         scanCodeWakeup = wakeup
-        KernelCoroutines.dispatcher.registerPoller(::collectDeferredScanCodes)
-        wakeup.signal()
         KernelCoroutines.scope.launch(CoroutineName("ps2-events")) {
             val batch = ByteArray(32)
             while (isActive) {
@@ -224,20 +223,6 @@ object Ps2Keyboard {
                     yield()
                 }
             }
-        }
-    }
-
-    private fun collectDeferredScanCodes() {
-        var accepted = false
-        while (true) {
-            val scanCode = bridge.fast_handoff_read_ps2_scan_code()
-            if (scanCode > UByte.MAX_VALUE.toUShort()) {
-                break
-            }
-            accepted = scanCodes.offer(scanCode.toByte()) || accepted
-        }
-        if (accepted) {
-            scanCodeWakeup?.signal()
         }
     }
 
@@ -264,17 +249,14 @@ object Ps2Keyboard {
             activeLow = activeLow,
         )
         val vector = irq + IRQ_BASE_VECTOR
-        bridge.fast_handoff_configure_ps2(
-            (vector - IRQ_BASE_VECTOR + 1u).toULong(),
-            dataPort.toUShort(),
-            commandPort.toUShort(),
-        )
         IrqController.registerAction(
             irq = irq,
             vector = vector,
             masked = false,
             levelTriggered = levelTriggered,
             activeLow = activeLow,
+            name = "ps/2-keyboard",
+            type = IrqControllerType.IO_APIC,
             handle = ::keyboardHandle,
         )
         startKeyboardService()

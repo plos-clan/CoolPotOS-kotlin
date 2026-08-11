@@ -2,7 +2,6 @@ package org.plos_clan.cpos.utils
 
 import org.plos_clan.cpos.drivers.TscClock
 
-/** Small boot-time entropy source used until a hardware entropy driver exists. */
 object KernelRandom {
     private const val GOLDEN_RATIO = 0x9e37_79b9_7f4a_7c15uL
     private const val MIX_MULTIPLIER = 0xbf58_476d_1ce4_e5b9uL

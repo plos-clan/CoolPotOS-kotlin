@@ -17,6 +17,7 @@ data class TmpfsOptions(
 object Tmpfs : FileSystemType {
     override val name: String = "tmpfs"
     override val magic: ULong = 0x0102_1994uL
+    override val requiresDevice: Boolean = false
 
     override fun createSuperBlock(options: FileSystemOptions): VfsResult<SuperBlock> {
         val configuration = when (options) {

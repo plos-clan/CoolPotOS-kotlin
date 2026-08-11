@@ -400,7 +400,6 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
         return (ptEntry and PTE_ADDR_MASK) or (virtualAddress and (PAGE_SIZE_BYTES - 1uL))
     }
 
-    /** Returns the resident frame even when the leaf PTE is intentionally non-present. */
     internal fun userPageFrame(virtualAddress: ULong): ULong? {
         if (!virtualAddress.isPageAligned() || virtualAddress >= USER_VIRTUAL_ADDRESS_LIMIT) {
             return null

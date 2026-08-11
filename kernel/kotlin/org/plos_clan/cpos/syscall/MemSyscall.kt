@@ -10,6 +10,7 @@ import org.plos_clan.cpos.mem.MemoryRegionBacking
 import org.plos_clan.cpos.mem.MemoryMapRequest
 import org.plos_clan.cpos.mem.MemoryMapResult
 import org.plos_clan.cpos.mem.MemoryRegionType
+import org.plos_clan.cpos.mem.VDSFileBacking
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.tasks.Process
@@ -40,7 +41,8 @@ private const val PROT_READ = 0x1uL
 private const val PROT_WRITE = 0x2uL
 private const val PROT_EXEC = 0x4uL
 
-private class MappedFile(private val file: org.plos_clan.cpos.fs.OpenFileDescription) : MemoryRegionBacking() {
+class MappedFile(private val file: org.plos_clan.cpos.fs.OpenFileDescription) :
+    MemoryRegionBacking(), VDSFileBacking {
     init {
         check(file.retain())
     }
@@ -57,6 +59,8 @@ private class MappedFile(private val file: org.plos_clan.cpos.fs.OpenFileDescrip
     }
 
     override fun close() = file.release()
+
+    override val getFile get() = file
 }
 
 private fun mmapResult(result: MemoryMapResult<ULong>): Long = when (result) {

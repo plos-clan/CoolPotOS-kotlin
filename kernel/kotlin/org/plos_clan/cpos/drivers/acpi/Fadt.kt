@@ -379,7 +379,6 @@ private fun GenericAddressStructure.writeRaw(value: ULong): Boolean {
     }
 }
 
-/** Reads one byte from a register block described by a GAS. */
 internal fun GenericAddressStructure.readByte(byteOffset: UInt): UInt? {
     if (byteOffset.toULong() > ULong.MAX_VALUE - address) {
         return null
@@ -392,7 +391,6 @@ internal fun GenericAddressStructure.readByte(byteOffset: UInt): UInt? {
     ).readRaw()?.toUInt()
 }
 
-/** Writes one byte to a register block described by a GAS. */
 internal fun GenericAddressStructure.writeByte(byteOffset: UInt, value: UInt): Boolean {
     if (byteOffset.toULong() > ULong.MAX_VALUE - address) {
         return false

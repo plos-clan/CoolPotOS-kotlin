@@ -81,11 +81,10 @@ private const val ST_NOSUID = 0x2uL
 private const val ST_NODEV = 0x4uL
 private const val ST_NOEXEC = 0x8uL
 
-/** Linux x86_64 struct stat (144 bytes). */
 private class LinuxStat(private val inode: Inode) : NativeStruct() {
     override fun toNativeBytes(): ByteArray = ByteArray(STAT_SIZE).also { buffer ->
         val metadata = inode.metadata()
-        putU64LE(buffer, 0, 0uL) // st_dev: VFS has no device number yet.
+        putU64LE(buffer, 0, 0uL) // st_dev
         putU64LE(buffer, 8, inode.id.value)
         putU64LE(buffer, 16, metadata.linkCount.toULong())
         putU32LE(buffer, 24, (metadata.mode.bits or typeBits(inode.type)).toInt())
@@ -96,7 +95,6 @@ private class LinuxStat(private val inode: Inode) : NativeStruct() {
         putU64LE(buffer, 48, metadata.size)
         putU64LE(buffer, 56, STAT_BLKSIZE)
         putU64LE(buffer, 64, blocksFor(metadata.size))
-        // atime, mtime and ctime are zero until timestamp metadata is added.
     }
 
     override fun updateFromNativeBytes(buffer: ByteArray): Boolean = false
@@ -119,7 +117,6 @@ private class LinuxStat(private val inode: Inode) : NativeStruct() {
         }
 }
 
-/** Linux x86_64 struct statfs (120 bytes). */
 private class LinuxStatFs(private val path: VfsPath) : NativeStruct() {
     override fun toNativeBytes(): ByteArray = ByteArray(STATFS_SIZE).also { buffer ->
         putU64LE(buffer, 0, path.mount.superBlock.type.magic)
@@ -1380,15 +1377,46 @@ fun sysIoctl(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
+fun sysChdir(regs: PtraceRegisters, process: Process): Long {
+    val pathname = copyPath(process, regs[PtraceRegisters.IDX_RDI])
+        ?: return errno(Errno.EFAULT)
+    if (pathname.isEmpty()) return errno(Errno.ENOENT)
+    val context = process.context ?: return errno(Errno.ENOENT)
+    return when (val result = FileSystemManager.vfs.chdir(
+        context,
+        VfsPathname.fromBytes(pathname),
+    )) {
+        is VfsResult.Ok -> 0L
+        is VfsResult.Err -> errno(result.error.errno)
+    }
+}
+
+fun sysFchdir(regs: PtraceRegisters, process: Process): Long {
+    val descriptor = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
+        ?: return errno(Errno.EBADF)
+    val file = process.fdTable.acquire(descriptor) ?: return errno(Errno.EBADF)
+    return try {
+        val context = process.context ?: return errno(Errno.ENOENT)
+        when (val result = FileSystemManager.vfs.chdir(context, file.path)) {
+            is VfsResult.Ok -> 0L
+            is VfsResult.Err -> errno(result.error.errno)
+        }
+    } finally {
+        file.release()
+    }
+}
+
 fun sysGetCWD(regs: PtraceRegisters, process: Process): Long {
     val userAddress = regs[PtraceRegisters.IDX_RDI]
     val length = regs[PtraceRegisters.IDX_RSI]
     if (userAddress == 0UL) return errno(Errno.EFAULT)
 
+    val context = process.context ?: return errno(Errno.ENOENT)
+
     val path = when (
         val result = FileSystemManager.vfs.absolutePath(
-            process.getFSContext(),
-            process.getFSContext().workingDirectory,
+            context,
+            context.workingDirectory,
         )
     ) {
         is VfsResult.Ok -> result.value

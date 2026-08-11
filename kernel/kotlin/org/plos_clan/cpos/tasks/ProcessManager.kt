@@ -35,10 +35,8 @@ class Thread(
     val kernelStackPages: ULong = 0uL,
     val kernelFsBase: ULong = 0uL,
 ) {
-    /** Address cleared to zero when this thread exits, if set by set_tid_address. */
     var clearChildTid: ULong = 0uL
 
-    /** Userspace robust-futex list registered by set_robust_list. */
     var robustListHead: ULong = 0uL
 
     val nativeContext: ULong = bridge.fast_handoff_create_task(

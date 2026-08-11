@@ -70,6 +70,8 @@ private const val SYS_GETRESUID = 118
 private const val SYS_GETRESGID = 120
 private const val SYS_UNAME = 63
 private const val SYS_GETCWD = 79
+private const val SYS_CHDIR = 80
+private const val SYS_FCHDIR = 81
 private const val SYS_READLINK = 89
 private const val SYS_GETUID = 102
 private const val SYS_GETGID = 104
@@ -155,6 +157,8 @@ object Syscall {
         this[SYS_OPENAT] = ::sysOpenAt
         this[SYS_FCHOWNAT] = ::sysFchownat
         this[SYS_GETCWD] = ::sysGetCWD
+        this[SYS_CHDIR] = ::sysChdir
+        this[SYS_FCHDIR] = ::sysFchdir
         this[SYS_READLINK] = ::sysReadlink
         this[SYS_REBOOT] = ::sysReboot
         this[SYS_UNAME] = ::sysUname

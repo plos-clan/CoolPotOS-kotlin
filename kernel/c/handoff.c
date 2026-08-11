@@ -15,9 +15,6 @@ enum {
     lapic_delivery_pending = 1u << 12,
     lapic_timer_tsc_deadline = 1u << 18,
     x2apic_msr_base = 0x800,
-    ps2_queue_capacity = 256,
-    ps2_queue_mask = ps2_queue_capacity - 1,
-    ps2_queue_empty = 0x100,
 };
 
 enum fast_cpu_state {
@@ -95,12 +92,6 @@ static uint8_t lapic_x2apic;
 static uint64_t lapic_mmio_base;
 static uint64_t scheduler_tick_cycles;
 static uint64_t bsp_lapic_id = UINT64_MAX;
-static uint8_t ps2_queue[ps2_queue_capacity];
-static uint16_t ps2_queue_head;
-static uint16_t ps2_queue_tail;
-static uint16_t ps2_data_port;
-static uint16_t ps2_status_port;
-static uint64_t ps2_irq_num;
 
 static enum fast_schedule_result fast_handoff_schedule(
     fast_cpu_t *cpu,
@@ -487,7 +478,6 @@ void fast_handoff_wake_bsp(void) {
     wake_cpu(cpu);
 }
 
-/* The Kotlin/Native interop wrapper keeps this entire call in Native state. */
 void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence) {
     const uint64_t flags = interrupt_save();
     fast_cpu_t *cpu = current_cpu();
@@ -514,48 +504,6 @@ _Noreturn void fast_handoff_idle(void) {
         const uint64_t sequence = fast_handoff_wake_sequence();
         fast_handoff_park_kotlin(0, sequence);
     }
-}
-
-void fast_handoff_configure_ps2(
-    uint64_t irq_num,
-    uint16_t data_port,
-    uint16_t status_port
-) {
-    __atomic_store_n(&ps2_queue_head, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&ps2_queue_tail, 0, __ATOMIC_RELAXED);
-    ps2_data_port = data_port;
-    ps2_status_port = status_port;
-    __atomic_store_n(&ps2_irq_num, irq_num, __ATOMIC_RELEASE);
-}
-
-uint16_t fast_handoff_read_ps2_scan_code(void) {
-    const uint16_t tail = __atomic_load_n(&ps2_queue_tail, __ATOMIC_RELAXED);
-    if (tail == __atomic_load_n(&ps2_queue_head, __ATOMIC_ACQUIRE))
-        return ps2_queue_empty;
-
-    const uint8_t scan_code = ps2_queue[tail];
-    __atomic_store_n(
-        &ps2_queue_tail,
-        (tail + 1) & ps2_queue_mask,
-        __ATOMIC_RELEASE
-    );
-    return scan_code;
-}
-
-static bool fast_handoff_ps2_irq(uint64_t irq_num) {
-    if (!irq_num || irq_num != __atomic_load_n(&ps2_irq_num, __ATOMIC_ACQUIRE))
-        return false;
-
-    if (!(io_in8(ps2_status_port) & 1u)) return true;
-
-    const uint8_t scan_code = io_in8(ps2_data_port);
-    const uint16_t head = __atomic_load_n(&ps2_queue_head, __ATOMIC_RELAXED);
-    const uint16_t next = (head + 1) & ps2_queue_mask;
-    if (next != __atomic_load_n(&ps2_queue_tail, __ATOMIC_ACQUIRE)) {
-        ps2_queue[head] = scan_code;
-        __atomic_store_n(&ps2_queue_head, next, __ATOMIC_RELEASE);
-    }
-    return true;
 }
 
 uint64_t fast_handoff_create_task(
@@ -822,9 +770,7 @@ __attribute__((used)) bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
 
     if (irq_num != timer_irq) {
         __atomic_add_fetch(&cpu->wake_sequence, 1, __ATOMIC_RELEASE);
-        if (fast_handoff_ps2_irq(irq_num)) {
-            lapic_eoi(irq_num);
-        } else if (irq_num == spurious_irq) {
+        if (irq_num == spurious_irq) {
             lapic_eoi(irq_num);
         } else {
             xstate_t *xstate = &((kernel_entry_frame_t *)regs)->xstate;

@@ -45,7 +45,7 @@ object Vdso : MemoryRegionBacking() {
                 end = USER_MMAP_END + length,
                 access = MEMORY_REGION_READABLE or MEMORY_REGION_EXECUTABLE,
                 name = "[vdso]",
-                type = MemoryRegionType.IMAGE,
+                type = MemoryRegionType.VDSO,
                 shared = true,
                 backing = this,
                 sharedIdentity = this,
