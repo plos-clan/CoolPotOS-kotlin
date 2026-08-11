@@ -53,6 +53,8 @@ object Scheduler {
 
     fun parkCurrent(): Boolean = bridge.fast_handoff_park_current()
 
+    fun yieldCurrent(): Boolean = bridge.fast_handoff_yield()
+
     fun wake(thread: Thread): Boolean {
         return bridge.fast_handoff_unpark(thread.nativeContext)
     }

@@ -3,7 +3,15 @@
 package org.plos_clan.cpos.fs
 
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.mem.BufferDestination
+import org.plos_clan.cpos.mem.BufferSource
+import org.plos_clan.cpos.mem.PreparedBufferDestination
+import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.Scheduler
+import org.plos_clan.cpos.tasks.Thread
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PollEvents
 import kotlin.concurrent.atomics.AtomicInt
 
@@ -26,6 +34,7 @@ enum class VfsError(val errno: Int) {
     NO_SPACE(28),
     ILLEGAL_SEEK(29),
     READ_ONLY(30),
+    BROKEN_PIPE(32),
     NOT_EMPTY(39),
     TOO_MANY_SYMLINKS(40),
     NOT_SUPPORTED(95),
@@ -302,11 +311,11 @@ interface FileContent {
     val size: Int
 
     fun copyInto(
-        destination: ByteArray,
+        destination: PreparedBufferDestination,
         destinationOffset: Int,
         sourceOffset: Int,
         count: Int,
-    )
+    ): Int
 }
 
 interface OpenFileBackend {
@@ -316,7 +325,7 @@ interface OpenFileBackend {
 
     fun read(
         inode: Inode,
-        destination: ByteArray,
+        destination: PreparedBufferDestination,
         destinationOffset: Int,
         count: Int,
         position: FilePosition,
@@ -324,7 +333,7 @@ interface OpenFileBackend {
 
     fun write(
         inode: Inode,
-        source: ByteArray,
+        source: PreparedBufferSource,
         sourceOffset: Int,
         count: Int,
         position: FilePosition,
@@ -344,6 +353,79 @@ interface OpenFileBackend {
         -VfsError.NOT_SUPPORTED.errno.toLong()
 
     fun release() {}
+}
+
+enum class IoEvent {
+    READABLE,
+    WRITABLE,
+}
+
+enum class IoMode {
+    BLOCKING,
+    NON_BLOCKING,
+}
+
+interface PositionlessOpenFileBackend : OpenFileBackend {
+    fun read(
+        inode: Inode,
+        destination: PreparedBufferDestination,
+        destinationOffset: Int,
+        count: Int,
+    ): IoResult = IoResult.failure(VfsError.NOT_SUPPORTED)
+
+    fun write(
+        inode: Inode,
+        source: PreparedBufferSource,
+        sourceOffset: Int,
+        count: Int,
+    ): IoResult = IoResult.failure(VfsError.NOT_SUPPORTED)
+
+    override fun read(
+        inode: Inode,
+        destination: PreparedBufferDestination,
+        destinationOffset: Int,
+        count: Int,
+        position: FilePosition,
+    ): IoResult = read(inode, destination, destinationOffset, count)
+
+    override fun write(
+        inode: Inode,
+        source: PreparedBufferSource,
+        sourceOffset: Int,
+        count: Int,
+        position: FilePosition,
+        append: Boolean,
+    ): IoResult = write(inode, source, sourceOffset, count)
+}
+
+interface DiscardingOpenFileBackend : PositionlessOpenFileBackend {
+    fun discard(inode: Inode, count: Int): IoResult
+
+    override fun write(
+        inode: Inode,
+        source: PreparedBufferSource,
+        sourceOffset: Int,
+        count: Int,
+    ): IoResult = discard(inode, count)
+}
+
+interface WaitableOpenFileBackend : PositionlessOpenFileBackend {
+    fun write(
+        inode: Inode,
+        source: PreparedBufferSource,
+        sourceOffset: Int,
+        count: Int,
+        mode: IoMode,
+    ): IoResult
+
+    override fun write(
+        inode: Inode,
+        source: PreparedBufferSource,
+        sourceOffset: Int,
+        count: Int,
+    ): IoResult = write(inode, source, sourceOffset, count, IoMode.BLOCKING)
+
+    fun await(event: IoEvent, count: Int)
 }
 
 class Inode internal constructor(
@@ -504,13 +586,14 @@ class OpenFileDescription internal constructor(
     val path: VfsPath,
     val inode: Inode,
     val access: AccessMode,
-    private var append: Boolean,
+    append: Boolean,
     private val backend: OpenFileBackend,
 ) {
     private val references = AtomicInt(1)
     private val positionLock = IrqSpinLock()
     private val position = FilePosition()
-    private var statusFlags = if (append) OpenFlags.O_APPEND else 0
+    private val positionlessBackend = backend as? PositionlessOpenFileBackend
+    private val statusFlags = AtomicInt(if (append) OpenFlags.O_APPEND else 0)
 
     val offset: Long
         get() = positionLock.withLock { position.value }
@@ -518,109 +601,78 @@ class OpenFileDescription internal constructor(
     internal val immutablePageSource: Any?
         get() = backend.immutablePageSource
 
-    fun getStatusFlags(): Int = positionLock.withLock { statusFlags }
+    fun getStatusFlags(): Int = statusFlags.load()
 
-    fun setStatusFlags(flags: Int) = positionLock.withLock {
-        statusFlags = (statusFlags and (OpenFlags.O_APPEND or OpenFlags.O_NONBLOCK).inv()) or
-            (flags and (OpenFlags.O_APPEND or OpenFlags.O_NONBLOCK))
-        append = statusFlags and OpenFlags.O_APPEND != 0
+    fun setStatusFlags(flags: Int) {
+        statusFlags.store(flags and (OpenFlags.O_APPEND or OpenFlags.O_NONBLOCK))
     }
 
     fun retain(): Boolean {
-        var observed = references.load()
-        while (observed in 1 until Int.MAX_VALUE) {
-            if (references.compareAndSet(observed, observed + 1)) {
-                return true
-            }
-            observed = references.load()
-        }
+        val previous = references.fetchAndAdd(1)
+        if (previous in 1 until Int.MAX_VALUE) return true
+        references.fetchAndAdd(-1)
         return false
     }
 
     fun release() {
-        var observed = references.load()
-        while (observed > 0) {
-            if (!references.compareAndSet(observed, observed - 1)) {
-                observed = references.load()
-                continue
-            }
-            if (observed == 1) {
-                positionLock.withLock {
-                    backend.release()
-                    inode.releaseOpenReference()
-                }
-            }
-            return
+        val previous = references.fetchAndAdd(-1)
+        if (previous <= 0) {
+            references.fetchAndAdd(1)
+        } else if (previous == 1) {
+            backend.release()
+            inode.releaseOpenReference()
         }
     }
 
-    fun read(destination: ByteArray, offset: Int = 0, count: Int = destination.size - offset): IoResult {
-        if (!isValidRange(destination, offset, count)) {
-            return IoResult.failure(VfsError.INVALID_ARGUMENT)
-        }
-        if (!access.canRead) {
-            return IoResult.failure(VfsError.BAD_DESCRIPTOR)
-        }
-        if (inode.type == InodeType.DIRECTORY) {
-            return IoResult.failure(VfsError.IS_DIRECTORY)
-        }
-        return positionLock.withLock {
-            if (references.load() == 0) {
-                return@withLock IoResult.failure(VfsError.BAD_DESCRIPTOR)
-            }
-            backend.read(inode, destination, offset, count, position)
-        }
+    fun read(destination: BufferDestination, offset: Int, count: Int): IoResult {
+        readError(offset, count)?.let { return IoResult.failure(it) }
+        val prepared = destination.prepareWrite(offset, count)
+            ?: return IoResult.failure(VfsError.FAULT)
+        return readBackend(prepared, offset, count, position)
+    }
+
+    internal fun read(
+        destination: PreparedBufferDestination,
+        offset: Int,
+        count: Int,
+    ): IoResult {
+        readError(offset, count)?.let { return IoResult.failure(it) }
+        return readBackend(destination, offset, count, position)
     }
 
     /** Reads without changing the open file description's shared offset. */
     fun readAt(
         fileOffset: ULong,
-        destination: ByteArray,
-        offset: Int = 0,
-        count: Int = destination.size - offset,
+        destination: BufferDestination,
+        offset: Int,
+        count: Int,
     ): IoResult {
-        if (!isValidRange(destination, offset, count) || fileOffset > Long.MAX_VALUE.toULong()) {
+        if (fileOffset > Long.MAX_VALUE.toULong()) {
             return IoResult.failure(VfsError.INVALID_ARGUMENT)
         }
-        if (!access.canRead) {
-            return IoResult.failure(VfsError.BAD_DESCRIPTOR)
-        }
-        if (inode.type == InodeType.DIRECTORY) {
-            return IoResult.failure(VfsError.IS_DIRECTORY)
-        }
-        return positionLock.withLock {
-            if (references.load() == 0) {
-                return@withLock IoResult.failure(VfsError.BAD_DESCRIPTOR)
-            }
-            backend.read(
-                inode,
-                destination,
-                offset,
-                count,
-                FilePosition(fileOffset.toLong()),
-            )
-        }
+        readError(offset, count)?.let { return IoResult.failure(it) }
+        val prepared = destination.prepareWrite(offset, count)
+            ?: return IoResult.failure(VfsError.FAULT)
+        return readBackend(prepared, offset, count, FilePosition(fileOffset.toLong()))
     }
 
-    fun write(source: ByteArray, offset: Int = 0, count: Int = source.size - offset): IoResult {
-        if (!isValidRange(source, offset, count)) {
-            return IoResult.failure(VfsError.INVALID_ARGUMENT)
-        }
-        if (!access.canWrite) {
-            return IoResult.failure(VfsError.BAD_DESCRIPTOR)
-        }
-        if (MountFlags.READ_ONLY in path.mount.flags) {
-            return IoResult.failure(VfsError.READ_ONLY)
-        }
-        if (inode.type == InodeType.DIRECTORY) {
-            return IoResult.failure(VfsError.IS_DIRECTORY)
-        }
-        return positionLock.withLock {
-            if (references.load() == 0) {
-                return@withLock IoResult.failure(VfsError.BAD_DESCRIPTOR)
-            }
-            backend.write(inode, source, offset, count, position, append)
-        }
+    fun write(source: BufferSource, offset: Int, count: Int): IoResult {
+        writeError(offset, count)?.let { return IoResult.failure(it) }
+        val discard = positionlessBackend as? DiscardingOpenFileBackend
+        if (discard != null) return discard.discard(inode, count)
+        val prepared = source.prepareRead(offset, count)
+            ?: return IoResult.failure(VfsError.FAULT)
+        return writeBackend(prepared, offset, count)
+    }
+
+    internal fun write(source: PreparedBufferSource, offset: Int, count: Int): IoResult {
+        writeError(offset, count)?.let { return IoResult.failure(it) }
+        return writeBackend(source, offset, count)
+    }
+
+    internal fun discardWrite(count: Int): IoResult? {
+        writeError(0, count)?.let { return IoResult.failure(it) }
+        return (positionlessBackend as? DiscardingOpenFileBackend)?.discard(inode, count)
     }
 
     fun iterate(emit: (entry: DirectoryEntry, nextOffset: Long) -> Boolean): VfsResult<Unit> {
@@ -684,8 +736,81 @@ class OpenFileDescription internal constructor(
         }
     }
 
-    private fun isValidRange(buffer: ByteArray, offset: Int, count: Int): Boolean =
-        offset >= 0 && count >= 0 && offset <= buffer.size - count
+    private fun readBackend(
+        destination: PreparedBufferDestination,
+        offset: Int,
+        count: Int,
+        filePosition: FilePosition,
+    ): IoResult {
+        val positionless = positionlessBackend
+        if (positionless == null) {
+            if (filePosition !== position) {
+                return backend.read(inode, destination, offset, count, filePosition)
+            }
+            return positionLock.withLock {
+                backend.read(inode, destination, offset, count, filePosition)
+            }
+        }
+        val waitable = positionless as? WaitableOpenFileBackend
+            ?: return positionless.read(inode, destination, offset, count)
+        while (true) {
+            val mode = currentIoMode()
+            val result = waitable.read(inode, destination, offset, count)
+            if (result.error != VfsError.WOULD_BLOCK || mode == IoMode.NON_BLOCKING) return result
+            waitable.await(IoEvent.READABLE, count)
+        }
+    }
+
+    private fun writeBackend(source: PreparedBufferSource, offset: Int, count: Int): IoResult {
+        val positionless = positionlessBackend
+        if (positionless == null) {
+            return positionLock.withLock {
+                val append = statusFlags.load() and OpenFlags.O_APPEND != 0
+                backend.write(inode, source, offset, count, position, append)
+            }
+        }
+        val waitable = positionless as? WaitableOpenFileBackend
+            ?: return positionless.write(inode, source, offset, count)
+        var transferred = 0
+        while (transferred < count) {
+            val remaining = count - transferred
+            val mode = currentIoMode()
+            val result = waitable.write(inode, source, offset + transferred, remaining, mode)
+            if (result.isSuccess) {
+                val current = result.bytesTransferred
+                if (current == 0) return IoResult.success(transferred)
+                transferred += current
+                if (transferred == count) return IoResult.success(transferred)
+            } else if (result.error != VfsError.WOULD_BLOCK) {
+                return if (transferred == 0) result else IoResult.success(transferred)
+            }
+            if (mode == IoMode.NON_BLOCKING) {
+                return if (transferred == 0) result else IoResult.success(transferred)
+            }
+
+            waitable.await(IoEvent.WRITABLE, count - transferred)
+        }
+        return IoResult.success(transferred)
+    }
+
+    private fun readError(offset: Int, count: Int): VfsError? = when {
+        offset < 0 || count < 0 -> VfsError.INVALID_ARGUMENT
+        references.load() == 0 || !access.canRead -> VfsError.BAD_DESCRIPTOR
+        inode.type == InodeType.DIRECTORY -> VfsError.IS_DIRECTORY
+        else -> null
+    }
+
+    private fun writeError(offset: Int, count: Int): VfsError? = when {
+        offset < 0 || count < 0 -> VfsError.INVALID_ARGUMENT
+        references.load() == 0 || !access.canWrite -> VfsError.BAD_DESCRIPTOR
+        MountFlags.READ_ONLY in path.mount.flags -> VfsError.READ_ONLY
+        inode.type == InodeType.DIRECTORY -> VfsError.IS_DIRECTORY
+        else -> null
+    }
+
+    private fun currentIoMode(): IoMode =
+        if (statusFlags.load() and OpenFlags.O_NONBLOCK == 0) IoMode.BLOCKING
+        else IoMode.NON_BLOCKING
 }
 
 class Vfs(
@@ -1352,13 +1477,12 @@ private class PipeInode(
 private class PipeEndpoint(
     private val state: PipeState,
     private val writable: Boolean,
-) : OpenFileBackend {
+) : WaitableOpenFileBackend {
     override fun read(
         inode: Inode,
-        destination: ByteArray,
+        destination: PreparedBufferDestination,
         destinationOffset: Int,
         count: Int,
-        position: FilePosition,
     ): IoResult = if (writable) {
         IoResult.failure(VfsError.BAD_DESCRIPTOR)
     } else {
@@ -1367,15 +1491,19 @@ private class PipeEndpoint(
 
     override fun write(
         inode: Inode,
-        source: ByteArray,
+        source: PreparedBufferSource,
         sourceOffset: Int,
         count: Int,
-        position: FilePosition,
-        append: Boolean,
+        mode: IoMode,
     ): IoResult = if (!writable) {
         IoResult.failure(VfsError.BAD_DESCRIPTOR)
     } else {
-        state.write(source, sourceOffset, count)
+        state.write(source, sourceOffset, count, mode)
+    }
+
+    override fun await(event: IoEvent, count: Int) {
+        check(writable == (event == IoEvent.WRITABLE))
+        state.await(event, count)
     }
 
     override fun poll(inode: Inode, events: Int): Long = state.poll(events, writable)
@@ -1385,48 +1513,159 @@ private class PipeEndpoint(
     }
 }
 
+private class PipeWaitQueue {
+    class Waiter {
+        var minimumBytes = 0
+        lateinit var thread: Thread
+        var ready = false
+
+        fun arm(minimumBytes: Int, thread: Thread) {
+            this.minimumBytes = minimumBytes
+            this.thread = thread
+            ready = false
+        }
+    }
+
+    private val waiters = ArrayDeque<Waiter>()
+    private val recycled = ArrayDeque<Waiter>()
+
+    fun acquire(minimumBytes: Int, thread: Thread): Waiter =
+        (recycled.removeFirstOrNull() ?: Waiter()).also { waiter ->
+            waiter.arm(minimumBytes, thread)
+            waiters.addLast(waiter)
+        }
+
+    fun release(waiter: Waiter) {
+        check(waiter.ready)
+        recycled.addLast(waiter)
+    }
+
+    fun notifyReady(availableBytes: Int) {
+        val waiter = waiters.firstOrNull() ?: return
+        if (availableBytes < waiter.minimumBytes) return
+        waiters.removeFirst()
+        waiter.ready = true
+        Scheduler.wake(waiter.thread)
+    }
+
+    fun notifyAllWaiters() {
+        while (waiters.isNotEmpty()) {
+            val waiter = waiters.removeFirst()
+            waiter.ready = true
+            Scheduler.wake(waiter.thread)
+        }
+    }
+}
+
 private class PipeState {
+    private companion object {
+        const val CAPACITY_PAGES = 16
+        val CAPACITY_BYTES = CAPACITY_PAGES * PAGE_SIZE_BYTES.toInt()
+        val ATOMIC_WRITE_BYTES = PAGE_SIZE_BYTES.toInt()
+    }
+
     private val lock = IrqSpinLock()
-    private val buffer = ByteArray(64 * 1024)
+    private val buffer = ByteArray(CAPACITY_BYTES)
+    private val readWaiters = PipeWaitQueue()
+    private val writeWaiters = PipeWaitQueue()
     private var head = 0
     private var tail = 0
     private var size = 0
     private var readers = 1
     private var writers = 1
 
-    fun read(destination: ByteArray, offset: Int, count: Int): IoResult = lock.withLock {
+    fun read(destination: PreparedBufferDestination, offset: Int, count: Int): IoResult = lock.withLock {
         if (count == 0) return@withLock IoResult.success(0)
         if (size == 0) {
             return@withLock if (writers == 0) IoResult.success(0)
             else IoResult.failure(VfsError.WOULD_BLOCK)
         }
-        val transferred = minOf(count, size)
-        repeat(transferred) { index ->
-            destination[offset + index] = buffer[tail]
-            tail = (tail + 1) % buffer.size
+        val requestedTransfer = minOf(count, size)
+        val firstChunk = minOf(requestedTransfer, buffer.size - tail)
+        var transferred = destination.copyFrom(offset, buffer, tail, firstChunk)
+        if (transferred == firstChunk) {
+            val remaining = requestedTransfer - firstChunk
+            if (remaining != 0) {
+                transferred += destination.copyFrom(offset + firstChunk, buffer, 0, remaining)
+            }
         }
+        if (transferred == 0) return@withLock IoResult.failure(VfsError.FAULT)
+        tail = (tail + transferred) % buffer.size
         size -= transferred
+        writeWaiters.notifyReady(buffer.size - size)
         IoResult.success(transferred)
     }
 
-    fun write(source: ByteArray, offset: Int, count: Int): IoResult = lock.withLock {
-        if (writers == 0 || readers == 0) return@withLock IoResult.failure(VfsError.IO)
+    fun write(
+        source: PreparedBufferSource,
+        offset: Int,
+        count: Int,
+        mode: IoMode,
+    ): IoResult = lock.withLock {
+        if (readers == 0) return@withLock IoResult.failure(VfsError.BROKEN_PIPE)
         if (count == 0) return@withLock IoResult.success(0)
-        if (size == buffer.size) return@withLock IoResult.failure(VfsError.WOULD_BLOCK)
-        val transferred = minOf(count, buffer.size - size)
-        repeat(transferred) { index ->
-            buffer[head] = source[offset + index]
-            head = (head + 1) % buffer.size
+        val available = buffer.size - size
+        val minimumWriteSize = when {
+            mode == IoMode.BLOCKING -> minOf(count, buffer.size)
+            count <= ATOMIC_WRITE_BYTES -> count
+            else -> 1
         }
+        if (available < minimumWriteSize) {
+            return@withLock IoResult.failure(VfsError.WOULD_BLOCK)
+        }
+        val requestedTransfer = minOf(count, available)
+        val firstChunk = minOf(requestedTransfer, buffer.size - head)
+        var transferred = source.copyTo(offset, buffer, head, firstChunk)
+        if (transferred == firstChunk) {
+            val remaining = requestedTransfer - firstChunk
+            if (remaining != 0) {
+                transferred += source.copyTo(offset + firstChunk, buffer, 0, remaining)
+            }
+        }
+        if (transferred == 0) return@withLock IoResult.failure(VfsError.FAULT)
+        head = (head + transferred) % buffer.size
         size += transferred
+        readWaiters.notifyReady(size)
         IoResult.success(transferred)
+    }
+
+    fun await(event: IoEvent, count: Int) {
+        val thread = checkNotNull(ProcessManager.currentThread())
+        val minimumBytes = if (event == IoEvent.READABLE) {
+            1
+        } else {
+            minOf(count, buffer.size)
+        }
+        val queue = if (event == IoEvent.READABLE) readWaiters else writeWaiters
+        var waiter: PipeWaitQueue.Waiter? = null
+        lock.withLock {
+            val availableBytes = when (event) {
+                IoEvent.READABLE -> size
+                IoEvent.WRITABLE -> buffer.size - size
+            }
+            val becameReady = availableBytes >= minimumBytes || when (event) {
+                IoEvent.READABLE -> writers == 0
+                IoEvent.WRITABLE -> readers == 0
+            }
+            if (!becameReady) {
+                waiter = queue.acquire(minimumBytes, thread)
+            }
+        }
+        val queued = waiter ?: return
+
+        do {
+            check(Scheduler.parkCurrent()) { "Cannot park a pipe waiter" }
+        } while (lock.withLock { !queued.ready })
+        lock.withLock { queue.release(queued) }
     }
 
     fun poll(events: Int, writable: Boolean): Long = lock.withLock {
         var available = 0
         if (writable) {
             if (readers == 0) available = PollEvents.POLLERR
-            else if (size < buffer.size) available = PollEvents.NORMAL_OUTPUT
+            else if (buffer.size - size >= ATOMIC_WRITE_BYTES) {
+                available = PollEvents.NORMAL_OUTPUT
+            }
         } else if (size != 0 || writers == 0) {
             available = PollEvents.NORMAL_INPUT
         }
@@ -1434,6 +1673,14 @@ private class PipeState {
     }
 
     fun close(writable: Boolean) = lock.withLock {
-        if (writable) writers-- else readers--
+        if (writable) {
+            check(writers > 0)
+            writers--
+            if (writers == 0) readWaiters.notifyAllWaiters()
+        } else {
+            check(readers > 0)
+            readers--
+            if (readers == 0) writeWaiters.notifyAllWaiters()
+        }
     }
 }

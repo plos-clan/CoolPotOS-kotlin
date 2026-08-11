@@ -7,6 +7,7 @@ import org.plos_clan.cpos.fs.OpenOptions
 import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsResult
 import org.plos_clan.cpos.mem.KernelPageDirectory
+import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.MemoryRegion
 import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.mem.VirtualAddressSpace
@@ -106,6 +107,8 @@ object ElfLoader {
             }
             if (executableFile.image.interpreterPath != null && interpreter == null) return null
 
+            val vdso = Vdso.install(addressSpace) ?: return null
+
             val stack = UserStackBuilder.build(
                 process = process,
                 arguments = arguments.ifEmpty { listOf(path) },
@@ -113,6 +116,7 @@ object ElfLoader {
                 executablePath = path,
                 executable = executable,
                 interpreter = interpreter,
+                systemInfoHeader = vdso,
                 addressSpace = addressSpace,
             ) ?: return null
 
@@ -385,7 +389,7 @@ object ElfLoader {
         while (copied < count) {
             val result = file.readAt(
                 fileOffset = fileOffset + copied.toULong(),
-                destination = data,
+                destination = ByteArrayBuffer(data),
                 offset = copied,
                 count = count - copied,
             )
@@ -417,7 +421,7 @@ private class ElfBacking(
             val count = (segmentEnd - start).toInt()
             val result = file.readAt(
                 fileOffset = segment.header.fileOffset + (start - segment.start),
-                destination = destination,
+                destination = ByteArrayBuffer(destination),
                 offset = (start - offset).toInt(),
                 count = count,
             )

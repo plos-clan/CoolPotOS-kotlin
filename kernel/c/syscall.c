@@ -167,10 +167,10 @@ static inline bool interrupts_enabled(void) {
 }
 
 static void wait_for_event(void) {
-    fast_handoff_yield();
-    if (interrupts_enabled()) {
-        __asm__ volatile("hlt" : : : "memory");
-    } else {
+    const bool switched = fast_handoff_yield();
+    if (!switched && interrupts_enabled()) {
+        __asm__ volatile("cli; sti; hlt" : : : "memory");
+    } else if (!switched) {
         for (unsigned int i = 0; i < 64; i++) cpu_relax();
     }
 }

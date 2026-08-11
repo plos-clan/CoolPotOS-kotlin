@@ -6,6 +6,7 @@ import org.plos_clan.cpos.drivers.char.TtyManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.tasks.TaskState
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -198,7 +199,7 @@ private class ProcTextHandle(
 ) : OpenFileBackend {
     override fun read(
         inode: Inode,
-        destination: ByteArray,
+        destination: PreparedBufferDestination,
         destinationOffset: Int,
         count: Int,
         position: FilePosition,
@@ -207,8 +208,9 @@ private class ProcTextHandle(
             return IoResult.success(0)
         }
         val start = position.value.toInt()
-        val copied = minOf(count, content.size - start)
-        content.copyInto(destination, destinationOffset, start, start + copied)
+        val requested = minOf(count, content.size - start)
+        val copied = destination.copyFrom(destinationOffset, content, start, requested)
+        if (copied == 0) return IoResult.failure(VfsError.FAULT)
         position.value += copied
         return IoResult.success(copied)
     }

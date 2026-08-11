@@ -15,7 +15,10 @@ import kotlinx.cinterop.staticCFunction
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.mem.PreparedBufferDestination
+import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PollEvents
@@ -115,30 +118,35 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
 
     override fun write(
         session: TtySession,
-        buffer: ByteArray,
+        buffer: PreparedBufferSource,
+        offset: Int,
         count: ULong
-    ): ULong {
-        val length = minOf(count, buffer.size.toULong()).toInt()
+    ): Long {
+        val length = count.toInt()
+        val bytes = ByteArray(length)
+        val copied = buffer.copyTo(offset, bytes, 0, length)
+        if (copied == 0 && length != 0) return -Errno.EFAULT.toLong()
         lock.withLock {
-            bridge.terminal_process(terminal, buffer.decodeToString(0, length))
+            bridge.terminal_process(terminal, bytes.decodeToString(0, copied))
         }
-        return count
+        return copied.toLong()
     }
 
     override fun read(
         session: TtySession,
-        buffer: ByteArray,
+        buffer: PreparedBufferDestination,
+        offset: Int,
         count: ULong
-    ): ULong {
-        val limit = minOf(count, buffer.size.toULong()).toInt()
+    ): Long {
+        val limit = count.toInt()
         if (limit == 0) {
-            return 0uL
+            return 0L
         }
 
         return if (session.hasLocalFlag(TermiosConstants.ICANON)) {
-            readCanonical(buffer, limit).toULong()
+            readCanonical(buffer, offset, limit).toLong()
         } else {
-            readNonCanonical(session, buffer, limit).toULong()
+            readNonCanonical(session, buffer, offset, limit).toLong()
         }
     }
 
@@ -350,7 +358,7 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         canonicalCount = 0
     }
 
-    private fun readCanonical(buffer: ByteArray, limit: Int): Int {
+    private fun readCanonical(buffer: PreparedBufferDestination, offset: Int, limit: Int): Int {
         while (true) {
             val result = inputLock.withLock {
                 if (canonicalRecordCount == 0) {
@@ -361,11 +369,11 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
                         0
                     } else {
                         val transferred = minOf(limit, recordLength)
-                        dequeueInputLocked(buffer, 0, transferred)
-                        if (transferred < recordLength) {
-                            prependCanonicalRecordLocked(recordLength - transferred)
+                        val copied = dequeueInputLocked(buffer, offset, transferred)
+                        if (copied < recordLength) {
+                            prependCanonicalRecordLocked(recordLength - copied)
                         }
-                        transferred
+                        copied
                     }
                 }
             }
@@ -376,12 +384,17 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         }
     }
 
-    private fun readNonCanonical(session: TtySession, buffer: ByteArray, limit: Int): Int {
+    private fun readNonCanonical(
+        session: TtySession,
+        buffer: PreparedBufferDestination,
+        offset: Int,
+        limit: Int,
+    ): Int {
         val minimum = minOf(session.controlCharacter(TermiosConstants.VMIN), limit)
         val timeout = session.controlCharacter(TermiosConstants.VTIME)
 
         if (minimum == 0 && timeout == 0) {
-            return drainAvailable(buffer, 0, limit)
+            return drainAvailable(buffer, offset, limit)
         }
 
         if (minimum == 0) {
@@ -392,12 +405,12 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
                 }
                 waitForInterrupt()
             }
-            return drainAvailable(buffer, 0, limit)
+            return drainAvailable(buffer, offset, limit)
         }
 
         var transferred = 0
         while (transferred == 0) {
-            transferred += drainAvailable(buffer, transferred, limit - transferred)
+            transferred += drainAvailable(buffer, offset + transferred, limit - transferred)
             if (transferred == 0) {
                 waitForInterrupt()
             }
@@ -405,7 +418,7 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
 
         if (timeout == 0) {
             while (transferred < minimum) {
-                val current = drainAvailable(buffer, transferred, limit - transferred)
+                val current = drainAvailable(buffer, offset + transferred, limit - transferred)
                 transferred += current
                 if (transferred < minimum) {
                     waitForInterrupt()
@@ -416,7 +429,7 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
 
         var deadline = timeoutDeadline(timeout)
         while (transferred < minimum) {
-            val current = drainAvailable(buffer, transferred, limit - transferred)
+            val current = drainAvailable(buffer, offset + transferred, limit - transferred)
             if (current != 0) {
                 transferred += current
                 deadline = timeoutDeadline(timeout)
@@ -430,7 +443,7 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         return transferred
     }
 
-    private fun drainAvailable(buffer: ByteArray, offset: Int, limit: Int): Int =
+    private fun drainAvailable(buffer: PreparedBufferDestination, offset: Int, limit: Int): Int =
         inputLock.withLock {
             dequeueInputLocked(buffer, offset, minOf(limit, inputCount))
         }
@@ -445,12 +458,21 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         return true
     }
 
-    private fun dequeueInputLocked(destination: ByteArray, offset: Int, length: Int): Int {
-        val transferred = minOf(length, inputCount)
-        repeat(transferred) { index ->
-            destination[offset + index] = inputData[inputHead]
-            inputHead = (inputHead + 1) % inputData.size
+    private fun dequeueInputLocked(
+        destination: PreparedBufferDestination,
+        offset: Int,
+        length: Int,
+    ): Int {
+        val requested = minOf(length, inputCount)
+        val firstChunk = minOf(requested, inputData.size - inputHead)
+        var transferred = destination.copyFrom(offset, inputData, inputHead, firstChunk)
+        if (transferred == firstChunk) {
+            val remaining = requested - firstChunk
+            if (remaining != 0) {
+                transferred += destination.copyFrom(offset + firstChunk, inputData, 0, remaining)
+            }
         }
+        inputHead = (inputHead + transferred) % inputData.size
         inputCount -= transferred
         return transferred
     }
@@ -562,7 +584,7 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         TscClock.isReady && TscClock.nanoTime() >= deadline
 
     private fun waitForInterrupt() {
-        bridge.fast_handoff_yield()
+        Scheduler.yieldCurrent()
         val flags = bridge.irq_save()
         bridge.enable_interrupt()
         bridge.wait_for_interrupt()

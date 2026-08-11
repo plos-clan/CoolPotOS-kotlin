@@ -48,12 +48,13 @@ new file mode 100644
 index 00000000..142a1aa6
 --- /dev/null
 +++ b/sysdeps/template/generic/generic.cpp
-@@ -0,0 +1,906 @@
+@@ -0,0 +1,913 @@
 +#include <bits/ensure.h>
 +#include <errno.h>
 +#include <fcntl.h>
 +#include <limits.h>
 +#include <mlibc/all-sysdeps.hpp>
++#include <mlibc/dlapi.hpp>
 +#include <signal.h>
 +#include <stdio.h>
 +#include <stdarg.h>
@@ -91,6 +92,10 @@ index 00000000..142a1aa6
 +}
 +
 +#ifndef MLIBC_BUILDING_RTLD
++
++static const auto vdso_clock_gettime = reinterpret_cast<int (*)(clockid_t, struct timespec *)>(
++	__dlapi_vdsosym("__vdso_clock_gettime", nullptr)
++);
 +
 +void sys_thread_exit() {
 +	::syscall(SYS_exit, 0);
@@ -600,9 +605,11 @@ index 00000000..142a1aa6
 +		return EINVAL;
 +
 +	struct timespec tp = {};
-+	auto ret = ::syscall(SYS_clock_gettime, clock, &tp);
-+	if(int e = sc_error(ret); e)
-+		return e;
++	int error = vdso_clock_gettime
++		? -vdso_clock_gettime(clock, &tp)
++		: sc_error(::syscall(SYS_clock_gettime, clock, &tp));
++	if(error)
++		return error;
 +
 +	*secs = tp.tv_sec;
 +	*nanos = tp.tv_nsec;

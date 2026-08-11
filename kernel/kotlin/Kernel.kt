@@ -18,6 +18,7 @@ import org.plos_clan.cpos.fault.ErrorHandler
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.module.Init
 import org.plos_clan.cpos.module.ModuleManager
+import org.plos_clan.cpos.module.Vdso
 import org.plos_clan.cpos.syscall.Syscall
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.Scheduler
@@ -47,6 +48,9 @@ fun kernelMain() {
         return
     }
     if (!TscClock.initialize()) {
+        return
+    }
+    if (!Vdso.initialize()) {
         return
     }
     if (!Acpi.initialize()) {

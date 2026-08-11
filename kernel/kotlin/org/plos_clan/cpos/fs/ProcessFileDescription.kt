@@ -1,6 +1,9 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package org.plos_clan.cpos.fs
 
 import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlin.concurrent.atomics.AtomicReference
 
 object OpenFlags {
     const val O_ACCMODE = 0x000003
@@ -44,7 +47,7 @@ data class FileDescriptor(
 )
 
 class FileDescriptorTable {
-    private val entries = mutableMapOf<Int, FileDescriptor>()
+    private val entries = DescriptorEntries(LIMIT)
     private val lock = IrqSpinLock()
 
     fun installExact(
@@ -52,7 +55,7 @@ class FileDescriptorTable {
         file: OpenFileDescription,
         flags: ULong
     ): Boolean = lock.withLock {
-        if (fd !in 0 until MAX_FILE_DESCRIPTORS || entries.containsKey(fd)) {
+        if (fd !in entries.indices || entries[fd] != null) {
             return@withLock false
         }
 
@@ -65,22 +68,14 @@ class FileDescriptorTable {
         flags: ULong,
         minimum: Int = 0,
     ): Int? = lock.withLock {
-        if (minimum !in 0 until MAX_FILE_DESCRIPTORS) {
-            return@withLock null
-        }
-        for (fd in minimum until MAX_FILE_DESCRIPTORS) {
-            if (!entries.containsKey(fd)) {
-                entries[fd] = FileDescriptor(file, flags)
-                return@withLock fd
-            }
-        }
-        null
+        val fd = entries.firstEmpty(minimum) ?: return@withLock null
+        entries[fd] = FileDescriptor(file, flags)
+        fd
     }
 
-    fun get(fd: Int): OpenFileDescription? =
-        lock.withLock { entries[fd]?.file }
+    fun contains(fd: Int): Boolean = entries[fd] != null
 
-    fun descriptorFlags(fd: Int): ULong? = lock.withLock { entries[fd]?.flags }
+    fun descriptorFlags(fd: Int): ULong? = entries[fd]?.flags
 
     fun setDescriptorFlags(fd: Int, flags: ULong): Boolean = lock.withLock {
         val descriptor = entries[fd] ?: return@withLock false
@@ -89,14 +84,11 @@ class FileDescriptorTable {
     }
 
     fun duplicate(fd: Int, minimum: Int, flags: ULong): Int? = lock.withLock {
-        if (minimum !in 0 until MAX_FILE_DESCRIPTORS) {
-            return@withLock null
-        }
         val source = entries[fd] ?: return@withLock null
         if (!source.file.retain()) {
             return@withLock null
         }
-        val target = (minimum until MAX_FILE_DESCRIPTORS).firstOrNull { it !in entries }
+        val target = entries.firstEmpty(minimum)
         if (target == null) {
             source.file.release()
             return@withLock null
@@ -105,13 +97,18 @@ class FileDescriptorTable {
         target
     }
 
-    fun acquire(fd: Int): OpenFileDescription? = lock.withLock {
-        val file = entries[fd]?.file ?: return@withLock null
-        if (file.retain()) file else null
+    fun acquire(fd: Int): OpenFileDescription? {
+        val file = entries[fd]?.file ?: return null
+        return if (file.retain()) file else null
+    }
+
+    fun acquire(fd: ULong): OpenFileDescription? {
+        val file = entries[fd]?.file ?: return null
+        return if (file.retain()) file else null
     }
 
     fun dup2(oldFd: Int, newFd: Int): Boolean = lock.withLock {
-        if (newFd !in 0 until MAX_FILE_DESCRIPTORS) {
+        if (newFd !in entries.indices) {
             return@withLock false
         }
         val source = entries[oldFd] ?: return@withLock false
@@ -124,19 +121,19 @@ class FileDescriptorTable {
             return@withLock false
         }
 
-        val replaced = entries.put(
-            newFd,
-            // dup2 creates a descriptor without FD_CLOEXEC, even when the
-            // source descriptor has that flag set.
-            FileDescriptor(source.file, 0uL),
-        )
+        val replaced = entries[newFd]
+        // dup2 creates a descriptor without FD_CLOEXEC, even when the
+        // source descriptor has that flag set.
+        entries[newFd] = FileDescriptor(source.file, 0uL)
         replaced?.file?.release()
         true
     }
 
     fun close(fd: Int): Boolean {
         val file = lock.withLock {
-            entries.remove(fd)?.file
+            val openFile = entries[fd]?.file ?: return@withLock null
+            entries[fd] = null
+            openFile
         } ?: return false
 
         file.release()
@@ -145,13 +142,14 @@ class FileDescriptorTable {
 
     fun copyInto(destination: FileDescriptorTable): Boolean {
         val descriptors = lock.withLock {
-            entries.map { (fd, descriptor) ->
+            entries.indices.mapNotNull { fd ->
+                val descriptor = entries[fd] ?: return@mapNotNull null
                 check(descriptor.file.retain())
                 fd to descriptor
             }
         }
         return destination.lock.withLock {
-            if (descriptors.any { (fd, _) -> destination.entries.containsKey(fd) }) {
+            if (descriptors.any { (fd, _) -> destination.entries[fd] != null }) {
                 descriptors.forEach { (_, descriptor) -> descriptor.file.release() }
                 false
             } else {
@@ -163,17 +161,62 @@ class FileDescriptorTable {
 
     fun closeOnExec() {
         val files = lock.withLock {
-            val selected = entries.filter { (_, descriptor) ->
-                descriptor.flags and FileDescriptorFlags.FD_CLOEXEC != 0uL
+            entries.indices.mapNotNull { fd ->
+                val descriptor = entries[fd]
+                descriptor?.takeIf {
+                    it.flags and FileDescriptorFlags.FD_CLOEXEC != 0uL
+                }?.file?.also { entries[fd] = null }
             }
-            selected.keys.forEach(entries::remove)
-            selected.values.map(FileDescriptor::file)
         }
         files.forEach(OpenFileDescription::release)
     }
 
+    private class DescriptorEntries(val size: Int) {
+        val indices = 0 until size
+        private val segments = Array((size + SEGMENT_SIZE - 1) / SEGMENT_SIZE) { index ->
+            val remaining = size - index * SEGMENT_SIZE
+            AtomicReference(arrayOfNulls<FileDescriptor>(minOf(SEGMENT_SIZE, remaining)))
+        }
+
+        operator fun get(index: Int): FileDescriptor? {
+            if (index !in indices) return null
+            return segments[index / SEGMENT_SIZE].load()[index % SEGMENT_SIZE]
+        }
+
+        operator fun get(index: ULong): FileDescriptor? {
+            if (index >= size.toULong()) return null
+            val validIndex = index.toInt()
+            return segments[validIndex / SEGMENT_SIZE].load()[validIndex % SEGMENT_SIZE]
+        }
+
+        operator fun set(index: Int, descriptor: FileDescriptor?) {
+            require(index in indices)
+            val segment = index / SEGMENT_SIZE
+            val updated = segments[segment].load().copyOf()
+            updated[index % SEGMENT_SIZE] = descriptor
+            segments[segment].store(updated)
+        }
+
+        fun firstEmpty(minimum: Int): Int? {
+            if (minimum !in indices) return null
+            var index = minimum
+            while (index < size) {
+                val segmentIndex = index / SEGMENT_SIZE
+                val snapshot = segments[segmentIndex].load()
+                for (offset in index % SEGMENT_SIZE until snapshot.size) {
+                    if (snapshot[offset] == null) return segmentIndex * SEGMENT_SIZE + offset
+                }
+                index = (segmentIndex + 1) * SEGMENT_SIZE
+            }
+            return null
+        }
+
+        companion object {
+            private const val SEGMENT_SIZE = 64
+        }
+    }
+
     companion object {
         const val LIMIT = 1024
-        private const val MAX_FILE_DESCRIPTORS = LIMIT
     }
 }

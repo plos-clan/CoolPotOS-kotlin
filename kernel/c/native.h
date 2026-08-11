@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "vdso.h"
 
 enum {
     cpu_slot_count = 256,
@@ -173,16 +174,18 @@ void idt_load(void);
 void kt_ap_start(void);
 void do_irq(void *regs, uint64_t irq_num);
 bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num);
-void fast_handoff_yield(void);
+bool fast_handoff_yield(void);
 bool fast_handoff_park_current(void);
 bool fast_handoff_unpark(uint64_t task);
 uint64_t fast_handoff_wake_sequence(void);
 void fast_handoff_wake_bsp(void);
 void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence);
+_Noreturn void fast_handoff_idle(void);
 bool fast_handoff_configure_timer(uint8_t vector, uint32_t frequency_hz);
 bool fast_handoff_finish_bootstrap(uint64_t task);
 bool fast_handoff_replace_address_space(uint64_t task, uint64_t cr3);
 void fast_handoff_reset_user_xstate(void);
+uint64_t fast_handoff_current_task_id(void);
 bool capture_sys_clone_context(uint64_t stack, uint64_t tls);
 uint64_t allocate_runtime_tid(void);
 uint64_t create_kernel_runtime_tcb(void);
@@ -193,5 +196,6 @@ uint64_t read_tsc(void);
 uint64_t runtime_clock_initialize(uint64_t frequency);
 uint64_t runtime_clock_frequency(void);
 uint64_t runtime_clock_nanos(void);
+bool runtime_vdso_initialize(vdso_image_t *image);
 uint64_t runtime_clock_deadline(uint64_t nanoseconds);
 void wrmsr(uint32_t msr, uint64_t value);

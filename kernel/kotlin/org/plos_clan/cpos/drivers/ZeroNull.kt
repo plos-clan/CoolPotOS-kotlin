@@ -1,9 +1,10 @@
 package org.plos_clan.cpos.drivers
 
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.mem.PreparedBufferDestination
+import org.plos_clan.cpos.utils.Errno
 
-object NullDev : DeviceBackend {
-
+object NullDev : DiscardingDeviceBackend {
     fun initialize() {
         DeviceManager.installDevice(DEV_CHAR, DEV_SYSDEV, this, "null", 0UL, this)
         DeviceManager.installDevice(DEV_CHAR, DEV_SYSDEV, ZeroDev, "zero", 0UL, ZeroDev)
@@ -19,21 +20,15 @@ object NullDev : DeviceBackend {
 
     override fun read(
         device: Device,
-        buffer: ByteArray,
-        offset: ULong,
+        buffer: PreparedBufferDestination,
+        bufferOffset: Int,
         size: ULong
     ): Long = 0
 
-    override fun write(
-        device: Device,
-        buffer: ByteArray,
-        offset: ULong,
-        size: ULong
-    ): Long = size.toLong()
+    override fun discard(device: Device, size: ULong): Long = size.toLong()
 }
 
-object ZeroDev : DeviceBackend {
-
+object ZeroDev : DiscardingDeviceBackend {
     override fun ioctl(
         device: Device,
         command: Int,
@@ -44,19 +39,14 @@ object ZeroDev : DeviceBackend {
 
     override fun read(
         device: Device,
-        buffer: ByteArray,
-        offset: ULong,
+        buffer: PreparedBufferDestination,
+        bufferOffset: Int,
         size: ULong
     ): Long {
-        buffer.fill(element = 0, toIndex = size.toInt())
-        return size.toLong()
+        val count = size.toInt()
+        val transferred = buffer.fill(bufferOffset, count)
+        return if (transferred != 0 || count == 0) transferred.toLong() else -Errno.EFAULT.toLong()
     }
 
-    override fun write(
-        device: Device,
-        buffer: ByteArray,
-        offset: ULong,
-        size: ULong
-    ): Long = size.toLong()
-
+    override fun discard(device: Device, size: ULong): Long = size.toLong()
 }

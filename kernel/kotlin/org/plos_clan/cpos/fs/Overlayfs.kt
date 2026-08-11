@@ -1,5 +1,9 @@
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.mem.ByteArrayBuffer
+import org.plos_clan.cpos.mem.PreparedBufferDestination
+import org.plos_clan.cpos.mem.PreparedBufferSource
+
 data class OverlayfsOptions(
     val lower: VfsPath,
     val upper: VfsPath,
@@ -206,15 +210,18 @@ private class OverlayInstance(options: OverlayfsOptions) : SuperBlockBackend {
             val size = source.metadata().size
             if (size > Long.MAX_VALUE.toULong()) return false
             val buffer = ByteArray(8192)
+            val transferBuffer = ByteArrayBuffer(buffer)
+            val destinationBuffer = checkNotNull(transferBuffer.prepareWrite(0, buffer.size))
+            val sourceBuffer = checkNotNull(transferBuffer.prepareRead(0, buffer.size))
             var position = FilePosition()
             var copied = 0uL
             while (copied < size) {
                 val count = minOf(buffer.size.toULong(), size - copied).toInt()
-                val read = sourceHandle.read(source, buffer, 0, count, position)
+                val read = sourceHandle.read(source, destinationBuffer, 0, count, position)
                 if (!read.isSuccess || read.bytesTransferred == 0) break
                 val write = destinationHandle.write(
                     destination,
-                    buffer,
+                    sourceBuffer,
                     0,
                     read.bytesTransferred,
                     FilePosition(copied.toLong()),
@@ -375,7 +382,7 @@ private class OverlayInstance(options: OverlayfsOptions) : SuperBlockBackend {
 
         override fun read(
             inode: Inode,
-            destination: ByteArray,
+            destination: PreparedBufferDestination,
             destinationOffset: Int,
             count: Int,
             position: FilePosition,
@@ -384,7 +391,7 @@ private class OverlayInstance(options: OverlayfsOptions) : SuperBlockBackend {
 
         override fun write(
             inode: Inode,
-            source: ByteArray,
+            source: PreparedBufferSource,
             sourceOffset: Int,
             count: Int,
             position: FilePosition,

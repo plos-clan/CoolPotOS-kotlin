@@ -55,6 +55,7 @@ private data class ToolSettings(
     val cc: String,
     val cxx: String,
     val linker: String,
+    val objcopy: String,
     val xorriso: String,
     val qemu: String,
 )
@@ -63,6 +64,11 @@ private data class Archive(
     val url: String,
     val file: File,
 )
+
+private object FullLto {
+    val compilerArgs = listOf("-flto=full", "-funified-lto")
+    val linkerArgs = listOf("--lto=full", "--lto-O3")
+}
 
 private class BuildPaths(project: Project) {
     val root = project.layout.buildDirectory.get().asFile
@@ -91,7 +97,7 @@ private class BuildPaths(project: Project) {
     val freestanding = root.resolve("freestnd-c-hdrs")
     val freestandingInclude = freestanding.resolve("include")
     val freestandingArchive = Archive(
-        "https://codeberg.org/OSDev/freestnd-c-hdrs-0bsd/archive/trunk.tar.gz",
+        "https://github.com/osdev0/freestnd-c-hdrs-0bsd/archive/refs/heads/trunk.tar.gz",
         downloads.resolve("freestnd-c-hdrs-0bsd-trunk.tar.gz"),
     )
 
@@ -101,8 +107,56 @@ private class BuildPaths(project: Project) {
     val mlibcPatch = assets.resolve("mlibc.patch")
     val mlibcSyscallHeader = mlibc.resolve("sysdeps/template/include/sys/syscall.h")
     val cObjects = root.resolve("c-objects")
+    val vdso = root.resolve("vdso")
     val kernelElf = root.resolve("kernel.elf")
     val isoImage = root.resolve("${project.name}.iso")
+}
+
+private class VdsoConfig(
+    paths: BuildPaths,
+    tools: ToolSettings,
+    arch: String,
+) {
+    val source = paths.kernelC.resolve("vdso.c")
+    val header = paths.kernelC.resolve("vdso.h")
+    val linkerScript = paths.kernelC.resolve("vdso.ld")
+    val objectFile = paths.vdso.resolve("vdso.o")
+    val linkedImage = paths.vdso.resolve("vdso.unstripped.so")
+    val image = paths.vdso.resolve("vdso.so")
+    val blob = paths.vdso.resolve("vdso-blob.o")
+    val compileCommand = listOf(
+        tools.cc,
+        "-target", "$arch-freestanding",
+        "-std=c23", "-O3",
+    ) + FullLto.compilerArgs + listOf(
+        "-fPIC", "-fvisibility=hidden",
+        "-ffreestanding", "-nostdinc", "-fno-stack-protector", "-fomit-frame-pointer",
+        "-fno-asynchronous-unwind-tables", "-fno-unwind-tables",
+        "-Wall", "-Wextra", "-Wpedantic", "-Werror",
+        "-I${paths.freestandingInclude.absolutePath}",
+        "-c", source.absolutePath,
+        "-o", objectFile.absolutePath,
+    )
+    val linkCommand = listOf(tools.linker) + FullLto.linkerArgs + listOf(
+        "-shared", "-nostdlib", "--hash-style=sysv",
+        "-soname=linux-vdso.so.1", "-z", "max-page-size=0x1000", "-z", "noexecstack",
+        "--build-id=none", "--orphan-handling=error",
+        "-T", linkerScript.absolutePath,
+        "-o", linkedImage.absolutePath,
+        objectFile.absolutePath,
+    )
+    val stripCommand = listOf(
+        tools.objcopy,
+        "--strip-sections",
+        linkedImage.absolutePath,
+        image.absolutePath,
+    )
+    val embedCommand = listOf(
+        tools.linker,
+        "-r", "-m", "elf_$arch", "-b", "binary",
+        "-o", blob.name,
+        image.name,
+    )
 }
 
 private data class UserlandConfig(
@@ -127,13 +181,17 @@ private class MlibcConfig(
     val path = "${build.absolutePath}:${System.getenv("PATH").orEmpty()}"
     val cc = "${tools.cc} -target $arch-unknown-none"
     val cxx = "${tools.cxx} -target $arch-unknown-none"
-    val cFlags = listOf(
-        "-pipe",
-        "-Wall", "-Wextra", "-nostdinc", "-ffreestanding",
-        "-fno-stack-protector", "-fno-stack-check", "-fno-lto", "-fno-PIC",
-        "-ffunction-sections", "-fdata-sections",
-        "-m64", "-march=x86-64", "-mno-red-zone", "-mcmodel=kernel",
-        "-D__thread=''", "-D_Thread_local=''", "-D_GNU_SOURCE",
+    val cFlags = (
+        listOf(
+            "-pipe",
+            "-Wall", "-Wextra", "-nostdinc", "-ffreestanding",
+            "-fno-stack-protector", "-fno-stack-check",
+        ) + FullLto.compilerArgs + listOf(
+            "-fno-PIC",
+            "-ffunction-sections", "-fdata-sections",
+            "-m64", "-march=x86-64", "-mno-red-zone", "-mcmodel=kernel",
+            "-D__thread=''", "-D_Thread_local=''", "-D_GNU_SOURCE",
+        )
     ).joinToString(" ")
     val cxxFlags = "$cFlags -fno-rtti -fno-exceptions -fno-sized-deallocation"
     val libraries = listOf("libc.a", "libm.a", "libpthread.a")
@@ -155,6 +213,7 @@ private class MlibcConfig(
 private class KernelConfig(
     paths: BuildPaths,
     mlibc: MlibcConfig,
+    vdso: VdsoConfig,
     tools: ToolSettings,
     arch: String,
     debug: Boolean,
@@ -178,10 +237,11 @@ private class KernelConfig(
         File(toolRoot, "lib/gcc/$arch-unknown-linux-gnu/8.3.0/libgcc.a"),
         File(toolRoot, "lib/gcc/$arch-unknown-linux-gnu/8.3.0/libgcc_eh.a"),
     )
-    val linkInputs = objects + kotlinLibrary + runtimeLibraries + staticLibraries
+    val linkInputs = objects + vdso.blob + kotlinLibrary + runtimeLibraries + staticLibraries
     val compileArgs = listOf(
         "-target", "$arch-freestanding",
         "-std=c23", "-ffreestanding", "-nostdinc", "-fno-builtin",
+    ) + FullLto.compilerArgs + listOf(
         "-m64", "-mno-red-zone", "-mcmodel=kernel", "-fno-stack-protector",
         "-mno-80387", "-mno-mmx", "-mno-sse", "-mno-sse2",
         "-Wall", "-Wextra", "-Wpedantic", "-Werror",
@@ -191,8 +251,8 @@ private class KernelConfig(
         paths.mlibcSyscallHeader.parentFile,
         paths.limineInclude,
         paths.freestandingInclude,
-    ).map { "-I${it.absolutePath}" } + if (debug) listOf("-Og") else listOf("-O2")
-    val linkArgs = listOf(
+    ).map { "-I${it.absolutePath}" } + if (debug) listOf("-Og") else listOf("-O3")
+    val linkArgs = FullLto.linkerArgs + listOf(
         "-m", "elf_$arch", "-nostdlib", "--eh-frame-hdr",
         "-z", "max-page-size=0x1000", "--gc-sections",
         "-u", "sched_yield", "-u", "frg_panic",
@@ -203,6 +263,7 @@ private class KernelConfig(
 
 private data class QemuConfig(
     val executable: String,
+    val cpuSet: String,
     val flags: List<String>,
 )
 
@@ -214,6 +275,7 @@ private class BuildConfig(private val project: Project) {
         cc = setting("crossCc", "CROSS_CC", "clang"),
         cxx = setting("crossCxx", "CROSS_CXX", "clang++"),
         linker = setting("linker", "LINKER", "ld.lld"),
+        objcopy = setting("objcopy", "OBJCOPY", "llvm-objcopy"),
         xorriso = setting("xorriso", "XORRISO", "xorriso"),
         qemu = setting("qemu", "QEMU", "qemu-system-x86_64"),
     )
@@ -236,8 +298,9 @@ private class BuildConfig(private val project: Project) {
             ),
         ),
     )
+    val vdso = VdsoConfig(paths, tools, arch)
     private val rootfsName = "cachyos-rootfs-$arch.erofs"
-    val kernel = KernelConfig(paths, mlibc, tools, arch, debug, toolRoot)
+    val kernel = KernelConfig(paths, mlibc, vdso, tools, arch, debug, toolRoot)
     val userland = UserlandConfig(
         image = setting(
             "userlandImage",
@@ -251,6 +314,7 @@ private class BuildConfig(private val project: Project) {
     )
     val qemu = QemuConfig(
         executable = tools.qemu,
+        cpuSet = setting("qemuCpuSet", "QEMU_CPU_SET", "0-7"),
         flags = listOf(
             "-m", setting("qemuMemory", "QEMU_MEMORY", "2g"),
             "-M", "q35", "-cpu", "host", "-enable-kvm",
@@ -406,12 +470,58 @@ tasks.matching { it.name == "cinteropBridgeNative" }.configureEach {
     dependsOn(prepareLimine, prepareFreestndHeaders)
 }
 
+val compileVdso = tasks.register<Exec>("compileVdso") {
+    group = "build"
+    description = "Compiles the userspace vDSO."
+    notCompatibleWithConfigurationCache("Creates a generated native image.")
+    dependsOn(prepareFreestndHeaders)
+    inputs.file(config.vdso.source)
+    inputs.file(config.vdso.header)
+    inputs.dir(config.paths.freestandingInclude)
+    outputs.file(config.vdso.objectFile)
+    doFirst { config.paths.vdso.mkdirs() }
+    commandLine(config.vdso.compileCommand)
+}
+
+val linkVdso = tasks.register<Exec>("linkVdso") {
+    group = "build"
+    description = "Links the userspace vDSO ELF image."
+    notCompatibleWithConfigurationCache("Creates a generated native image.")
+    dependsOn(compileVdso)
+    inputs.file(config.vdso.objectFile)
+    inputs.file(config.vdso.linkerScript)
+    outputs.file(config.vdso.linkedImage)
+    commandLine(config.vdso.linkCommand)
+}
+
+val stripVdso = tasks.register<Exec>("stripVdso") {
+    group = "build"
+    description = "Removes link-time metadata from the vDSO image."
+    notCompatibleWithConfigurationCache("Creates a generated native image.")
+    dependsOn(linkVdso)
+    inputs.file(config.vdso.linkedImage)
+    outputs.file(config.vdso.image)
+    commandLine(config.vdso.stripCommand)
+}
+
+val embedVdso = tasks.register<Exec>("embedVdso") {
+    group = "build"
+    description = "Embeds the vDSO image into the kernel link."
+    notCompatibleWithConfigurationCache("Creates a generated native image.")
+    dependsOn(stripVdso)
+    inputs.file(config.vdso.image)
+    outputs.file(config.vdso.blob)
+    workingDir(config.paths.vdso)
+    commandLine(config.vdso.embedCommand)
+}
+
 val buildMlibc = tasks.register("buildMlibc") {
     group = "build"
     description = "Builds the mlibc C library."
     notCompatibleWithConfigurationCache("Runs an external source build.")
 
     inputs.property("buildType", config.mlibc.buildType)
+    inputs.property("compilerFlags", listOf(config.mlibc.cFlags, config.mlibc.cxxFlags))
     inputs.file(config.paths.mlibcPatch)
     inputs.dir(config.mlibc.source)
     outputs.dir(config.mlibc.prefix)
@@ -482,6 +592,7 @@ val compileC = tasks.register("compileC") {
         .withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.files(
         config.paths.kernelC.resolve("bridge.h"),
+        config.vdso.header,
         config.paths.limineHeader,
         config.paths.mlibcSyscallHeader,
     ).withPathSensitivity(PathSensitivity.RELATIVE)
@@ -507,7 +618,7 @@ val compileC = tasks.register("compileC") {
 val linkKernel = tasks.register<Exec>("linkKernel") {
     group = "build"
     description = "Links the kernel and runtime libraries into an ELF executable."
-    dependsOn(config.kernel.kotlinLinkTask, compileC, buildMlibc)
+    dependsOn(config.kernel.kotlinLinkTask, compileC, embedVdso, buildMlibc)
 
     inputs.files(config.kernel.linkInputs)
     inputs.file(config.paths.linkerScript)
@@ -519,6 +630,7 @@ val linkKernel = tasks.register<Exec>("linkKernel") {
         add("-o")
         add(config.paths.kernelElf.absolutePath)
         addAll(config.kernel.objects.map(File::getAbsolutePath))
+        add(config.vdso.blob.absolutePath)
         add(config.kernel.kotlinLibrary.absolutePath)
         add("--start-group")
         addAll(config.kernel.staticLibraries.map(File::getAbsolutePath))
@@ -573,6 +685,7 @@ tasks.register<Exec>("run") {
     dependsOn(buildIso)
 
     val runCommand = buildList {
+        addAll(listOf("taskset", "--cpu-list", config.qemu.cpuSet))
         add(config.qemu.executable)
         addAll(config.qemu.flags)
         add("-serial")

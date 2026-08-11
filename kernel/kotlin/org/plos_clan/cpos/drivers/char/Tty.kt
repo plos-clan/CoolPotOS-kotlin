@@ -3,10 +3,12 @@ package org.plos_clan.cpos.drivers.char
 import org.plos_clan.cpos.drivers.DEV_CHAR
 import org.plos_clan.cpos.drivers.DEV_TTY
 import org.plos_clan.cpos.drivers.Device
-import org.plos_clan.cpos.drivers.DeviceBackend
+import org.plos_clan.cpos.drivers.PositionlessDeviceBackend
 import org.plos_clan.cpos.drivers.DeviceManager
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.mem.PreparedBufferDestination
+import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Cmdline
@@ -275,7 +277,7 @@ class TtySession(
     var ttyKbMode: Int,
     val backend: TtySessionBackend,
     val device: TtyDevice,
-) : DeviceBackend {
+) : PositionlessDeviceBackend {
     val termios2 = Termios2(
         termios.cIflag,
         termios.cOflag,
@@ -307,17 +309,17 @@ class TtySession(
 
     override fun read(
         device: Device,
-        buffer: ByteArray,
-        offset: ULong,
+        buffer: PreparedBufferDestination,
+        bufferOffset: Int,
         size: ULong
-    ): Long = backend.read(this, buffer, size).toLong()
+    ): Long = backend.read(this, buffer, bufferOffset, size)
 
     override fun write(
         device: Device,
-        buffer: ByteArray,
-        offset: ULong,
+        buffer: PreparedBufferSource,
+        bufferOffset: Int,
         size: ULong
-    ): Long = backend.write(this, buffer, size).toLong()
+    ): Long = backend.write(this, buffer, bufferOffset, size)
 
     fun keyboardInput(data: CharArray) = backend.keyboardInput(this, data)
 
@@ -380,16 +382,16 @@ data class ProcessTerminal(
 
 interface TtySessionBackend {
     fun keyboardInput(session: TtySession, data: CharArray)
-    fun write(session: TtySession, buffer: ByteArray, count: ULong): ULong
-    fun read(session: TtySession, buffer: ByteArray, count: ULong): ULong
+    fun write(session: TtySession, buffer: PreparedBufferSource, offset: Int, count: ULong): Long
+    fun read(session: TtySession, buffer: PreparedBufferDestination, offset: Int, count: ULong): Long
     fun flush(session: TtySession)
     fun ioctl(session: TtySession, command: Int, args: UserMemory): Int
     fun poll(session: TtySession, events: Int): Int
 }
 
 interface TtyPhysicalDevice {
-    fun write(session: TtySession, buffer: ByteArray, count: ULong): ULong
-    fun read(session: TtySession, buffer: ByteArray, count: ULong): ULong
+    fun write(session: TtySession, buffer: PreparedBufferSource, offset: Int, count: ULong): Long
+    fun read(session: TtySession, buffer: PreparedBufferDestination, offset: Int, count: ULong): Long
     fun flush(session: TtySession)
     fun ioctl(session: TtySession, command: Int, args: UserMemory): Int
 }

@@ -22,12 +22,14 @@ import org.plos_clan.cpos.fs.VfsPath
 import org.plos_clan.cpos.fs.VfsResult
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.syscall.Syscall.copyPath
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.syscall.Syscall.partialOrError
 import org.plos_clan.cpos.syscall.Syscall.userMemory
 import org.plos_clan.cpos.tasks.Process
+import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PollEvents
@@ -880,7 +882,7 @@ fun sysFcntl(regs: PtraceRegisters, process: Process): Long {
 
         F_GETOWN,
         F_SETOWN,
-        -> if (process.fdTable.get(fd) == null) errno(Errno.EBADF) else 0L
+        -> if (process.fdTable.contains(fd)) 0L else errno(Errno.EBADF)
 
         else -> errno(Errno.EINVAL)
     }
@@ -921,7 +923,7 @@ fun sysPoll(regs: PtraceRegisters, process: Process): Long {
             else errno(Errno.EFAULT)
         }
 
-        bridge.fast_handoff_yield()
+        Scheduler.yieldCurrent()
         bridge.wait_for_interrupt()
     }
 }
@@ -976,7 +978,7 @@ fun sysPselect6(regs: PtraceRegisters, process: Process): Long {
                 ) return errno(Errno.EFAULT)
                 return ready.toLong()
             }
-            bridge.fast_handoff_yield()
+            Scheduler.yieldCurrent()
             bridge.wait_for_interrupt()
         }
     } finally {
@@ -1131,9 +1133,8 @@ private fun ByteArray.writeI32LE(offset: Int, value: Int) {
 }
 
 fun sysRead(regs: PtraceRegisters, process: Process): Long {
-    val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
+    val file = process.fdTable.acquire(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
-    val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
     try {
         val requested = minOf(regs[PtraceRegisters.IDX_RDX], MAX_RW_COUNT)
         if (requested == 0uL) {
@@ -1141,53 +1142,21 @@ fun sysRead(regs: PtraceRegisters, process: Process): Long {
         }
 
         val userAddress = regs[PtraceRegisters.IDX_RSI]
-        val buffer = ByteArray(minOf(requested, IO_CHUNK_SIZE.toULong()).toInt())
-        var transferred = 0uL
-        while (transferred < requested) {
-            val count = minOf(
-                requested - transferred,
-                buffer.size.toULong(),
-            ).toInt()
-            val user = userMemory(process, userAddress, transferred)
-                ?: return partialOrError(transferred, Errno.EFAULT)
-            if (!user.isWritable(count)) {
-                return partialOrError(transferred, Errno.EFAULT)
-            }
+        val buffer = UserMemory(process.addressSpace, userAddress)
+        val count = requested.toInt()
+        val destination = buffer.prepareWrite(0, count)
+            ?: return errno(Errno.EFAULT)
 
-            val result = file.read(buffer, count = count)
-            if (result.error == VfsError.WOULD_BLOCK &&
-                file.inode.type == InodeType.PIPE &&
-                file.getStatusFlags() and OpenFlags.O_NONBLOCK == 0
-            ) {
-                bridge.fast_handoff_yield()
-                bridge.wait_for_interrupt()
-                continue
-            }
-            if (!result.isSuccess) {
-                return if (transferred != 0uL) transferred.toLong() else result.raw
-            }
-            val current = result.bytesTransferred
-            if (current == 0) {
-                break
-            }
-            if (!user.copyToUser(buffer, size = current)) {
-                return partialOrError(transferred, Errno.EFAULT)
-            }
-            transferred += current.toULong()
-            if (current < count) {
-                break
-            }
-        }
-        return transferred.toLong()
+        val result = file.read(destination, 0, count)
+        return result.raw
     } finally {
         file.release()
     }
 }
 
 fun sysWrite(regs: PtraceRegisters, process: Process): Long {
-    val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
+    val file = process.fdTable.acquire(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
-    val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
     try {
         val requested = minOf(regs[PtraceRegisters.IDX_RDX], MAX_RW_COUNT)
         if (requested == 0uL) {
@@ -1195,41 +1164,16 @@ fun sysWrite(regs: PtraceRegisters, process: Process): Long {
         }
 
         val userAddress = regs[PtraceRegisters.IDX_RSI]
-        val buffer = ByteArray(minOf(requested, IO_CHUNK_SIZE.toULong()).toInt())
-        var transferred = 0uL
-        while (transferred < requested) {
-            val count = minOf(
-                requested - transferred,
-                buffer.size.toULong(),
-            ).toInt()
-            val user = userMemory(process, userAddress, transferred)
-                ?: return partialOrError(transferred, Errno.EFAULT)
-            if (!user.copyFromUser(buffer, size = count)) {
-                return partialOrError(transferred, Errno.EFAULT)
-            }
-
-            val result = file.write(buffer, count = count)
-            if (result.error == VfsError.WOULD_BLOCK &&
-                file.inode.type == InodeType.PIPE &&
-                file.getStatusFlags() and OpenFlags.O_NONBLOCK == 0
-            ) {
-                bridge.fast_handoff_yield()
-                bridge.wait_for_interrupt()
-                continue
-            }
-            if (!result.isSuccess) {
-                return if (transferred != 0uL) transferred.toLong() else result.raw
-            }
-            val current = result.bytesTransferred
-            if (current == 0) {
-                break
-            }
-            transferred += current.toULong()
-            if (current < count) {
-                break
-            }
+        val buffer = UserMemory(process.addressSpace, userAddress)
+        val count = requested.toInt()
+        val result = if (file.inode.type == InodeType.PIPE) {
+            val source = buffer.prepareRead(0, count)
+                ?: return errno(Errno.EFAULT)
+            file.write(source, 0, count)
+        } else {
+            file.write(buffer, 0, count)
         }
-        return transferred.toLong()
+        return result.raw
     } finally {
         file.release()
     }
@@ -1246,56 +1190,38 @@ fun sysReadv(regs: PtraceRegisters, process: Process): Long {
         }
 
         val vectorCount = vectorCountValue.toInt()
+        if (vectorCount == 0) return 0L
         val vectors = UserMemory(
             process.addressSpace,
             regs[PtraceRegisters.IDX_RSI],
         ).copyFromUser(vectorCount * IO_VECTOR_SIZE)
             ?: return errno(Errno.EFAULT)
-        val requested = vectors.totalIoVectorLength(vectorCount)
+        val cursor = IoVectorCursor(process, vectors, vectorCount)
+        val requested = cursor.remaining
         if (requested == 0uL) {
             return 0L
         }
-
         val buffer = ByteArray(minOf(requested, IO_CHUNK_SIZE.toULong()).toInt())
+        val transferBuffer = ByteArrayBuffer(buffer)
         var transferred = 0uL
-        repeat(vectorCount) { index ->
-            val vectorOffset = index * IO_VECTOR_SIZE
-            val userAddress = vectors.readU64LE(vectorOffset)
-            val vectorLength = minOf(
-                vectors.readU64LE(vectorOffset + ULong.SIZE_BYTES),
-                requested - transferred,
-            )
-            var currentOffset = 0uL
-
-            while (currentOffset < vectorLength) {
-                val count = minOf(
-                    vectorLength - currentOffset,
-                    buffer.size.toULong(),
-                ).toInt()
-                val user = userMemory(process, userAddress, currentOffset)
-                    ?: return partialOrError(transferred, Errno.EFAULT)
-                if (!user.isWritable(count)) {
-                    return partialOrError(transferred, Errno.EFAULT)
-                }
-
-                val result = file.read(buffer, count = count)
-                if (!result.isSuccess) {
-                    return if (transferred != 0uL) transferred.toLong() else result.raw
-                }
-                val current = result.bytesTransferred
-                if (current == 0) {
-                    return transferred.toLong()
-                }
-                if (!user.copyToUser(buffer, size = current)) {
-                    return partialOrError(transferred, Errno.EFAULT)
-                }
-
-                transferred += current.toULong()
-                currentOffset += current.toULong()
-                if (current < count) {
-                    return transferred.toLong()
-                }
+        while (cursor.remaining != 0uL) {
+            val count = minOf(cursor.remaining, buffer.size.toULong()).toInt()
+            if (!cursor.isWritable(count)) {
+                return partialOrError(transferred, Errno.EFAULT)
             }
+
+            val result = file.read(transferBuffer, 0, count)
+            if (!result.isSuccess) {
+                return if (transferred != 0uL) transferred.toLong() else result.raw
+            }
+            val current = result.bytesTransferred
+            if (current == 0) return transferred.toLong()
+            if (!cursor.copyToUser(buffer, current)) {
+                return partialOrError(transferred, Errno.EFAULT)
+            }
+
+            transferred += current.toULong()
+            if (current < count) return transferred.toLong()
         }
         return transferred.toLong()
     } finally {
@@ -1314,53 +1240,36 @@ fun sysWritev(regs: PtraceRegisters, process: Process): Long {
         }
 
         val vectorCount = vectorCountValue.toInt()
+        if (vectorCount == 0) return 0L
         val vectors = UserMemory(
             process.addressSpace,
             regs[PtraceRegisters.IDX_RSI],
         ).copyFromUser(vectorCount * IO_VECTOR_SIZE)
             ?: return errno(Errno.EFAULT)
-        val requested = vectors.totalIoVectorLength(vectorCount)
+        val cursor = IoVectorCursor(process, vectors, vectorCount)
+        val requested = cursor.remaining
         if (requested == 0uL) {
             return 0L
         }
+        file.discardWrite(requested.toInt())?.let { return it.raw }
 
         val buffer = ByteArray(minOf(requested, IO_CHUNK_SIZE.toULong()).toInt())
+        val transferBuffer = ByteArrayBuffer(buffer)
         var transferred = 0uL
-        repeat(vectorCount) { index ->
-            val vectorOffset = index * IO_VECTOR_SIZE
-            val userAddress = vectors.readU64LE(vectorOffset)
-            val vectorLength = minOf(
-                vectors.readU64LE(vectorOffset + ULong.SIZE_BYTES),
-                requested - transferred,
-            )
-            var currentOffset = 0uL
-
-            while (currentOffset < vectorLength) {
-                val count = minOf(
-                    vectorLength - currentOffset,
-                    buffer.size.toULong(),
-                ).toInt()
-                val user = userMemory(process, userAddress, currentOffset)
-                    ?: return partialOrError(transferred, Errno.EFAULT)
-                if (!user.copyFromUser(buffer, size = count)) {
-                    return partialOrError(transferred, Errno.EFAULT)
-                }
-
-                val result = file.write(buffer, count = count)
-                if (!result.isSuccess) {
-                    return if (transferred != 0uL) transferred.toLong() else result.raw
-                }
-                val current = result.bytesTransferred
-                if (current == 0) {
-                    return transferred.toLong()
-                }
-
-                transferred += current.toULong()
-                currentOffset += current.toULong()
-                if (current < count) {
-                    return transferred.toLong()
-                }
+        while (cursor.remaining != 0uL) {
+            val count = minOf(cursor.remaining, buffer.size.toULong()).toInt()
+            if (!cursor.copyFromUser(buffer, count)) {
+                return partialOrError(transferred, Errno.EFAULT)
             }
+
+            val result = file.write(transferBuffer, 0, count)
+            if (!result.isSuccess) {
+                return if (transferred != 0uL) transferred.toLong() else result.raw
+            }
+            val current = result.bytesTransferred
+            if (current == 0) return transferred.toLong()
+            transferred += current.toULong()
+            if (current < count) return transferred.toLong()
         }
         return transferred.toLong()
     } finally {
@@ -1368,13 +1277,81 @@ fun sysWritev(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-private fun ByteArray.totalIoVectorLength(vectorCount: Int): ULong {
-    var total = 0uL
-    repeat(vectorCount) { index ->
-        val length = readU64LE(index * IO_VECTOR_SIZE + ULong.SIZE_BYTES)
-        total += minOf(length, MAX_RW_COUNT - total)
+private class IoVectorCursor(
+    private val process: Process,
+    private val vectors: ByteArray,
+    private val vectorCount: Int,
+) {
+    var remaining = totalLength()
+        private set
+
+    private var index = 0
+    private var offset = 0uL
+
+    fun isWritable(count: Int): Boolean = visit(count, false) { user, _, size ->
+        user.isWritable(size)
     }
-    return total
+
+    fun copyFromUser(destination: ByteArray, count: Int): Boolean =
+        visit(count, true) { user, bufferOffset, size ->
+            user.copyFromUser(destination, bufferOffset, size)
+        }
+
+    fun copyToUser(source: ByteArray, count: Int): Boolean =
+        visit(count, true) { user, bufferOffset, size ->
+            user.copyToUser(source, bufferOffset, size)
+        }
+
+    private inline fun visit(
+        count: Int,
+        advance: Boolean,
+        operation: (UserMemory, Int, Int) -> Boolean,
+    ): Boolean {
+        if (count < 0 || count.toULong() > remaining) return false
+
+        var currentIndex = index
+        var currentOffset = offset
+        var processed = 0
+        while (processed < count) {
+            if (currentIndex >= vectorCount) return false
+            val vectorOffset = currentIndex * IO_VECTOR_SIZE
+            val vectorLength = vectors.readU64LE(vectorOffset + ULong.SIZE_BYTES)
+            if (currentOffset >= vectorLength) {
+                currentIndex++
+                currentOffset = 0uL
+                continue
+            }
+
+            val size = minOf(
+                (count - processed).toULong(),
+                vectorLength - currentOffset,
+            ).toInt()
+            val user = userMemory(
+                process,
+                vectors.readU64LE(vectorOffset),
+                currentOffset,
+            ) ?: return false
+            if (!operation(user, processed, size)) return false
+            processed += size
+            currentOffset += size.toULong()
+        }
+
+        if (advance) {
+            index = currentIndex
+            offset = currentOffset
+            remaining -= count.toULong()
+        }
+        return true
+    }
+
+    private fun totalLength(): ULong {
+        var total = 0uL
+        repeat(vectorCount) { current ->
+            val length = vectors.readU64LE(current * IO_VECTOR_SIZE + ULong.SIZE_BYTES)
+            total += minOf(length, MAX_RW_COUNT - total)
+        }
+        return total
+    }
 }
 
 private fun ByteArray.readU64LE(offset: Int): ULong {

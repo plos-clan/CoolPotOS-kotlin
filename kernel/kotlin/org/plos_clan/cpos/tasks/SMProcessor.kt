@@ -40,10 +40,7 @@ fun apStart() {
         return
     }
     bridge.enable_interrupt()
-    while (true) {
-        val sequence = bridge.fast_handoff_wake_sequence()
-        bridge.fast_handoff_park_kotlin(0uL, sequence)
-    }
+    bridge.fast_handoff_idle()
 }
 
 object SMProcessor {

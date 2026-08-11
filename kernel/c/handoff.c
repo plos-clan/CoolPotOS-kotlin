@@ -15,14 +15,6 @@ enum {
     lapic_delivery_pending = 1u << 12,
     lapic_timer_tsc_deadline = 1u << 18,
     x2apic_msr_base = 0x800,
-    task_ready = 0,
-    task_running = 1,
-    task_blocked = 2,
-    task_zombie = 3,
-    park_idle = 0,
-    park_requested = 1,
-    park_parked = 2,
-    park_notified = 3,
     ps2_queue_capacity = 256,
     ps2_queue_mask = ps2_queue_capacity - 1,
     ps2_queue_empty = 0x100,
@@ -32,6 +24,24 @@ enum fast_cpu_state {
     cpu_offline,
     cpu_bootstrapping,
     cpu_online,
+};
+
+enum fast_task_state {
+    task_ready,
+    task_running,
+    task_blocked,
+    task_zombie,
+};
+
+enum fast_schedule_request {
+    schedule_reschedule,
+    schedule_park,
+};
+
+enum fast_schedule_result {
+    schedule_rejected,
+    schedule_same_task,
+    schedule_switched,
 };
 
 typedef struct fast_task fast_task_t;
@@ -58,7 +68,7 @@ struct fast_task {
     fast_cpu_t *cpu;
     uint8_t state;
     uint8_t queued;
-    uint8_t park_state;
+    uint8_t wake_pending;
 };
 _Static_assert(
     sizeof(fast_task_t) == 64,
@@ -92,8 +102,11 @@ static uint16_t ps2_data_port;
 static uint16_t ps2_status_port;
 static uint64_t ps2_irq_num;
 
-static bool fast_handoff_schedule(fast_cpu_t *cpu, xstate_t *interrupted_xstate);
-static void wake_idle_worker(fast_cpu_t *cpu);
+static enum fast_schedule_result fast_handoff_schedule(
+    fast_cpu_t *cpu,
+    xstate_t *interrupted_xstate,
+    enum fast_schedule_request request
+);
 
 __attribute__((naked, noinline))
 static void fast_switch_to(uint64_t *, uint64_t) {
@@ -190,11 +203,17 @@ static inline void unlock_cpu(fast_cpu_t *cpu) {
     __atomic_clear(&cpu->lock, __ATOMIC_RELEASE);
 }
 
-static inline uint8_t task_state_load(const fast_task_t *task) {
-    return __atomic_load_n(&task->state, __ATOMIC_ACQUIRE);
+static inline enum fast_task_state task_state_load(const fast_task_t *task) {
+    return (enum fast_task_state)__atomic_load_n(
+        &task->state,
+        __ATOMIC_ACQUIRE
+    );
 }
 
-static inline void task_state_store(fast_task_t *task, uint8_t state) {
+static inline void task_state_store(
+    fast_task_t *task,
+    enum fast_task_state state
+) {
     __atomic_store_n(&task->state, state, __ATOMIC_RELEASE);
 }
 
@@ -270,17 +289,9 @@ static void wake_cpu(fast_cpu_t *cpu) {
 }
 
 static bool queue_push(fast_cpu_t *cpu, fast_task_t *task) {
-    uint8_t expected = 0;
-    if (!task || !__atomic_compare_exchange_n(
-            &task->queued,
-            &expected,
-            1,
-            false,
-            __ATOMIC_ACQ_REL,
-            __ATOMIC_ACQUIRE
-        ))
-        return false;
+    if (!task || task->queued) return false;
 
+    task->queued = true;
     task->next = NULL;
     if (cpu->tail) cpu->tail->next = task;
     else cpu->head = task;
@@ -296,67 +307,48 @@ static fast_task_t *queue_pop(fast_cpu_t *cpu) {
         if (!cpu->head) cpu->tail = NULL;
         cpu->queue_size--;
         task->next = NULL;
-        uint8_t expected = task_ready;
-        if (__atomic_compare_exchange_n(
-                &task->state,
-                &expected,
-                task_running,
-                false,
-                __ATOMIC_ACQ_REL,
-                __ATOMIC_ACQUIRE
-            )) {
-            __atomic_store_n(&task->queued, 0, __ATOMIC_RELEASE);
+        task->queued = false;
+        if (task_state_load(task) == task_ready) {
+            task_state_store(task, task_running);
             return task;
         }
-        __atomic_store_n(&task->queued, 0, __ATOMIC_RELEASE);
     }
     return NULL;
 }
 
-static bool fast_handoff_schedule(
+static enum fast_schedule_result fast_handoff_schedule(
     fast_cpu_t *cpu,
-    xstate_t *interrupted_xstate
+    xstate_t *interrupted_xstate,
+    enum fast_schedule_request request
 ) {
     const uint64_t flags = interrupt_save();
     if (!__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) ||
         cpu->state == cpu_offline || !cpu->current) {
         interrupt_restore(flags);
-        return false;
+        return schedule_rejected;
     }
 
     lock_cpu(cpu);
     fast_task_t *previous = cpu->current;
-    const bool previous_is_idle = cpu->state == cpu_online &&
-        previous == cpu->idle;
-
-    uint8_t parked = __atomic_load_n(&previous->park_state, __ATOMIC_ACQUIRE);
-    if (parked == park_requested) {
-        if (__atomic_compare_exchange_n(
-                &previous->park_state,
-                &parked,
-                park_parked,
-                false,
-                __ATOMIC_ACQ_REL,
-                __ATOMIC_ACQUIRE
-            )) {
-            task_state_store(previous, task_blocked);
-        } else if (parked == park_notified) {
-            __atomic_store_n(&previous->park_state, park_idle, __ATOMIC_RELEASE);
+    bool select_next = true;
+    if (request == schedule_park) {
+        if (previous == cpu->idle || task_state_load(previous) != task_running) {
+            unlock_cpu(cpu);
+            interrupt_restore(flags);
+            return schedule_rejected;
         }
-    } else if (parked == park_notified) {
-        __atomic_compare_exchange_n(
-            &previous->park_state,
-            &parked,
-            park_idle,
-            false,
-            __ATOMIC_ACQ_REL,
-            __ATOMIC_ACQUIRE
-        );
+        if (previous->wake_pending) {
+            previous->wake_pending = false;
+            select_next = false;
+        } else {
+            task_state_store(previous, task_blocked);
+        }
     }
 
     fast_task_t *next = previous;
-    if (cpu->head || task_state_load(previous) != task_running) {
-        if (!previous_is_idle && task_state_load(previous) == task_running) {
+    if (select_next &&
+        (cpu->head || task_state_load(previous) != task_running)) {
+        if (task_state_load(previous) == task_running) {
             task_state_store(previous, task_ready);
             if (!queue_push(cpu, previous))
                 task_state_store(previous, task_running);
@@ -369,19 +361,22 @@ static bool fast_handoff_schedule(
             task_state_store(next, task_running);
         }
         if (!next) {
-            task_state_store(previous, task_running);
+            if (request == schedule_park)
+                task_state_store(previous, task_running);
             next = previous;
         }
-    }
-    if (previous_is_idle && next != previous &&
-        task_state_load(previous) == task_running) {
-        task_state_store(previous, task_ready);
     }
     cpu->current = next;
     update_scheduler_timer(cpu);
     unlock_cpu(cpu);
 
-    if (next != previous) {
+    enum fast_schedule_result result = schedule_same_task;
+    if (next != previous) result = schedule_switched;
+    else if (request == schedule_park && select_next)
+        result = schedule_rejected;
+    const bool switched = result == schedule_switched;
+
+    if (switched) {
         if (interrupted_xstate) {
             initialize_xstate_header(interrupted_xstate);
             save_xstate(interrupted_xstate);
@@ -407,7 +402,7 @@ static bool fast_handoff_schedule(
         fast_switch_to(&previous->rsp, next->rsp);
     }
     interrupt_restore(flags);
-    return next != previous && interrupted_xstate != NULL;
+    return result;
 }
 
 void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base) {
@@ -430,106 +425,53 @@ bool fast_handoff_configure_timer(uint8_t vector, uint32_t frequency_hz) {
     return true;
 }
 
-void fast_handoff_yield(void) {
-    if (!__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE)) return;
+bool fast_handoff_yield(void) {
+    if (!__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE)) return false;
 
     fast_cpu_t *cpu = current_cpu();
-    if (cpu->state == cpu_offline) return;
-    fast_handoff_schedule(cpu, NULL);
+    if (cpu->state == cpu_offline) return false;
+    return fast_handoff_schedule(
+        cpu,
+        NULL,
+        schedule_reschedule
+    ) == schedule_switched;
 }
 
 bool fast_handoff_park_current(void) {
     if (!__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE)) return false;
-
-    const uint64_t flags = interrupt_save();
-    fast_cpu_t *cpu = current_cpu();
-    fast_task_t *task = cpu->current;
-    if (cpu->state == cpu_offline || !task || task == cpu->idle) {
-        interrupt_restore(flags);
-        return false;
-    }
-
-    uint8_t expected = park_idle;
-    if (__atomic_compare_exchange_n(
-            &task->park_state,
-            &expected,
-            park_requested,
-            false,
-            __ATOMIC_ACQ_REL,
-            __ATOMIC_ACQUIRE
-        )) {
-        fast_handoff_schedule(cpu, NULL);
-        interrupt_restore(flags);
-        return true;
-    }
-    if (expected != park_notified || !__atomic_compare_exchange_n(
-            &task->park_state,
-            &expected,
-            park_idle,
-            false,
-            __ATOMIC_ACQ_REL,
-            __ATOMIC_ACQUIRE
-        )) {
-        interrupt_restore(flags);
-        return false;
-    }
-    interrupt_restore(flags);
-    return true;
+    return fast_handoff_schedule(
+        current_cpu(),
+        NULL,
+        schedule_park
+    ) != schedule_rejected;
 }
 
 bool fast_handoff_unpark(uint64_t handle) {
     fast_task_t *task = task_from_handle(handle);
     if (!task) return false;
 
-    for (;;) {
-        if (task_state_load(task) == task_zombie) return false;
+    fast_cpu_t *cpu = __atomic_load_n(&task->cpu, __ATOMIC_ACQUIRE);
+    if (!cpu) return false;
 
-        uint8_t parked = __atomic_load_n(&task->park_state, __ATOMIC_ACQUIRE);
-        if (parked == park_notified) return true;
-        if (parked != park_parked) {
-            if (__atomic_compare_exchange_n(
-                    &task->park_state,
-                    &parked,
-                    park_notified,
-                    false,
-                    __ATOMIC_ACQ_REL,
-                    __ATOMIC_ACQUIRE
-                ))
-                return true;
-            continue;
+    const uint64_t flags = interrupt_save();
+    lock_cpu(cpu);
+    const enum fast_task_state state = task_state_load(task);
+    bool success = state != task_zombie;
+    bool wake = false;
+    if (state == task_blocked) {
+        task_state_store(task, task_ready);
+        wake = queue_push(cpu, task);
+        if (!wake) {
+            task_state_store(task, task_blocked);
+            success = false;
         }
-        if (!__atomic_compare_exchange_n(
-                &task->park_state,
-                &parked,
-                park_idle,
-                false,
-                __ATOMIC_ACQ_REL,
-                __ATOMIC_ACQUIRE
-            ))
-            continue;
-
-        uint8_t state = task_blocked;
-        if (!__atomic_compare_exchange_n(
-                &task->state,
-                &state,
-                task_ready,
-                false,
-                __ATOMIC_ACQ_REL,
-                __ATOMIC_ACQUIRE
-            ))
-            return state != task_zombie;
-
-        fast_cpu_t *cpu = __atomic_load_n(&task->cpu, __ATOMIC_ACQUIRE);
-        if (!cpu) return false;
-
-        const uint64_t flags = interrupt_save();
-        lock_cpu(cpu);
-        const bool queued = queue_push(cpu, task);
-        unlock_cpu(cpu);
-        if (queued) wake_cpu(cpu);
-        interrupt_restore(flags);
-        return queued || __atomic_load_n(&task->queued, __ATOMIC_ACQUIRE) != 0;
+    } else if (success) {
+        task->wake_pending = true;
     }
+    unlock_cpu(cpu);
+    if (wake) wake_cpu(cpu);
+    interrupt_restore(flags);
+    return success;
 }
 
 uint64_t fast_handoff_wake_sequence(void) {
@@ -542,12 +484,7 @@ void fast_handoff_wake_bsp(void) {
     if (lapic_id == UINT64_MAX) return;
 
     fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
-    const uint64_t flags = interrupt_save();
-    lock_cpu(cpu);
-    wake_idle_worker(cpu);
-    unlock_cpu(cpu);
     wake_cpu(cpu);
-    interrupt_restore(flags);
 }
 
 /* The Kotlin/Native interop wrapper keeps this entire call in Native state. */
@@ -556,7 +493,7 @@ void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence) {
     fast_cpu_t *cpu = current_cpu();
     if (__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) &&
         cpu->state != cpu_offline)
-        fast_handoff_schedule(cpu, NULL);
+        fast_handoff_schedule(cpu, NULL, schedule_reschedule);
     lock_cpu(cpu);
     const bool idle = cpu->state == cpu_online && cpu->current == cpu->idle &&
         !cpu->head && wake_sequence ==
@@ -570,6 +507,13 @@ void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence) {
     if (sleep && (flags & (1u << 9)))
         __asm__ volatile("sti; hlt; cli" : : : "memory");
     interrupt_restore(flags);
+}
+
+_Noreturn void fast_handoff_idle(void) {
+    for (;;) {
+        const uint64_t sequence = fast_handoff_wake_sequence();
+        fast_handoff_park_kotlin(0, sequence);
+    }
 }
 
 void fast_handoff_configure_ps2(
@@ -612,16 +556,6 @@ static bool fast_handoff_ps2_irq(uint64_t irq_num) {
         __atomic_store_n(&ps2_queue_head, next, __ATOMIC_RELEASE);
     }
     return true;
-}
-
-static void wake_idle_worker(fast_cpu_t *cpu) {
-    fast_task_t *idle = cpu->idle;
-    if (cpu->state != cpu_online || !idle || idle == cpu->current ||
-        !__atomic_load_n(&idle->rsp, __ATOMIC_ACQUIRE))
-        return;
-
-    task_state_store(idle, task_ready);
-    queue_push(cpu, idle);
 }
 
 uint64_t fast_handoff_create_task(
@@ -756,7 +690,7 @@ bool fast_handoff_bind_current(
     if (!task->kernel_fs_base)
         task->kernel_fs_base = rdmsr(ia32_fs_base_msr);
     task_state_store(task, task_running);
-    __atomic_store_n(&task->queued, 0, __ATOMIC_RELEASE);
+    task->queued = false;
     unlock_cpu(cpu);
     interrupt_restore(flags);
     return true;
@@ -800,7 +734,7 @@ bool fast_handoff_enqueue(uint64_t handle, uint64_t lapic_id) {
             owner = unassigned;
         }
     }
-    const uint8_t state = task_state_load(task);
+    const enum fast_task_state state = task_state_load(task);
     const bool accepted = owner == cpu && task != cpu->current &&
         state != task_running &&
         state != task_zombie && queue_push(cpu, task);
@@ -835,8 +769,20 @@ uint8_t fast_handoff_task_state(uint64_t handle) {
 
 void fast_handoff_set_task_state(uint64_t handle, uint8_t state) {
     fast_task_t *task = task_from_handle(handle);
-    if (task && state <= task_zombie)
-        __atomic_store_n(&task->state, state, __ATOMIC_RELEASE);
+    if (!task || state > task_zombie) return;
+
+    fast_cpu_t *cpu = __atomic_load_n(&task->cpu, __ATOMIC_ACQUIRE);
+    if (!cpu) {
+        task_state_store(task, (enum fast_task_state)state);
+        return;
+    }
+
+    const uint64_t flags = interrupt_save();
+    lock_cpu(cpu);
+    task_state_store(task, (enum fast_task_state)state);
+    if (state == task_zombie) task->wake_pending = false;
+    unlock_cpu(cpu);
+    interrupt_restore(flags);
 }
 
 uint64_t fast_handoff_current_task_id(void) {
@@ -871,15 +817,12 @@ void fast_handoff_reset_user_xstate(void) {
     *state = initial_xstate;
 }
 
-bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
+__attribute__((used)) bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
     fast_cpu_t *cpu = current_cpu();
 
     if (irq_num != timer_irq) {
         __atomic_add_fetch(&cpu->wake_sequence, 1, __ATOMIC_RELEASE);
         if (fast_handoff_ps2_irq(irq_num)) {
-            lock_cpu(cpu);
-            wake_idle_worker(cpu);
-            unlock_cpu(cpu);
             lapic_eoi(irq_num);
         } else if (irq_num == spurious_irq) {
             lapic_eoi(irq_num);
@@ -894,13 +837,15 @@ bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
         return false;
     }
 
+    cpu->timer_deadline = 0;
     lapic_eoi(irq_num);
     if (__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) &&
         cpu->state != cpu_offline) {
         return fast_handoff_schedule(
             cpu,
-            &((kernel_entry_frame_t *)regs)->xstate
-        );
+            &((kernel_entry_frame_t *)regs)->xstate,
+            schedule_reschedule
+        ) == schedule_switched;
     } else {
         update_scheduler_timer(cpu);
     }

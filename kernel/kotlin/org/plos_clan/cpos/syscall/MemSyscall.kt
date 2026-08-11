@@ -4,6 +4,7 @@ package org.plos_clan.cpos.syscall
 
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.InodeType
+import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.MEMORY_REGION_ACCESS_MASK
 import org.plos_clan.cpos.mem.MemoryRegionBacking
 import org.plos_clan.cpos.mem.MemoryMapRequest
@@ -51,7 +52,7 @@ private class MappedFile(private val file: org.plos_clan.cpos.fs.OpenFileDescrip
         get() = file.inode
 
     override fun read(offset: ULong, destination: ByteArray): Int {
-        val result = file.readAt(offset, destination)
+        val result = file.readAt(offset, ByteArrayBuffer(destination), 0, destination.size)
         return if (result.isSuccess) result.bytesTransferred else result.raw.toInt()
     }
 

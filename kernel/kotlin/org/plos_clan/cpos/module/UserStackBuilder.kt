@@ -35,6 +35,7 @@ private const val AT_EGID = 14uL
 private const val AT_SECURE = 23uL
 private const val AT_RANDOM = 25uL
 private const val AT_EXECFN = 31uL
+private const val AT_SYSINFO_EHDR = 33uL
 
 data class UserStackResult(
     val stackPointer: ULong,
@@ -51,6 +52,7 @@ object UserStackBuilder {
         executablePath: String,
         executable: ElfLoadResult,
         interpreter: ElfInterpreterLoadResult? = null,
+        systemInfoHeader: ULong,
         stackTop: ULong = DEFAULT_USER_STACK_TOP,
         stackSize: ULong = DEFAULT_USER_STACK_SIZE,
         randomBytes: ByteArray? = null,
@@ -145,6 +147,7 @@ object UserStackBuilder {
         auxiliary(AT_SECURE, 0uL)
         auxiliary(AT_RANDOM, randomAddress)
         auxiliary(AT_EXECFN, execfnAddress)
+        auxiliary(AT_SYSINFO_EHDR, systemInfoHeader)
         auxiliary(AT_NULL, 0uL)
 
         val stackPointer = writer.pushAlignedWords(words) ?: run {

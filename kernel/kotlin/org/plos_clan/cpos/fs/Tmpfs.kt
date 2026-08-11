@@ -1,6 +1,9 @@
 package org.plos_clan.cpos.fs
 
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.mem.ByteArrayBuffer
+import org.plos_clan.cpos.mem.PreparedBufferDestination
+import org.plos_clan.cpos.mem.PreparedBufferSource
 
 data class TmpfsOptions(
     val sizeLimit: ULong? = null,
@@ -253,7 +256,7 @@ private class TmpfsRegularFile(
 
     fun read(
         inode: Inode,
-        destination: ByteArray,
+        destination: PreparedBufferDestination,
         destinationOffset: Int,
         count: Int,
         position: FilePosition,
@@ -270,30 +273,15 @@ private class TmpfsRegularFile(
             val pageIndex = absolute / fileSystem.pageSize.toULong()
             val pageOffset = (absolute % fileSystem.pageSize.toULong()).toInt()
             val chunk = minOf(available - copied, fileSystem.pageSize - pageOffset)
-            val page = pages[pageIndex]
-            if (page == null) {
-                val sourceCount = copyContent(
-                    absolute,
-                    destination,
-                    destinationOffset + copied,
-                    chunk,
-                )
-                if (sourceCount != chunk) {
-                    destination.fill(
-                        0,
-                        destinationOffset + copied + sourceCount,
-                        destinationOffset + copied + chunk,
-                    )
-                }
-            } else {
-                page.copyInto(
-                    destination,
-                    destinationOffset + copied,
-                    pageOffset,
-                    pageOffset + chunk,
-                )
+            val transferred = pages[pageIndex]?.let { page ->
+                destination.copyFrom(destinationOffset + copied, page, pageOffset, chunk)
+            } ?: readContentOrZero(absolute, destination, destinationOffset + copied, chunk)
+            if (transferred == 0) {
+                if (copied == 0) return@withLock IoResult.failure(VfsError.FAULT)
+                break
             }
-            copied += chunk
+            copied += transferred
+            if (transferred < chunk) break
         }
         position.value += copied
         IoResult.success(copied)
@@ -301,7 +289,7 @@ private class TmpfsRegularFile(
 
     fun write(
         inode: Inode,
-        source: ByteArray,
+        source: PreparedBufferSource,
         sourceOffset: Int,
         count: Int,
         position: FilePosition,
@@ -315,6 +303,7 @@ private class TmpfsRegularFile(
         }
 
         var copied = 0
+        var noSpace = false
         while (copied < count) {
             val pageIndex = cursor / fileSystem.pageSize.toULong()
             val pageOffset = (cursor % fileSystem.pageSize.toULong()).toInt()
@@ -322,19 +311,28 @@ private class TmpfsRegularFile(
             var page = pages[pageIndex]
             if (page == null) {
                 if (!fileSystem.reserve(fileSystem.pageSize.toULong())) {
+                    noSpace = true
                     break
                 }
                 page = ByteArray(fileSystem.pageSize)
-                copyContent(pageIndex * fileSystem.pageSize.toULong(), page, 0, page.size)
+                val destination = checkNotNull(ByteArrayBuffer(page).prepareWrite(0, page.size))
+                copyContent(
+                    pageIndex * fileSystem.pageSize.toULong(),
+                    destination,
+                    0,
+                    page.size,
+                )
                 pages[pageIndex] = page
             }
-            source.copyInto(page, pageOffset, sourceOffset + copied, sourceOffset + copied + chunk)
-            cursor += chunk.toULong()
-            copied += chunk
+            val transferred = source.copyTo(sourceOffset + copied, page, pageOffset, chunk)
+            if (transferred == 0) break
+            cursor += transferred.toULong()
+            copied += transferred
+            if (transferred < chunk) break
         }
 
         if (copied == 0 && count != 0) {
-            return@withLock IoResult.failure(VfsError.NO_SPACE)
+            return@withLock IoResult.failure(if (noSpace) VfsError.NO_SPACE else VfsError.FAULT)
         }
         position.value = cursor.toLong()
         inode.updateMetadata { it.copy(size = maxOf(it.size, cursor)) }
@@ -343,7 +341,7 @@ private class TmpfsRegularFile(
 
     private fun copyContent(
         position: ULong,
-        destination: ByteArray,
+        destination: PreparedBufferDestination,
         destinationOffset: Int,
         count: Int,
     ): Int {
@@ -352,21 +350,38 @@ private class TmpfsRegularFile(
         val sourcePosition = position.toInt()
         val copied = minOf(count, contentSize - sourcePosition).coerceAtLeast(0)
         if (copied != 0) {
-            source.copyInto(
+            return source.copyInto(
                 destination,
                 destinationOffset,
                 contentOffset + sourcePosition,
                 copied,
             )
         }
-        return copied
+        return 0
+    }
+
+    private fun readContentOrZero(
+        position: ULong,
+        destination: PreparedBufferDestination,
+        destinationOffset: Int,
+        count: Int,
+    ): Int {
+        val contentBytes = contentBytes(position, count)
+        val copied = copyContent(position, destination, destinationOffset, contentBytes)
+        if (copied < contentBytes) return copied
+        return copied + destination.fill(destinationOffset + copied, count - copied)
+    }
+
+    private fun contentBytes(position: ULong, count: Int): Int {
+        if (content == null || position > Int.MAX_VALUE.toULong()) return 0
+        return minOf(count, contentSize - position.toInt()).coerceAtLeast(0)
     }
 }
 
 private class TmpfsRegularHandle(private val file: TmpfsRegularFile) : OpenFileBackend {
     override fun read(
         inode: Inode,
-        destination: ByteArray,
+        destination: PreparedBufferDestination,
         destinationOffset: Int,
         count: Int,
         position: FilePosition,
@@ -374,7 +389,7 @@ private class TmpfsRegularHandle(private val file: TmpfsRegularFile) : OpenFileB
 
     override fun write(
         inode: Inode,
-        source: ByteArray,
+        source: PreparedBufferSource,
         sourceOffset: Int,
         count: Int,
         position: FilePosition,

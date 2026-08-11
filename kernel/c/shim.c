@@ -173,15 +173,6 @@ uint64_t get_sys_clone_recorded_count(void) { return clone_count; }
 uint64_t get_sys_clone_stack_at(uint64_t index) { return index < clone_count ? clone_records[index].stack : 0; }
 uint64_t get_sys_clone_tls_at(uint64_t index) { return index < clone_count ? clone_records[index].tls : 0; }
 
-static __attribute__((noreturn)) void kernel_idle_thread_entry(void) {
-    for (;;) {
-        const uint64_t sequence = fast_handoff_wake_sequence();
-        fast_handoff_park_kotlin(0, sequence);
-    }
-}
-
-uint64_t get_kernel_idle_entry_address(void) { return (uintptr_t)&kernel_idle_thread_entry; }
-
 void pthread_exit(void *ret_val) __attribute__((noreturn));
 int pthread_key_create(uint32_t *key, void (*destructor)(void *));
 

@@ -10,6 +10,7 @@ import org.plos_clan.cpos.syscall.Syscall.copyWordToUser
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.TaskState
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.NativeStruct
@@ -230,7 +231,7 @@ private fun terminate(process: Process, group: Boolean, status: Int): Nothing {
     }
     ProcessManager.markExited(process, status)
     current.clearChildTid = 0uL
-    bridge.fast_handoff_yield()
+    Scheduler.yieldCurrent()
     while (true) {
         bridge.wait_for_interrupt()
     }
@@ -303,7 +304,7 @@ fun sysWait4(regs: PtraceRegisters, process: Process): Long {
             return exited.id.toLong()
         }
         if (options and WAIT_WNOHANG != 0uL) return 0L
-        bridge.fast_handoff_yield()
+        Scheduler.yieldCurrent()
         bridge.wait_for_interrupt()
     }
 }

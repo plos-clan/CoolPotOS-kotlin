@@ -1,6 +1,8 @@
 package org.plos_clan.cpos.drivers
 
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.mem.PreparedBufferDestination
+import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 const val DEV_NULL = 0  // 空设备
@@ -22,8 +24,64 @@ const val DEV_GPU = 226   // 显卡
 interface DeviceBackend {
     fun ioctl(device: Device, command: Int, args: UserMemory): Long
     fun poll(device: Device, events: Int): Long
-    fun read(device: Device, buffer: ByteArray, offset: ULong, size: ULong): Long
-    fun write(device: Device, buffer: ByteArray, offset: ULong, size: ULong): Long
+    fun read(
+        device: Device,
+        buffer: PreparedBufferDestination,
+        bufferOffset: Int,
+        offset: ULong,
+        size: ULong,
+    ): Long
+
+    fun write(
+        device: Device,
+        buffer: PreparedBufferSource,
+        bufferOffset: Int,
+        offset: ULong,
+        size: ULong,
+    ): Long
+}
+
+interface PositionlessDeviceBackend : DeviceBackend {
+    fun read(
+        device: Device,
+        buffer: PreparedBufferDestination,
+        bufferOffset: Int,
+        size: ULong,
+    ): Long
+
+    fun write(
+        device: Device,
+        buffer: PreparedBufferSource,
+        bufferOffset: Int,
+        size: ULong,
+    ): Long
+
+    override fun read(
+        device: Device,
+        buffer: PreparedBufferDestination,
+        bufferOffset: Int,
+        offset: ULong,
+        size: ULong,
+    ): Long = read(device, buffer, bufferOffset, size)
+
+    override fun write(
+        device: Device,
+        buffer: PreparedBufferSource,
+        bufferOffset: Int,
+        offset: ULong,
+        size: ULong,
+    ): Long = write(device, buffer, bufferOffset, size)
+}
+
+interface DiscardingDeviceBackend : PositionlessDeviceBackend {
+    fun discard(device: Device, size: ULong): Long
+
+    override fun write(
+        device: Device,
+        buffer: PreparedBufferSource,
+        bufferOffset: Int,
+        size: ULong,
+    ): Long = discard(device, size)
 }
 
 class Device(
@@ -35,11 +93,16 @@ class Device(
     val handle: Any,
     val backend: DeviceBackend,
 ) {
-    fun write(buffer: ByteArray, offset: ULong, count: ULong): Long =
-        backend.write(this, buffer, offset, count)
+    fun write(buffer: PreparedBufferSource, bufferOffset: Int, offset: ULong, count: ULong): Long =
+        backend.write(this, buffer, bufferOffset, offset, count)
 
-    fun read(buffer: ByteArray, offset: ULong, count: ULong): Long =
-        backend.read(this, buffer, offset, count)
+    fun read(
+        buffer: PreparedBufferDestination,
+        bufferOffset: Int,
+        offset: ULong,
+        count: ULong,
+    ): Long =
+        backend.read(this, buffer, bufferOffset, offset, count)
 }
 
 object DeviceManager {

@@ -2,6 +2,7 @@
 
 #include <limine.h>
 #include "os_terminal.h"
+#include "vdso.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -40,7 +41,6 @@ void irq_restore(uint64_t flags);
 uint64_t get_sys_clone_recorded_count(void);
 uint64_t get_sys_clone_stack_at(uint64_t index);
 uint64_t get_sys_clone_tls_at(uint64_t index);
-uint64_t get_kernel_idle_entry_address(void);
 uint64_t get_kernel_clone_thread_entry_address(void);
 uint64_t create_kernel_runtime_tcb(void);
 uint64_t get_asm_syscall_handle_address(void);
@@ -49,12 +49,13 @@ void wait_for_interrupt(void);
 void cpu_relax(void);
 void asm_pause(void);
 void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base);
-void fast_handoff_yield(void);
+bool fast_handoff_yield(void);
 bool fast_handoff_park_current(void);
 bool fast_handoff_unpark(uint64_t task);
 uint64_t fast_handoff_wake_sequence(void);
 void fast_handoff_wake_bsp(void);
 void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence);
+_Noreturn void fast_handoff_idle(void);
 bool fast_handoff_configure_timer(uint8_t vector, uint32_t frequency_hz);
 void fast_handoff_configure_ps2(
     uint64_t irq_num,
@@ -105,6 +106,7 @@ bool runtime_vm_add_region(void *base, size_t size);
 uint64_t runtime_clock_initialize(uint64_t frequency);
 uint64_t runtime_clock_frequency(void);
 uint64_t runtime_clock_nanos(void);
+bool runtime_vdso_initialize(vdso_image_t *image);
 extern void (*ap_start_ptr)(struct limine_mp_info *);
 void *__rtld_allocateTcb(void);
 void asm_syscall_handle(void);

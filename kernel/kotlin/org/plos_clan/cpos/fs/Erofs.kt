@@ -2,6 +2,9 @@
 
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.mem.ByteArrayBuffer
+import org.plos_clan.cpos.mem.PreparedBufferDestination
+
 import bridge.cp_zstd_decompress
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
@@ -244,7 +247,7 @@ private class ErofsInstance private constructor(
 
         override fun read(
             inode: Inode,
-            destination: ByteArray,
+            destination: PreparedBufferDestination,
             destinationOffset: Int,
             count: Int,
             position: FilePosition,
@@ -259,6 +262,7 @@ private class ErofsInstance private constructor(
                 destinationOffset,
                 available,
             ) ?: return IoResult.failure(VfsError.IO)
+            if (copied == 0) return IoResult.failure(VfsError.FAULT)
             position.value += copied
             return IoResult.success(copied)
         }
@@ -355,7 +359,7 @@ private class PackedData private constructor(
 
     fun read(
         offset: ULong,
-        destination: ByteArray,
+        destination: PreparedBufferDestination,
         destinationOffset: Int,
         count: Int,
     ): Int? {
@@ -370,8 +374,14 @@ private class PackedData private constructor(
             val sourceOffset = (offset + copied.toULong() - extent.logicalStart).toInt()
             val chunk = minOf(count - copied, data.size - sourceOffset)
             if (chunk <= 0) return null
-            data.copyInto(destination, destinationOffset + copied, sourceOffset, sourceOffset + chunk)
-            copied += chunk
+            val transferred = destination.copyFrom(
+                destinationOffset + copied,
+                data,
+                sourceOffset,
+                chunk,
+            )
+            copied += transferred
+            if (transferred < chunk) return copied
             extentIndex++
         }
         return copied
@@ -800,7 +810,8 @@ private class Image(private val data: ModuleData) {
         if (!contains(sourceOffset, count) || destinationOffset < 0 ||
             destinationOffset > destination.size - count
         ) return false
-        data.copyInto(destination, destinationOffset, sourceOffset.toInt(), count)
+        val target = checkNotNull(ByteArrayBuffer(destination).prepareWrite(destinationOffset, count))
+        data.copyInto(target, destinationOffset, sourceOffset.toInt(), count)
         return true
     }
 

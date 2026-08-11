@@ -14,6 +14,8 @@ import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.toKString
 import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.fs.FileContent
+import org.plos_clan.cpos.mem.ByteArrayBuffer
+import org.plos_clan.cpos.mem.PreparedBufferDestination
 import platform.posix.memcpy
 
 class ModuleData internal constructor(
@@ -26,26 +28,24 @@ class ModuleData internal constructor(
     }
 
     override fun copyInto(
-        destination: ByteArray,
+        destination: PreparedBufferDestination,
         destinationOffset: Int,
         sourceOffset: Int,
         count: Int,
-    ) {
+    ): Int {
         require(sourceOffset >= 0 && count >= 0 && sourceOffset <= size - count)
-        require(destinationOffset >= 0 && destinationOffset <= destination.size - count)
-        destination.usePinned { pinned ->
-            memcpy(
-                pinned.addressOf(destinationOffset),
-                address + sourceOffset,
-                count.toULong(),
-            )
-        }
+        return destination.copyFrom(
+            destinationOffset,
+            requireNotNull(address + sourceOffset),
+            count,
+        )
     }
 
     fun copyOfRange(startIndex: Int, endIndex: Int): ByteArray {
         require(startIndex >= 0 && endIndex >= startIndex && endIndex <= size)
         return ByteArray(endIndex - startIndex).also { destination ->
-            copyInto(destination, 0, startIndex, destination.size)
+            val target = checkNotNull(ByteArrayBuffer(destination).prepareWrite(0, destination.size))
+            copyInto(target, 0, startIndex, destination.size)
         }
     }
 
