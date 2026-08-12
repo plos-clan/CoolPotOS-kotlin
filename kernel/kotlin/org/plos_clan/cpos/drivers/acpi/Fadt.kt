@@ -11,19 +11,13 @@ import bridge.io_out32
 import bridge.io_out8
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
-import kotlinx.cinterop.UIntVar
-import kotlinx.cinterop.ULongVar
-import kotlinx.cinterop.UShortVar
-import kotlinx.cinterop.get
-import kotlinx.cinterop.set
-import org.plos_clan.cpos.mem.KernelPageDirectory
+import org.plos_clan.cpos.mem.MmioRegion
 import org.plos_clan.cpos.utils.checksumOk
 import org.plos_clan.cpos.utils.matchesAscii
 import org.plos_clan.cpos.utils.readU16
 import org.plos_clan.cpos.utils.readU32
 import org.plos_clan.cpos.utils.readU64
 import org.plos_clan.cpos.utils.readU8
-import org.plos_clan.cpos.utils.toPointer
 import org.plos_clan.cpos.utils.toVirtualPointer
 
 private const val GAS_LENGTH = 12
@@ -407,16 +401,13 @@ private fun readMmio(
     physicalAddress: ULong,
     byteCount: Int,
 ): ULong? {
-    val virtualAddress = KernelPageDirectory.mapMmio(
-        physicalAddress = physicalAddress,
-        byteLength = byteCount.toULong(),
-    ) ?: return null
-
+    val region = MmioRegion.map(physicalAddress, byteCount.toULong()) ?: return null
+    val address = region.addressAt(0uL, byteCount) ?: return null
     return when (byteCount) {
-        1 -> virtualAddress.toPointer<UByteVar>()?.get(0)?.toULong()
-        2 -> virtualAddress.toPointer<UShortVar>()?.get(0)?.toULong()
-        4 -> virtualAddress.toPointer<UIntVar>()?.get(0)?.toULong()
-        8 -> virtualAddress.toPointer<ULongVar>()?.get(0)
+        1 -> address.readU8().toULong()
+        2 -> address.readU16().toULong()
+        4 -> address.readU32().toULong()
+        8 -> address.readU64()
         else -> null
     }
 }
@@ -426,16 +417,13 @@ private fun writeMmio(
     byteCount: Int,
     value: ULong,
 ): Boolean {
-    val virtualAddress = KernelPageDirectory.mapMmio(
-        physicalAddress = physicalAddress,
-        byteLength = byteCount.toULong(),
-    ) ?: return false
-
+    val region = MmioRegion.map(physicalAddress, byteCount.toULong()) ?: return false
+    val address = region.addressAt(0uL, byteCount) ?: return false
     when (byteCount) {
-        1 -> virtualAddress.toPointer<UByteVar>()?.set(0, value.toUByte()) ?: return false
-        2 -> virtualAddress.toPointer<UShortVar>()?.set(0, value.toUShort()) ?: return false
-        4 -> virtualAddress.toPointer<UIntVar>()?.set(0, value.toUInt()) ?: return false
-        8 -> virtualAddress.toPointer<ULongVar>()?.set(0, value) ?: return false
+        1 -> address.writeU8(value.toUByte())
+        2 -> address.writeU16(value.toUShort())
+        4 -> address.writeU32(value.toUInt())
+        8 -> address.writeU64(value)
         else -> return false
     }
     return true

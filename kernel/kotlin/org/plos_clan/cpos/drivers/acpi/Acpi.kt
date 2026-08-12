@@ -4,6 +4,8 @@ package org.plos_clan.cpos.drivers.acpi
 
 import bridge.rsdp_request
 import kotlinx.cinterop.*
+import org.plos_clan.cpos.drivers.pcie.Pcie
+import org.plos_clan.cpos.drivers.pcie.PcieEcamRegion
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.drivers.acpi.aml.Aml
 import org.plos_clan.cpos.drivers.acpi.apic.Apic
@@ -115,15 +117,15 @@ private object McfgParser : AcpiTableParser<McfgInfo> {
                 val endBus = table.pointer.readU8(offset + MCFG_ENTRY_END_BUS_OFFSET).toUInt()
                 val region = PcieEcamRegion(
                     baseAddress = baseAddress,
-                    segmentGroup = segmentGroup,
-                    startBus = startBus,
-                    endBus = endBus,
+                    segmentGroup = segmentGroup.toUShort(),
+                    startBus = startBus.toUByte(),
+                    endBus = endBus.toUByte(),
                 )
 
                 if (region.isUsable) {
                     add(region)
                 } else {
-                    val busRange = "${region.busStart}-${region.busEnd}"
+                    val busRange = "${region.startBus}-${region.endBus}"
                     val base = baseAddress.hex()
                     println("ACPI: ignore MCFG region#$index seg=$segmentGroup bus=$busRange base=$base")
                 }

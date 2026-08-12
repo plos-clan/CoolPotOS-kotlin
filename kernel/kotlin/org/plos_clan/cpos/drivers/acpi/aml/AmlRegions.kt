@@ -4,13 +4,9 @@ package org.plos_clan.cpos.drivers.acpi.aml
 
 import bridge.io_in8
 import bridge.io_out8
-import kotlinx.cinterop.UByteVar
-import kotlinx.cinterop.get
-import kotlinx.cinterop.set
-import org.plos_clan.cpos.drivers.acpi.Pcie
-import org.plos_clan.cpos.mem.KernelPageDirectory
+import org.plos_clan.cpos.drivers.pcie.Pcie
+import org.plos_clan.cpos.mem.MmioRegion
 import org.plos_clan.cpos.utils.IrqSpinLock
-import org.plos_clan.cpos.utils.toPointer
 
 private const val REGION_SYSTEM_MEMORY = 0u
 private const val REGION_SYSTEM_IO = 1u
@@ -152,8 +148,7 @@ internal class AmlRegionManager(
         val address = region.offset + relativeOffset
         return when (region.spaceId) {
             REGION_SYSTEM_MEMORY -> {
-                val virtual = KernelPageDirectory.mapMmio(address, 1uL) ?: return null
-                virtual.toPointer<UByteVar>()?.get(0)?.toUInt()
+                MmioRegion.map(address, 1uL)?.addressAt(0uL)?.readU8()?.toUInt()
             }
             REGION_SYSTEM_IO -> {
                 if (address > 0xFFFFuL) null else io_in8(address.toUShort()).toUInt()
@@ -187,9 +182,8 @@ internal class AmlRegionManager(
         val address = region.offset + relativeOffset
         return when (region.spaceId) {
             REGION_SYSTEM_MEMORY -> {
-                val virtual = KernelPageDirectory.mapMmio(address, 1uL) ?: return false
-                val pointer = virtual.toPointer<UByteVar>() ?: return false
-                pointer[0] = value
+                val mapped = MmioRegion.map(address, 1uL) ?: return false
+                mapped.addressAt(0uL)?.writeU8(value) ?: return false
                 true
             }
             REGION_SYSTEM_IO -> {

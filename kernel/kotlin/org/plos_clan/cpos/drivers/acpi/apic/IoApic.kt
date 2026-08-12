@@ -1,15 +1,8 @@
-@file:OptIn(ExperimentalForeignApi::class)
-
 package org.plos_clan.cpos.drivers.acpi.apic
 
-import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.UIntVar
-import kotlinx.cinterop.get
-import kotlinx.cinterop.set
-import org.plos_clan.cpos.mem.KernelPageDirectory
+import org.plos_clan.cpos.mem.MmioRegion
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.hex
-import org.plos_clan.cpos.utils.toPointer
 
 private const val IOAPIC_MMIO_SIZE = 0x1000uL
 
@@ -27,21 +20,24 @@ private const val IOAPIC_MASK_BIT = 0x1_0000uL
 
 object IoApic {
     private val lock = IrqSpinLock()
-    private var mmioBaseVirtualAddress = 0uL
+    private var mmioRegion: MmioRegion? = null
     private var redirectionEntryCount = 0u
 
     fun initialize(physicalAddress: ULong): Boolean {
-        val mappedBase = KernelPageDirectory.mapMmio(physicalAddress, IOAPIC_MMIO_SIZE) ?: run {
+        val mappedRegion = MmioRegion.map(physicalAddress, IOAPIC_MMIO_SIZE) ?: run {
             println("APIC: failed to map IOAPIC at ${physicalAddress.hex()}")
             return false
         }
 
-        mmioBaseVirtualAddress = mappedBase
+        mmioRegion = mappedRegion
 
         val version = lock.withLock { readUnlocked(IOAPIC_REG_VERSION) }
         redirectionEntryCount = ((version shr 16) and IOAPIC_BYTE_MASK) + 1u
         val versionId = (version and IOAPIC_BYTE_MASK).hex()
-        println("APIC: IOAPIC mapped=${mappedBase.hex()} version=$versionId entries=$redirectionEntryCount")
+        println(
+            "APIC: IOAPIC mapped=${mappedRegion.virtualAddress.hex()} " +
+                "version=$versionId entries=$redirectionEntryCount",
+        )
         return true
     }
 
@@ -53,7 +49,7 @@ object IoApic {
         levelTriggered: Boolean = false,
         activeLow: Boolean = false,
     ) {
-        if (mmioBaseVirtualAddress == 0uL || redirectionEntryCount == 0u) {
+        if (mmioRegion == null || redirectionEntryCount == 0u) {
             return
         }
         if (vector > UByte.MAX_VALUE.toUInt()) {
@@ -81,9 +77,8 @@ object IoApic {
         println("APIC: route irq=$irq vector=$vector dst_apic_id=$destination masked=$masked")
     }
 
-
     fun setMasked(irq: UInt, masked: Boolean): Boolean {
-        if (mmioBaseVirtualAddress == 0uL || irq >= redirectionEntryCount) {
+        if (mmioRegion == null || irq >= redirectionEntryCount) {
             return false
         }
         return lock.withLock {
@@ -110,10 +105,9 @@ object IoApic {
     }
 
     private fun readRaw(offset: ULong): UInt =
-        (mmioBaseVirtualAddress + offset).toPointer<UIntVar>()?.get(0) ?: 0u
+        mmioRegion?.addressAt(offset, UInt.SIZE_BYTES)?.readU32() ?: 0u
 
     private fun writeRaw(offset: ULong, value: UInt) {
-        val pointer = (mmioBaseVirtualAddress + offset).toPointer<UIntVar>() ?: return
-        pointer[0] = value
+        mmioRegion?.addressAt(offset, UInt.SIZE_BYTES)?.writeU32(value)
     }
 }

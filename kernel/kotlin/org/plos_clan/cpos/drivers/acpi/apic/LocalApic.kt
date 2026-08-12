@@ -6,13 +6,9 @@ import bridge.mp_request
 import bridge.rdmsr
 import bridge.wrmsr
 import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.UIntVar
-import kotlinx.cinterop.get
 import kotlinx.cinterop.pointed
-import kotlinx.cinterop.set
-import org.plos_clan.cpos.mem.KernelPageDirectory
+import org.plos_clan.cpos.mem.MmioRegion
 import org.plos_clan.cpos.utils.hex
-import org.plos_clan.cpos.utils.toPointer
 
 private const val LIMINE_MP_RESPONSE_X86_64_X2APIC = 1u
 
@@ -30,7 +26,7 @@ private const val LAPIC_ID_MASK_LONG = 0xFFuL
 
 object LocalApic {
     private var x2ApicMode = false
-    private var mmioBaseVirtualAddress = 0uL
+    private var mmioRegion: MmioRegion? = null
     private var bspDeadlineTimerReady = false
 
     val isX2ApicMode: Boolean
@@ -56,20 +52,20 @@ object LocalApic {
         bspDeadlineTimerReady = false
         x2ApicMode = detectX2ApicMode()
         if (x2ApicMode) {
-            mmioBaseVirtualAddress = 0uL
+            mmioRegion = null
             println("APIC: using x2APIC mode (MSR base=0x800)")
         } else {
-            val mappedBase = KernelPageDirectory.mapMmio(physicalAddress, LAPIC_MMIO_SIZE) ?: run {
+            val mappedRegion = MmioRegion.map(physicalAddress, LAPIC_MMIO_SIZE) ?: run {
                 println("APIC: failed to map LAPIC at ${physicalAddress.hex()}")
                 return false
             }
-            mmioBaseVirtualAddress = mappedBase
-            println("APIC: using xAPIC mode (base=${mappedBase.hex()})")
+            mmioRegion = mappedRegion
+            println("APIC: using xAPIC mode (base=${mappedRegion.virtualAddress.hex()})")
         }
 
         bridge.fast_handoff_configure_lapic(
             if (x2ApicMode) 1u.toUByte() else 0u.toUByte(),
-            mmioBaseVirtualAddress,
+            mmioRegion?.virtualAddress ?: 0uL,
         )
         enableController()
         if (timerVector !in LAPIC_MIN_INTERRUPT_VECTOR until LAPIC_SPURIOUS_VECTOR) {
@@ -112,9 +108,7 @@ object LocalApic {
             return rdmsr(X2APIC_MSR_BASE + (register shr 4))
         }
 
-        val pointer =
-            (mmioBaseVirtualAddress + register.toULong()).toPointer<UIntVar>() ?: return 0uL
-        return pointer[0].toULong()
+        return mmioRegion?.addressAt(register.toULong(), UInt.SIZE_BYTES)?.readU32()?.toULong() ?: 0uL
     }
 
     private fun write(register: UInt, value: ULong): Boolean {
@@ -123,8 +117,8 @@ object LocalApic {
             return true
         }
 
-        val pointer = (mmioBaseVirtualAddress + register.toULong()).toPointer<UIntVar>() ?: return false
-        pointer[0] = value.toUInt()
+        val address = mmioRegion?.addressAt(register.toULong(), UInt.SIZE_BYTES) ?: return false
+        address.writeU32(value.toUInt())
         return true
     }
 }
