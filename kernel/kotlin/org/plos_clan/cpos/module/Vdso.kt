@@ -38,7 +38,7 @@ object Vdso : MemoryRegionBacking() {
 
     fun install(addressSpace: VirtualAddressSpace): ULong? {
         if (image.isEmpty()) return null
-        val length = image.size.toULong().alignUp(PAGE_SIZE_BYTES)
+        val length = image.size.toULong().alignUp(PAGE_SIZE_BYTES) ?: return null
         val installed = addressSpace.insert(
             MemoryRegion(
                 start = USER_MMAP_END,

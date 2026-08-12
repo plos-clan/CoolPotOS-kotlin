@@ -13,6 +13,7 @@ import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.TaskState
 import org.plos_clan.cpos.utils.Errno
+import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.PtraceRegisters
 
@@ -34,14 +35,14 @@ private class IdTriplet(
     private val real: Int,
     private val effective: Int,
     private val saved: Int,
-) : NativeStruct() {
+) : NativeStruct {
     override fun toNativeBytes(): ByteArray = ByteArray(NATIVE_SIZE).also { buffer ->
-        putU32LE(buffer, 0, real)
-        putU32LE(buffer, Int.SIZE_BYTES, effective)
-        putU32LE(buffer, Int.SIZE_BYTES * 2, saved)
+        LittleEndianBuffer(buffer).apply {
+            writeU32(0, real.toUInt())
+            writeU32(Int.SIZE_BYTES, effective.toUInt())
+            writeU32(Int.SIZE_BYTES * 2, saved.toUInt())
+        }
     }
-
-    override fun updateFromNativeBytes(buffer: ByteArray): Boolean = false
 
     companion object {
         const val NATIVE_SIZE = Int.SIZE_BYTES * 3
@@ -313,19 +314,11 @@ private fun readStringVector(process: Process, address: ULong): List<String>? {
             address + index.toULong() * ULong.SIZE_BYTES.toULong(),
         )
             .copyFromUser(ULong.SIZE_BYTES) ?: return null
-        val pointer = pointerBytes.readU64LE(0)
+        val pointer = LittleEndianBuffer(pointerBytes).readU64(0)
         if (pointer == 0uL) return values
         val value = UserMemory(process.addressSpace, pointer).copyCStringFromUser(4096)
             ?: return null
         values += value.decodeToString()
     }
     return null
-}
-
-private fun ByteArray.readU64LE(offset: Int): ULong {
-    var value = 0uL
-    repeat(ULong.SIZE_BYTES) { index ->
-        value = value or (this[offset + index].toUByte().toULong() shl (index * Byte.SIZE_BITS))
-    }
-    return value
 }

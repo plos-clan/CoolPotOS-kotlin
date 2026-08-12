@@ -23,14 +23,31 @@ internal class PciConfigSpace(
         (baseAddress + offset.toULong()).writeU32(value)
     }
 
-    fun read(offset: Int, byteCount: Int): ULong =
-        (0 until byteCount).fold(0uL) { value, index ->
-            value or (readU8(offset + index).toULong() shl (index * 8))
+    fun read(offset: Int, byteCount: Int): ULong = when (byteCount) {
+        UByte.SIZE_BYTES -> readU8(offset).toULong()
+        UShort.SIZE_BYTES -> readU16(offset).toULong()
+        UInt.SIZE_BYTES -> readU32(offset).toULong()
+        ULong.SIZE_BYTES -> {
+            readU32(offset).toULong() or
+                (readU32(offset + UInt.SIZE_BYTES).toULong() shl UInt.SIZE_BITS)
         }
+        else -> (0 until byteCount).fold(0uL) { value, index ->
+            value or (readU8(offset + index).toULong() shl (index * Byte.SIZE_BITS))
+        }
+    }
 
     fun write(offset: Int, byteCount: Int, value: ULong) {
-        repeat(byteCount) { index ->
-            writeU8(offset + index, (value shr (index * 8)).toUByte())
+        when (byteCount) {
+            UByte.SIZE_BYTES -> writeU8(offset, value.toUByte())
+            UShort.SIZE_BYTES -> writeU16(offset, value.toUShort())
+            UInt.SIZE_BYTES -> writeU32(offset, value.toUInt())
+            ULong.SIZE_BYTES -> {
+                writeU32(offset, value.toUInt())
+                writeU32(offset + UInt.SIZE_BYTES, (value shr UInt.SIZE_BITS).toUInt())
+            }
+            else -> repeat(byteCount) { index ->
+                writeU8(offset + index, (value shr (index * Byte.SIZE_BITS)).toUByte())
+            }
         }
     }
 }

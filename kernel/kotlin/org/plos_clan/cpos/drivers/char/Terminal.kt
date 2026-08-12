@@ -20,7 +20,9 @@ import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.Errno
+import org.plos_clan.cpos.utils.ByteRingBuffer
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
 import org.plos_clan.cpos.utils.TermiosConstants
 
@@ -92,13 +94,9 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
     }
 
     private val lock = IrqSpinLock()
-    private val inputLock = IrqSpinLock()
-    private val inputData = ByteArray(INPUT_BUFFER_SIZE)
+    private val input = ByteRingBuffer(INPUT_BUFFER_SIZE)
     private val canonicalData = ByteArray(INPUT_BUFFER_SIZE)
     private val canonicalRecords = IntArray(MAX_CANONICAL_RECORDS)
-    private var inputHead = 0
-    private var inputTail = 0
-    private var inputCount = 0
     private var canonicalCount = 0
     private var canonicalRecordHead = 0
     private var canonicalRecordTail = 0
@@ -109,9 +107,9 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
             return
         }
 
-        inputLock.withLock {
+        input.transaction {
             data.forEach { character ->
-                receiveInputLocked(session, character.code and 0xFF)
+                receiveInput(session, character.code and 0xFF)
             }
         }
     }
@@ -264,11 +262,11 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         events: Int
     ): Int {
         var returned = events and PollEvents.NORMAL_OUTPUT
-        val readable = inputLock.withLock {
+        val readable = input.transaction {
             if (session.hasLocalFlag(TermiosConstants.ICANON)) {
                 canonicalRecordCount != 0
             } else {
-                inputCount != 0
+                available != 0
             }
         }
         if (readable && events and PollEvents.NORMAL_INPUT != 0) {
@@ -277,7 +275,7 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         return returned
     }
 
-    private fun receiveInputLocked(session: TtySession, rawValue: Int) {
+    private fun ByteRingBuffer.Transaction.receiveInput(session: TtySession, rawValue: Int) {
         var value = rawValue
         if (session.hasInputFlag(TermiosConstants.ISTRIP)) {
             value = value and 0x7F
@@ -294,7 +292,7 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         }
 
         if (!session.hasLocalFlag(TermiosConstants.ICANON)) {
-            enqueueInputLocked(value.toByte())
+            offer(value.toByte())
             echoCharacter(session, value)
             return
         }
@@ -324,7 +322,7 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
 
         val eof = session.controlCharacter(TermiosConstants.VEOF)
         if (eof != 0 && value == eof) {
-            commitCanonicalLocked(eof = true)
+            commitCanonical(eof = true)
             return
         }
 
@@ -335,11 +333,11 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         echoCharacter(session, value)
 
         if (lineEnd) {
-            commitCanonicalLocked(eof = false)
+            commitCanonical(eof = false)
         }
     }
 
-    private fun commitCanonicalLocked(eof: Boolean) {
+    private fun ByteRingBuffer.Transaction.commitCanonical(eof: Boolean) {
         if (canonicalCount == 0) {
             if (eof) {
                 enqueueCanonicalRecordLocked(0)
@@ -347,12 +345,10 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
             return
         }
 
-        if (canonicalCount <= inputData.size - inputCount &&
+        if (canonicalCount <= remaining &&
             canonicalRecordCount < canonicalRecords.size
         ) {
-            repeat(canonicalCount) { index ->
-                enqueueInputLocked(canonicalData[index])
-            }
+            write(canonicalData, 0, canonicalCount)
             enqueueCanonicalRecordLocked(canonicalCount)
         }
         canonicalCount = 0
@@ -360,7 +356,7 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
 
     private fun readCanonical(buffer: PreparedBufferDestination, offset: Int, limit: Int): Int {
         while (true) {
-            val result = inputLock.withLock {
+            val result = input.transaction {
                 if (canonicalRecordCount == 0) {
                     null
                 } else {
@@ -369,7 +365,7 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
                         0
                     } else {
                         val transferred = minOf(limit, recordLength)
-                        val copied = dequeueInputLocked(buffer, offset, transferred)
+                        val copied = read(buffer, offset, transferred)
                         if (copied < recordLength) {
                             prependCanonicalRecordLocked(recordLength - copied)
                         }
@@ -444,38 +440,9 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
     }
 
     private fun drainAvailable(buffer: PreparedBufferDestination, offset: Int, limit: Int): Int =
-        inputLock.withLock {
-            dequeueInputLocked(buffer, offset, minOf(limit, inputCount))
+        input.transaction {
+            read(buffer, offset, minOf(limit, available))
         }
-
-    private fun enqueueInputLocked(value: Byte): Boolean {
-        if (inputCount == inputData.size) {
-            return false
-        }
-        inputData[inputTail] = value
-        inputTail = (inputTail + 1) % inputData.size
-        inputCount++
-        return true
-    }
-
-    private fun dequeueInputLocked(
-        destination: PreparedBufferDestination,
-        offset: Int,
-        length: Int,
-    ): Int {
-        val requested = minOf(length, inputCount)
-        val firstChunk = minOf(requested, inputData.size - inputHead)
-        var transferred = destination.copyFrom(offset, inputData, inputHead, firstChunk)
-        if (transferred == firstChunk) {
-            val remaining = requested - firstChunk
-            if (remaining != 0) {
-                transferred += destination.copyFrom(offset + firstChunk, inputData, 0, remaining)
-            }
-        }
-        inputHead = (inputHead + transferred) % inputData.size
-        inputCount -= transferred
-        return transferred
-    }
 
     private fun enqueueCanonicalRecordLocked(length: Int): Boolean {
         if (canonicalRecordCount == canonicalRecords.size) {
@@ -501,15 +468,13 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         canonicalRecordCount++
     }
 
-    private fun hasInput(): Boolean = inputLock.withLock { inputCount != 0 }
+    private fun hasInput(): Boolean = input.available != 0
 
-    private fun availableInputBytes(): Int = inputLock.withLock { inputCount }
+    private fun availableInputBytes(): Int = input.available
 
     private fun flushInput() {
-        inputLock.withLock {
-            inputHead = 0
-            inputTail = 0
-            inputCount = 0
+        input.transaction {
+            clear()
             canonicalCount = 0
             canonicalRecordHead = 0
             canonicalRecordTail = 0
@@ -542,16 +507,12 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
 
     private fun copyIntFromUser(args: UserMemory): Int? {
         val data = args.copyFromUser(Int.SIZE_BYTES) ?: return null
-        return data[0].toUByte().toInt() or
-            (data[1].toUByte().toInt() shl 8) or
-            (data[2].toUByte().toInt() shl 16) or
-            (data[3].toUByte().toInt() shl 24)
+        return LittleEndianBuffer(data).readU32(0).toInt()
     }
 
     private fun copyIntToUser(args: UserMemory, value: Int): Int {
-        val data = ByteArray(Int.SIZE_BYTES) { index ->
-            (value ushr (index * Byte.SIZE_BITS)).toByte()
-        }
+        val data = ByteArray(Int.SIZE_BYTES)
+        LittleEndianBuffer(data).writeU32(0, value.toUInt())
         return if (args.copyToUser(data)) Errno.EOK else -Errno.EFAULT
     }
 

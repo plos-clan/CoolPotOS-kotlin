@@ -9,6 +9,7 @@ import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
+import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.PtraceRegisters
 
@@ -34,7 +35,7 @@ data class UtsName(
     val version: String,
     val machine: String,
     val domainname: String,
-) : NativeStruct() {
+) : NativeStruct {
     init {
         fields().forEach { (name, value) ->
             require('\u0000' !in value) { "$name must not contain NUL" }
@@ -74,11 +75,13 @@ data class UtsName(
     }
 }
 
-data class TimeSpec(var sec: Long, var nsec: Long) : NativeStruct() {
+data class TimeSpec(var sec: Long, var nsec: Long) : NativeStruct {
     override fun toNativeBytes(): ByteArray =
         ByteArray(NATIVE_SIZE).also { buffer ->
-            putU64LE(buffer, SEC_OFFSET, sec.toULong())
-            putU64LE(buffer, NSEC_OFFSET, nsec.toULong())
+            LittleEndianBuffer(buffer).apply {
+                writeU64(SEC_OFFSET, sec.toULong())
+                writeU64(NSEC_OFFSET, nsec.toULong())
+            }
         }
 
     override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
@@ -86,8 +89,9 @@ data class TimeSpec(var sec: Long, var nsec: Long) : NativeStruct() {
             return false
         }
 
-        val updatedSec = getU64LE(buffer, SEC_OFFSET).toLong()
-        val updatedNsec = getU64LE(buffer, NSEC_OFFSET).toLong()
+        val input = LittleEndianBuffer(buffer)
+        val updatedSec = input.readU64(SEC_OFFSET).toLong()
+        val updatedNsec = input.readU64(NSEC_OFFSET).toLong()
 
         sec = updatedSec
         nsec = updatedNsec

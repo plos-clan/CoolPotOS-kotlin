@@ -22,6 +22,7 @@ import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.alignUp
+import org.plos_clan.cpos.utils.LittleEndianBuffer
 
 private const val ELF64_HEADER_SIZE = 64
 private const val ELF64_PROGRAM_HEADER_SIZE = 56
@@ -180,7 +181,7 @@ object ElfLoader {
             return null
         }
 
-        val pages = planPages(segments)
+        val pages = planPages(segments) ?: return null
         val backing = ElfBacking(file.file, segments)
         val regions = pageRegions(pages, name, backing)
         val inserted = try {
@@ -214,6 +215,7 @@ object ElfLoader {
         val size = file.inode.metadata().size
         val headerData = readExact(file, 0uL, ELF64_HEADER_SIZE)
             ?: return reject("header is truncated")
+        val headerInput = LittleEndianBuffer(headerData)
         if (headerData[0].toUByte() != 0x7fu.toUByte() ||
             headerData[1] != 'E'.code.toByte() ||
             headerData[2] != 'L'.code.toByte() ||
@@ -225,14 +227,14 @@ object ElfLoader {
         ) return reject("unsupported class, byte order, or version")
 
         val header = ElfHeader(
-            type = headerData.readU16(16),
-            machine = headerData.readU16(18),
-            version = headerData.readU32(20),
-            entryPoint = headerData.readU64(24),
-            programHeaderOffset = headerData.readU64(32),
-            headerSize = headerData.readU16(52),
-            programHeaderEntrySize = headerData.readU16(54),
-            programHeaderCount = headerData.readU16(56),
+            type = headerInput.readU16(16),
+            machine = headerInput.readU16(18),
+            version = headerInput.readU32(20),
+            entryPoint = headerInput.readU64(24),
+            programHeaderOffset = headerInput.readU64(32),
+            headerSize = headerInput.readU16(52),
+            programHeaderEntrySize = headerInput.readU16(54),
+            programHeaderCount = headerInput.readU16(56),
         )
         val type = when (header.type.toUInt()) {
             ELF_TYPE_EXECUTABLE -> ElfObjectType.EXECUTABLE
@@ -251,16 +253,17 @@ object ElfLoader {
         ) return reject("program header table is truncated")
         val table = readExact(file, header.programHeaderOffset, tableSize.toInt())
             ?: return reject("cannot read program header table")
+        val tableInput = LittleEndianBuffer(table)
         val programHeaders = List(header.programHeaderCount.toInt()) { index ->
             val cursor = index * ELF64_PROGRAM_HEADER_SIZE
             ProgramHeader(
-                type = table.readU32(cursor),
-                flags = table.readU32(cursor + 4),
-                fileOffset = table.readU64(cursor + 8),
-                virtualAddress = table.readU64(cursor + 16),
-                fileSize = table.readU64(cursor + 32),
-                memorySize = table.readU64(cursor + 40),
-                alignment = table.readU64(cursor + 48),
+                type = tableInput.readU32(cursor),
+                flags = tableInput.readU32(cursor + 4),
+                fileOffset = tableInput.readU64(cursor + 8),
+                virtualAddress = tableInput.readU64(cursor + 16),
+                fileSize = tableInput.readU64(cursor + 32),
+                memorySize = tableInput.readU64(cursor + 40),
+                alignment = tableInput.readU64(cursor + 48),
             )
         }
         val interpreters = programHeaders.filter { it.type == PROGRAM_TYPE_INTERPRETER }
@@ -314,11 +317,11 @@ object ElfLoader {
         )
     }
 
-    private fun planPages(segments: List<LoadSegment>): Map<ULong, PagePlan> {
+    private fun planPages(segments: List<LoadSegment>): Map<ULong, PagePlan>? {
         val pages = linkedMapOf<ULong, PagePlan>()
         for (segment in segments) {
             var address = segment.start.alignDown(PAGE_SIZE_BYTES)
-            val end = segment.end.alignUp(PAGE_SIZE_BYTES)
+            val end = segment.end.alignUp(PAGE_SIZE_BYTES) ?: return null
             while (address < end) {
                 val page = pages.getOrPut(address, ::PagePlan)
                 page.readable = page.readable ||
@@ -495,13 +498,3 @@ private fun fitsInFile(offset: ULong, size: ULong, fileSize: ULong): Boolean =
 
 private fun ULong.isPowerOfTwo(): Boolean =
     this != 0uL && (this and (this - 1uL)) == 0uL
-
-private fun ByteArray.readU16(offset: Int): UShort =
-    ((this[offset].toInt() and 0xff) or
-        ((this[offset + 1].toInt() and 0xff) shl Byte.SIZE_BITS)).toUShort()
-
-private fun ByteArray.readU32(offset: Int): UInt =
-    readU16(offset).toUInt() or (readU16(offset + UShort.SIZE_BYTES).toUInt() shl 16)
-
-private fun ByteArray.readU64(offset: Int): ULong =
-    readU32(offset).toULong() or (readU32(offset + UInt.SIZE_BYTES).toULong() shl 32)

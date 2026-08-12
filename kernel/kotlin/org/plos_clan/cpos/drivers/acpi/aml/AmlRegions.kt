@@ -5,7 +5,7 @@ package org.plos_clan.cpos.drivers.acpi.aml
 import bridge.io_in8
 import bridge.io_out8
 import org.plos_clan.cpos.drivers.pcie.Pcie
-import org.plos_clan.cpos.mem.MmioRegion
+import org.plos_clan.cpos.mem.CachedMmioRegion
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 private const val REGION_SYSTEM_MEMORY = 0u
@@ -16,6 +16,7 @@ internal class AmlRegionManager(
     private val namespace: AmlNamespace,
 ) {
     private val lock = IrqSpinLock()
+    private val memory = CachedMmioRegion()
 
     fun read(field: AmlFieldUnit): AmlObject? {
         if (field.bitLength == 0uL) {
@@ -148,7 +149,7 @@ internal class AmlRegionManager(
         val address = region.offset + relativeOffset
         return when (region.spaceId) {
             REGION_SYSTEM_MEMORY -> {
-                MmioRegion.map(address, 1uL)?.addressAt(0uL)?.readU8()?.toUInt()
+                memory.addressAt(address)?.readU8()?.toUInt()
             }
             REGION_SYSTEM_IO -> {
                 if (address > 0xFFFFuL) null else io_in8(address.toUShort()).toUInt()
@@ -182,8 +183,7 @@ internal class AmlRegionManager(
         val address = region.offset + relativeOffset
         return when (region.spaceId) {
             REGION_SYSTEM_MEMORY -> {
-                val mapped = MmioRegion.map(address, 1uL) ?: return false
-                mapped.addressAt(0uL)?.writeU8(value) ?: return false
+                memory.addressAt(address)?.writeU8(value) ?: return false
                 true
             }
             REGION_SYSTEM_IO -> {

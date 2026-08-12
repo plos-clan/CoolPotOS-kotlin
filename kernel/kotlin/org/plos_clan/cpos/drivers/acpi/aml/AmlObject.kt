@@ -1,5 +1,7 @@
 package org.plos_clan.cpos.drivers.acpi.aml
 
+import org.plos_clan.cpos.utils.LittleEndianBuffer
+
 sealed class AmlObject
 
 data object AmlUninitialized : AmlObject()
@@ -76,10 +78,8 @@ internal fun AmlObject.dereference(): AmlObject =
 internal fun AmlObject.integerValue(): ULong? =
     when (val value = dereference()) {
         is AmlInteger -> value.value
-        is AmlBuffer -> value.bytes.take(minOf(value.bytes.size, ULong.SIZE_BYTES))
-            .foldIndexed(0uL) { index, result, byte ->
-                result or (byte.toUByte().toULong() shl (index * 8))
-            }
+        is AmlBuffer -> LittleEndianBuffer(value.bytes)
+            .readUnsigned(0, minOf(value.bytes.size, ULong.SIZE_BYTES))
         is AmlString -> value.value.toULongOrNull()
         else -> null
     }

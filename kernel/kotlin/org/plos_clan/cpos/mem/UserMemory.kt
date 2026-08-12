@@ -9,6 +9,7 @@ import kotlinx.cinterop.get
 import kotlinx.cinterop.plus
 import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
+import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.toVirtualPointer
 import platform.posix.memcpy
 import platform.posix.memset
@@ -111,9 +112,8 @@ class UserMemory private constructor(
         if (count == 0) return true
 
         val start = address + offset.toULong()
-        val pageMask = PAGE_SIZE_BYTES - 1uL
-        val firstPage = start and pageMask.inv()
-        val lastPage = (start + count.toULong() - 1uL) and pageMask.inv()
+        val firstPage = start.alignDown(PAGE_SIZE_BYTES)
+        val lastPage = (start + count.toULong() - 1uL).alignDown(PAGE_SIZE_BYTES)
         if (isPrepared(firstPage, lastPage, writable)) return true
 
         preparedVirtualPage = ULong.MAX_VALUE
@@ -168,7 +168,7 @@ class UserMemory private constructor(
                 requireWritable = false,
             ) ?: return null
             val source = physicalAddress.toVirtualPointer<UByteVar>() ?: return null
-            val pageOffset = currentAddress and (PAGE_SIZE_BYTES - 1uL)
+            val pageOffset = currentAddress - currentAddress.alignDown(PAGE_SIZE_BYTES)
             val chunkLength = minOf(
                 maxLength - copied,
                 (PAGE_SIZE_BYTES - pageOffset).toInt(),
@@ -242,8 +242,7 @@ class UserMemory private constructor(
     ): ULong? {
         if (preparedVirtualPage == ULong.MAX_VALUE || requireWritable && !preparedWritable) return null
 
-        val pageMask = PAGE_SIZE_BYTES - 1uL
-        val virtualPage = virtualAddress and pageMask.inv()
+        val virtualPage = virtualAddress.alignDown(PAGE_SIZE_BYTES)
         if (virtualPage < preparedVirtualPage) return null
         val pageIndex = (virtualPage - preparedVirtualPage) / PAGE_SIZE_BYTES
         val physicalPage = if (pageIndex == 0uL) {
@@ -251,7 +250,7 @@ class UserMemory private constructor(
         } else {
             additionalPhysicalPages?.getOrNull(pageIndex.toInt() - 1) ?: return null
         }
-        return physicalPage + (virtualAddress and pageMask)
+        return physicalPage + (virtualAddress - virtualPage)
     }
 
     private fun isPrepared(firstPage: ULong, lastPage: ULong, writable: Boolean): Boolean {
@@ -265,6 +264,6 @@ class UserMemory private constructor(
     private fun pageChunkSize(currentAddress: ULong, remaining: Int): Int =
         minOf(
             remaining,
-            (PAGE_SIZE_BYTES - (currentAddress and (PAGE_SIZE_BYTES - 1uL))).toInt(),
+            (PAGE_SIZE_BYTES - (currentAddress - currentAddress.alignDown(PAGE_SIZE_BYTES))).toInt(),
         )
 }

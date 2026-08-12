@@ -13,6 +13,7 @@ import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Cmdline
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.TermiosConstants
 import org.plos_clan.cpos.utils.VTModeConstants
@@ -128,27 +129,26 @@ data class WinSize(
     var wsCol: Short,
     var wsXpixel: Short,
     var wsYpixel: Short
-) : NativeStruct() {
+) : NativeStruct {
     override fun toNativeBytes(): ByteArray =
         ByteArray(8).also { buffer ->
-            putU16LE(buffer, 0, wsRow)
-            putU16LE(buffer, 2, wsCol)
-            putU16LE(buffer, 4, wsXpixel)
-            putU16LE(buffer, 6, wsYpixel)
+            LittleEndianBuffer(buffer).apply {
+                writeU16(0, wsRow.toUShort())
+                writeU16(2, wsCol.toUShort())
+                writeU16(4, wsXpixel.toUShort())
+                writeU16(6, wsYpixel.toUShort())
+            }
         }
 
     override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
         if (buffer.size != 8) {
             return false
         }
-        fun readShort(offset: Int): Short = (
-            buffer[offset].toUByte().toUInt() or
-                (buffer[offset + 1].toUByte().toUInt() shl 8)
-        ).toShort()
-        wsRow = readShort(0)
-        wsCol = readShort(2)
-        wsXpixel = readShort(4)
-        wsYpixel = readShort(6)
+        val input = LittleEndianBuffer(buffer)
+        wsRow = input.readU16(0).toShort()
+        wsCol = input.readU16(2).toShort()
+        wsXpixel = input.readU16(4).toShort()
+        wsYpixel = input.readU16(6).toShort()
         return true
     }
 }
@@ -160,7 +160,7 @@ class Termios(
     var cLflag: Int,    /* local mode flags */
     var cLine: Byte,    /* line discipline */
     var cCc: ByteArray  /* control characters */
-) : NativeStruct() {
+) : NativeStruct {
     init {
         require(cCc.size == NCCS) { "c_cc length must $NCCS" }
     }
@@ -169,10 +169,12 @@ class Termios(
         require(cCc.size == NCCS) { "c_cc length must $NCCS" }
 
         return ByteArray(NATIVE_SIZE).also { buffer ->
-            putU32LE(buffer, 0, cIflag)
-            putU32LE(buffer, 4, cOflag)
-            putU32LE(buffer, 8, cCflag)
-            putU32LE(buffer, 12, cLflag)
+            LittleEndianBuffer(buffer).apply {
+                writeU32(0, cIflag.toUInt())
+                writeU32(4, cOflag.toUInt())
+                writeU32(8, cCflag.toUInt())
+                writeU32(12, cLflag.toUInt())
+            }
             buffer[LINE_OFFSET] = cLine
             cCc.copyInto(buffer, destinationOffset = CONTROL_CHARACTERS_OFFSET)
         }
@@ -183,10 +185,11 @@ class Termios(
             return false
         }
 
-        val inputFlags = getU32LE(buffer, 0)
-        val outputFlags = getU32LE(buffer, 4)
-        val controlFlags = getU32LE(buffer, 8)
-        val localFlags = getU32LE(buffer, 12)
+        val input = LittleEndianBuffer(buffer)
+        val inputFlags = input.readU32(0).toInt()
+        val outputFlags = input.readU32(4).toInt()
+        val controlFlags = input.readU32(8).toInt()
+        val localFlags = input.readU32(12).toInt()
         val line = buffer[LINE_OFFSET]
         val controlCharacters = buffer.copyOfRange(
             CONTROL_CHARACTERS_OFFSET,
@@ -218,7 +221,7 @@ class Termios2(
     var cCc: ByteArray,
     var cIspeed: Int,   /* input speed */
     var cOspeed: Int    /* output speed */
-) : NativeStruct() {
+) : NativeStruct {
     init {
         require(cCc.size == TERMIOS2_NCCS) { "c_cc length must be $TERMIOS2_NCCS" }
     }
@@ -227,14 +230,15 @@ class Termios2(
         require(cCc.size == TERMIOS2_NCCS) { "c_cc length must be $TERMIOS2_NCCS" }
 
         return ByteArray(NATIVE_SIZE).also { buffer ->
-            putU32LE(buffer, 0, cIflag)
-            putU32LE(buffer, 4, cOflag)
-            putU32LE(buffer, 8, cCflag)
-            putU32LE(buffer, 12, cLflag)
+            val output = LittleEndianBuffer(buffer)
+            output.writeU32(0, cIflag.toUInt())
+            output.writeU32(4, cOflag.toUInt())
+            output.writeU32(8, cCflag.toUInt())
+            output.writeU32(12, cLflag.toUInt())
             buffer[LINE_OFFSET] = cLine
             cCc.copyInto(buffer, destinationOffset = CONTROL_CHARACTERS_OFFSET)
-            putU32LE(buffer, INPUT_SPEED_OFFSET, cIspeed)
-            putU32LE(buffer, OUTPUT_SPEED_OFFSET, cOspeed)
+            output.writeU32(INPUT_SPEED_OFFSET, cIspeed.toUInt())
+            output.writeU32(OUTPUT_SPEED_OFFSET, cOspeed.toUInt())
         }
     }
 
@@ -242,14 +246,15 @@ class Termios2(
         if (buffer.size != NATIVE_SIZE) {
             return false
         }
-        cIflag = getU32LE(buffer, 0)
-        cOflag = getU32LE(buffer, 4)
-        cCflag = getU32LE(buffer, 8)
-        cLflag = getU32LE(buffer, 12)
+        val input = LittleEndianBuffer(buffer)
+        cIflag = input.readU32(0).toInt()
+        cOflag = input.readU32(4).toInt()
+        cCflag = input.readU32(8).toInt()
+        cLflag = input.readU32(12).toInt()
         cLine = buffer[LINE_OFFSET]
         cCc = buffer.copyOfRange(CONTROL_CHARACTERS_OFFSET, INPUT_SPEED_OFFSET)
-        cIspeed = getU32LE(buffer, INPUT_SPEED_OFFSET)
-        cOspeed = getU32LE(buffer, OUTPUT_SPEED_OFFSET)
+        cIspeed = input.readU32(INPUT_SPEED_OFFSET).toInt()
+        cOspeed = input.readU32(OUTPUT_SPEED_OFFSET).toInt()
         return true
     }
 

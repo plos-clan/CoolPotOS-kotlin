@@ -9,6 +9,9 @@ import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.UShortVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set
+import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
+import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.toPointer
 
 value class MmioAddress(val value: ULong) {
@@ -46,18 +49,49 @@ class MmioRegion private constructor(
 ) {
     fun addressAt(offset: ULong, width: Int = 1): MmioAddress? {
         if (width <= 0) return null
-        val end = offset + width.toULong()
-        if (end < offset || end > byteLength) return null
-        val address = virtualAddress + offset
-        return address.takeIf { it >= virtualAddress }?.let(::MmioAddress)
+        val accessWidth = width.toULong()
+        if (offset > ULong.MAX_VALUE - accessWidth || offset + accessWidth > byteLength) {
+            return null
+        }
+        if (offset > ULong.MAX_VALUE - virtualAddress) return null
+        return MmioAddress(virtualAddress + offset)
     }
 
     companion object {
         fun map(physicalAddress: ULong, byteLength: ULong): MmioRegion? {
             if (byteLength == 0uL) return null
-            if (physicalAddress + byteLength < physicalAddress) return null
+            if (physicalAddress > ULong.MAX_VALUE - byteLength) return null
             val virtualAddress = KernelPageDirectory.mapMmio(physicalAddress, byteLength) ?: return null
             return MmioRegion(physicalAddress, virtualAddress, byteLength)
         }
+    }
+}
+
+class CachedMmioRegion {
+    private val lock = IrqSpinLock()
+    private var mapped: MmioRegion? = null
+
+    fun addressAt(physicalAddress: ULong, width: Int = 1): MmioAddress? {
+        if (width <= 0) return null
+        val accessWidth = width.toULong()
+        if (physicalAddress > ULong.MAX_VALUE - accessWidth) return null
+        return lock.withLock {
+            mapped?.addressFor(physicalAddress, width)?.let { return@withLock it }
+
+            val pageBase = physicalAddress.alignDown(PAGE_SIZE_BYTES)
+            val pageOffset = physicalAddress - pageBase
+            val requiredLength = pageOffset + accessWidth
+            if (requiredLength < pageOffset) return@withLock null
+
+            val region = MmioRegion.map(pageBase, maxOf(PAGE_SIZE_BYTES, requiredLength))
+                ?: return@withLock null
+            mapped = region
+            region.addressFor(physicalAddress, width)
+        }
+    }
+
+    private fun MmioRegion.addressFor(physicalAddress: ULong, width: Int): MmioAddress? {
+        if (physicalAddress < this.physicalAddress) return null
+        return addressAt(physicalAddress - this.physicalAddress, width)
     }
 }

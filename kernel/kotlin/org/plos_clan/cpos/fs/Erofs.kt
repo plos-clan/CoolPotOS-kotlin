@@ -10,6 +10,8 @@ import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.module.ModuleData
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.LittleEndianBuffer
+import org.plos_clan.cpos.utils.alignUp
 
 private const val DEFAULT_CACHE_BYTES = 16 * 1024 * 1024
 
@@ -104,7 +106,7 @@ private class ErofsInstance private constructor(
         ) {
             return null
         }
-        val mapHeader = image.align(inode.location + inode.inodeSize.toULong(), 8)
+        val mapHeader = image.align(inode.location + inode.inodeSize.toULong(), 8) ?: return null
         if (!image.contains(mapHeader, 8)) return null
         val fragmentHeader = image.u64(mapHeader)
         if (fragmentHeader and Header.FRAGMENT_INODE_FLAG == 0uL) return null
@@ -120,21 +122,22 @@ private class ErofsInstance private constructor(
     private fun directoryData(node: DirectoryNode): DirectoryData? {
         inodeLock.withLock { node.cached }?.let { return it }
         val bytes = node.data.readAll() ?: return null
+        val input = LittleEndianBuffer(bytes)
         val entries = mutableListOf<Entry>()
         var blockStart = 0
         while (blockStart < bytes.size) {
             val blockLength = minOf(header.blockSize, bytes.size - blockStart)
             if (blockLength < Header.DIRENT_SIZE) return null
-            val firstName = bytes.u16(blockStart + 8)
+            val firstName = input.readU16(blockStart + 8).toInt()
             if (firstName < Header.DIRENT_SIZE || firstName > blockLength ||
                 firstName % Header.DIRENT_SIZE != 0
             ) return null
             val count = firstName / Header.DIRENT_SIZE
             for (index in 0 until count) {
                 val entryOffset = blockStart + index * Header.DIRENT_SIZE
-                val nameStart = bytes.u16(entryOffset + 8)
+                val nameStart = input.readU16(entryOffset + 8).toInt()
                 val nameEnd = if (index + 1 < count) {
-                    bytes.u16(entryOffset + Header.DIRENT_SIZE + 8)
+                    input.readU16(entryOffset + Header.DIRENT_SIZE + 8).toInt()
                 } else {
                     var end = blockLength
                     while (end > nameStart && bytes[blockStart + end - 1] == 0.toByte()) end--
@@ -147,7 +150,7 @@ private class ErofsInstance private constructor(
                     ?: return null
                 entries += Entry(
                     VfsName.fromPath(bytes, blockStart + nameStart, blockStart + nameEnd),
-                    bytes.u64(entryOffset),
+                    input.readU64(entryOffset),
                     type,
                 )
             }
@@ -423,7 +426,7 @@ private class CompactIndex private constructor(
         const val ZSTD = 3
 
         fun open(image: Image, header: Header, inode: DiskInode): CompactIndex? {
-            val mapHeader = image.align(inode.location + inode.inodeSize.toULong(), 8)
+            val mapHeader = image.align(inode.location + inode.inodeSize.toULong(), 8) ?: return null
             if (!image.contains(mapHeader, 8)) return null
             val advise = image.u16(mapHeader + 4uL)
             val clusterBits = image.u8(mapHeader + 7uL)
@@ -786,8 +789,8 @@ private class Image(private val data: ModuleData) {
     fun contains(offset: ULong, count: ULong): Boolean =
         offset <= size.toULong() && count <= size.toULong() - offset
 
-    fun align(offset: ULong, alignment: Int): ULong =
-        (offset + alignment.toULong() - 1uL) and (alignment.toULong() - 1uL).inv()
+    fun align(offset: ULong, alignment: Int): ULong? =
+        offset.alignUp(alignment.toULong())
 
     fun u8(offset: ULong): Int = data[offset.toInt()].toInt() and 0xff
 
@@ -818,10 +821,3 @@ private class Image(private val data: ModuleData) {
 
     fun addressAt(offset: ULong, count: Int) = data.addressAt(offset.toInt(), count)
 }
-
-private fun ByteArray.u16(offset: Int): Int =
-    (this[offset].toInt() and 0xff) or ((this[offset + 1].toInt() and 0xff) shl 8)
-
-private fun ByteArray.u64(offset: Int): ULong =
-    u16(offset).toULong() or (u16(offset + 2).toULong() shl 16) or
-        (u16(offset + 4).toULong() shl 32) or (u16(offset + 6).toULong() shl 48)

@@ -370,7 +370,7 @@ object BuddyFrameAllocator {
         if (base > ULong.MAX_VALUE - (PAGE_SIZE_BYTES - 1uL)) {
             return null
         }
-        val start = maxOf(base.alignUp(PAGE_SIZE_BYTES), LOW_MEMORY_GUARD)
+        val start = maxOf(base.alignUp(PAGE_SIZE_BYTES) ?: return null, LOW_MEMORY_GUARD)
         val end = (base + minOf(length, ULong.MAX_VALUE - base))
             .alignDown(PAGE_SIZE_BYTES)
         if (end <= start) {

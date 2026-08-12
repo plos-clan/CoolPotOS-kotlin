@@ -675,7 +675,7 @@ class VirtualAddressSpace internal constructor(
     }
 
     private fun findGapLocked(windowStart: ULong, windowEnd: ULong, length: ULong): ULong? {
-        val start = windowStart.alignUp(PAGE_SIZE_BYTES)
+        val start = windowStart.alignUp(PAGE_SIZE_BYTES) ?: return null
         val end = windowEnd.alignDown(PAGE_SIZE_BYTES)
         if (start >= end || length > end - start) return null
 
@@ -688,7 +688,7 @@ class VirtualAddressSpace internal constructor(
             if (gapEnd > cursor && gapEnd - cursor >= length) {
                 best = gapEnd - length
             }
-            cursor = maxOf(cursor, region.end.alignUp(PAGE_SIZE_BYTES))
+            cursor = maxOf(cursor, region.end.alignUp(PAGE_SIZE_BYTES) ?: return best)
             if (cursor >= end) return best
         }
         if (end > cursor && end - cursor >= length) {
@@ -716,6 +716,6 @@ class VirtualAddressSpace internal constructor(
         if (length == 0uL || length > ULong.MAX_VALUE - (PAGE_SIZE_BYTES - 1uL)) {
             return null
         }
-        return length.alignUp(PAGE_SIZE_BYTES).takeIf { it != 0uL }
+        return length.alignUp(PAGE_SIZE_BYTES)
     }
 }

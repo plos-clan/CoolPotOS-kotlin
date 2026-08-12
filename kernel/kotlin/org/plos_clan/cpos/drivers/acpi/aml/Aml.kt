@@ -127,6 +127,9 @@ object Aml {
         arguments: List<AmlObject> = emptyList(),
     ): AmlObject? = parseAbsoluteName(absolutePath)?.let { evaluate(it, arguments) }
 
+    fun evaluate(value: AmlObject): AmlObject? =
+        if (initialized) evaluator.evaluate(value) else null
+
     fun findDevicesById(id: String): List<AmlDeviceInfo> =
         enumerateDevices().filter { it.matchesId(id) }
 

@@ -111,6 +111,12 @@ internal class AmlEvaluator(
     fun evaluate(node: AmlNamespaceNode, arguments: List<AmlObject> = emptyList()): AmlObject? =
         evaluateNode(node, arguments, 0, AmlBudget())
 
+    fun evaluate(value: AmlObject): AmlObject? = when (value) {
+        is AmlAlias -> namespace.resolve(value.declarationScope, value.target)
+            ?.let { evaluateNode(it, emptyList(), 0, AmlBudget()) }
+        else -> value.dereference()
+    }
+
     private fun evaluateNode(
         node: AmlNamespaceNode,
         arguments: List<AmlObject>,

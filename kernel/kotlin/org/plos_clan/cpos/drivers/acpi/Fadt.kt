@@ -10,15 +10,16 @@ import bridge.io_out16
 import bridge.io_out32
 import bridge.io_out8
 import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.UByteVar
-import org.plos_clan.cpos.mem.MmioRegion
+import org.plos_clan.cpos.drivers.acpi.aml.Aml
+import org.plos_clan.cpos.drivers.acpi.aml.AmlInteger
+import org.plos_clan.cpos.drivers.acpi.aml.AmlPackage
+import org.plos_clan.cpos.drivers.acpi.aml.dereference
+import org.plos_clan.cpos.mem.CachedMmioRegion
 import org.plos_clan.cpos.utils.checksumOk
-import org.plos_clan.cpos.utils.matchesAscii
 import org.plos_clan.cpos.utils.readU16
 import org.plos_clan.cpos.utils.readU32
 import org.plos_clan.cpos.utils.readU64
 import org.plos_clan.cpos.utils.readU8
-import org.plos_clan.cpos.utils.toVirtualPointer
 
 private const val GAS_LENGTH = 12
 
@@ -68,22 +69,6 @@ private const val FADT_X_PM_TIMER_OFFSET = 208
 private const val FADT_X_GPE0_OFFSET = 220
 private const val FADT_X_GPE1_OFFSET = 232
 
-private const val DSDT_HEADER_LENGTH = 36
-private const val DSDT_LENGTH_OFFSET = 4
-private const val MAX_DSDT_LENGTH = 16 * 1024 * 1024
-
-private const val AML_NAME_OP = 0x08u
-private const val AML_PACKAGE_OP = 0x12u
-private const val AML_ROOT_CHAR = 0x5Cu
-private const val AML_PARENT_PREFIX_CHAR = 0x5Eu
-private const val AML_ZERO_OP = 0x00u
-private const val AML_ONE_OP = 0x01u
-private const val AML_ONES_OP = 0xFFu
-private const val AML_BYTE_PREFIX = 0x0Au
-private const val AML_WORD_PREFIX = 0x0Bu
-private const val AML_DWORD_PREFIX = 0x0Cu
-private const val AML_QWORD_PREFIX = 0x0Eu
-
 private const val GAS_ACCESS_UNDEFINED = 0u
 private const val GAS_ACCESS_BYTE = 1u
 private const val GAS_ACCESS_WORD = 2u
@@ -96,6 +81,8 @@ private const val PM1_SLEEP_TYPE_MASK = 0x1C00uL
 private const val PM1_SLEEP_ENABLE = 0x2000uL
 private const val MAX_SLEEP_TYPE = 7u
 private const val ACPI_ENABLE_POLL_ATTEMPTS = 1_000_000
+
+private val fadtMemory = CachedMmioRegion()
 
 
 data class GenericAddressStructure(
@@ -206,8 +193,8 @@ object Fadt {
 
     fun shutdown(): Boolean {
         val fadt = current ?: return fail("FADT is unavailable")
-        val sleepType = findS5SleepType(fadt)
-            ?: return fail("cannot find a static _S5 package in DSDT")
+        val sleepType = findS5SleepType()
+            ?: return fail("cannot evaluate AML _S5 package")
         return shutdown(sleepType.pm1a, sleepType.pm1b)
     }
 
@@ -401,8 +388,7 @@ private fun readMmio(
     physicalAddress: ULong,
     byteCount: Int,
 ): ULong? {
-    val region = MmioRegion.map(physicalAddress, byteCount.toULong()) ?: return null
-    val address = region.addressAt(0uL, byteCount) ?: return null
+    val address = fadtMemory.addressAt(physicalAddress, byteCount) ?: return null
     return when (byteCount) {
         1 -> address.readU8().toULong()
         2 -> address.readU16().toULong()
@@ -417,8 +403,7 @@ private fun writeMmio(
     byteCount: Int,
     value: ULong,
 ): Boolean {
-    val region = MmioRegion.map(physicalAddress, byteCount.toULong()) ?: return false
-    val address = region.addressAt(0uL, byteCount) ?: return false
+    val address = fadtMemory.addressAt(physicalAddress, byteCount) ?: return false
     when (byteCount) {
         1 -> address.writeU8(value.toUByte())
         2 -> address.writeU16(value.toUShort())
@@ -461,158 +446,13 @@ private fun ULong.withSleepType(sleepType: UInt): ULong =
     (this and (PM1_SLEEP_TYPE_MASK or PM1_SLEEP_ENABLE).inv()) or
         (sleepType.toULong() shl PM1_SLEEP_TYPE_SHIFT)
 
-private data class AmlPackageBounds(
-    val contentOffset: Int,
-    val endOffset: Int,
-)
-
-private data class AmlInteger(
-    val value: ULong,
-    val nextOffset: Int,
-)
-
-private fun findS5SleepType(fadt: FadtInfo): S5SleepType? {
-    val dsdtAddress = fadt.dsdtAddress ?: return null
-    val dsdt = dsdtAddress.toVirtualPointer<UByteVar>() ?: return null
-    if (!dsdt.matchesAscii(0, "DSDT")) {
-        println("ACPI: invalid DSDT signature")
-        return null
-    }
-
-    val lengthBits = dsdt.readU32(DSDT_LENGTH_OFFSET)
-    if (lengthBits < DSDT_HEADER_LENGTH.toUInt() ||
-        lengthBits > MAX_DSDT_LENGTH.toUInt()
-    ) {
-        println("ACPI: invalid DSDT length=$lengthBits")
-        return null
-    }
-    val length = lengthBits.toInt()
-    if (!dsdt.checksumOk(length)) {
-        println("ACPI: DSDT checksum failed")
-        return null
-    }
-
-    for (nameOffset in DSDT_HEADER_LENGTH..length - 4) {
-        if (!dsdt.matchesAscii(nameOffset, "_S5_")) {
-            continue
-        }
-        if (!dsdt.isNameDefinition(nameOffset)) {
-            continue
-        }
-
-        val packageOpOffset = nameOffset + 4
-        if (packageOpOffset >= length ||
-            dsdt.readU8(packageOpOffset).toUInt() != AML_PACKAGE_OP
-        ) {
-            continue
-        }
-
-        val bounds = decodeAmlPackageLength(
-            dsdt = dsdt,
-            offset = packageOpOffset + 1,
-            limit = length,
-        ) ?: continue
-        if (bounds.contentOffset >= bounds.endOffset) {
-            continue
-        }
-
-        val elementCount = dsdt.readU8(bounds.contentOffset).toUInt()
-        if (elementCount < 2u) {
-            continue
-        }
-        val first = readAmlInteger(dsdt, bounds.contentOffset + 1, bounds.endOffset)
-            ?: continue
-        val second = readAmlInteger(dsdt, first.nextOffset, bounds.endOffset)
-            ?: continue
-        if (first.value > MAX_SLEEP_TYPE.toULong() ||
-            second.value > MAX_SLEEP_TYPE.toULong()
-        ) {
-            continue
-        }
-
-        return S5SleepType(
-            pm1a = first.value.toUInt(),
-            pm1b = second.value.toUInt(),
-        )
-    }
-    return null
-}
-
-private fun kotlinx.cinterop.CPointer<UByteVar>.isNameDefinition(nameOffset: Int): Boolean {
-    var prefixOffset = nameOffset
-    while (prefixOffset > DSDT_HEADER_LENGTH) {
-        val prefix = readU8(prefixOffset - 1).toUInt()
-        if (prefix != AML_ROOT_CHAR && prefix != AML_PARENT_PREFIX_CHAR) {
-            break
-        }
-        prefixOffset--
-    }
-    return prefixOffset > DSDT_HEADER_LENGTH &&
-        readU8(prefixOffset - 1).toUInt() == AML_NAME_OP
-}
-
-private fun decodeAmlPackageLength(
-    dsdt: kotlinx.cinterop.CPointer<UByteVar>,
-    offset: Int,
-    limit: Int,
-): AmlPackageBounds? {
-    if (offset >= limit) {
-        return null
-    }
-
-    val lead = dsdt.readU8(offset).toUInt()
-    val followingByteCount = (lead shr 6).toInt()
-    val encodedByteCount = followingByteCount + 1
-    if (offset > limit - encodedByteCount) {
-        return null
-    }
-
-    var packageLength = if (followingByteCount == 0) lead and 0x3Fu else lead and 0x0Fu
-    repeat(followingByteCount) { index ->
-        packageLength = packageLength or
-            (dsdt.readU8(offset + index + 1).toUInt() shl (4 + index * 8))
-    }
-    if (packageLength < encodedByteCount.toUInt()) {
-        return null
-    }
-
-    val endOffset = offset.toLong() + packageLength.toLong()
-    if (endOffset > limit.toLong()) {
-        return null
-    }
-    return AmlPackageBounds(
-        contentOffset = offset + encodedByteCount,
-        endOffset = endOffset.toInt(),
-    )
-}
-
-private fun readAmlInteger(
-    dsdt: kotlinx.cinterop.CPointer<UByteVar>,
-    offset: Int,
-    limit: Int,
-): AmlInteger? {
-    if (offset >= limit) {
-        return null
-    }
-
-    return when (dsdt.readU8(offset).toUInt()) {
-        AML_ZERO_OP -> AmlInteger(0uL, offset + 1)
-        AML_ONE_OP -> AmlInteger(1uL, offset + 1)
-        AML_ONES_OP -> AmlInteger(ULong.MAX_VALUE, offset + 1)
-        AML_BYTE_PREFIX -> if (offset <= limit - 2) {
-            AmlInteger(dsdt.readU8(offset + 1).toULong(), offset + 2)
-        } else null
-        AML_WORD_PREFIX -> if (offset <= limit - 3) {
-            AmlInteger(dsdt.readU16(offset + 1).toULong(), offset + 3)
-        } else null
-        AML_DWORD_PREFIX -> if (offset <= limit - 5) {
-            AmlInteger(dsdt.readU32(offset + 1).toULong(), offset + 5)
-        } else null
-        AML_QWORD_PREFIX -> if (offset <= limit - 9) {
-            AmlInteger(dsdt.readU64(offset + 1), offset + 9)
-        } else null
-        else -> null
-    }
+private fun findS5SleepType(): S5SleepType? {
+    val packageValue = Aml.evaluate("\\_S5_")?.dereference() as? AmlPackage ?: return null
+    val sleepTypes = packageValue.elements
+        .take(2)
+        .map { (Aml.evaluate(it) as? AmlInteger)?.value ?: return null }
+    if (sleepTypes.size != 2 || sleepTypes.any { it > MAX_SLEEP_TYPE.toULong() }) return null
+    return S5SleepType(sleepTypes[0].toUInt(), sleepTypes[1].toUInt())
 }
 
 object FadtParser : AcpiTableParser<FadtInfo> {

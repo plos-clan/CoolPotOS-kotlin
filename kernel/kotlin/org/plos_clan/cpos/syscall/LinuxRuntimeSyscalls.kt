@@ -11,6 +11,7 @@ import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.tasks.ResourceLimit
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.KernelRandom
+import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.PtraceRegisters
 
@@ -40,29 +41,40 @@ private const val ROBUST_LIST_SIZE = 24uL
 private const val NS_PER_SECOND = 1_000_000_000uL
 private const val NS_PER_MICROSECOND = 1_000uL
 
-private class TimeValue(val seconds: Long, val microseconds: Long) : NativeStruct() {
+private class TimeValue(val seconds: Long, val microseconds: Long) : NativeStruct {
     override fun toNativeBytes(): ByteArray = ByteArray(NATIVE_SIZE).also { buffer ->
-        putU64LE(buffer, 0, seconds.toULong())
-        putU64LE(buffer, Long.SIZE_BYTES, microseconds.toULong())
+        LittleEndianBuffer(buffer).apply {
+            writeU64(0, seconds.toULong())
+            writeU64(Long.SIZE_BYTES, microseconds.toULong())
+        }
     }
-
-    override fun updateFromNativeBytes(buffer: ByteArray): Boolean = false
 
     companion object {
         const val NATIVE_SIZE = Long.SIZE_BYTES * 2
     }
 }
 
-private class ResourceLimitValue(val limit: ResourceLimit) : NativeStruct() {
+private class ResourceLimitValue(var limit: ResourceLimit) : NativeStruct {
     override fun toNativeBytes(): ByteArray = ByteArray(NATIVE_SIZE).also { buffer ->
-        putU64LE(buffer, 0, limit.soft)
-        putU64LE(buffer, ULong.SIZE_BYTES, limit.hard)
+        LittleEndianBuffer(buffer).apply {
+            writeU64(0, limit.soft)
+            writeU64(ULong.SIZE_BYTES, limit.hard)
+        }
     }
 
-    override fun updateFromNativeBytes(buffer: ByteArray): Boolean = false
+    override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
+        if (buffer.size != NATIVE_SIZE) return false
+        val input = LittleEndianBuffer(buffer)
+        limit = ResourceLimit(input.readU64(0), input.readU64(ULong.SIZE_BYTES))
+        return true
+    }
 
     companion object {
         const val NATIVE_SIZE = ULong.SIZE_BYTES * 2
+
+        fun fromNativeBytes(buffer: ByteArray): ResourceLimitValue? =
+            ResourceLimitValue(ResourceLimit(0uL, 0uL))
+                .takeIf { it.updateFromNativeBytes(buffer) }
     }
 }
 
@@ -182,10 +194,12 @@ object LinuxRuntimeSyscalls {
             val bytes = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDX])
                 .copyFromUser(ResourceLimitValue.NATIVE_SIZE)
                 ?: return Syscall.errno(Errno.EFAULT)
-            val soft = bytes.readU64LE(0)
-            val hard = bytes.readU64LE(ULong.SIZE_BYTES)
-            if (soft > hard) return Syscall.errno(Errno.EINVAL)
-            ResourceLimit(soft, hard)
+            val limit = ResourceLimitValue.fromNativeBytes(bytes)?.limit
+                ?: return Syscall.errno(Errno.EFAULT)
+            if (limit.soft > limit.hard) {
+                return Syscall.errno(Errno.EINVAL)
+            }
+            limit
         }
         val current = target.resourceLimits.get(resource)
         if (regs[PtraceRegisters.IDX_R10] != 0uL &&
@@ -236,7 +250,7 @@ object LinuxRuntimeSyscalls {
         if (setAddress == 0uL) return 0L
         val set = UserMemory(process.addressSpace, setAddress).copyFromUser(ULong.SIZE_BYTES)
             ?: return Syscall.errno(Errno.EFAULT)
-        val mask = set.readU64LE(0)
+        val mask = LittleEndianBuffer(set).readU64(0)
         process.signalMask = when (regs[PtraceRegisters.IDX_RDI].toInt()) {
             SIG_BLOCK -> process.signalMask or mask
             SIG_UNBLOCK -> process.signalMask and mask.inv()
@@ -260,11 +274,4 @@ object LinuxRuntimeSyscalls {
     private fun copyToUser(process: Process, address: ULong, bytes: ByteArray): Long =
         if (UserMemory(process.addressSpace, address).copyToUser(bytes)) 0L else Syscall.errno(Errno.EFAULT)
 
-    private fun ByteArray.readU64LE(offset: Int): ULong {
-        var value = 0uL
-        repeat(ULong.SIZE_BYTES) { index ->
-            value = value or (this[offset + index].toUByte().toULong() shl (index * Byte.SIZE_BITS))
-        }
-        return value
-    }
 }

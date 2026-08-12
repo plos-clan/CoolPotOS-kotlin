@@ -325,7 +325,11 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
         val virtualBase = virtualAddress.alignDown(PAGE_SIZE_BYTES)
         val physicalBase = physicalAddress.alignDown(PAGE_SIZE_BYTES)
         val leadingOffset = virtualAddress - virtualBase
+        if (byteLength > ULong.MAX_VALUE - leadingOffset) {
+            return false
+        }
         val mappedLength = (byteLength + leadingOffset).alignUp(PAGE_SIZE_BYTES)
+            ?: return false
 
         var offset = 0uL
         while (offset < mappedLength) {
@@ -342,8 +346,12 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
             return Hhdm.toVirtual(physicalAddress)
         }
 
+        if (physicalAddress > ULong.MAX_VALUE - byteLength) {
+            return null
+        }
         val physicalBase = physicalAddress.alignDown(PAGE_SIZE_BYTES)
         val physicalEnd = (physicalAddress + byteLength).alignUp(PAGE_SIZE_BYTES)
+            ?: return null
         val length = physicalEnd - physicalBase
         val virtualBase = Hhdm.toVirtual(physicalBase)
 

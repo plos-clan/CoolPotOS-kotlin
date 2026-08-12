@@ -25,19 +25,17 @@ fun <T : CPointed> ULong.toPointer(): CPointer<T>? = toLong().toCPointer()
 
 fun CPointer<UByteVar>.readU8(offset: Int): UByte = this[offset]
 
-private fun CPointer<UByteVar>.readLittleEndian(offset: Int, byteCount: Int): ULong =
-    (0 until byteCount).fold(0uL) { value, byteIndex ->
-        value or (readU8(offset + byteIndex).toULong() shl (byteIndex * Byte.SIZE_BITS))
-    }
-
 fun CPointer<UByteVar>.readU16(offset: Int): UShort =
-    readLittleEndian(offset, UShort.SIZE_BYTES).toUShort()
+    (readU8(offset).toUInt() or
+        (readU8(offset + 1).toUInt() shl Byte.SIZE_BITS)).toUShort()
 
 fun CPointer<UByteVar>.readU32(offset: Int): UInt =
-    readLittleEndian(offset, UInt.SIZE_BYTES).toUInt()
+    readU16(offset).toUInt() or
+        (readU16(offset + UShort.SIZE_BYTES).toUInt() shl UShort.SIZE_BITS)
 
 fun CPointer<UByteVar>.readU64(offset: Int): ULong =
-    readLittleEndian(offset, ULong.SIZE_BYTES)
+    readU32(offset).toULong() or
+        (readU32(offset + UInt.SIZE_BYTES).toULong() shl UInt.SIZE_BITS)
 
 fun CPointer<UByteVar>.matchesAscii(offset: Int, text: String): Boolean =
     text.indices.all { index -> readU8(offset + index) == text[index].code.toUByte() }
@@ -50,23 +48,35 @@ fun CPointer<UByteVar>.checksumOk(length: Int): Boolean {
         .fold(0u) { sum, index -> (sum + readU8(index).toUInt()) and 0xffu } == 0u
 }
 
-fun ULong.alignUp(alignment: ULong): ULong {
-    if (alignment == 0uL) {
-        return this
+fun ULong.alignUp(alignment: ULong): ULong? {
+    require(alignment != 0uL) { "Alignment must be positive" }
+    val adjustment = if (alignment and (alignment - 1uL) == 0uL) {
+        val mask = alignment - 1uL
+        (alignment - (this and mask)) and mask
+    } else {
+        val remainder = this % alignment
+        if (remainder == 0uL) 0uL else alignment - remainder
     }
-    val mask = alignment - 1uL
-    return (this + mask) and mask.inv()
+    return if (this <= ULong.MAX_VALUE - adjustment) this + adjustment else null
 }
 
 fun ULong.alignDown(alignment: ULong): ULong {
-    if (alignment == 0uL) {
-        return this
+    require(alignment != 0uL) { "Alignment must be positive" }
+    return if (alignment and (alignment - 1uL) == 0uL) {
+        this and (alignment - 1uL).inv()
+    } else {
+        this - this % alignment
     }
-    val mask = alignment - 1uL
-    return this and mask.inv()
 }
 
-fun ULong.isPageAligned(): Boolean = (this and (PAGE_SIZE_BYTES - 1uL)) == 0uL
+fun ULong.isAligned(alignment: ULong): Boolean =
+    when {
+        alignment == 0uL -> false
+        alignment and (alignment - 1uL) == 0uL -> this and (alignment - 1uL) == 0uL
+        else -> this % alignment == 0uL
+    }
+
+fun ULong.isPageAligned(): Boolean = isAligned(PAGE_SIZE_BYTES)
 
 fun <T : CPointed> ULong.toVirtualPointer(): CPointer<T>? = Hhdm.toVirtualPointer(this)
 
@@ -76,72 +86,98 @@ fun CPointer<ULongVar>.clear() {
     }
 }
 
-abstract class NativeStruct {
-    protected fun putU16LE(
-        buffer: ByteArray,
-        offset: Int,
-        value: Short,
-    ) {
-        val bits = value.toUShort().toUInt()
-        buffer[offset] = (bits and 0xffu).toByte()
-        buffer[offset + 1] = ((bits shr 8) and 0xffu).toByte()
+value class LittleEndianBuffer(private val bytes: ByteArray) {
+    fun readU8(offset: Int): UByte {
+        requireRange(offset, UByte.SIZE_BYTES)
+        return bytes[offset].toUByte()
     }
 
-    protected fun putU32LE(
-        buffer: ByteArray,
-        offset: Int,
-        value: Int,
-    ) {
+    fun readU16(offset: Int): UShort {
+        requireRange(offset, UShort.SIZE_BYTES)
+        return (bytes[offset].toUByte().toUInt() or
+            (bytes[offset + 1].toUByte().toUInt() shl Byte.SIZE_BITS)).toUShort()
+    }
+
+    fun readU32(offset: Int): UInt {
+        requireRange(offset, UInt.SIZE_BYTES)
+        return bytes[offset].toUByte().toUInt() or
+            (bytes[offset + 1].toUByte().toUInt() shl 8) or
+            (bytes[offset + 2].toUByte().toUInt() shl 16) or
+            (bytes[offset + 3].toUByte().toUInt() shl 24)
+    }
+
+    fun readU64(offset: Int): ULong {
+        requireRange(offset, ULong.SIZE_BYTES)
+        return bytes[offset].toUByte().toULong() or
+            (bytes[offset + 1].toUByte().toULong() shl 8) or
+            (bytes[offset + 2].toUByte().toULong() shl 16) or
+            (bytes[offset + 3].toUByte().toULong() shl 24) or
+            (bytes[offset + 4].toUByte().toULong() shl 32) or
+            (bytes[offset + 5].toUByte().toULong() shl 40) or
+            (bytes[offset + 6].toUByte().toULong() shl 48) or
+            (bytes[offset + 7].toUByte().toULong() shl 56)
+    }
+
+    fun readUnsigned(offset: Int, byteCount: Int): ULong {
+        require(byteCount in 0..ULong.SIZE_BYTES) {
+            "Little-endian integer width must be between 0 and ${ULong.SIZE_BYTES} bytes"
+        }
+        return when (byteCount) {
+            0 -> {
+                requireRange(offset, 0)
+                0uL
+            }
+            UByte.SIZE_BYTES -> readU8(offset).toULong()
+            UShort.SIZE_BYTES -> readU16(offset).toULong()
+            UInt.SIZE_BYTES -> readU32(offset).toULong()
+            ULong.SIZE_BYTES -> readU64(offset)
+            else -> {
+                requireRange(offset, byteCount)
+                var value = 0uL
+                repeat(byteCount) { index ->
+                    value = value or
+                        (bytes[offset + index].toUByte().toULong() shl (index * Byte.SIZE_BITS))
+                }
+                value
+            }
+        }
+    }
+
+    fun writeU16(offset: Int, value: UShort) {
+        requireRange(offset, UShort.SIZE_BYTES)
         val bits = value.toUInt()
-        buffer[offset] = (bits and 0xffu).toByte()
-        buffer[offset + 1] = ((bits shr 8) and 0xffu).toByte()
-        buffer[offset + 2] = ((bits shr 16) and 0xffu).toByte()
-        buffer[offset + 3] = ((bits shr 24) and 0xffu).toByte()
+        bytes[offset] = bits.toByte()
+        bytes[offset + 1] = (bits shr 8).toByte()
     }
 
-    protected fun putU64LE(
-        buffer: ByteArray,
-        offset: Int,
-        value: ULong,
-    ) {
-        buffer[offset] = (value and 0xffu).toByte()
-        buffer[offset + 1] = ((value shr 8) and 0xffu).toByte()
-        buffer[offset + 2] = ((value shr 16) and 0xffu).toByte()
-        buffer[offset + 3] = ((value shr 24) and 0xffu).toByte()
-        buffer[offset + 4] = ((value shr 32) and 0xffu).toByte()
-        buffer[offset + 5] = ((value shr 40) and 0xffu).toByte()
-        buffer[offset + 6] = ((value shr 48) and 0xffu).toByte()
-        buffer[offset + 7] = ((value shr 56) and 0xffu).toByte()
+    fun writeU32(offset: Int, value: UInt) {
+        requireRange(offset, UInt.SIZE_BYTES)
+        bytes[offset] = value.toByte()
+        bytes[offset + 1] = (value shr 8).toByte()
+        bytes[offset + 2] = (value shr 16).toByte()
+        bytes[offset + 3] = (value shr 24).toByte()
     }
 
-    protected fun getU32LE(
-        buffer: ByteArray,
-        offset: Int,
-    ): Int {
-        require(offset >= 0 && offset <= buffer.size - UInt.SIZE_BYTES) {
-            "32-bit field at offset $offset exceeds a ${buffer.size}-byte structure"
-        }
-        return (
-            buffer[offset].toUByte().toUInt() or
-                (buffer[offset + 1].toUByte().toUInt() shl 8) or
-                (buffer[offset + 2].toUByte().toUInt() shl 16) or
-                (buffer[offset + 3].toUByte().toUInt() shl 24)
-        ).toInt()
+    fun writeU64(offset: Int, value: ULong) {
+        requireRange(offset, ULong.SIZE_BYTES)
+        bytes[offset] = value.toByte()
+        bytes[offset + 1] = (value shr 8).toByte()
+        bytes[offset + 2] = (value shr 16).toByte()
+        bytes[offset + 3] = (value shr 24).toByte()
+        bytes[offset + 4] = (value shr 32).toByte()
+        bytes[offset + 5] = (value shr 40).toByte()
+        bytes[offset + 6] = (value shr 48).toByte()
+        bytes[offset + 7] = (value shr 56).toByte()
     }
 
-    protected fun getU64LE(
-        buffer: ByteArray,
-        offset: Int,
-    ): ULong {
-        require(offset >= 0 && offset <= buffer.size - ULong.SIZE_BYTES) {
-            "64-bit field at offset $offset exceeds a ${buffer.size}-byte structure"
-        }
-
-        return (0 until ULong.SIZE_BYTES).fold(0uL) { value, byteIndex ->
-            value or (buffer[offset + byteIndex].toUByte().toULong() shl (byteIndex * Byte.SIZE_BITS))
+    private fun requireRange(offset: Int, byteCount: Int) {
+        require(offset >= 0 && byteCount >= 0 && offset <= bytes.size - byteCount) {
+            "$byteCount-byte field at offset $offset exceeds a ${bytes.size}-byte buffer"
         }
     }
+}
 
-    abstract fun toNativeBytes(): ByteArray
-    abstract fun updateFromNativeBytes(buffer: ByteArray): Boolean
+interface NativeStruct {
+    fun toNativeBytes(): ByteArray
+    fun updateFromNativeBytes(buffer: ByteArray): Boolean = false
 }

@@ -30,8 +30,9 @@ import org.plos_clan.cpos.syscall.Syscall.partialOrError
 import org.plos_clan.cpos.syscall.Syscall.userMemory
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.Scheduler
-import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.Errno
+import org.plos_clan.cpos.utils.LittleEndianBuffer
+import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.PollEvents
 import org.plos_clan.cpos.utils.PtraceRegisters
 
@@ -81,23 +82,23 @@ private const val ST_NOSUID = 0x2uL
 private const val ST_NODEV = 0x4uL
 private const val ST_NOEXEC = 0x8uL
 
-private class LinuxStat(private val inode: Inode) : NativeStruct() {
+private class LinuxStat(private val inode: Inode) : NativeStruct {
     override fun toNativeBytes(): ByteArray = ByteArray(STAT_SIZE).also { buffer ->
         val metadata = inode.metadata()
-        putU64LE(buffer, 0, 0uL) // st_dev
-        putU64LE(buffer, 8, inode.id.value)
-        putU64LE(buffer, 16, metadata.linkCount.toULong())
-        putU32LE(buffer, 24, (metadata.mode.bits or typeBits(inode.type)).toInt())
-        putU32LE(buffer, 28, metadata.uid.toInt())
-        putU32LE(buffer, 32, metadata.gid.toInt())
-        putU32LE(buffer, 36, 0) // __pad0
-        putU64LE(buffer, 40, metadata.deviceNumber)
-        putU64LE(buffer, 48, metadata.size)
-        putU64LE(buffer, 56, STAT_BLKSIZE)
-        putU64LE(buffer, 64, blocksFor(metadata.size))
+        LittleEndianBuffer(buffer).apply {
+            writeU64(0, 0uL) // st_dev
+            writeU64(8, inode.id.value)
+            writeU64(16, metadata.linkCount.toULong())
+            writeU32(24, metadata.mode.bits or typeBits(inode.type))
+            writeU32(28, metadata.uid)
+            writeU32(32, metadata.gid)
+            writeU32(36, 0u) // __pad0
+            writeU64(40, metadata.deviceNumber)
+            writeU64(48, metadata.size)
+            writeU64(56, STAT_BLKSIZE)
+            writeU64(64, blocksFor(metadata.size))
+        }
     }
-
-    override fun updateFromNativeBytes(buffer: ByteArray): Boolean = false
 
     private fun typeBits(type: InodeType): UInt = when (type) {
         InodeType.REGULAR -> S_IFREG
@@ -117,16 +118,16 @@ private class LinuxStat(private val inode: Inode) : NativeStruct() {
         }
 }
 
-private class LinuxStatFs(private val path: VfsPath) : NativeStruct() {
+private class LinuxStatFs(private val path: VfsPath) : NativeStruct {
     override fun toNativeBytes(): ByteArray = ByteArray(STATFS_SIZE).also { buffer ->
-        putU64LE(buffer, 0, path.mount.superBlock.type.magic)
-        putU64LE(buffer, 8, STAT_BLKSIZE)
-        putU64LE(buffer, 64, 255uL)
-        putU64LE(buffer, 72, STAT_BLKSIZE)
-        putU64LE(buffer, 80, path.mount.flags.toStatFsFlags())
+        LittleEndianBuffer(buffer).apply {
+            writeU64(0, path.mount.superBlock.type.magic)
+            writeU64(8, STAT_BLKSIZE)
+            writeU64(64, 255uL)
+            writeU64(72, STAT_BLKSIZE)
+            writeU64(80, path.mount.flags.toStatFsFlags())
+        }
     }
-
-    override fun updateFromNativeBytes(buffer: ByteArray): Boolean = false
 
     private fun MountFlags.toStatFsFlags(): ULong {
         var result = 0uL
@@ -141,7 +142,7 @@ private class LinuxStatFs(private val path: VfsPath) : NativeStruct() {
 private class LinuxDirent64(
     private val entry: DirectoryEntry,
     private val nextOffset: Long,
-) : NativeStruct() {
+) : NativeStruct {
     private val name = entry.name.copyBytes()
 
     val recordSize: Int =
@@ -149,14 +150,14 @@ private class LinuxDirent64(
             DIRENT64_ALIGNMENT * DIRENT64_ALIGNMENT
 
     override fun toNativeBytes(): ByteArray = ByteArray(recordSize).also { buffer ->
-        putU64LE(buffer, 0, entry.inodeId.value)
-        putU64LE(buffer, 8, nextOffset.toULong())
-        putU16LE(buffer, 16, recordSize.toShort())
+        LittleEndianBuffer(buffer).apply {
+            writeU64(0, entry.inodeId.value)
+            writeU64(8, nextOffset.toULong())
+            writeU16(16, recordSize.toUShort())
+        }
         buffer[18] = entry.type.directoryEntryType
         name.copyInto(buffer, DIRENT64_HEADER_SIZE)
     }
-
-    override fun updateFromNativeBytes(buffer: ByteArray): Boolean = false
 
     private val InodeType.directoryEntryType: Byte
         get() = when (this) {
@@ -308,8 +309,10 @@ fun sysPipe2(regs: PtraceRegisters, process: Process): Long {
     }
 
     val output = ByteArray(Int.SIZE_BYTES * 2).also { bytes ->
-        bytes.writeI32LE(0, readFd)
-        bytes.writeI32LE(Int.SIZE_BYTES, writeFd)
+        LittleEndianBuffer(bytes).apply {
+            writeU32(0, readFd.toUInt())
+            writeU32(Int.SIZE_BYTES, writeFd.toUInt())
+        }
     }
     if (!UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI]).copyToUser(output)) {
         process.fdTable.close(readFd)
@@ -1008,13 +1011,14 @@ private fun readPselectTimeout(process: Process, address: ULong): VfsResult<Sele
 private fun readPselectSignalMask(process: Process, address: ULong): VfsResult<ULong> {
     val descriptor = UserMemory(process.addressSpace, address).copyFromUser(ULong.SIZE_BYTES * 2)
         ?: return VfsResult.Err(VfsError.FAULT)
-    val signalSet = descriptor.readU64LE(0)
-    val size = descriptor.readU64LE(ULong.SIZE_BYTES)
+    val input = LittleEndianBuffer(descriptor)
+    val signalSet = input.readU64(0)
+    val size = input.readU64(ULong.SIZE_BYTES)
     if (signalSet == 0uL) return VfsResult.Ok(process.signalMask)
     if (size != ULong.SIZE_BYTES.toULong()) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
     val mask = UserMemory(process.addressSpace, signalSet).copyFromUser(ULong.SIZE_BYTES)
         ?: return VfsResult.Err(VfsError.FAULT)
-    return VfsResult.Ok(mask.readU64LE(0))
+    return VfsResult.Ok(LittleEndianBuffer(mask).readU64(0))
 }
 
 private fun timeoutDeadline(timeout: SelectTimeout): ULong {
@@ -1073,10 +1077,11 @@ private fun scanPollDescriptors(
     count: Int,
 ): Int {
     var ready = 0
+    val input = LittleEndianBuffer(descriptors)
     repeat(count) { index ->
         val offset = index * POLL_FD_SIZE
-        val fd = descriptors.readI32LE(offset)
-        val requested = descriptors.readU16LE(offset + Int.SIZE_BYTES)
+        val fd = input.readU32(offset).toInt()
+        val requested = input.readU16(offset + Int.SIZE_BYTES).toInt()
         val returned = when {
             fd < 0 -> 0
             else -> {
@@ -1099,34 +1104,12 @@ private fun scanPollDescriptors(
             }
         }
 
-        descriptors.writeU16LE(offset + Int.SIZE_BYTES + Short.SIZE_BYTES, returned)
+        input.writeU16(offset + Int.SIZE_BYTES + Short.SIZE_BYTES, returned.toUShort())
         if (returned != 0) {
             ready++
         }
     }
     return ready
-}
-
-private fun ByteArray.readI32LE(offset: Int): Int =
-    (this[offset].toUByte().toUInt() or
-        (this[offset + 1].toUByte().toUInt() shl 8) or
-        (this[offset + 2].toUByte().toUInt() shl 16) or
-        (this[offset + 3].toUByte().toUInt() shl 24)).toInt()
-
-private fun ByteArray.readU16LE(offset: Int): Int =
-    this[offset].toUByte().toInt() or
-        (this[offset + 1].toUByte().toInt() shl 8)
-
-private fun ByteArray.writeU16LE(offset: Int, value: Int) {
-    this[offset] = value.toByte()
-    this[offset + 1] = (value ushr 8).toByte()
-}
-
-private fun ByteArray.writeI32LE(offset: Int, value: Int) {
-    this[offset] = value.toByte()
-    this[offset + 1] = (value ushr 8).toByte()
-    this[offset + 2] = (value ushr 16).toByte()
-    this[offset + 3] = (value ushr 24).toByte()
 }
 
 fun sysRead(regs: PtraceRegisters, process: Process): Long {
@@ -1279,6 +1262,8 @@ private class IoVectorCursor(
     private val vectors: ByteArray,
     private val vectorCount: Int,
 ) {
+    private val input = LittleEndianBuffer(vectors)
+
     var remaining = totalLength()
         private set
 
@@ -1312,7 +1297,7 @@ private class IoVectorCursor(
         while (processed < count) {
             if (currentIndex >= vectorCount) return false
             val vectorOffset = currentIndex * IO_VECTOR_SIZE
-            val vectorLength = vectors.readU64LE(vectorOffset + ULong.SIZE_BYTES)
+            val vectorLength = input.readU64(vectorOffset + ULong.SIZE_BYTES)
             if (currentOffset >= vectorLength) {
                 currentIndex++
                 currentOffset = 0uL
@@ -1325,7 +1310,7 @@ private class IoVectorCursor(
             ).toInt()
             val user = userMemory(
                 process,
-                vectors.readU64LE(vectorOffset),
+                input.readU64(vectorOffset),
                 currentOffset,
             ) ?: return false
             if (!operation(user, processed, size)) return false
@@ -1344,20 +1329,11 @@ private class IoVectorCursor(
     private fun totalLength(): ULong {
         var total = 0uL
         repeat(vectorCount) { current ->
-            val length = vectors.readU64LE(current * IO_VECTOR_SIZE + ULong.SIZE_BYTES)
+            val length = input.readU64(current * IO_VECTOR_SIZE + ULong.SIZE_BYTES)
             total += minOf(length, MAX_RW_COUNT - total)
         }
         return total
     }
-}
-
-private fun ByteArray.readU64LE(offset: Int): ULong {
-    var value = 0uL
-    repeat(ULong.SIZE_BYTES) { byteIndex ->
-        value = value or
-            (this[offset + byteIndex].toUByte().toULong() shl (byteIndex * Byte.SIZE_BITS))
-    }
-    return value
 }
 
 fun sysIoctl(regs: PtraceRegisters, process: Process): Long {

@@ -15,7 +15,7 @@ import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
-import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
+import org.plos_clan.cpos.utils.isPageAligned
 import org.plos_clan.cpos.utils.PtraceRegisters
 
 private const val MAP_SHARED = 0x01uL
@@ -124,7 +124,7 @@ fun sysMmap(regs: PtraceRegisters, process: Process): Long {
     if ((flags and MAP_HUGETLB) != 0uL || (flags and MAP_SYNC) != 0uL) {
         return errno(Errno.ENOTSUP)
     }
-    if ((offset and (PAGE_SIZE_BYTES - 1uL)) != 0uL ||
+    if (!offset.isPageAligned() ||
         anonymous && offset != 0uL
     ) {
         return errno(Errno.EINVAL)
@@ -134,7 +134,7 @@ fun sysMmap(regs: PtraceRegisters, process: Process): Long {
     val fixed = (flags and (MAP_FIXED or MAP_FIXED_NOREPLACE)) != 0uL
     val noReplace = (flags and MAP_FIXED_NOREPLACE) != 0uL
     val access = protection and SUPPORTED_PROT
-    if (fixed && (hint and (PAGE_SIZE_BYTES - 1uL)) != 0uL) {
+    if (fixed && !hint.isPageAligned()) {
         return errno(Errno.EINVAL)
     }
 
