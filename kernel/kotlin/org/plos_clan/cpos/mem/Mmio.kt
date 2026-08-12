@@ -40,6 +40,12 @@ value class MmioAddress(val value: ULong) {
     fun writeU64(value: ULong) {
         this.value.toPointer<ULongVar>()?.set(0, value)
     }
+
+    /** Writes a 64-bit register represented by two adjacent 32-bit MMIO words. */
+    fun writeSplitU64(value: ULong, lowMask: UInt = 0u) {
+        writeU32(value.toUInt() or lowMask)
+        (this + UInt.SIZE_BYTES.toULong()).writeU32((value shr UInt.SIZE_BITS).toUInt())
+    }
 }
 
 class MmioRegion private constructor(
