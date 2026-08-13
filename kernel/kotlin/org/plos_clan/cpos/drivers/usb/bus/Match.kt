@@ -1,6 +1,6 @@
 package org.plos_clan.cpos.drivers.usb.bus
 
-internal fun UsbDevice.matchDrivers() {
+internal suspend fun UsbDevice.matchDrivers() {
     if (usbDrivers.isEmpty()) {
         println("No USB drivers registered")
         return

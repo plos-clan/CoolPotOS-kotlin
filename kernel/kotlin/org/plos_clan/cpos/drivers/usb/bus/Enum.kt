@@ -215,7 +215,7 @@ private fun UsbDevice.parseInterfaceDescriptor(ptr: CPointer<UByteVar>) {
 
 private fun UsbDevice.parseHidDescriptor(ptr: CPointer<UByteVar>) {
     val iface = interfaces.lastOrNull() ?: return
-    val numDescriptors = ptr.readU8(6)
+    val numDescriptors = ptr.readU8(5)
     var pos = HidDescriptorHeader.SIZE_BYTES
 
     repeat(numDescriptors.toInt()) {

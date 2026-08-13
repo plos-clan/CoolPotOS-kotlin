@@ -67,7 +67,7 @@ data class HidDescriptorHeader(
     val numDescriptors: UByte,
 ) {
     companion object {
-        const val SIZE_BYTES = 9
+        const val SIZE_BYTES = 6
     }
 }
 

@@ -7,6 +7,7 @@ import org.plos_clan.cpos.drivers.usb.xhci.Xhci
 object Usb {
     fun initialize() {
         println("Initializing USB subsystem...")
+        ClassDrivers.initialize()
 
         for (device in Pcie.enumeratedDevices) {
             if (device.deviceType != PciDeviceType.USB_CONTROLLER) {

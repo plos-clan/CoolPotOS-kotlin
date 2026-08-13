@@ -24,6 +24,6 @@ interface UsbDriver {
     fun handleCompletion(event: CompletionEvent)
 }
 
-typealias ProbeFn = (UsbInterface) -> UsbDriver?
+typealias ProbeFn = suspend (UsbInterface) -> UsbDriver?
 
 val usbDrivers = mutableListOf<ProbeFn>()
