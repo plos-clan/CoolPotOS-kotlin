@@ -10,7 +10,7 @@ import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.MemoryRegion
 import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
-import org.plos_clan.cpos.mem.VirtualAddressSpace
+import org.plos_clan.cpos.mem.AddressSpace
 import org.plos_clan.cpos.mem.MEMORY_REGION_EXECUTABLE
 import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.mem.MEMORY_REGION_WRITABLE
@@ -73,7 +73,7 @@ object ElfLoader {
         arguments: List<String> = listOf(path),
         environment: List<String> = emptyList(),
     ): UserProcessImage? {
-        val addressSpace = VirtualAddressSpace(KernelPageDirectory.getDirectory().createUserDirectory())
+        val addressSpace = AddressSpace.user(KernelPageDirectory.getDirectory().createUserDirectory())
         var installed = false
         try {
             val executableFile = open(process, path) ?: return null
@@ -156,7 +156,7 @@ object ElfLoader {
 
     private fun loadImage(
         file: ElfFile,
-        addressSpace: VirtualAddressSpace,
+        addressSpace: AddressSpace,
         name: String,
         loadBias: ULong,
     ): ElfLoadResult? {

@@ -2,6 +2,8 @@
 
 package org.plos_clan.cpos.mem
 
+import kotlinx.cinterop.CPointed
+import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.UIntVar
@@ -12,7 +14,9 @@ import kotlinx.cinterop.set
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
+import org.plos_clan.cpos.utils.hex
 import org.plos_clan.cpos.utils.toPointer
+import platform.posix.memset
 
 value class MmioAddress(val value: ULong) {
     operator fun plus(offset: ULong): MmioAddress = MmioAddress(value + offset)
@@ -41,7 +45,6 @@ value class MmioAddress(val value: ULong) {
         this.value.toPointer<ULongVar>()?.set(0, value)
     }
 
-    /** Writes a 64-bit register represented by two adjacent 32-bit MMIO words. */
     fun writeSplitU64(value: ULong, lowMask: UInt = 0u) {
         writeU32(value.toUInt() or lowMask)
         (this + UInt.SIZE_BYTES.toULong()).writeU32((value shr UInt.SIZE_BITS).toUInt())
@@ -52,6 +55,7 @@ class MmioRegion private constructor(
     val physicalAddress: ULong,
     val virtualAddress: ULong,
     val byteLength: ULong,
+    private var ownedFrames: ULong,
 ) {
     fun addressAt(offset: ULong, width: Int = 1): MmioAddress? {
         if (width <= 0) return null
@@ -63,12 +67,65 @@ class MmioRegion private constructor(
         return MmioAddress(virtualAddress + offset)
     }
 
+    fun <T : CPointed> view(): CPointer<T> =
+        requireNotNull(virtualAddress.toPointer<T>()) {
+            "MmioRegion: virtual address ${virtualAddress.hex()} is not valid"
+        }
+
+    fun free() {
+        KernelPageDirectory.addressSpace.unmap(virtualAddress, byteLength)
+        val frames = ownedFrames
+        ownedFrames = 0uL
+        if (frames > 0uL) {
+            BuddyFrameAllocator.freeFrames(physicalAddress, frames)
+        }
+    }
+
     companion object {
         fun map(physicalAddress: ULong, byteLength: ULong): MmioRegion? {
             if (byteLength == 0uL) return null
             if (physicalAddress > ULong.MAX_VALUE - byteLength) return null
-            val virtualAddress = KernelPageDirectory.mapMmio(physicalAddress, byteLength) ?: return null
-            return MmioRegion(physicalAddress, virtualAddress, byteLength)
+
+            val virtualAddress = mapPhysical(physicalAddress, byteLength, populate = false)
+                ?: return null
+            return MmioRegion(physicalAddress, virtualAddress, byteLength, 0uL)
+        }
+
+        fun allocate(pageCount: ULong = 1uL): MmioRegion? {
+            require(pageCount > 0uL) { "pageCount must be positive" }
+
+            val physical = BuddyFrameAllocator.allocateFrames(pageCount) ?: return null
+            val byteLength = pageCount * PAGE_SIZE_BYTES
+            val virtual = mapPhysical(physical, byteLength, populate = true) ?: run {
+                BuddyFrameAllocator.freeFrames(physical, pageCount)
+                return null
+            }
+            memset(virtual.toPointer<UByteVar>(), 0, byteLength)
+            return MmioRegion(physical, virtual, byteLength, pageCount)
+        }
+
+        private fun mapPhysical(
+            physicalAddress: ULong,
+            byteLength: ULong,
+            populate: Boolean,
+        ): ULong? {
+            val result = KernelPageDirectory.addressSpace.map(
+                MemoryMapRequest(
+                    hint = 0uL,
+                    length = byteLength,
+                    access = MEMORY_REGION_READABLE or MEMORY_REGION_WRITABLE,
+                    fixed = false,
+                    noReplace = false,
+                    shared = false,
+                    type = MemoryRegionType.MMIO,
+                    offset = physicalAddress,
+                    populate = populate,
+                ),
+            )
+            return when (result) {
+                is MemoryMapResult.Ok -> result.value
+                is MemoryMapResult.Err -> null
+            }
         }
     }
 }

@@ -5,9 +5,9 @@ package org.plos_clan.cpos.drivers.usb.xhci.core
 import kotlinx.cinterop.UIntVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set
-import org.plos_clan.cpos.mem.DmaBuffer
+import org.plos_clan.cpos.mem.MmioRegion
 
-class ErstEntry(buffer: DmaBuffer) {
+class ErstEntry(buffer: MmioRegion) {
     private val words = buffer.view<UIntVar>()
 
     var baseAddress: ULong
@@ -24,7 +24,7 @@ class ErstEntry(buffer: DmaBuffer) {
         }
 }
 
-class SlotContext(buffer: DmaBuffer, contextSize: Int) {
+class SlotContext(buffer: MmioRegion, contextSize: Int) {
     private val words = buffer.view<UIntVar>()
     private val base = contextSize / UInt.SIZE_BYTES
 
@@ -68,7 +68,7 @@ class SlotContext(buffer: DmaBuffer, contextSize: Int) {
     }
 }
 
-class InputControlContext(buffer: DmaBuffer) {
+class InputControlContext(buffer: MmioRegion) {
     private val words = buffer.view<UIntVar>()
 
     var dropFlags: UInt
@@ -84,7 +84,7 @@ class InputControlContext(buffer: DmaBuffer) {
         }
 }
 
-class EndpointContext(buffer: DmaBuffer, dci: Int, contextSize: Int) {
+class EndpointContext(buffer: MmioRegion, dci: Int, contextSize: Int) {
     private val words = buffer.view<UIntVar>()
     private val base = (dci + 1) * contextSize / UInt.SIZE_BYTES
 

@@ -6,6 +6,7 @@ import bridge.read_cr2
 import bridge.read_cr3
 import bridge.register_interrupt_handler
 import kotlinx.cinterop.*
+import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.mem.PageFaultResult
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.SMProcessor
@@ -111,15 +112,18 @@ fun pageFault(frame: COpaquePointer?, ecode: ULong, interruptedRbp: ULong) {
         ((ecode and PAGE_FAULT_PRESENT) == 0uL ||
             (ecode and PAGE_FAULT_WRITE) != 0uL ||
             (ecode and PAGE_FAULT_INSTRUCTION) != 0uL)
-    if (cameFromUser && canResolve) {
-        val resolution = ProcessManager.currentProcess()
-            ?.takeUnless { it.isKernelProcess }
-            ?.addressSpace
-            ?.faultIn(
-                address = read_cr2(),
-                write = (ecode and PAGE_FAULT_WRITE) != 0uL,
-                execute = (ecode and PAGE_FAULT_INSTRUCTION) != 0uL,
-            )
+    if (canResolve) {
+        val address = read_cr2()
+        val write = (ecode and PAGE_FAULT_WRITE) != 0uL
+        val execute = (ecode and PAGE_FAULT_INSTRUCTION) != 0uL
+        val resolution = if (cameFromUser) {
+            ProcessManager.currentProcess()
+                ?.takeUnless { it.isKernelProcess }
+                ?.addressSpace
+                ?.faultIn(address, write, execute)
+        } else {
+            KernelPageDirectory.addressSpace.faultIn(address, write, execute)
+        }
         if (resolution == PageFaultResult.RESOLVED) {
             return
         }

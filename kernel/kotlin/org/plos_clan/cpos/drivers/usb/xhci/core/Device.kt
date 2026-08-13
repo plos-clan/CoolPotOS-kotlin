@@ -15,13 +15,13 @@ import org.plos_clan.cpos.drivers.usb.defs.SPEED_FULL
 import org.plos_clan.cpos.drivers.usb.defs.SPEED_HIGH
 import org.plos_clan.cpos.drivers.usb.defs.SPEED_LOW
 import org.plos_clan.cpos.drivers.usb.defs.SPEED_SUPER
-import org.plos_clan.cpos.mem.DmaBuffer
+import org.plos_clan.cpos.mem.MmioRegion
 import platform.posix.memcpy
 
 suspend fun Xhci.addressDevice(portId: Int, slotId: UByte, speedId: UInt): Boolean {
     println("Addressing device on slot $slotId...")
 
-    val outContext = requireNotNull(DmaBuffer.allocate())
+    val outContext = requireNotNull(MmioRegion.allocate())
     dcbaa!!.view<ULongVar>()[slotId.toInt()] = outContext.physicalAddress
     slots[slotId.toInt()] = Slot(
         id = slotId,
@@ -34,7 +34,7 @@ suspend fun Xhci.addressDevice(portId: Int, slotId: UByte, speedId: UInt): Boole
     val ep0 = Endpoint()
     slots[slotId.toInt()].endpoints[1] = ep0
 
-    val inContext = requireNotNull(DmaBuffer.allocate())
+    val inContext = requireNotNull(MmioRegion.allocate())
     try {
         val ctrlContext = InputControlContext(inContext)
         ctrlContext.addFlags = 1u or (1u shl 1)
@@ -78,7 +78,7 @@ suspend fun Xhci.addressDevice(portId: Int, slotId: UByte, speedId: UInt): Boole
 }
 
 suspend fun Xhci.configureEndpoints(slotId: UByte, endpoints: List<UsbEndpoint>): Boolean {
-    val inContext = requireNotNull(DmaBuffer.allocate())
+    val inContext = requireNotNull(MmioRegion.allocate())
     try {
         val ctrlContext = InputControlContext(inContext)
         ctrlContext.addFlags = 1u
@@ -112,7 +112,7 @@ suspend fun Xhci.configureEndpoints(slotId: UByte, endpoints: List<UsbEndpoint>)
 }
 
 suspend fun Xhci.updateEp0Mps(slotId: UByte, mps: UInt): Boolean {
-    val inContext = requireNotNull(DmaBuffer.allocate())
+    val inContext = requireNotNull(MmioRegion.allocate())
     try {
         val source = slots[slotId.toInt()].outContext ?: return false
 
@@ -144,7 +144,7 @@ suspend fun Xhci.updateEp0Mps(slotId: UByte, mps: UInt): Boolean {
 
 internal fun Xhci.setupOneEndpoint(
     slotId: UByte,
-    contextBuffer: DmaBuffer,
+    contextBuffer: MmioRegion,
     endpoint: UsbEndpoint,
 ): UInt? {
     val address = endpoint.desc.endpointAddress

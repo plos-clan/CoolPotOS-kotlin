@@ -5,7 +5,7 @@ package org.plos_clan.cpos.module
 import org.plos_clan.cpos.mem.MemoryRegion
 import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.mem.UserMemory
-import org.plos_clan.cpos.mem.VirtualAddressSpace
+import org.plos_clan.cpos.mem.AddressSpace
 import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.mem.MEMORY_REGION_WRITABLE
 import org.plos_clan.cpos.mem.MemoryRegionType
@@ -56,7 +56,7 @@ object UserStackBuilder {
         stackTop: ULong = DEFAULT_USER_STACK_TOP,
         stackSize: ULong = DEFAULT_USER_STACK_SIZE,
         randomBytes: ByteArray? = null,
-        addressSpace: VirtualAddressSpace = process.addressSpace,
+        addressSpace: AddressSpace = process.addressSpace,
     ): UserStackResult? {
         if (!validateStackRange(stackTop, stackSize)) {
             println("UserStack: invalid stack range")
@@ -173,13 +173,13 @@ object UserStackBuilder {
 
     private fun validCString(value: String): Boolean = '\u0000' !in value
 
-    private fun rollback(addressSpace: VirtualAddressSpace, start: ULong, length: ULong) {
+    private fun rollback(addressSpace: AddressSpace, start: ULong, length: ULong) {
         addressSpace.unmap(start, length)
     }
 }
 
 private class StackWriter(
-    private val addressSpace: VirtualAddressSpace,
+    private val addressSpace: AddressSpace,
     private val bottom: ULong,
     top: ULong,
 ) {

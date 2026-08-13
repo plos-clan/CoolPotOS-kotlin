@@ -17,7 +17,7 @@ import platform.posix.memset
 class UserMemory private constructor(
     private val pageDirectory: PageDirectory,
     private val address: ULong,
-    private val addressSpace: VirtualAddressSpace?,
+    private val addressSpace: AddressSpace?,
 ) : BufferSource, BufferDestination {
     private var preparedVirtualPage = ULong.MAX_VALUE
     private var preparedWritable = false
@@ -27,7 +27,7 @@ class UserMemory private constructor(
     internal constructor(pageDirectory: PageDirectory, address: ULong) :
         this(pageDirectory, address, null)
 
-    internal constructor(addressSpace: VirtualAddressSpace, address: ULong) :
+    internal constructor(addressSpace: AddressSpace, address: ULong) :
         this(addressSpace.pageDirectory, address, addressSpace)
 
     fun copyFromUser(size: Int): ByteArray? {

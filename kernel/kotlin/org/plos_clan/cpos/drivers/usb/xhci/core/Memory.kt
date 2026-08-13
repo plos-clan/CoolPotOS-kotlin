@@ -5,7 +5,7 @@ package org.plos_clan.cpos.drivers.usb.xhci.core
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.set
 import org.plos_clan.cpos.drivers.usb.xhci.regs.Interrupter
-import org.plos_clan.cpos.mem.DmaBuffer
+import org.plos_clan.cpos.mem.MmioRegion
 
 fun Xhci.setupCommandRing() {
     commandRing = CommandRing()
@@ -13,7 +13,7 @@ fun Xhci.setupCommandRing() {
 }
 
 fun Xhci.setupDcbaa(maxSlots: UByte) {
-    val dcbaaBuffer = requireNotNull(DmaBuffer.allocate())
+    val dcbaaBuffer = requireNotNull(MmioRegion.allocate())
     dcbaa = dcbaaBuffer
 
     val scratchpadCount = capability.maxScratchpadBuffers
@@ -25,17 +25,17 @@ fun Xhci.setupDcbaa(maxSlots: UByte) {
 }
 
 private fun Xhci.setupScratchpads(count: UInt) {
-    val array = requireNotNull(DmaBuffer.allocate())
+    val array = requireNotNull(MmioRegion.allocate())
     val arrayView = array.view<ULongVar>()
     repeat(count.toInt()) { index ->
-        val buffer = requireNotNull(DmaBuffer.allocate())
+        val buffer = requireNotNull(MmioRegion.allocate())
         arrayView[index] = buffer.physicalAddress
     }
     dcbaa!!.view<ULongVar>()[0] = array.physicalAddress
 }
 
 fun Xhci.setupInterrupter() {
-    val erst = requireNotNull(DmaBuffer.allocate())
+    val erst = requireNotNull(MmioRegion.allocate())
 
     val runtimeOffset = capability.runtimeOffset
     val runtimeBase = capability.baseAddress + runtimeOffset.toULong()

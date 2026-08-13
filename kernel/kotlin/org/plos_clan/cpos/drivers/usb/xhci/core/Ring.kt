@@ -5,12 +5,12 @@ package org.plos_clan.cpos.drivers.usb.xhci.core
 import kotlinx.cinterop.UIntVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set
-import org.plos_clan.cpos.mem.DmaBuffer
+import org.plos_clan.cpos.mem.MmioRegion
 import org.plos_clan.cpos.mem.MmioAddress
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 
 class CommandRing {
-    private val buffer = requireNotNull(DmaBuffer.allocate())
+    private val buffer = requireNotNull(MmioRegion.allocate())
     private val words = buffer.view<UIntVar>()
 
     val physicalAddress = buffer.physicalAddress
@@ -62,7 +62,7 @@ class CommandRing {
 }
 
 class EventRing(private val erdpRegister: MmioAddress) {
-    private val buffer = requireNotNull(DmaBuffer.allocate())
+    private val buffer = requireNotNull(MmioRegion.allocate())
     private val words = buffer.view<UIntVar>()
 
     val physicalAddress = buffer.physicalAddress
@@ -109,7 +109,7 @@ class EventRing(private val erdpRegister: MmioAddress) {
 }
 
 class TransferRing {
-    private val buffer = requireNotNull(DmaBuffer.allocate())
+    private val buffer = requireNotNull(MmioRegion.allocate())
     private val words = buffer.view<UIntVar>()
 
     val physicalAddress = buffer.physicalAddress

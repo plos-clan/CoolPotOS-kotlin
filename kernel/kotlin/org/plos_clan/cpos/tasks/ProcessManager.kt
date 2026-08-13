@@ -11,7 +11,7 @@ import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.KernelPageDirectory
-import org.plos_clan.cpos.mem.VirtualAddressSpace
+import org.plos_clan.cpos.mem.AddressSpace
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
@@ -103,7 +103,7 @@ class Thread(
         }
     }
 
-    internal fun replaceAddressSpace(addressSpace: VirtualAddressSpace): Boolean =
+    internal fun replaceAddressSpace(addressSpace: AddressSpace): Boolean =
         bridge.fast_handoff_replace_address_space(
             nativeContext,
             addressSpace.pageDirectory.pml4PhysicalAddress,
@@ -114,7 +114,7 @@ class Process internal constructor(
     val id: Int,
     name: String,
     val isKernelProcess: Boolean,
-    addressSpace: VirtualAddressSpace,
+    addressSpace: AddressSpace,
     var context: FileSystemContext?,
     var ruid: Int = 0,
     var euid: Int = 0,
@@ -222,7 +222,7 @@ object ProcessManager {
 
         val systemProcess = newProcess(
             name = "{system}",
-            addressSpace = VirtualAddressSpace(KernelPageDirectory.getDirectory()),
+            addressSpace = AddressSpace.user(KernelPageDirectory.getDirectory()),
             isKernelProcess = true,
             null
         ).also { process ->
@@ -275,7 +275,7 @@ object ProcessManager {
         parent: Process? = null,
     ): Process {
         val addressSpace = parent?.addressSpace?.fork()
-            ?: VirtualAddressSpace(KernelPageDirectory.getDirectory().createUserDirectory())
+            ?: AddressSpace.user(KernelPageDirectory.getDirectory().createUserDirectory())
         val context = parent?.context?.fork() ?: FileSystemManager.kernelContext
         val child = newProcess(
             name = name,
@@ -326,7 +326,7 @@ object ProcessManager {
         }.also(Scheduler::enqueueThread)
     }
 
-    fun installUserAddressSpace(process: Process, replacement: VirtualAddressSpace): Boolean {
+    fun installUserAddressSpace(process: Process, replacement: AddressSpace): Boolean {
         if (process.threads.isNotEmpty()) {
             val current = currentThread() ?: return false
             val hasLiveSibling = process.threads.any { thread ->
@@ -395,7 +395,7 @@ object ProcessManager {
 
     private fun newProcess(
         name: String,
-        addressSpace: VirtualAddressSpace,
+        addressSpace: AddressSpace,
         isKernelProcess: Boolean,
         context: FileSystemContext?,
         parentId: Int = 0,

@@ -6,7 +6,7 @@ import org.plos_clan.cpos.drivers.usb.bus.HostController
 import org.plos_clan.cpos.drivers.usb.xhci.regs.Capability
 import org.plos_clan.cpos.drivers.usb.xhci.regs.Doorbell
 import org.plos_clan.cpos.drivers.usb.xhci.regs.Operational
-import org.plos_clan.cpos.mem.DmaBuffer
+import org.plos_clan.cpos.mem.MmioRegion
 import org.plos_clan.cpos.mem.MmioAddress
 
 class Xhci(baseAddress: MmioAddress) {
@@ -17,7 +17,7 @@ class Xhci(baseAddress: MmioAddress) {
 
     val hostController: HostController = XhciHostController(this)
 
-    internal var dcbaa: DmaBuffer? = null
+    internal var dcbaa: MmioRegion? = null
     internal lateinit var commandRing: CommandRing
     internal lateinit var eventRing: EventRing
     internal val slots = Array(MAX_SLOTS) { Slot() }

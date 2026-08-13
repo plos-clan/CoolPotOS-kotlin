@@ -27,7 +27,7 @@ private const val PAGE_1_GIB_OFFSET_MASK = 0x3FFF_FFFFuL
 private const val KERNEL_PML4_START_INDEX = PTE_COUNT / 2
 internal const val USER_VIRTUAL_ADDRESS_LIMIT = 0x0000_8000_0000_0000uL
 private val PTE_PARENT_FLAGS = PTE_PRESENT or PTE_WRITABLE or PTE_USER
-private val MMIO_PTE_FLAGS = PTE_PRESENT or PTE_WRITABLE or PTE_NO_CACHE or PTE_NO_EXECUTE
+internal val MMIO_PTE_FLAGS = PTE_PRESENT or PTE_WRITABLE or PTE_NO_CACHE or PTE_NO_EXECUTE
 
 internal object UserFrameReferences {
     private const val PAGE_SHIFT = 12
@@ -310,55 +310,6 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
             (if (executable) 0uL else PTE_NO_EXECUTE)
         invlpg(virtualAddress)
         return true
-    }
-
-    fun mapRange(
-        virtualAddress: ULong,
-        physicalAddress: ULong,
-        byteLength: ULong,
-        flags: ULong,
-    ): Boolean {
-        if (byteLength == 0uL) {
-            return true
-        }
-
-        val virtualBase = virtualAddress.alignDown(PAGE_SIZE_BYTES)
-        val physicalBase = physicalAddress.alignDown(PAGE_SIZE_BYTES)
-        val leadingOffset = virtualAddress - virtualBase
-        if (byteLength > ULong.MAX_VALUE - leadingOffset) {
-            return false
-        }
-        val mappedLength = (byteLength + leadingOffset).alignUp(PAGE_SIZE_BYTES)
-            ?: return false
-
-        var offset = 0uL
-        while (offset < mappedLength) {
-            if (!mapPage(virtualBase + offset, physicalBase + offset, flags)) {
-                return false
-            }
-            offset += PAGE_SIZE_BYTES
-        }
-        return true
-    }
-
-    fun mapMmioRange(physicalAddress: ULong, byteLength: ULong): ULong? {
-        if (byteLength == 0uL) {
-            return Hhdm.toVirtual(physicalAddress)
-        }
-
-        if (physicalAddress > ULong.MAX_VALUE - byteLength) {
-            return null
-        }
-        val physicalBase = physicalAddress.alignDown(PAGE_SIZE_BYTES)
-        val physicalEnd = (physicalAddress + byteLength).alignUp(PAGE_SIZE_BYTES)
-            ?: return null
-        val length = physicalEnd - physicalBase
-        val virtualBase = Hhdm.toVirtual(physicalBase)
-
-        if (!mapRange(virtualBase, physicalBase, length, MMIO_PTE_FLAGS)) {
-            return null
-        }
-        return Hhdm.toVirtual(physicalAddress)
     }
 
     fun activate() {
@@ -698,10 +649,6 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
     ): CPointer<ULongVar>? {
         val entry = parentTable[index]
         if (entry and PTE_PRESENT != 0uL) {
-            if (entry and PTE_HUGE != 0uL) {
-                println("Paging: huge-page entry blocks split at index=$index")
-                return null
-            }
             return (entry and PTE_ADDR_MASK).toVirtualPointer()
         }
 
@@ -726,6 +673,10 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
 object KernelPageDirectory {
     private var activeDirectory: PageDirectory? = null
 
+    val addressSpace: AddressSpace by lazy {
+        AddressSpace.kernel(getDirectory())
+    }
+
     fun initialize(): PageDirectory? {
         activeDirectory?.let { return it }
 
@@ -747,9 +698,4 @@ object KernelPageDirectory {
 
     fun getDirectory(): PageDirectory =
         checkNotNull(activeDirectory ?: initialize()) { "Paging: active directory is unavailable" }
-
-    fun mapMmio(
-        physicalAddress: ULong,
-        byteLength: ULong,
-    ): ULong? = (activeDirectory ?: initialize())?.mapMmioRange(physicalAddress, byteLength)
 }

@@ -12,7 +12,7 @@ import org.plos_clan.cpos.mem.MemoryRegion
 import org.plos_clan.cpos.mem.MemoryRegionBacking
 import org.plos_clan.cpos.mem.MemoryRegionType
 import org.plos_clan.cpos.mem.USER_MMAP_END
-import org.plos_clan.cpos.mem.VirtualAddressSpace
+import org.plos_clan.cpos.mem.AddressSpace
 import org.plos_clan.cpos.mem.MEMORY_REGION_EXECUTABLE
 import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -36,7 +36,7 @@ object Vdso : MemoryRegionBacking() {
         true
     }
 
-    fun install(addressSpace: VirtualAddressSpace): ULong? {
+    fun install(addressSpace: AddressSpace): ULong? {
         if (image.isEmpty()) return null
         val length = image.size.toULong().alignUp(PAGE_SIZE_BYTES) ?: return null
         val installed = addressSpace.insert(

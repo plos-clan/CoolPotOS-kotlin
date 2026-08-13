@@ -24,6 +24,8 @@ internal const val MEMORY_REGION_ACCESS_MASK = 0x7uL
 
 const val USER_MMAP_START = 0x0000_0000_0001_0000uL
 const val USER_MMAP_END = 0x0000_7f00_0000_0000uL
+private const val MMIO_VIRTUAL_BASE = 0xffff_ff00_0000_0000uL
+private const val MMIO_VIRTUAL_END = 0xffff_ff80_0000_0000uL
 
 private const val EIO = 5
 private const val ENOMEM = 12
@@ -37,6 +39,7 @@ enum class MemoryRegionType {
     IMAGE,
     STACK,
     VDSO,
+    MMIO,
 }
 
 data class MemoryRegion(
@@ -190,12 +193,25 @@ enum class PageFaultResult {
     MAPPING_FAILED,
 }
 
-class VirtualAddressSpace internal constructor(
+class AddressSpace internal constructor(
     val pageDirectory: PageDirectory,
+    private val start: ULong,
+    private val end: ULong,
+    private val user: Boolean,
 ) {
+    private val limit = if (user) USER_VIRTUAL_ADDRESS_LIMIT else end
+
     private val regions = mutableListOf<MemoryRegion>()
     private val lock = IrqSpinLock()
     private val faultScratch = ByteArray(PAGE_SIZE_BYTES.toInt())
+
+    companion object {
+        fun user(pageDirectory: PageDirectory): AddressSpace =
+            AddressSpace(pageDirectory, USER_MMAP_START, USER_MMAP_END, true)
+
+        fun kernel(pageDirectory: PageDirectory): AddressSpace =
+            AddressSpace(pageDirectory, MMIO_VIRTUAL_BASE, MMIO_VIRTUAL_END, false)
+    }
 
     val used: ULong
         get() = lock.withLock { regions.fold(0uL) { total, region -> total + region.length } }
@@ -206,11 +222,11 @@ class VirtualAddressSpace internal constructor(
         }
     }
 
-    fun fork(): VirtualAddressSpace = lock.withLock {
+    fun fork(): AddressSpace = lock.withLock {
         val directory = pageDirectory.cloneDirectory(
             sharedRegions = regions.filter(MemoryRegion::shared),
         )
-        VirtualAddressSpace(directory).also { child ->
+        AddressSpace(directory, start, end, user).also { child ->
             child.regions += regions.map { region ->
                 check(region.backing?.retain() != false)
                 region.copy()
@@ -292,7 +308,7 @@ class VirtualAddressSpace internal constructor(
         ) {
             return MemoryMapResult.Err(EINVAL)
         }
-        if (alignedLength > USER_MMAP_END - USER_MMAP_START) {
+        if (alignedLength > end - start) {
             return MemoryMapResult.Err(ENOMEM)
         }
 
@@ -386,7 +402,7 @@ class VirtualAddressSpace internal constructor(
         write: Boolean,
         execute: Boolean = false,
     ): PageFaultResult = lock.withLock {
-        if (address >= USER_VIRTUAL_ADDRESS_LIMIT) {
+        if (address >= limit) {
             return@withLock PageFaultResult.INVALID_ADDRESS
         }
         val region = findLocked(address)
@@ -433,6 +449,15 @@ class VirtualAddressSpace internal constructor(
         page: ULong,
         scratch: ByteArray? = null,
     ): PageFaultResult {
+        if (region.type == MemoryRegionType.MMIO) {
+            val physicalAddress = region.offset.alignDown(PAGE_SIZE_BYTES) + (page - region.start)
+            return if (pageDirectory.mapPage(page, physicalAddress, MMIO_PTE_FLAGS)) {
+                PageFaultResult.RESOLVED
+            } else {
+                PageFaultResult.MAPPING_FAILED
+            }
+        }
+
         val backing = region.backing
         if (backing?.immutablePageSource != null) {
             FilePageCache.acquire(backing, region.offset + (page - region.start))?.let { frame ->
@@ -492,7 +517,7 @@ class VirtualAddressSpace internal constructor(
         if (!address.isPageAligned()) {
             return MemoryMapResult.Err(EINVAL)
         }
-        if (!validUserRange(address, alignedLength)) return MemoryMapResult.Err(EFAULT)
+        if (!validRange(address, alignedLength)) return MemoryMapResult.Err(EFAULT)
         lock.withLock {
             unmapRangeLocked(address, address + alignedLength)
         }
@@ -506,7 +531,7 @@ class VirtualAddressSpace internal constructor(
         ) {
             return MemoryMapResult.Err(EINVAL)
         }
-        if (!validUserRange(address, alignedLength)) return MemoryMapResult.Err(EFAULT)
+        if (!validRange(address, alignedLength)) return MemoryMapResult.Err(EFAULT)
 
         return lock.withLock {
             val end = address + alignedLength
@@ -547,7 +572,11 @@ class VirtualAddressSpace internal constructor(
     private fun rollbackMapping(region: MemoryRegion, start: ULong, end: ULong) {
         var address = start
         while (address < end) {
-            pageDirectory.releaseUserPage(address)
+            if (user) {
+                pageDirectory.releaseUserPage(address)
+            } else {
+                pageDirectory.unmapPage(address)
+            }
             address += PAGE_SIZE_BYTES
         }
         lock.withLock {
@@ -570,7 +599,11 @@ class VirtualAddressSpace internal constructor(
 
             var address = region.start
             while (address < region.end) {
-                pageDirectory.releaseUserPage(address)
+                if (user) {
+                    pageDirectory.releaseUserPage(address)
+                } else {
+                    pageDirectory.unmapPage(address)
+                }
                 address += PAGE_SIZE_BYTES
             }
             region.backing?.release()
@@ -628,7 +661,8 @@ class VirtualAddressSpace internal constructor(
             left.shared == right.shared &&
             left.sharedIdentity === right.sharedIdentity &&
             left.backing === right.backing &&
-            (left.type != MemoryRegionType.FILE || left.offset + left.length == right.offset)
+            ((left.type != MemoryRegionType.FILE && left.type != MemoryRegionType.MMIO) ||
+                left.offset + left.length == right.offset)
 
     private fun insertLocked(region: MemoryRegion): Boolean {
         if (!validRegion(region) || findIntersectionLocked(region.start, region.end) != null) {
@@ -660,18 +694,18 @@ class VirtualAddressSpace internal constructor(
 
     private fun findUnmappedAreaLocked(hint: ULong, length: ULong): ULong? {
         val alignedHint = hint.alignDown(PAGE_SIZE_BYTES)
-        if (alignedHint >= USER_MMAP_START &&
-            alignedHint <= USER_MMAP_END - length &&
+        if (alignedHint >= start &&
+            alignedHint <= end - length &&
             findIntersectionLocked(alignedHint, alignedHint + length) == null
         ) {
             return alignedHint
         }
 
-        if (alignedHint >= USER_MMAP_START && alignedHint < USER_MMAP_END - length) {
-            findGapLocked(alignedHint + length, USER_MMAP_END, length)?.let { return it }
-            findGapLocked(USER_MMAP_START, alignedHint, length)?.let { return it }
+        if (alignedHint >= start && alignedHint < end - length) {
+            findGapLocked(alignedHint + length, end, length)?.let { return it }
+            findGapLocked(start, alignedHint, length)?.let { return it }
         }
-        return findGapLocked(USER_MMAP_START, USER_MMAP_END, length)
+        return findGapLocked(start, end, length)
     }
 
     private fun findGapLocked(windowStart: ULong, windowEnd: ULong, length: ULong): ULong? {
@@ -701,16 +735,15 @@ class VirtualAddressSpace internal constructor(
         region.start < region.end &&
             region.start.isPageAligned() &&
             region.end.isPageAligned() &&
-            region.end <= USER_VIRTUAL_ADDRESS_LIMIT
+            region.end <= limit
 
-    private fun validMmapRange(start: ULong, length: ULong): Boolean =
-        start >= USER_MMAP_START &&
-            start < USER_MMAP_END &&
-            length <= USER_MMAP_END - start
+    private fun validMmapRange(address: ULong, length: ULong): Boolean =
+        address in start..<end &&
+            length <= end - address
 
-    private fun validUserRange(start: ULong, length: ULong): Boolean =
-        start < USER_VIRTUAL_ADDRESS_LIMIT &&
-            length <= USER_VIRTUAL_ADDRESS_LIMIT - start
+    private fun validRange(address: ULong, length: ULong): Boolean =
+        address < limit &&
+            length <= limit - address
 
     private fun alignLength(length: ULong): ULong? {
         if (length == 0uL || length > ULong.MAX_VALUE - (PAGE_SIZE_BYTES - 1uL)) {
