@@ -41,21 +41,21 @@ class Xhci(baseAddress: MmioAddress) {
         }
     }
 
-    suspend fun testCommandRing(): Boolean {
+    suspend fun testCommandRing(): Unit? {
         val command = Trb.newNoOpCmd()
         val (code, _) = sendCommand(command)
             ?: run {
                 println("No op command timeout or error")
-                return false
+                return null
             }
 
         if (code == 1u) {
             println("xHCI command ring verified")
         } else {
             println("No op failed with code: $code")
-            return false
+            return null
         }
-        return true
+        return Unit
     }
 
     internal suspend fun enableSlot(): UByte? {

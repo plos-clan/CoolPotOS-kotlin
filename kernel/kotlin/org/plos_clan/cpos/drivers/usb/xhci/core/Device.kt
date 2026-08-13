@@ -18,7 +18,7 @@ import org.plos_clan.cpos.drivers.usb.defs.SPEED_SUPER
 import org.plos_clan.cpos.mem.MmioRegion
 import platform.posix.memcpy
 
-suspend fun Xhci.addressDevice(portId: Int, slotId: UByte, speedId: UInt): Boolean {
+suspend fun Xhci.addressDevice(portId: Int, slotId: UByte, speedId: UInt): Unit? {
     println("Addressing device on slot $slotId...")
 
     val outContext = requireNotNull(MmioRegion.allocate())
@@ -64,20 +64,20 @@ suspend fun Xhci.addressDevice(portId: Int, slotId: UByte, speedId: UInt): Boole
         val (code, _) = sendCommand(command)
             ?: run {
                 println("Address Device command timeout")
-                return false
+                return null
             }
 
         if (code != 1u) {
             println("Address Device failed code: $code")
-            return false
+            return null
         }
     } finally {
         inContext.free()
     }
-    return true
+    return Unit
 }
 
-suspend fun Xhci.configureEndpoints(slotId: UByte, endpoints: List<UsbEndpoint>): Boolean {
+suspend fun Xhci.configureEndpoints(slotId: UByte, endpoints: List<UsbEndpoint>): Unit? {
     val inContext = requireNotNull(MmioRegion.allocate())
     try {
         val ctrlContext = InputControlContext(inContext)
@@ -98,23 +98,23 @@ suspend fun Xhci.configureEndpoints(slotId: UByte, endpoints: List<UsbEndpoint>)
         val (code, _) = sendCommand(command)
             ?: run {
                 println("Configure endpoint command timeout")
-                return false
+                return null
             }
 
         if (code != 1u) {
             println("Configure endpoint failed: $code")
-            return false
+            return null
         }
     } finally {
         inContext.free()
     }
-    return true
+    return Unit
 }
 
-suspend fun Xhci.updateEp0Mps(slotId: UByte, mps: UInt): Boolean {
+suspend fun Xhci.updateEp0Mps(slotId: UByte, mps: UInt): Unit? {
     val inContext = requireNotNull(MmioRegion.allocate())
     try {
-        val source = slots[slotId.toInt()].outContext ?: return false
+        val source = slots[slotId.toInt()].outContext ?: return null
 
         val copyBytes = (contextSize * 2).toULong()
         memcpy(
@@ -130,16 +130,16 @@ suspend fun Xhci.updateEp0Mps(slotId: UByte, mps: UInt): Boolean {
         ep0Context.info2 = (ep0Context.info2 and 0xffff0000u.inv()) or ((mps and 0xffffu) shl 16)
 
         val command = Trb.newEvaluateContext(inContext.physicalAddress, slotId)
-        val (code, _) = sendCommand(command) ?: return false
+        val (code, _) = sendCommand(command) ?: return null
 
         if (code != 1u) {
             println("Evaluate Context failed: $code")
-            return false
+            return null
         }
     } finally {
         inContext.free()
     }
-    return true
+    return Unit
 }
 
 internal fun Xhci.setupOneEndpoint(

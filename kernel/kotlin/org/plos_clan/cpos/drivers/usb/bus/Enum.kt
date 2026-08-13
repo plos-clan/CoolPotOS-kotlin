@@ -29,26 +29,23 @@ import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.readU8
 import org.plos_clan.cpos.utils.readU16
 
-suspend fun UsbDevice.enumerate(): Boolean {
+suspend fun UsbDevice.enumerate(): Unit? {
     val buffers = mutableListOf<MmioRegion>()
     try {
-        val descriptorBuffer = MmioRegion.allocate() ?: return false
+        val descriptorBuffer = MmioRegion.allocate() ?: return null
         buffers.add(descriptorBuffer)
 
-        if (!submitControl(
-                ControlTransferArgs(
-                    setup = SetupPacket(
-                        requestType = REQ_DIR_IN,
-                        request = REQ_GET_DESCRIPTOR,
-                        value = (DESC_DEVICE.toUInt() shl 8).toUShort(),
-                        length = 8u.toUShort(),
-                    ),
-                    bufferPhysicalAddress = descriptorBuffer.physicalAddress,
+        submitControl(
+            ControlTransferArgs(
+                setup = SetupPacket(
+                    requestType = REQ_DIR_IN,
+                    request = REQ_GET_DESCRIPTOR,
+                    value = (DESC_DEVICE.toUInt() shl 8).toUShort(),
+                    length = 8u.toUShort(),
                 ),
-            )
-        ) {
-            return false
-        }
+                bufferPhysicalAddress = descriptorBuffer.physicalAddress,
+            ),
+        ) ?: return null
 
         val descriptorPtr = descriptorBuffer.view<UByteVar>()
         var mps0 = descriptorPtr.readU8(7).toUInt()
@@ -57,26 +54,23 @@ suspend fun UsbDevice.enumerate(): Boolean {
             if (speed >= SPEED_SUPER.toUInt()) {
                 mps0 = 1u shl mps0.toInt()
             }
-            if (!host.updateEp0Mps(slotId, mps0)) {
+            host.updateEp0Mps(slotId, mps0) ?: run {
                 println("Failed to update EP0 MPS for slot $slotId")
-                return false
+                return null
             }
         }
 
-        if (!submitControl(
-                ControlTransferArgs(
-                    setup = SetupPacket(
-                        requestType = REQ_DIR_IN,
-                        request = REQ_GET_DESCRIPTOR,
-                        value = (DESC_DEVICE.toUInt() shl 8).toUShort(),
-                        length = DeviceDescriptor.SIZE_BYTES.toUShort(),
-                    ),
-                    bufferPhysicalAddress = descriptorBuffer.physicalAddress,
+        submitControl(
+            ControlTransferArgs(
+                setup = SetupPacket(
+                    requestType = REQ_DIR_IN,
+                    request = REQ_GET_DESCRIPTOR,
+                    value = (DESC_DEVICE.toUInt() shl 8).toUShort(),
+                    length = DeviceDescriptor.SIZE_BYTES.toUShort(),
                 ),
-            )
-        ) {
-            return false
-        }
+                bufferPhysicalAddress = descriptorBuffer.physicalAddress,
+            ),
+        ) ?: return null
 
         val deviceDescriptor = DeviceDescriptor(
             bcdUsb = descriptorPtr.readU16(2),
@@ -93,51 +87,45 @@ suspend fun UsbDevice.enumerate(): Boolean {
             numConfigurations = descriptorPtr.readU8(17),
         )
         desc = deviceDescriptor
-        println(
-            "USB Device: ${deviceDescriptor.idVendor.toInt().toString(16).padStart(4, '0')}:" +
-                "${deviceDescriptor.idProduct.toInt().toString(16).padStart(4, '0')}",
-        )
 
-        val headerBuffer = MmioRegion.allocate() ?: return false
+        val devicePrefix = deviceDescriptor.idVendor.toInt().toString(16).padStart(4, '0')
+        val deviceSuffix =  deviceDescriptor.idProduct.toInt().toString(16).padStart(4, '0')
+        println("USB Device: ${devicePrefix}:${deviceSuffix}")
+
+        val headerBuffer = MmioRegion.allocate() ?: return null
         buffers.add(headerBuffer)
 
-        if (!submitControl(
-                ControlTransferArgs(
-                    setup = SetupPacket(
-                        requestType = REQ_DIR_IN,
-                        request = REQ_GET_DESCRIPTOR,
-                        value = (DESC_CONFIGURATION.toUInt() shl 8).toUShort(),
-                        length = ConfigurationDescriptor.SIZE_BYTES.toUShort(),
-                    ),
-                    bufferPhysicalAddress = headerBuffer.physicalAddress,
+        submitControl(
+            ControlTransferArgs(
+                setup = SetupPacket(
+                    requestType = REQ_DIR_IN,
+                    request = REQ_GET_DESCRIPTOR,
+                    value = (DESC_CONFIGURATION.toUInt() shl 8).toUShort(),
+                    length = ConfigurationDescriptor.SIZE_BYTES.toUShort(),
                 ),
-            )
-        ) {
-            return false
-        }
+                bufferPhysicalAddress = headerBuffer.physicalAddress,
+            ),
+        ) ?: return null
 
         val headerPtr = headerBuffer.view<UByteVar>()
         val totalLength = headerPtr.readU16(2)
         val configValue = headerPtr.readU8(5)
 
         val pagesNeeded = (totalLength.toULong() + PAGE_SIZE_BYTES - 1uL) / PAGE_SIZE_BYTES
-        val configBuffer = MmioRegion.allocate(pagesNeeded) ?: return false
+        val configBuffer = MmioRegion.allocate(pagesNeeded) ?: return null
         buffers.add(configBuffer)
 
-        if (!submitControl(
-                ControlTransferArgs(
-                    setup = SetupPacket(
-                        requestType = REQ_DIR_IN,
-                        request = REQ_GET_DESCRIPTOR,
-                        value = (DESC_CONFIGURATION.toUInt() shl 8).toUShort(),
-                        length = totalLength,
-                    ),
-                    bufferPhysicalAddress = configBuffer.physicalAddress,
+        submitControl(
+            ControlTransferArgs(
+                setup = SetupPacket(
+                    requestType = REQ_DIR_IN,
+                    request = REQ_GET_DESCRIPTOR,
+                    value = (DESC_CONFIGURATION.toUInt() shl 8).toUShort(),
+                    length = totalLength,
                 ),
-            )
-        ) {
-            return false
-        }
+                bufferPhysicalAddress = configBuffer.physicalAddress,
+            ),
+        ) ?: return null
 
         println("Parsing config tree (len: $totalLength)")
         parseConfigTree(configBuffer.view<UByteVar>(), totalLength)
@@ -151,29 +139,24 @@ suspend fun UsbDevice.enumerate(): Boolean {
         }
 
         println("Configuring endpoints in hardware...")
-        if (!host.configureEndpoints(slotId, endpoints)) {
-            return false
-        }
+        host.configureEndpoints(slotId, endpoints) ?: return null
 
-        if (!submitControl(
-                ControlTransferArgs(
-                    setup = SetupPacket(
-                        requestType = REQ_DIR_OUT,
-                        request = REQ_SET_CONFIGURATION,
-                        value = configValue.toUShort(),
-                    ),
+        submitControl(
+            ControlTransferArgs(
+                setup = SetupPacket(
+                    requestType = REQ_DIR_OUT,
+                    request = REQ_SET_CONFIGURATION,
+                    value = configValue.toUShort(),
                 ),
-            )
-        ) {
-            return false
-        }
+            ),
+        ) ?: return null
 
         matchDrivers()
         println("Device enumeration complete (slot $slotId)")
     } finally {
         buffers.forEach { it.free() }
     }
-    return true
+    return Unit
 }
 
 private fun UsbDevice.parseConfigTree(configRaw: CPointer<UByteVar>, totalLength: UShort) {

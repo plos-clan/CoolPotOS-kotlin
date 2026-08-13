@@ -41,70 +41,60 @@ class HidDevice(
     internal suspend fun submitTransfer() {
         val buffer = buffer ?: return
 
-        if (!iface.device.submitTransfer(
-                GeneralTransferArgs(
-                    endpointAddress = endpointAddress,
-                    bufferPhysicalAddress = buffer.physicalAddress,
-                    length = maxReportSize.toUInt(),
-                ),
-            )
-        ) {
-            println("HID: Submit transfer failed")
-        }
+        iface.device.submitTransfer(
+            GeneralTransferArgs(
+                endpointAddress = endpointAddress,
+                bufferPhysicalAddress = buffer.physicalAddress,
+                length = maxReportSize.toUInt(),
+            ),
+        ) ?: println("HID: Submit transfer failed")
     }
 
     private suspend fun setProtocol(protocol: UShort) {
-        if (!iface.device.submitControl(
-                ControlTransferArgs(
-                    setup = SetupPacket(
-                        requestType = REQ_TYPE_CLASS or REQ_REC_INTERFACE,
-                        request = REQ_SET_PROTOCOL,
-                        value = protocol,
-                        index = iface.desc.interfaceNumber.toUShort(),
-                    ),
+        iface.device.submitControl(
+            ControlTransferArgs(
+                setup = SetupPacket(
+                    requestType = REQ_TYPE_CLASS or REQ_REC_INTERFACE,
+                    request = REQ_SET_PROTOCOL,
+                    value = protocol,
+                    index = iface.desc.interfaceNumber.toUShort(),
                 ),
-            )
-        ) {
-            println("HID: Set protocol failed (ignored)")
-        }
+            ),
+        ) ?: println("HID: Set protocol failed (ignored)")
     }
 
     private suspend fun setIdle(duration: UShort) {
-        if (!iface.device.submitControl(
-                ControlTransferArgs(
-                    setup = SetupPacket(
-                        requestType = REQ_TYPE_CLASS or REQ_REC_INTERFACE,
-                        request = REQ_SET_IDLE,
-                        value = duration,
-                        index = iface.desc.interfaceNumber.toUShort(),
-                    ),
+        iface.device.submitControl(
+            ControlTransferArgs(
+                setup = SetupPacket(
+                    requestType = REQ_TYPE_CLASS or REQ_REC_INTERFACE,
+                    request = REQ_SET_IDLE,
+                    value = duration,
+                    index = iface.desc.interfaceNumber.toUShort(),
                 ),
-            )
-        ) {
-            println("HID: Set idle failed (ignored)")
-        }
+            ),
+        ) ?: println("HID: Set idle failed (ignored)")
     }
 
-    private suspend fun fetchReportDescriptor(): Boolean {
-        val buffer = reportDescriptorBuffer ?: return false
+    private suspend fun fetchReportDescriptor(): Unit? {
+        val buffer = reportDescriptorBuffer ?: return null
 
-        if (!iface.device.submitControl(
-                ControlTransferArgs(
-                    setup = SetupPacket(
-                        requestType = REQ_DIR_IN or REQ_REC_INTERFACE,
-                        request = REQ_GET_DESCRIPTOR,
-                        value = (DESC_REPORT.toUInt() shl 8).toUShort(),
-                        index = iface.desc.interfaceNumber.toUShort(),
-                        length = reportDescriptorLength,
-                    ),
-                    bufferPhysicalAddress = buffer.physicalAddress,
+        iface.device.submitControl(
+            ControlTransferArgs(
+                setup = SetupPacket(
+                    requestType = REQ_DIR_IN or REQ_REC_INTERFACE,
+                    request = REQ_GET_DESCRIPTOR,
+                    value = (DESC_REPORT.toUInt() shl 8).toUShort(),
+                    index = iface.desc.interfaceNumber.toUShort(),
+                    length = reportDescriptorLength,
                 ),
-            )
-        ) {
+                bufferPhysicalAddress = buffer.physicalAddress,
+            ),
+        ) ?: run {
             println("HID: Failed to fetch report descriptor")
-            return false
+            return null
         }
-        return true
+        return Unit
     }
 
     companion object {
@@ -122,7 +112,7 @@ class HidDevice(
             device.reportDescriptorBuffer = descBuffer
             device.reportDescriptorLength = descLength
 
-            if (!device.fetchReportDescriptor()) {
+            device.fetchReportDescriptor() ?: run {
                 descBuffer.free()
                 return null
             }

@@ -8,9 +8,7 @@ import org.plos_clan.cpos.drivers.usb.xhci.regs.PORT_PRC
 import org.plos_clan.cpos.drivers.usb.xhci.regs.Port
 
 suspend fun Xhci.xhciHubThread() {
-    if (!testCommandRing()) {
-        return
-    }
+    testCommandRing() ?: return
     checkPorts()
 
     while (true) {
@@ -80,19 +78,17 @@ internal suspend fun Xhci.attachDevice(port: Port) {
 
     println("Device assigned to slot $slotId")
 
-    if (!setupSlotDevice(port, slotId)) {
+    setupSlotDevice(port, slotId) ?: run {
         println("Device init failed for slot $slotId")
         cleanupSlotOnFailure(slotId)
     }
 }
 
-internal suspend fun Xhci.setupSlotDevice(port: Port, slotId: UByte): Boolean {
+internal suspend fun Xhci.setupSlotDevice(port: Port, slotId: UByte): Unit? {
     val speedId = port.speedId
     println("Port ${port.id} enabled (speed: $speedId)")
 
-    if (!addressDevice(port.id, slotId, speedId)) {
-        return false
-    }
+    addressDevice(port.id, slotId, speedId) ?: return null
 
     val device = UsbDevice(
         host = hostController,
@@ -102,13 +98,13 @@ internal suspend fun Xhci.setupSlotDevice(port: Port, slotId: UByte): Boolean {
     )
     slots[slotId.toInt()].usbDevice = device
 
-    if (!device.enumerate()) {
+    device.enumerate() ?: run {
         println("Enumeration failed for slot $slotId")
         device.free()
         slots[slotId.toInt()].usbDevice = null
-        return false
+        return null
     }
 
     portToSlot[port.id] = slotId
-    return true
+    return Unit
 }

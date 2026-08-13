@@ -6,9 +6,8 @@ import org.plos_clan.cpos.drivers.usb.bus.dispatchCompletion
 import org.plos_clan.cpos.drivers.usb.bus.GeneralTransferArgs
 import org.plos_clan.cpos.drivers.usb.bus.TransferStatus
 import org.plos_clan.cpos.drivers.usb.defs.REQ_DIR_IN
-import org.plos_clan.cpos.utils.LittleEndianBuffer
 
-suspend fun Xhci.submitTransfer(args: GeneralTransferArgs): Boolean {
+suspend fun Xhci.submitTransfer(args: GeneralTransferArgs): Unit? {
     val endpointNumber = args.endpointAddress and 0x0fu.toUByte()
     val isIn = args.endpointAddress and REQ_DIR_IN != 0u.toUByte()
 
@@ -17,25 +16,27 @@ suspend fun Xhci.submitTransfer(args: GeneralTransferArgs): Boolean {
     } else {
         endpointNumber.toUInt() * 2u
     }
-    if (dci < 2u || dci > 31u) {
-        return false
+    if (dci !in 2u..31u) {
+        return null
     }
 
-    val endpoint = slots[args.slotId.toInt()].endpoints[dci.toInt()] ?: return false
+    val endpoint = slots[args.slotId.toInt()].endpoints[dci.toInt()] ?: return null
     endpoint.semaphore.acquire()
     endpoint.ring.enqueue(Trb.newNormal(args.bufferPhysicalAddress, args.length))
     doorbell.ring(args.slotId, dci)
-    return true
+    return Unit
 }
 
-suspend fun Xhci.submitControl(args: ControlTransferArgs): Boolean {
+suspend fun Xhci.submitControl(args: ControlTransferArgs): Unit? {
     val isIn = args.setup.requestType and REQ_DIR_IN != 0u.toUByte()
 
     val setup = args.setup
     val slotId = args.slotId
-    val setupBuffer = LittleEndianBuffer(setup.toNativeBytes())
-    val paramLow = setupBuffer.readU32(0)
-    val paramHigh = setupBuffer.readU32(4)
+    val paramLow = setup.requestType.toUInt() or
+        (setup.request.toUInt() shl 8) or
+        (setup.value.toUInt() shl 16)
+    val paramHigh = setup.index.toUInt() or
+        (setup.length.toUInt() shl 16)
 
     val hasDataStage = setup.length.toUInt() > 0u
     val trt = when {
@@ -44,7 +45,7 @@ suspend fun Xhci.submitControl(args: ControlTransferArgs): Boolean {
         else -> 2u
     }
 
-    val endpoint = slots[slotId.toInt()].endpoints[1] ?: return false
+    val endpoint = slots[slotId.toInt()].endpoints[1] ?: return null
 
     val trbCount = if (hasDataStage) 3 else 2
     repeat(trbCount) {
@@ -73,9 +74,9 @@ suspend fun Xhci.submitControl(args: ControlTransferArgs): Boolean {
     val code = event.completionCode
     if (code != 1u && code != 13u) {
         println("Control transfer failed. Code: $code")
-        return false
+        return null
     }
-    return true
+    return Unit
 }
 
 internal fun Xhci.completeTransfer(slotId: UByte, dci: UInt, code: UInt, length: UInt) {

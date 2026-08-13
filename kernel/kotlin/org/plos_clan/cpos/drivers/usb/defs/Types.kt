@@ -7,15 +7,8 @@ data class SetupPacket(
     val index: UShort = 0u,
     val length: UShort = 0u,
 ) {
-    fun toNativeBytes(): ByteArray = ByteArray(8).also { bytes ->
-        bytes[0] = requestType.toByte()
-        bytes[1] = request.toByte()
-        bytes[2] = value.toByte()
-        bytes[3] = (value.toUInt() shr 8).toByte()
-        bytes[4] = index.toByte()
-        bytes[5] = (index.toUInt() shr 8).toByte()
-        bytes[6] = length.toByte()
-        bytes[7] = (length.toUInt() shr 8).toByte()
+    companion object {
+        const val SIZE_BYTES = 8
     }
 }
 

@@ -16,18 +16,18 @@ data class GeneralTransferArgs(
 )
 
 interface HostController {
-    suspend fun updateEp0Mps(slotId: UByte, mps: UInt): Boolean
-    suspend fun configureEndpoints(slotId: UByte, endpoints: List<UsbEndpoint>): Boolean
-    suspend fun submitControl(args: ControlTransferArgs): Boolean
-    suspend fun submitTransfer(args: GeneralTransferArgs): Boolean
+    suspend fun updateEp0Mps(slotId: UByte, mps: UInt): Unit?
+    suspend fun configureEndpoints(slotId: UByte, endpoints: List<UsbEndpoint>): Unit?
+    suspend fun submitControl(args: ControlTransferArgs): Unit?
+    suspend fun submitTransfer(args: GeneralTransferArgs): Unit?
 }
 
-suspend fun UsbDevice.submitControl(args: ControlTransferArgs): Boolean {
+suspend fun UsbDevice.submitControl(args: ControlTransferArgs): Unit? {
     val finalArgs = args.copy(slotId = slotId)
     return host.submitControl(finalArgs)
 }
 
-suspend fun UsbDevice.submitTransfer(args: GeneralTransferArgs): Boolean {
+suspend fun UsbDevice.submitTransfer(args: GeneralTransferArgs): Unit? {
     val finalArgs = args.copy(slotId = slotId)
     return host.submitTransfer(finalArgs)
 }
