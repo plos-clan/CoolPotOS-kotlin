@@ -1,9 +1,5 @@
 package org.plos_clan.cpos.drivers.usb.bus
 
-import org.plos_clan.cpos.drivers.usb.defs.EndpointDescriptor
-import org.plos_clan.cpos.drivers.usb.defs.SetupPacket
-import org.plos_clan.cpos.drivers.usb.defs.SsEndpointCompanionDescriptor
-
 enum class TransferStatus {
     COMPLETED,
     SHORT_PACKET,
@@ -22,3 +18,12 @@ data class CompletionEvent(
     val status: TransferStatus,
     val residualLength: UInt,
 )
+
+interface UsbDriver {
+    fun disconnect()
+    fun handleCompletion(event: CompletionEvent)
+}
+
+typealias ProbeFn = (UsbInterface) -> UsbDriver?
+
+val usbDrivers = mutableListOf<ProbeFn>()

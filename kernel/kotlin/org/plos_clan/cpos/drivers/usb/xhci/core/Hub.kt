@@ -2,6 +2,7 @@ package org.plos_clan.cpos.drivers.usb.xhci.core
 
 import kotlinx.coroutines.yield
 import org.plos_clan.cpos.drivers.usb.bus.UsbDevice
+import org.plos_clan.cpos.drivers.usb.bus.enumerate
 import org.plos_clan.cpos.drivers.usb.xhci.regs.PORT_CSC
 import org.plos_clan.cpos.drivers.usb.xhci.regs.PORT_PRC
 import org.plos_clan.cpos.drivers.usb.xhci.regs.Port

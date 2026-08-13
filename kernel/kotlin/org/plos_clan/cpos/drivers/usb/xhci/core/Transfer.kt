@@ -2,6 +2,7 @@ package org.plos_clan.cpos.drivers.usb.xhci.core
 
 import org.plos_clan.cpos.drivers.usb.bus.CompletionEvent
 import org.plos_clan.cpos.drivers.usb.bus.ControlTransferArgs
+import org.plos_clan.cpos.drivers.usb.bus.dispatchCompletion
 import org.plos_clan.cpos.drivers.usb.bus.GeneralTransferArgs
 import org.plos_clan.cpos.drivers.usb.bus.TransferStatus
 import org.plos_clan.cpos.drivers.usb.defs.REQ_DIR_IN
