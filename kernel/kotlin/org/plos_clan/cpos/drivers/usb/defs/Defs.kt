@@ -1,4 +1,4 @@
-package defs
+package org.plos_clan.cpos.drivers.usb.defs
 
 const val DESC_DEVICE: UByte = 1u
 const val DESC_CONFIGURATION: UByte = 2u
