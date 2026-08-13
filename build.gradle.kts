@@ -191,6 +191,7 @@ private class MlibcConfig(
             "-ffunction-sections", "-fdata-sections",
             "-m64", "-march=x86-64", "-mno-red-zone", "-mcmodel=kernel",
             "-D__thread=''", "-D_Thread_local=''", "-D_GNU_SOURCE",
+            "-idirafter", paths.freestandingInclude.absolutePath,
         )
     ).joinToString(" ")
     val cxxFlags = "$cFlags -fno-rtti -fno-exceptions -fno-sized-deallocation"
@@ -521,6 +522,7 @@ val buildMlibc = tasks.register("buildMlibc") {
     group = "build"
     description = "Builds the mlibc C library."
     notCompatibleWithConfigurationCache("Runs an external source build.")
+    dependsOn(prepareFreestndHeaders)
 
     inputs.property("buildType", config.mlibc.buildType)
     inputs.property("compilerFlags", listOf(config.mlibc.cFlags, config.mlibc.cxxFlags))
