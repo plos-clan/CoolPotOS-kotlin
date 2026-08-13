@@ -9,6 +9,7 @@ import org.plos_clan.cpos.drivers.NullDev
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.acpi.Acpi
 import org.plos_clan.cpos.drivers.char.TtyManager
+import org.plos_clan.cpos.drivers.usb.Usb
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
@@ -77,6 +78,7 @@ fun kernelMain() {
         return
     }
     Acpi.enumerateDevices()
+    Usb.initialize()
     ModuleManager.initialize()
     if (!FileSystemManager.mountRootfs()) {
         return

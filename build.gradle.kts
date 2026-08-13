@@ -319,6 +319,7 @@ private class BuildConfig(private val project: Project) {
             "-m", setting("qemuMemory", "QEMU_MEMORY", "2g"),
             "-M", "q35", "-cpu", "host", "-enable-kvm",
             "-no-reboot", "-smp", "4",
+            "-device", "qemu-xhci,id=xhci", "-device", "usb-kbd,bus=xhci.0",
             "-drive",
             "if=pflash,format=raw,readonly=on,file=${paths.assets.resolve("ovmf-code.fd")}",
         ) + if (debug) listOf("-s", "-S") else emptyList(),
