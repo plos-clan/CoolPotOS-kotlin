@@ -3,6 +3,9 @@
 package org.plos_clan.cpos.drivers.usb.hid
 
 import kotlinx.cinterop.UByteVar
+import kotlinx.cinterop.get
+import org.plos_clan.cpos.drivers.input.InputId
+import org.plos_clan.cpos.drivers.input.InputManager
 import org.plos_clan.cpos.drivers.usb.bus.CompletionEvent
 import org.plos_clan.cpos.drivers.usb.bus.TransferStatus
 import org.plos_clan.cpos.drivers.usb.bus.UsbDriver
@@ -59,36 +62,88 @@ class Keyboard(
         if (event.endpointAddress != hid.endpointAddress) {
             return
         }
-
-        if (event.status != TransferStatus.COMPLETED && event.status != TransferStatus.SHORT_PACKET) {
-            println("KBD: Transfer failed (${event.status.ordinal})")
-            return
-        }
-
-        val data = hid.buffer!!.view<UByteVar>()
-
-        for (modifier in layout.modifiers) {
-            if (modifier.value(data, 0u) == 1u) {
-                println("Key (Mod): 0x${(modifier.usageMin and 0xffu).toString(16).padStart(2, '0')}")
+        try {
+            if (event.status != TransferStatus.COMPLETED &&
+                event.status != TransferStatus.SHORT_PACKET
+            ) {
+                println("KBD: Transfer failed (${event.status.ordinal})")
+                return
             }
-        }
+            val buffer = hid.buffer ?: return
+            val length = (
+                hid.maxReportSize.toUInt() -
+                    minOf(event.residualLength, hid.maxReportSize.toUInt())
+                ).toInt()
+            if (length == 0) return
 
-        for (arrayField in layout.arrays) {
-            for (i in 0 until arrayField.reportCount.toInt()) {
-                val usage = arrayField.value(data, i.toUInt())
-                if (usage > 1u) {
-                    println("Key (Std): 0x${usage.toString(16).padStart(2, '0')}")
+            val data = buffer.view<UByteVar>()
+            val numbered = hid.descriptor.reports.keys.any { it != 0u.toUByte() }
+            val reportId = if (numbered) data[0] else 0u.toUByte()
+            val input = InputManager.findKeyboard(hid) ?: run {
+                val descriptor = hid.iface.device.desc
+                InputManager.registerKeyboard(
+                    source = hid,
+                    name = "USB HID keyboard",
+                    physicalPath =
+                        "usb-${hid.iface.device.slotId}/input${hid.iface.desc.interfaceNumber}",
+                    id = InputId(
+                        bus = InputId.BUS_USB,
+                        vendor = descriptor?.idVendor ?: 0u,
+                        product = descriptor?.idProduct ?: 0u,
+                        version = descriptor?.bcdDevice ?: 0u,
+                    ),
+                )
+            } ?: return
+            val report = input.beginReport()
+            val availableBits = length.toULong() * Byte.SIZE_BITS.toULong()
+            var hasKeyboardFields = false
+
+            for (field in layout.modifiers) {
+                if (field.reportId != reportId) continue
+                hasKeyboardFields = true
+                val endBit = field.bitOffset.toULong() +
+                    field.bitSize.toULong() * field.reportCount.toULong()
+                if (endBit > availableBits) {
+                    report.invalidate()
+                    continue
+                }
+                report.setHidUsage(
+                    (field.usageMin and 0xffffu).toInt(),
+                    field.value(data, 0u) != 0u,
+                )
+            }
+            for (field in layout.arrays) {
+                if (field.reportId != reportId) continue
+                hasKeyboardFields = true
+                val endBit = field.bitOffset.toULong() +
+                    field.bitSize.toULong() * field.reportCount.toULong()
+                if (endBit > availableBits) {
+                    report.invalidate()
+                    continue
+                }
+                report.coverHidRange(field.usageMin, field.usageMax)
+                repeat(field.reportCount.toInt()) { index ->
+                    report.setHidUsage(field.value(data, index.toUInt()).toInt())
                 }
             }
-        }
-
-        for (bitmap in layout.bitmaps) {
-            if (bitmap.value(data, 0u) == 1u) {
-                println("Key (Bmp): 0x${(bitmap.usageMin and 0xffu).toString(16).padStart(2, '0')}")
+            for (field in layout.bitmaps) {
+                if (field.reportId != reportId) continue
+                hasKeyboardFields = true
+                val endBit = field.bitOffset.toULong() +
+                    field.bitSize.toULong() * field.reportCount.toULong()
+                if (endBit > availableBits) {
+                    report.invalidate()
+                    continue
+                }
+                report.setHidUsage(
+                    (field.usageMin and 0xffffu).toInt(),
+                    field.value(data, 0u) != 0u,
+                )
             }
+            if (hasKeyboardFields) report.commit()
+        } finally {
+            hid.transferCompletion.release()
         }
-
-        hid.transferCompletion.release()
     }
 
     companion object {

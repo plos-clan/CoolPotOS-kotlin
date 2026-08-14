@@ -22,6 +22,10 @@ const val DEV_USB = 33      // USB userspace node
 const val DEV_GPU = 226   // 显卡
 
 interface DeviceBackend {
+    fun open(device: Device): DeviceBackend? = this
+
+    fun close(device: Device) {}
+
     fun ioctl(device: Device, command: Int, args: UserMemory): Long
     fun poll(device: Device, events: Int): Long
     fun read(
@@ -39,6 +43,11 @@ interface DeviceBackend {
         offset: ULong,
         size: ULong,
     ): Long
+}
+
+enum class DeviceIoEvent {
+    READABLE,
+    WRITABLE,
 }
 
 interface PositionlessDeviceBackend : DeviceBackend {
@@ -71,6 +80,10 @@ interface PositionlessDeviceBackend : DeviceBackend {
         offset: ULong,
         size: ULong,
     ): Long = write(device, buffer, bufferOffset, size)
+}
+
+interface WaitablePositionlessDeviceBackend : PositionlessDeviceBackend {
+    fun await(device: Device, event: DeviceIoEvent, count: Int)
 }
 
 interface DiscardingDeviceBackend : PositionlessDeviceBackend {
@@ -129,9 +142,12 @@ object DeviceManager {
         backend: DeviceBackend,
     ): ULong = deviceLock.withLock {
         if (subtype !in deviceIdx.indices ||
-            name.isEmpty() ||
-            name.any { it == '/' || it == '\u0000' } ||
-            devices.any { it.name == name }
+            !validDevicePath(name) ||
+            devices.any { device ->
+                device.name == name ||
+                    device.name.startsWith("$name/") ||
+                    name.startsWith("${device.name}/")
+            }
         ) {
             return@withLock 0uL
         }
@@ -140,7 +156,7 @@ object DeviceManager {
         if (minor > MAX_MINOR || deviceMinorInUseLocked(subtype, minor)) {
             return@withLock 0uL
         }
-        deviceIdx[subtype] = minor + 1uL
+        deviceIdx[subtype] = maxOf(deviceIdx[subtype], minor + 1uL)
 
         Device(
             name = name,
@@ -191,4 +207,13 @@ object DeviceManager {
 
     fun snapshotDevices(): List<Device> =
         deviceLock.withLock { devices.toList() }
+
+    private fun validDevicePath(path: String): Boolean {
+        if (path.isEmpty() || path.first() == '/' || path.last() == '/' || '\u0000' in path) {
+            return false
+        }
+        return path.split('/').all { component ->
+            component.isNotEmpty() && component != "." && component != ".."
+        }
+    }
 }

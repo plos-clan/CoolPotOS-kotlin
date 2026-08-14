@@ -4,8 +4,11 @@ import org.plos_clan.cpos.drivers.DEV_BLOCK
 import org.plos_clan.cpos.drivers.DEV_CHAR
 import org.plos_clan.cpos.drivers.DiscardingDeviceBackend
 import org.plos_clan.cpos.drivers.Device
+import org.plos_clan.cpos.drivers.DeviceBackend
+import org.plos_clan.cpos.drivers.DeviceIoEvent
 import org.plos_clan.cpos.drivers.DeviceManager
 import org.plos_clan.cpos.drivers.PositionlessDeviceBackend
+import org.plos_clan.cpos.drivers.WaitablePositionlessDeviceBackend
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
@@ -33,12 +36,14 @@ object Devfs : FileSystemType {
 private class DevfsInstance : SuperBlockBackend {
     private val lock = IrqSpinLock()
     private val inodes = mutableMapOf<ULong, Inode>()
+    private val directories = mutableMapOf<String, Inode>()
+    private var nextDirectoryInode = ULong.MAX_VALUE
 
     fun createRoot(superBlock: SuperBlock): Inode =
         Inode(
             id = InodeId(0uL),
             superBlock = superBlock,
-            backend = DevfsDirectory(this),
+            backend = DevfsDirectory(this, ""),
             metadata = InodeMetadata(
                 mode = FileMode(0x1EDu),
                 linkCount = 2u,
@@ -59,19 +64,40 @@ private class DevfsInstance : SuperBlockBackend {
             )
         }
     }
+
+    fun directoryFor(superBlock: SuperBlock, path: String): Inode = lock.withLock {
+        directories.getOrPut(path) {
+            Inode(
+                id = InodeId(nextDirectoryInode--),
+                superBlock = superBlock,
+                backend = DevfsDirectory(this, path),
+                metadata = InodeMetadata(
+                    mode = FileMode(0x1EDu),
+                    linkCount = 2u,
+                ),
+            )
+        }
+    }
 }
 
 private class DevfsDirectory(
     private val fileSystem: DevfsInstance,
+    private val path: String,
 ) : DirectoryBackend {
     override val type: InodeType = InodeType.DIRECTORY
     override val cacheNegativeLookups: Boolean = false
 
     override fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?> {
-        val device = DeviceManager.findDeviceByName(name.toString())
-            ?.takeIf(::isDeviceNode)
-            ?: return VfsResult.Ok(null)
-        return VfsResult.Ok(fileSystem.inodeFor(directory.superBlock, device))
+        val child = if (path.isEmpty()) name.toString() else "$path/$name"
+        val devices = DeviceManager.snapshotDevices().filter(::isDeviceNode)
+        devices.firstOrNull { it.name == child }?.let { device ->
+            return VfsResult.Ok(fileSystem.inodeFor(directory.superBlock, device))
+        }
+        return if (devices.any { it.name.startsWith("$child/") }) {
+            VfsResult.Ok(fileSystem.directoryFor(directory.superBlock, child))
+        } else {
+            VfsResult.Ok(null)
+        }
     }
 
     override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
@@ -81,11 +107,25 @@ private class DevfsDirectory(
         DeviceManager.snapshotDevices()
             .asSequence()
             .filter(::isDeviceNode)
-            .sortedBy(Device::name)
-            .map { device ->
-                val bytes = device.name.encodeToByteArray()
+            .mapNotNull { device ->
+                val relative = when {
+                    path.isEmpty() -> device.name
+                    device.name.startsWith("$path/") -> device.name.substring(path.length + 1)
+                    else -> return@mapNotNull null
+                }
+                val childName = relative.substringBefore('/')
+                childName to device.takeIf { '/' !in relative }
+            }
+            .distinctBy { it.first }
+            .sortedBy { it.first }
+            .map { (childName, device) ->
+                val bytes = childName.encodeToByteArray()
                 val name = VfsName.fromPath(bytes, 0, bytes.size)
-                val inode = fileSystem.inodeFor(superBlock, device)
+                val inode = device?.let { fileSystem.inodeFor(superBlock, it) }
+                    ?: fileSystem.directoryFor(
+                        superBlock,
+                        if (path.isEmpty()) childName else "$path/$childName",
+                    )
                 DirectoryEntry(name, inode.id, inode.type)
             }
             .toList()
@@ -126,26 +166,33 @@ private class DevfsDeviceNode(
     override val type: InodeType =
         if (device.type == DEV_BLOCK) InodeType.BLOCK_DEVICE else InodeType.CHARACTER_DEVICE
 
-    override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
-        VfsResult.Ok(DevfsDeviceHandle.open(device))
+    override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> {
+        val backend = device.backend.open(device)
+            ?: return VfsResult.Err(VfsError.NO_DEVICE)
+        return VfsResult.Ok(DevfsDeviceHandle.open(device, backend))
+    }
 }
 
 private sealed class DevfsDeviceHandle(
     protected val device: Device,
+    protected val backend: DeviceBackend,
 ) : OpenFileBackend {
     companion object {
-        fun open(device: Device): DevfsDeviceHandle = when (val backend = device.backend) {
+        fun open(device: Device, backend: DeviceBackend): DevfsDeviceHandle = when (backend) {
             is DiscardingDeviceBackend -> Discarding(device, backend)
+            is WaitablePositionlessDeviceBackend -> Waitable(device, backend)
             is PositionlessDeviceBackend -> Positionless(device, backend)
-            else -> Positioned(device)
+            else -> Positioned(device, backend)
         }
     }
 
     override fun ioctl(inode: Inode, command: Int, args: UserMemory): Long =
-        device.backend.ioctl(device, command, args)
+        backend.ioctl(device, command, args)
 
     override fun poll(inode: Inode, events: Int): Long =
-        device.backend.poll(device, events)
+        backend.poll(device, events)
+
+    override fun release() = backend.close(device)
 
     protected fun Long.toIoResult(requested: Int): IoResult {
         if (this < 0) {
@@ -160,7 +207,10 @@ private sealed class DevfsDeviceHandle(
         return IoResult.success(toInt())
     }
 
-    private class Positioned(device: Device) : DevfsDeviceHandle(device) {
+    private class Positioned(
+        device: Device,
+        backend: DeviceBackend,
+    ) : DevfsDeviceHandle(device, backend) {
         override fun read(
             inode: Inode,
             destination: PreparedBufferDestination,
@@ -171,7 +221,7 @@ private sealed class DevfsDeviceHandle(
             if (count == 0) return IoResult.success(0)
             val deviceOffset = position.deviceOffset()
                 ?: return IoResult.failure(VfsError.FILE_TOO_LARGE)
-            val result = device.backend.read(
+            val result = backend.read(
                 device,
                 destination,
                 destinationOffset,
@@ -193,7 +243,7 @@ private sealed class DevfsDeviceHandle(
             if (count == 0) return IoResult.success(0)
             val deviceOffset = position.deviceOffset()
                 ?: return IoResult.failure(VfsError.FILE_TOO_LARGE)
-            val result = device.backend.write(
+            val result = backend.write(
                 device,
                 source,
                 sourceOffset,
@@ -210,8 +260,8 @@ private sealed class DevfsDeviceHandle(
 
     private open class Positionless(
         device: Device,
-        protected val backend: PositionlessDeviceBackend,
-    ) : DevfsDeviceHandle(device), PositionlessOpenFileBackend {
+        protected val positionlessBackend: PositionlessDeviceBackend,
+    ) : DevfsDeviceHandle(device, positionlessBackend), PositionlessOpenFileBackend {
         override fun read(
             inode: Inode,
             destination: PreparedBufferDestination,
@@ -220,7 +270,12 @@ private sealed class DevfsDeviceHandle(
         ): IoResult = if (count == 0) {
             IoResult.success(0)
         } else {
-            backend.read(device, destination, destinationOffset, count.toULong()).toIoResult(count)
+            positionlessBackend.read(
+                device,
+                destination,
+                destinationOffset,
+                count.toULong(),
+            ).toIoResult(count)
         }
 
         override fun write(
@@ -231,8 +286,42 @@ private sealed class DevfsDeviceHandle(
         ): IoResult = if (count == 0) {
             IoResult.success(0)
         } else {
-            backend.write(device, source, sourceOffset, count.toULong()).toIoResult(count)
+            positionlessBackend.write(
+                device,
+                source,
+                sourceOffset,
+                count.toULong(),
+            ).toIoResult(count)
         }
+    }
+
+    private class Waitable(
+        device: Device,
+        private val waitableBackend: WaitablePositionlessDeviceBackend,
+    ) : Positionless(device, waitableBackend), WaitableOpenFileBackend {
+        override fun write(
+            inode: Inode,
+            source: PreparedBufferSource,
+            sourceOffset: Int,
+            count: Int,
+        ): IoResult = super<Positionless>.write(inode, source, sourceOffset, count)
+
+        override fun write(
+            inode: Inode,
+            source: PreparedBufferSource,
+            sourceOffset: Int,
+            count: Int,
+            mode: IoMode,
+        ): IoResult = super<Positionless>.write(inode, source, sourceOffset, count)
+
+        override fun await(event: IoEvent, count: Int) = waitableBackend.await(
+            device,
+            when (event) {
+                IoEvent.READABLE -> DeviceIoEvent.READABLE
+                IoEvent.WRITABLE -> DeviceIoEvent.WRITABLE
+            },
+            count,
+        )
     }
 
     private class Discarding(
