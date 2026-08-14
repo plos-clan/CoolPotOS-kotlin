@@ -1,4 +1,25 @@
-# CoolPotOS Kotlin
+<div align="center">
+<img height="200px" src="https://github.com/user-attachments/assets/d72d810d-f5c1-4129-9781-1b91f9030711" />
+
+<h1 align="center">CoolPotOS Kotlin</h1>
+<h3>A simple operating system written in Kotlin/Native..</h3>
+</div>
+
+---
+
+
+## Feature
+
+* Symmetric multiprocessing
+* Buddy allocator & 4-level page table
+* TSC-deadline apic timer
+* USB Driver(HID Keyboard & Mouse)
+* RRS-handoff scheduler
+* Vdso
+* ACPI AML
+* devtmpfs & procfs & erofs
+* glibc dynamic program
+* GC & Coroutine & runtime exception
 
 ## Build
 
@@ -89,3 +110,5 @@ This project is licensed under the [0BSD License](LICENSE).
 ## Dependency
 
 * mlibc [managarm/mlibc](https://github.com/managarm/mlibc)
+* libos-terminal [plos-clan/libos-terminal](https://github.com/plos-clan/libos-terminal)
+* libzstd-decompress [facebook/zstd](https://github.com/facebook/zstd)
