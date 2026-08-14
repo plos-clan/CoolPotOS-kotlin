@@ -55,6 +55,7 @@ class Keyboard(
 
     override fun disconnect() {
         println("KBD: disconnected")
+        InputManager.unregisterKeyboard(hid)
         hid.free()
     }
 

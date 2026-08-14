@@ -2,9 +2,10 @@ package org.plos_clan.cpos.drivers.input
 
 import kotlinx.coroutines.delay
 import org.plos_clan.cpos.coroutines.KernelCoroutines
-import org.plos_clan.cpos.drivers.DEV_CHAR
-import org.plos_clan.cpos.drivers.DEV_INPUT
 import org.plos_clan.cpos.drivers.DeviceManager
+import org.plos_clan.cpos.drivers.DeviceRegistration
+import org.plos_clan.cpos.drivers.DeviceType
+import org.plos_clan.cpos.drivers.LinuxDeviceMajor
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.char.TtyManager
 import org.plos_clan.cpos.utils.IrqSpinLock
@@ -240,16 +241,18 @@ internal class KeyboardInputDevice(
 
     internal fun install(): Boolean {
         val minor = EVENT_MINOR_BASE + eventIndex
-        return DeviceManager.installDeviceMinor(
-            type = DEV_CHAR,
-            subtype = DEV_INPUT,
-            handle = this,
-            name = "input/event$eventIndex",
-            parent = 0uL,
-            backend = evdev,
-            fixedMinor = minor.toULong(),
-        ) != 0uL
+        return DeviceManager.register(
+            DeviceRegistration(
+                name = "input/event$eventIndex",
+                type = DeviceType.CHARACTER,
+                major = LinuxDeviceMajor.INPUT.number,
+                minor = minor.toUInt(),
+                backend = evdev,
+            ),
+        ) != null
     }
+
+    internal fun uninstall(): Boolean = DeviceManager.unregisterAll(evdev) != 0
 
     fun beginReport(): KeyboardReport = report.reset()
 
@@ -406,6 +409,11 @@ internal object InputManager {
 
     fun findKeyboard(source: Any): KeyboardInputDevice? =
         lock.withLock { keyboards[source] }
+
+    fun unregisterKeyboard(source: Any): Boolean = lock.withLock {
+        val keyboard = keyboards.remove(source) ?: return@withLock false
+        keyboard.uninstall()
+    }
 
     fun registerKeyboard(
         source: Any,

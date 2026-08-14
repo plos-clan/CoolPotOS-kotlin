@@ -12,7 +12,7 @@ object FileSystemManager {
         private set
 
     fun initialize(): Boolean {
-        return register(Tmpfs) && register(Devfs) && register(Procfs) &&
+        return register(Tmpfs) && register(Devtmpfs) && register(Procfs) &&
             register(Erofs) && register(Overlayfs)
     }
 
@@ -56,7 +56,7 @@ object FileSystemManager {
         }
 
         val devFlags = MountFlags(MountFlags.NO_EXEC.bits or MountFlags.NO_SUID.bits)
-        if (!mount(context, "/dev", Devfs, devFlags)) return false
+        if (!mount(context, "/dev", Devtmpfs, devFlags)) return false
 
         val procFlags = MountFlags(
             MountFlags.NO_EXEC.bits or MountFlags.NO_DEVICE.bits or MountFlags.NO_SUID.bits,

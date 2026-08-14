@@ -5,21 +5,38 @@ import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.IrqSpinLock
 
-const val DEV_NULL = 0  // 空设备
-const val DEV_CHAR = 1  // 字符设备
-const val DEV_BLOCK = 2 // 块设备
-const val DEV_NET = 3   // 网络设备
+enum class DeviceType {
+    CHARACTER,
+    BLOCK,
+}
 
-const val DEV_TTY = 4     // TTY 设备
-const val DEV_PART = 8    // 磁盘分区
-const val DEV_SOUND = 116 // 声卡 / ALSA
-const val DEV_INPUT = 13  // 输入设备
-const val DEV_FB = 29    // 帧缓冲
-const val DEV_DISK = 30     // 磁盘
-const val DEV_NETIF = 31     // 网卡
-const val DEV_SYSDEV = 32     // 系统设备
-const val DEV_USB = 33      // USB userspace node
-const val DEV_GPU = 226   // 显卡
+enum class LinuxDeviceMajor(val number: UInt) {
+    MEMORY(1u),
+    VIRTUAL_TERMINAL(4u),
+    TTY_AUXILIARY(5u),
+    INPUT(13u),
+}
+
+value class DeviceNumber private constructor(val value: ULong) {
+    val major: UInt
+        get() = (value shr 8 and 0xfffuL).toUInt()
+
+    val minor: UInt
+        get() = ((value and 0xffuL) or (value shr 12 and 0xfffff00uL)).toUInt()
+
+    companion object {
+        const val MAX_MAJOR = 0xfffu
+        const val MAX_MINOR = 0xfffffu
+
+        fun create(major: UInt, minor: UInt): DeviceNumber? {
+            if (major > MAX_MAJOR || minor > MAX_MINOR) return null
+            val encoded = (major.toULong() shl 8) or
+                (minor.toULong() and 0xffuL) or
+                ((minor.toULong() and 0xfffff00uL) shl 12)
+            return DeviceNumber(encoded)
+        }
+    }
+}
 
 interface DeviceBackend {
     fun open(device: Device): DeviceBackend? = this
@@ -97,116 +114,119 @@ interface DiscardingDeviceBackend : PositionlessDeviceBackend {
     ): Long = discard(device, size)
 }
 
-class Device(
+data class DeviceRegistration(
     val name: String,
-    val type: Int,
-    val subType: Int,
-    val dev: ULong,
-    val parent: ULong,
-    val handle: Any,
+    val type: DeviceType,
+    val major: UInt,
+    val minor: UInt? = null,
     val backend: DeviceBackend,
-) {
-    fun write(buffer: PreparedBufferSource, bufferOffset: Int, offset: ULong, count: ULong): Long =
-        backend.write(this, buffer, bufferOffset, offset, count)
+)
 
-    fun read(
-        buffer: PreparedBufferDestination,
-        bufferOffset: Int,
-        offset: ULong,
-        count: ULong,
-    ): Long =
-        backend.read(this, buffer, bufferOffset, offset, count)
+class Device internal constructor(
+    val name: String,
+    val type: DeviceType,
+    val number: DeviceNumber,
+    val backend: DeviceBackend,
+)
+
+interface DeviceRegistryObserver {
+    fun deviceRegistered(device: Device)
+    fun deviceUnregistered(device: Device)
 }
 
 object DeviceManager {
-    private const val MAX_MINOR = 0xffuL
+    private data class DeviceKey(val type: DeviceType, val number: DeviceNumber)
+    private data class MajorKey(val type: DeviceType, val major: UInt)
 
-    private val devices = mutableListOf<Device>()
-    private val deviceIdx = ULongArray(227)
-    private val deviceLock = IrqSpinLock()
+    private val devicesByName = mutableMapOf<String, Device>()
+    private val devicesByNumber = mutableMapOf<DeviceKey, Device>()
+    private val nextMinor = mutableMapOf<MajorKey, UInt>()
+    private val observers = mutableSetOf<DeviceRegistryObserver>()
+    private val lock = IrqSpinLock()
 
-    private fun deviceMinorInUseLocked(subtype: Int, minor: ULong): Boolean =
-        devices.any { device ->
-            device.type != DEV_NULL &&
-                device.subType == subtype &&
-                (device.dev and MAX_MINOR) == minor
-        }
-
-    private fun installDeviceInternal(
-        type: Int,
-        subtype: Int,
-        handle: Any,
-        name: String,
-        parent: ULong,
-        fixedMinor: ULong?,
-        backend: DeviceBackend,
-    ): ULong = deviceLock.withLock {
-        if (subtype !in deviceIdx.indices ||
-            !validDevicePath(name) ||
-            devices.any { device ->
-                device.name == name ||
-                    device.name.startsWith("$name/") ||
-                    name.startsWith("${device.name}/")
-            }
+    fun register(registration: DeviceRegistration): Device? = lock.withLock {
+        if (registration.major > DeviceNumber.MAX_MAJOR ||
+            !validDevicePath(registration.name) ||
+            devicesByName.containsKey(registration.name)
         ) {
-            return@withLock 0uL
+            return@withLock null
         }
 
-        val minor = fixedMinor ?: deviceIdx[subtype]
-        if (minor > MAX_MINOR || deviceMinorInUseLocked(subtype, minor)) {
-            return@withLock 0uL
-        }
-        deviceIdx[subtype] = maxOf(deviceIdx[subtype], minor + 1uL)
+        val majorKey = MajorKey(registration.type, registration.major)
+        val minor = registration.minor ?: allocateMinor(majorKey) ?: return@withLock null
+        val number = DeviceNumber.create(registration.major, minor) ?: return@withLock null
+        val key = DeviceKey(registration.type, number)
+        if (devicesByNumber.containsKey(key)) return@withLock null
 
-        Device(
-            name = name,
-            type = type,
-            subType = subtype,
-            dev = (subtype.toULong() shl 8) or minor,
-            parent = parent,
-            handle = handle,
-            backend = backend,
-        ).also(devices::add).dev
+        if (registration.minor == null) {
+            nextMinor[majorKey] = minor + 1u
+        }
+        val device = Device(
+            name = registration.name,
+            type = registration.type,
+            number = number,
+            backend = registration.backend,
+        )
+        devicesByName[device.name] = device
+        devicesByNumber[key] = device
+        observers.forEach { it.deviceRegistered(device) }
+        device
     }
 
-    fun installDevice(
-        type: Int,
-        subtype: Int,
-        handle: Any,
-        name: String,
-        parent: ULong,
-        backend: DeviceBackend,
-    ): ULong = installDeviceInternal(type, subtype, handle, name, parent, null, backend)
+    fun unregister(device: Device): Boolean = lock.withLock {
+        if (devicesByName[device.name] !== device) return@withLock false
+        unregisterLocked(device)
+        true
+    }
 
-    fun installDeviceMinor(
-        type: Int,
-        subtype: Int,
-        handle: Any,
-        name: String,
-        parent: ULong,
-        backend: DeviceBackend,
-        fixedMinor: ULong,
-    ): ULong = installDeviceInternal(type, subtype, handle, name, parent, fixedMinor, backend)
+    fun unregisterAll(backend: DeviceBackend): Int = lock.withLock {
+        val removed = devicesByName.values.filter { it.backend === backend }
+        removed.forEach(::unregisterLocked)
+        removed.size
+    }
 
-    fun findDevice(subType: Int, index: ULong): Device? = deviceLock.withLock {
-        var current = 0uL
-        devices.firstOrNull { device ->
-            if (device.subType != subType) {
-                false
-            } else {
-                current++ == index
+    fun findByBackend(backend: DeviceBackend): Device? = lock.withLock {
+        var match: Device? = null
+        for (device in devicesByName.values) {
+            if (device.backend === backend &&
+                (match == null || device.number.value < match.number.value)
+            ) {
+                match = device
+            }
+        }
+        match
+    }
+
+    fun observe(observer: DeviceRegistryObserver) {
+        lock.withLock {
+            if (observers.add(observer)) {
+                devicesByName.values.forEach(observer::deviceRegistered)
             }
         }
     }
 
-    fun getDevice(dev: ULong): Device? =
-        deviceLock.withLock { devices.firstOrNull { it.dev == dev } }
+    fun stopObserving(observer: DeviceRegistryObserver) {
+        lock.withLock { observers -= observer }
+    }
 
-    fun findDeviceByName(name: String): Device? =
-        deviceLock.withLock { devices.firstOrNull { it.name == name } }
+    private fun allocateMinor(key: MajorKey): UInt? {
+        var candidate = nextMinor[key] ?: 0u
+        while (candidate <= DeviceNumber.MAX_MINOR) {
+            val number = DeviceNumber.create(key.major, candidate) ?: return null
+            if (!devicesByNumber.containsKey(DeviceKey(key.type, number))) return candidate
+            if (candidate == DeviceNumber.MAX_MINOR) return null
+            candidate++
+        }
+        return null
+    }
 
-    fun snapshotDevices(): List<Device> =
-        deviceLock.withLock { devices.toList() }
+    private fun unregisterLocked(device: Device) {
+        devicesByName.remove(device.name)
+        devicesByNumber.remove(DeviceKey(device.type, device.number))
+        val major = MajorKey(device.type, device.number.major)
+        nextMinor[major] = minOf(nextMinor[major] ?: DeviceNumber.MAX_MINOR, device.number.minor)
+        observers.forEach { it.deviceUnregistered(device) }
+    }
 
     private fun validDevicePath(path: String): Boolean {
         if (path.isEmpty() || path.first() == '/' || path.last() == '/' || '\u0000' in path) {

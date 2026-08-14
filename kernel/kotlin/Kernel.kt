@@ -5,7 +5,7 @@ import bridge.get_sys_clone_tls_at
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.FrameBuffer
-import org.plos_clan.cpos.drivers.NullDev
+import org.plos_clan.cpos.drivers.MemoryDevice
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.acpi.Acpi
 import org.plos_clan.cpos.drivers.char.TtyManager
@@ -72,8 +72,12 @@ fun kernelMain() {
         return
     }
     FrameBuffer.initialize()
-    TtyManager.initialize()
-    NullDev.initialize()
+    if (!TtyManager.initialize()) {
+        return
+    }
+    if (!MemoryDevice.initialize()) {
+        return
+    }
     if (!KernelCoroutines.initialize()) {
         return
     }

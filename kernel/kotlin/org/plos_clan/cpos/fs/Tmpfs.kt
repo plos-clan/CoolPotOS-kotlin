@@ -33,7 +33,10 @@ object Tmpfs : FileSystemType {
     }
 }
 
-private class TmpfsInstance(private val options: TmpfsOptions) : SuperBlockBackend {
+internal class TmpfsInstance(
+    private val options: TmpfsOptions,
+    internal val cacheDirectoryLookups: Boolean = true,
+) : SuperBlockBackend {
     private val lock = IrqSpinLock()
     private var nextInodeId = 1uL
     private var allocatedBytes = 0uL
@@ -42,19 +45,53 @@ private class TmpfsInstance(private val options: TmpfsOptions) : SuperBlockBacke
         get() = options.pageSize
 
     fun newRegularFile(superBlock: SuperBlock, mode: FileMode): Inode =
-        newInode(superBlock, TmpfsRegularFile(this), mode, linkCount = 1u)
+        newInode(
+            superBlock,
+            TmpfsRegularFile(this),
+            InodeMetadata(mode = mode, linkCount = 1u),
+        )
 
-    fun newDirectory(superBlock: SuperBlock, mode: FileMode): Inode =
-        newInode(superBlock, TmpfsDirectory(this), mode, linkCount = 2u)
+    fun newDirectory(
+        superBlock: SuperBlock,
+        mode: FileMode,
+        automatic: Boolean = false,
+    ): Inode = newInode(
+        superBlock,
+        TmpfsDirectory(this, automatic),
+        InodeMetadata(mode = mode, linkCount = 2u),
+    )
 
     fun newSymlink(superBlock: SuperBlock, target: VfsPathname): Inode =
         newInode(
             superBlock = superBlock,
             backend = TmpfsSymlink(target),
-            mode = FileMode(0x1FFu),
-            size = target.size.toULong(),
-            linkCount = 1u,
+            metadata = InodeMetadata(
+                mode = FileMode(0x1FFu),
+                size = target.size.toULong(),
+                linkCount = 1u,
+            ),
         )
+
+    fun installSpecialNode(
+        root: Inode,
+        path: List<VfsName>,
+        backend: InodeBackend,
+        metadata: InodeMetadata,
+    ): Boolean {
+        if (path.isEmpty()) return false
+        val directory = root.backend as? TmpfsDirectory ?: return false
+        return directory.installSpecialNode(root, path, 0, backend, metadata)
+    }
+
+    fun removeSpecialNode(
+        root: Inode,
+        path: List<VfsName>,
+        matches: (InodeBackend) -> Boolean,
+    ): Boolean {
+        if (path.isEmpty()) return false
+        val directory = root.backend as? TmpfsDirectory ?: return false
+        return directory.removeSpecialNode(root, path, 0, matches)
+    }
 
     fun reserve(bytes: ULong): Boolean = lock.withLock {
         val limit = options.sizeLimit
@@ -78,22 +115,33 @@ private class TmpfsInstance(private val options: TmpfsOptions) : SuperBlockBacke
     private fun newInode(
         superBlock: SuperBlock,
         backend: InodeBackend,
-        mode: FileMode,
-        size: ULong = 0uL,
-        linkCount: UInt,
+        metadata: InodeMetadata,
     ): Inode {
         val id = lock.withLock { InodeId(nextInodeId++) }
         return Inode(
             id = id,
             superBlock = superBlock,
             backend = backend,
-            metadata = InodeMetadata(mode, size, linkCount),
+            metadata = metadata,
         )
     }
+
+    internal fun newSpecialNode(
+        superBlock: SuperBlock,
+        backend: InodeBackend,
+        metadata: InodeMetadata,
+    ): Inode = newInode(superBlock, backend, metadata)
 }
 
-private class TmpfsDirectory(private val fileSystem: TmpfsInstance) : DirectoryBackend {
+internal class TmpfsDirectory(
+    private val fileSystem: TmpfsInstance,
+    private val automatic: Boolean,
+) : DirectoryBackend {
     override val type: InodeType = InodeType.DIRECTORY
+    override val cachePositiveLookups: Boolean
+        get() = fileSystem.cacheDirectoryLookups
+    override val cacheNegativeLookups: Boolean
+        get() = fileSystem.cacheDirectoryLookups
 
     private val lock = IrqSpinLock()
     private val children = linkedMapOf<VfsName, Inode>()
@@ -147,6 +195,78 @@ private class TmpfsDirectory(private val fileSystem: TmpfsInstance) : DirectoryB
 
     fun snapshot(): List<DirectoryEntry> = lock.withLock {
         children.map { (name, inode) -> DirectoryEntry(name, inode.id, inode.type) }
+    }
+
+    fun installSpecialNode(
+        directory: Inode,
+        path: List<VfsName>,
+        index: Int,
+        backend: InodeBackend,
+        metadata: InodeMetadata,
+    ): Boolean = lock.withLock {
+        val name = path[index]
+        if (index == path.lastIndex) {
+            if (children.containsKey(name)) return@withLock false
+            children[name] = fileSystem.newSpecialNode(directory.superBlock, backend, metadata)
+            return@withLock true
+        }
+
+        var child = children[name]
+        var created = false
+        if (child == null) {
+            child = fileSystem.newDirectory(
+                directory.superBlock,
+                FileMode(0x1EDu),
+                automatic = true,
+            )
+            children[name] = child
+            directory.updateMetadata { it.copy(linkCount = it.linkCount + 1u) }
+            created = true
+        }
+        val childDirectory = child.backend as? TmpfsDirectory ?: return@withLock false
+        val installed = childDirectory.installSpecialNode(
+            child,
+            path,
+            index + 1,
+            backend,
+            metadata,
+        )
+        if (!installed && created && childDirectory.isEmpty()) {
+            children.remove(name)
+            directory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
+            child.updateMetadata { it.copy(linkCount = 0u) }
+        }
+        installed
+    }
+
+    fun removeSpecialNode(
+        directory: Inode,
+        path: List<VfsName>,
+        index: Int,
+        matches: (InodeBackend) -> Boolean,
+    ): Boolean = lock.withLock {
+        val name = path[index]
+        val child = children[name] ?: return@withLock false
+        if (index == path.lastIndex) {
+            if (!matches(child.backend)) return@withLock false
+            children.remove(name)
+            child.updateMetadata { it.copy(linkCount = 0u) }
+            return@withLock true
+        }
+
+        val childDirectory = child.backend as? TmpfsDirectory ?: return@withLock false
+        val removed = childDirectory.removeSpecialNode(
+            child,
+            path,
+            index + 1,
+            matches,
+        )
+        if (removed && childDirectory.automatic && childDirectory.isEmpty()) {
+            children.remove(name)
+            directory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
+            child.updateMetadata { it.copy(linkCount = 0u) }
+        }
+        removed
     }
 
     private fun isEmpty(): Boolean = lock.withLock { children.isEmpty() }

@@ -280,6 +280,9 @@ interface SymlinkBackend : InodeBackend {
 }
 
 interface DirectoryBackend : InodeBackend {
+    val cachePositiveLookups: Boolean
+        get() = true
+
     val cacheNegativeLookups: Boolean
         get() = true
 
@@ -1431,22 +1434,22 @@ class Vfs(
         name: VfsName,
         followMount: Boolean = true,
     ): VfsResult<VfsPath> {
-        parent.dentry.cachedChild(name)?.let { cached ->
-            val inode = cached.inode()
-            if (inode == null &&
-                (parent.inode?.backend as? DirectoryBackend)?.cacheNegativeLookups != false
-            ) {
-                return VfsResult.Err(VfsError.NOT_FOUND)
-            }
-            if (inode != null) {
-                val path = VfsPath(parent.mount, cached)
-                return VfsResult.Ok(if (followMount) followMounts(context.namespace, path) else path)
-            }
-        }
-
         val directory = parent.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = directory.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        parent.dentry.cachedChild(name)?.let { cached ->
+            val inode = cached.inode()
+            if (inode == null && backend.cacheNegativeLookups) {
+                return VfsResult.Err(VfsError.NOT_FOUND)
+            }
+            if (inode != null && backend.cachePositiveLookups) {
+                val path = VfsPath(parent.mount, cached)
+                return VfsResult.Ok(
+                    if (followMount) followMounts(context.namespace, path) else path,
+                )
+            }
+        }
+
         val inode = when (val result = backend.lookup(directory, name)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result

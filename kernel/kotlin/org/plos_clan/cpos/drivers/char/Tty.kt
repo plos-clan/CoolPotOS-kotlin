@@ -1,9 +1,11 @@
 package org.plos_clan.cpos.drivers.char
 
-import org.plos_clan.cpos.drivers.DEV_CHAR
-import org.plos_clan.cpos.drivers.DEV_TTY
 import org.plos_clan.cpos.drivers.Device
+import org.plos_clan.cpos.drivers.DeviceBackend
 import org.plos_clan.cpos.drivers.DeviceManager
+import org.plos_clan.cpos.drivers.DeviceRegistration
+import org.plos_clan.cpos.drivers.DeviceType
+import org.plos_clan.cpos.drivers.LinuxDeviceMajor
 import org.plos_clan.cpos.drivers.PositionlessDeviceBackend
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
 import org.plos_clan.cpos.mem.PreparedBufferDestination
@@ -12,6 +14,7 @@ import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Cmdline
+import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct
@@ -378,6 +381,37 @@ class TtySession(
     }
 }
 
+private object ControllingTty : PositionlessDeviceBackend {
+    override fun open(device: Device): DeviceBackend? = currentSession()
+
+    override fun ioctl(device: Device, command: Int, args: UserMemory): Long =
+        currentSession()?.ioctl(device, command, args) ?: -Errno.ENXIO.toLong()
+
+    override fun poll(device: Device, events: Int): Long =
+        currentSession()?.poll(device, events) ?: -Errno.ENXIO.toLong()
+
+    override fun read(
+        device: Device,
+        buffer: PreparedBufferDestination,
+        bufferOffset: Int,
+        size: ULong,
+    ): Long = currentSession()?.read(device, buffer, bufferOffset, size)
+        ?: -Errno.ENXIO.toLong()
+
+    override fun write(
+        device: Device,
+        buffer: PreparedBufferSource,
+        bufferOffset: Int,
+        size: ULong,
+    ): Long = currentSession()?.write(device, buffer, bufferOffset, size)
+        ?: -Errno.ENXIO.toLong()
+
+    private fun currentSession(): TtySession? {
+        val sessionId = ProcessManager.currentProcess()?.sessionId?.takeIf { it != 0 } ?: return null
+        return TtyManager.vts.firstOrNull { it.sessionId == sessionId }
+    }
+}
+
 data class TtyDevice(val name: String, val device: TtyPhysicalDevice, val type: TtyDeviceType)
 
 data class ProcessTerminal(
@@ -426,11 +460,8 @@ object TtyManager {
 
     fun processTerminal(process: Process): ProcessTerminal? {
         val session = vts.firstOrNull { it.sessionId == process.sessionId } ?: return null
-        val device = DeviceManager.snapshotDevices()
-            .filter { it.handle === session }
-            .minByOrNull(Device::dev)
-            ?: return null
-        return ProcessTerminal(device.dev, session.foregroundProcessGroup)
+        val device = DeviceManager.findByBackend(session) ?: return null
+        return ProcessTerminal(device.number.value, session.foregroundProcessGroup)
     }
 
     fun installTtyDevice(device: TtyDevice) {
@@ -471,40 +502,68 @@ object TtyManager {
         )
     }
 
-    fun initialize() {
+    fun initialize(): Boolean {
         val devName = Cmdline["console"] ?: "fb0"
-
-        val device = devices.find { it.name == devName } ?: return
+        val device = devices.find { it.name == devName } ?: return false
+        val registered = mutableListOf<Device>()
         for (index in 0..6) {
-            val session =
-                TtySession(
-                    createDefaultTermios(),
-                    createDefaultVtMode(),
-                    VTModeConstants.KD_TEXT,
-                    VTModeConstants.K_XLATE,
-                    TerminalSession(device.device as TtyGraphicsDevice),
-                    device
-                )
-            vts += session
-            DeviceManager.installDevice(
-                DEV_CHAR,
-                DEV_TTY,
-                session,
-                "tty$index",
-                0UL,
-                session
+            val session = TtySession(
+                createDefaultTermios(),
+                createDefaultVtMode(),
+                VTModeConstants.KD_TEXT,
+                VTModeConstants.K_XLATE,
+                TerminalSession(device.device as TtyGraphicsDevice),
+                device,
             )
+            vts += session
+            val tty = DeviceManager.register(
+                DeviceRegistration(
+                    name = "tty$index",
+                    type = DeviceType.CHARACTER,
+                    major = LinuxDeviceMajor.VIRTUAL_TERMINAL.number,
+                    minor = index.toUInt(),
+                    backend = session,
+                ),
+            )
+            if (tty == null) {
+                registered.forEach(DeviceManager::unregister)
+                vts.clear()
+                return false
+            }
+            registered += tty
         }
 
-        vts.firstOrNull()?.let { console ->
-            DeviceManager.installDevice(
-                DEV_CHAR,
-                DEV_TTY,
-                console,
-                "tty",
-                0uL,
-                console,
-            )
+        val console = vts.first()
+        val controllingTty = DeviceManager.register(
+            DeviceRegistration(
+                name = "tty",
+                type = DeviceType.CHARACTER,
+                major = LinuxDeviceMajor.TTY_AUXILIARY.number,
+                minor = 0u,
+                backend = ControllingTty,
+            ),
+        )
+        if (controllingTty == null) {
+            registered.forEach(DeviceManager::unregister)
+            vts.clear()
+            return false
         }
+        registered += controllingTty
+
+        val systemConsole = DeviceManager.register(
+            DeviceRegistration(
+                name = "console",
+                type = DeviceType.CHARACTER,
+                major = LinuxDeviceMajor.TTY_AUXILIARY.number,
+                minor = 1u,
+                backend = console,
+            ),
+        )
+        if (systemConsole == null) {
+            registered.forEach(DeviceManager::unregister)
+            vts.clear()
+            return false
+        }
+        return true
     }
 }
