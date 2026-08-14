@@ -1,7 +1,7 @@
 package org.plos_clan.cpos.drivers
 
-import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.PreparedBufferDestination
+import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.Errno
 
 object NullDev : DiscardingDeviceBackend {

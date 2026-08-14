@@ -6,7 +6,6 @@
 
 package org.plos_clan.cpos.mem
 
-import kotlin.native.runtime.GC
 import bridge.runtime_vm_install
 import bridge.runtime_vm_take_released
 import kotlinx.cinterop.COpaquePointer
@@ -17,6 +16,7 @@ import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.staticCFunction
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.toPointer
+import kotlin.native.runtime.GC
 
 internal data class GarbageCollectionStatistics(
     val epoch: ULong,

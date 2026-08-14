@@ -3,7 +3,6 @@
 package org.plos_clan.cpos.drivers.usb.hid
 
 import kotlinx.cinterop.UByteVar
-import kotlinx.coroutines.launch
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.coroutines.KernelSemaphore
 import org.plos_clan.cpos.drivers.usb.bus.ControlTransferArgs
@@ -149,7 +148,7 @@ class HidDevice(
             device.setProtocol(PROTO_REPORT.toUShort())
             device.setIdle(0u.toUShort())
 
-            KernelCoroutines.scope.launch {
+            KernelCoroutines.launch("usb-common") {
                 while (device.buffer != null) {
                     device.submitTransfer()
                     device.transferCompletion.acquire()

@@ -3,7 +3,6 @@
 package org.plos_clan.cpos.syscall
 
 import kotlinx.coroutines.DisposableHandle
-import kotlinx.coroutines.Runnable
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.mem.UserMemory
@@ -170,9 +169,9 @@ object Futex {
                 else -> {
                     queues.getOrPut(address.key) { ArrayDeque() }.addLast(waiter)
                     waiter.timeout = expiresAt?.let { deadline ->
-                        KernelCoroutines.dispatcher.scheduleAt(deadline, Runnable {
+                        KernelCoroutines.dispatcher.scheduleAt(deadline) {
                             timeout(waiter)
-                        })
+                        }
                     }
                 }
             }

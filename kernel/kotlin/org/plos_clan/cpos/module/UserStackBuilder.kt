@@ -2,16 +2,16 @@
 
 package org.plos_clan.cpos.module
 
-import org.plos_clan.cpos.mem.MemoryRegion
-import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
-import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.AddressSpace
 import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.mem.MEMORY_REGION_WRITABLE
+import org.plos_clan.cpos.mem.MemoryRegion
 import org.plos_clan.cpos.mem.MemoryRegionType
+import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
+import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.Process
-import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.KernelRandom
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.isPageAligned
 

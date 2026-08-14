@@ -3,7 +3,6 @@ package org.plos_clan.cpos.drivers.input
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceBackend
 import org.plos_clan.cpos.drivers.DeviceIoEvent
-import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.WaitablePositionlessDeviceBackend
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource

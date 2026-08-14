@@ -6,8 +6,8 @@ import org.plos_clan.cpos.drivers.usb.bus.HostController
 import org.plos_clan.cpos.drivers.usb.xhci.regs.Capability
 import org.plos_clan.cpos.drivers.usb.xhci.regs.Doorbell
 import org.plos_clan.cpos.drivers.usb.xhci.regs.Operational
-import org.plos_clan.cpos.mem.MmioRegion
 import org.plos_clan.cpos.mem.MmioAddress
+import org.plos_clan.cpos.mem.MmioRegion
 
 class Xhci(baseAddress: MmioAddress) {
     val capability = Capability(baseAddress)

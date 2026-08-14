@@ -3,9 +3,7 @@
 package org.plos_clan.cpos.drivers.char
 
 import bridge.io_in8
-import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.coroutines.KernelEvent
@@ -143,7 +141,7 @@ object Ps2Keyboard {
     private fun startEventWorker(decoder: Ps2Set1Decoder) {
         val wakeup = KernelCoroutines.dispatcher.createEvent()
         scanCodeWakeup = wakeup
-        KernelCoroutines.scope.launch(CoroutineName("ps2-keyboard")) {
+        KernelCoroutines.launch("ps2-keyboard") {
             val batch = ByteArray(SCAN_CODE_BATCH_SIZE)
             while (isActive) {
                 wakeup.await()

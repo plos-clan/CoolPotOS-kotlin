@@ -2,11 +2,8 @@
 
 package org.plos_clan.cpos.drivers.usb.xhci
 
-import kotlinx.coroutines.CoroutineName
-import kotlinx.coroutines.launch
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.pcie.PciDevice
-import org.plos_clan.cpos.drivers.usb.xhci.core.Xhci as XhciController
 import org.plos_clan.cpos.drivers.usb.xhci.core.resetController
 import org.plos_clan.cpos.drivers.usb.xhci.core.setupCommandRing
 import org.plos_clan.cpos.drivers.usb.xhci.core.setupDcbaa
@@ -15,6 +12,7 @@ import org.plos_clan.cpos.drivers.usb.xhci.core.takeOwnership
 import org.plos_clan.cpos.drivers.usb.xhci.core.xhciHubThread
 import org.plos_clan.cpos.mem.MmioAddress
 import org.plos_clan.cpos.mem.MmioRegion
+import org.plos_clan.cpos.drivers.usb.xhci.core.Xhci as XhciController
 
 object Xhci {
     private val controllers = mutableListOf<XhciController>()
@@ -61,7 +59,7 @@ object Xhci {
         println("xHCI Initialized successfully")
 
         controllers.add(xhci)
-        KernelCoroutines.scope.launch(CoroutineName("xhci-hub")) {
+        KernelCoroutines.launch("xhci-hub") {
             xhci.xhciHubThread()
         }
     }

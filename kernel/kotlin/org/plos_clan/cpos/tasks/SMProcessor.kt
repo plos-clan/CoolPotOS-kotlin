@@ -2,7 +2,10 @@
 
 package org.plos_clan.cpos.tasks
 
-import kotlinx.cinterop.*
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.get
+import kotlinx.cinterop.pointed
+import kotlinx.cinterop.toLong
 import org.plos_clan.cpos.drivers.acpi.apic.LAPIC_TIMER_FREQUENCY_HZ
 import org.plos_clan.cpos.drivers.acpi.apic.LAPIC_TIMER_INTERRUPT_VECTOR
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic

@@ -3,8 +3,18 @@
 package org.plos_clan.cpos.fault
 
 import bridge.executable_file_request
-import kotlinx.cinterop.*
-import org.plos_clan.cpos.utils.*
+import kotlinx.cinterop.CPointer
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.UByteVar
+import kotlinx.cinterop.pointed
+import kotlinx.cinterop.reinterpret
+import org.plos_clan.cpos.utils.hex
+import org.plos_clan.cpos.utils.isCanonicalKernelAddress
+import org.plos_clan.cpos.utils.readAscii
+import org.plos_clan.cpos.utils.readU16
+import org.plos_clan.cpos.utils.readU32
+import org.plos_clan.cpos.utils.readU64
+import org.plos_clan.cpos.utils.readU8
 
 private const val ELF64_HEADER_SIZE = 64uL
 private const val ELF64_SECTION_HEADER_SIZE = 64uL

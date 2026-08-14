@@ -2,12 +2,11 @@
 
 package org.plos_clan.cpos.fs
 
-import org.plos_clan.cpos.mem.ByteArrayBuffer
-import org.plos_clan.cpos.mem.PreparedBufferDestination
-
 import bridge.cp_zstd_decompress
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
+import org.plos_clan.cpos.mem.ByteArrayBuffer
+import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.module.ModuleData
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.LittleEndianBuffer
@@ -143,7 +142,7 @@ private class ErofsInstance private constructor(
                     while (end > nameStart && bytes[blockStart + end - 1] == 0.toByte()) end--
                     end
                 }
-                if (nameStart < firstName || nameEnd <= nameStart || nameEnd > blockLength ||
+                if (nameStart !in firstName..<nameEnd || nameEnd > blockLength ||
                     nameEnd - nameStart > Header.MAX_NAME_LENGTH
                 ) return null
                 val type = inodeType(bytes[entryOffset + 10].toInt() and 0xff)

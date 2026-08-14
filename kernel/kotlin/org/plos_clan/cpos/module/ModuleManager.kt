@@ -6,17 +6,14 @@ import bridge.module_request
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
-import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.get
 import kotlinx.cinterop.plus
 import kotlinx.cinterop.pointed
 import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.toKString
-import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.fs.FileContent
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.PreparedBufferDestination
-import platform.posix.memcpy
 
 class ModuleData internal constructor(
     private val address: CPointer<UByteVar>,

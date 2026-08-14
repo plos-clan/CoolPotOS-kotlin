@@ -2,10 +2,10 @@
 
 package org.plos_clan.cpos.drivers.pcie
 
+import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.fault.IrqController
 import org.plos_clan.cpos.fault.IrqControllerType
 import org.plos_clan.cpos.fault.IrqHandler
-import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 
 enum class PciIrqType {
     INTX,

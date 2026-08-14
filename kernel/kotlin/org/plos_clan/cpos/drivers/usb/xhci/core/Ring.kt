@@ -5,8 +5,8 @@ package org.plos_clan.cpos.drivers.usb.xhci.core
 import kotlinx.cinterop.UIntVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set
-import org.plos_clan.cpos.mem.MmioRegion
 import org.plos_clan.cpos.mem.MmioAddress
+import org.plos_clan.cpos.mem.MmioRegion
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 
 class CommandRing {

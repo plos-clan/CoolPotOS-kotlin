@@ -2,16 +2,16 @@ package org.plos_clan.cpos.fs
 
 import org.plos_clan.cpos.drivers.DEV_BLOCK
 import org.plos_clan.cpos.drivers.DEV_CHAR
-import org.plos_clan.cpos.drivers.DiscardingDeviceBackend
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceBackend
 import org.plos_clan.cpos.drivers.DeviceIoEvent
 import org.plos_clan.cpos.drivers.DeviceManager
+import org.plos_clan.cpos.drivers.DiscardingDeviceBackend
 import org.plos_clan.cpos.drivers.PositionlessDeviceBackend
 import org.plos_clan.cpos.drivers.WaitablePositionlessDeviceBackend
-import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 object Devfs : FileSystemType {

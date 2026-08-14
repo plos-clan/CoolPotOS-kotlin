@@ -26,8 +26,8 @@ import org.plos_clan.cpos.drivers.usb.defs.SetupPacket
 import org.plos_clan.cpos.drivers.usb.defs.SsEndpointCompanionDescriptor
 import org.plos_clan.cpos.mem.MmioRegion
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
-import org.plos_clan.cpos.utils.readU8
 import org.plos_clan.cpos.utils.readU16
+import org.plos_clan.cpos.utils.readU8
 
 suspend fun UsbDevice.enumerate(): Unit? {
     val buffers = mutableListOf<MmioRegion>()

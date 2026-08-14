@@ -2,6 +2,7 @@ package org.plos_clan.cpos.fs.procfs
 
 import org.plos_clan.cpos.drivers.char.TtyManager
 import org.plos_clan.cpos.fs.FileSystemManager
+import org.plos_clan.cpos.fs.VfsName
 import org.plos_clan.cpos.fs.VfsResult
 import org.plos_clan.cpos.mem.MEMORY_REGION_EXECUTABLE
 import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
@@ -47,7 +48,7 @@ enum class ProcessFile(val fileName: String) {
     }
 
     companion object {
-        fun from(name: org.plos_clan.cpos.fs.VfsName): ProcessFile? =
+        fun from(name: VfsName): ProcessFile? =
             entries.firstOrNull { it.fileName == name.toString() }
     }
 }

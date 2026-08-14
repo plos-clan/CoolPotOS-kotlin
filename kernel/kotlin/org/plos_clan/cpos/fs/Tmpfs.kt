@@ -1,9 +1,9 @@
 package org.plos_clan.cpos.fs
 
-import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.utils.IrqSpinLock
 
 data class TmpfsOptions(
     val sizeLimit: ULong? = null,

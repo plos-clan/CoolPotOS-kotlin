@@ -14,13 +14,13 @@ import kotlinx.cinterop.set
 import kotlinx.cinterop.staticCFunction
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
-import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
-import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.ByteRingBuffer
+import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents

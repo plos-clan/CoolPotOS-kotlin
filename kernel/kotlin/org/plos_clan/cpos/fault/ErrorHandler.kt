@@ -5,7 +5,12 @@ package org.plos_clan.cpos.fault
 import bridge.read_cr2
 import bridge.read_cr3
 import bridge.register_interrupt_handler
-import kotlinx.cinterop.*
+import kotlinx.cinterop.COpaquePointer
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.ULongVar
+import kotlinx.cinterop.get
+import kotlinx.cinterop.reinterpret
+import kotlinx.cinterop.staticCFunction
 import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.mem.PageFaultResult
 import org.plos_clan.cpos.tasks.ProcessManager

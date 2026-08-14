@@ -1,8 +1,6 @@
 package org.plos_clan.cpos.drivers.input
 
-import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.DEV_CHAR
 import org.plos_clan.cpos.drivers.DEV_INPUT
@@ -340,7 +338,7 @@ internal class KeyboardInputDevice(
     }
 
     private fun launchRepeat(key: KeyCode, generation: Int) {
-        KernelCoroutines.scope.launch(CoroutineName("event$eventIndex-repeat")) {
+        KernelCoroutines.launch("event$eventIndex-repeat") {
             var waitMillis = lock.withLock { repeatDelayMillis }
             while (true) {
                 delay(waitMillis.toLong())

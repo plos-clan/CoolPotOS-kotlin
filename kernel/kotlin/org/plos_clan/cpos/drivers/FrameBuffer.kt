@@ -14,9 +14,9 @@ import org.plos_clan.cpos.drivers.char.TtyDeviceType
 import org.plos_clan.cpos.drivers.char.TtyManager
 import org.plos_clan.cpos.drivers.char.TtyPhysicalDevice
 import org.plos_clan.cpos.drivers.char.TtySession
-import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.mem.UserMemory
 
 class TtyGraphicsDevice(
     val address: CPointer<out CPointed>?,

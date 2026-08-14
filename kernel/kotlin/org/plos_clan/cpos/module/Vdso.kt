@@ -8,13 +8,13 @@ import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
 import kotlinx.cinterop.readBytes
 import kotlinx.cinterop.reinterpret
+import org.plos_clan.cpos.mem.AddressSpace
+import org.plos_clan.cpos.mem.MEMORY_REGION_EXECUTABLE
+import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.mem.MemoryRegion
 import org.plos_clan.cpos.mem.MemoryRegionBacking
 import org.plos_clan.cpos.mem.MemoryRegionType
 import org.plos_clan.cpos.mem.USER_MMAP_END
-import org.plos_clan.cpos.mem.AddressSpace
-import org.plos_clan.cpos.mem.MEMORY_REGION_EXECUTABLE
-import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignUp
 

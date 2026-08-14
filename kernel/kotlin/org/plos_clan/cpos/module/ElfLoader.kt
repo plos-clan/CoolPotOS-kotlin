@@ -6,23 +6,23 @@ import org.plos_clan.cpos.fs.OpenFileDescription
 import org.plos_clan.cpos.fs.OpenOptions
 import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsResult
-import org.plos_clan.cpos.mem.KernelPageDirectory
-import org.plos_clan.cpos.mem.ByteArrayBuffer
-import org.plos_clan.cpos.mem.MemoryRegion
-import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.mem.AddressSpace
+import org.plos_clan.cpos.mem.ByteArrayBuffer
+import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.mem.MEMORY_REGION_EXECUTABLE
 import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.mem.MEMORY_REGION_WRITABLE
+import org.plos_clan.cpos.mem.MemoryRegion
 import org.plos_clan.cpos.mem.MemoryRegionBacking
 import org.plos_clan.cpos.mem.MemoryRegionType
+import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.mem.VDSFileBacking
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.alignUp
-import org.plos_clan.cpos.utils.LittleEndianBuffer
 
 private const val ELF64_HEADER_SIZE = 64
 private const val ELF64_PROGRAM_HEADER_SIZE = 56

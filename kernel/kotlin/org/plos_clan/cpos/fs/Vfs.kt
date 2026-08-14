@@ -2,11 +2,11 @@
 
 package org.plos_clan.cpos.fs
 
-import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.BufferDestination
 import org.plos_clan.cpos.mem.BufferSource
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.Thread

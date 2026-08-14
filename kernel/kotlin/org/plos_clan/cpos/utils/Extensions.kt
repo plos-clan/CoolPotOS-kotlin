@@ -2,7 +2,14 @@
 
 package org.plos_clan.cpos.utils
 
-import kotlinx.cinterop.*
+import kotlinx.cinterop.CPointed
+import kotlinx.cinterop.CPointer
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.UByteVar
+import kotlinx.cinterop.ULongVar
+import kotlinx.cinterop.get
+import kotlinx.cinterop.set
+import kotlinx.cinterop.toCPointer
 import org.plos_clan.cpos.mem.Hhdm
 
 const val PTE_COUNT = 512

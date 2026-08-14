@@ -6,8 +6,8 @@ import kotlinx.cinterop.*
 import org.plos_clan.cpos.drivers.acpi.apic.IoApic
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.tasks.SMProcessor
-import org.plos_clan.cpos.utils.PtraceRegisters
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.PtraceRegisters
 import kotlin.experimental.ExperimentalNativeApi
 
 const val ARCH_MAX_IRQ_NUM = 256

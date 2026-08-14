@@ -3,12 +3,12 @@ package org.plos_clan.cpos.drivers.char
 import org.plos_clan.cpos.drivers.DEV_CHAR
 import org.plos_clan.cpos.drivers.DEV_TTY
 import org.plos_clan.cpos.drivers.Device
-import org.plos_clan.cpos.drivers.PositionlessDeviceBackend
 import org.plos_clan.cpos.drivers.DeviceManager
+import org.plos_clan.cpos.drivers.PositionlessDeviceBackend
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
-import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Cmdline

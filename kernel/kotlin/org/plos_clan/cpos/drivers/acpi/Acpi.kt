@@ -3,13 +3,25 @@
 package org.plos_clan.cpos.drivers.acpi
 
 import bridge.rsdp_request
-import kotlinx.cinterop.*
+import kotlinx.cinterop.CPointer
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.UByteVar
+import kotlinx.cinterop.pointed
+import kotlinx.cinterop.reinterpret
+import org.plos_clan.cpos.drivers.acpi.aml.Aml
+import org.plos_clan.cpos.drivers.acpi.apic.Apic
 import org.plos_clan.cpos.drivers.pcie.Pcie
 import org.plos_clan.cpos.drivers.pcie.PcieEcamRegion
 import org.plos_clan.cpos.mem.Hhdm
-import org.plos_clan.cpos.drivers.acpi.aml.Aml
-import org.plos_clan.cpos.drivers.acpi.apic.Apic
-import org.plos_clan.cpos.utils.*
+import org.plos_clan.cpos.utils.checksumOk
+import org.plos_clan.cpos.utils.hex
+import org.plos_clan.cpos.utils.matchesAscii
+import org.plos_clan.cpos.utils.readAscii
+import org.plos_clan.cpos.utils.readU16
+import org.plos_clan.cpos.utils.readU32
+import org.plos_clan.cpos.utils.readU64
+import org.plos_clan.cpos.utils.readU8
+import org.plos_clan.cpos.utils.toVirtualPointer
 
 private const val RSDP_V1_LENGTH = 20
 private const val RSDP_V2_MIN_LENGTH = 36

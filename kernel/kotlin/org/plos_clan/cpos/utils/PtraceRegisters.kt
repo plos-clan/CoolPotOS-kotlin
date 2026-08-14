@@ -1,6 +1,10 @@
 package org.plos_clan.cpos.utils
 
-import kotlinx.cinterop.*
+import kotlinx.cinterop.CPointer
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.ULongVar
+import kotlinx.cinterop.get
+import kotlinx.cinterop.set
 
 @ExperimentalForeignApi
 class PtraceRegisters(private val registers: CPointer<ULongVar>) {

@@ -6,17 +6,17 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.InodeType
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.MEMORY_REGION_ACCESS_MASK
-import org.plos_clan.cpos.mem.MemoryRegionBacking
 import org.plos_clan.cpos.mem.MemoryMapRequest
 import org.plos_clan.cpos.mem.MemoryMapResult
+import org.plos_clan.cpos.mem.MemoryRegionBacking
 import org.plos_clan.cpos.mem.MemoryRegionType
 import org.plos_clan.cpos.mem.VDSFileBacking
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
-import org.plos_clan.cpos.utils.isPageAligned
 import org.plos_clan.cpos.utils.PtraceRegisters
+import org.plos_clan.cpos.utils.isPageAligned
 
 private const val MAP_SHARED = 0x01uL
 private const val MAP_PRIVATE = 0x02uL

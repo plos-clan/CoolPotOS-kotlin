@@ -3,6 +3,7 @@
 package org.plos_clan.cpos.syscall
 
 import kotlinx.cinterop.ExperimentalForeignApi
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.AccessMode
 import org.plos_clan.cpos.fs.CreateDisposition
 import org.plos_clan.cpos.fs.DirectoryEntry
@@ -17,12 +18,11 @@ import org.plos_clan.cpos.fs.OpenOptions
 import org.plos_clan.cpos.fs.SeekOrigin
 import org.plos_clan.cpos.fs.SymlinkBackend
 import org.plos_clan.cpos.fs.VfsError
-import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsPath
+import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsResult
-import org.plos_clan.cpos.drivers.TscClock
-import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.ByteArrayBuffer
+import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.syscall.Syscall.copyPath
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor

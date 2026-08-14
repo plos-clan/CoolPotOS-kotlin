@@ -33,11 +33,16 @@ object Procfs : FileSystemType {
     override val magic: ULong = 0x9fa0uL
     override val requiresDevice: Boolean = false
 
+    private var procInstance: ProcfsInstance? = null
+
+    val getInstance get() = procInstance!!
+
     override fun createSuperBlock(options: FileSystemOptions): VfsResult<SuperBlock> {
         if (options != EmptyFileSystemOptions) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
         val instance = ProcfsInstance()
+        procInstance = instance
         return VfsResult.Ok(
             SuperBlock(
                 this,
@@ -52,7 +57,7 @@ interface ProcFSRender {
     fun render() : ByteArray
 }
 
-private class ProcfsInstance : SuperBlockBackend {
+class ProcfsInstance : SuperBlockBackend {
     fun root(superBlock: SuperBlock): Inode = directory(
         superBlock = superBlock,
         id = ROOT_INODE,
@@ -73,15 +78,20 @@ private class ProcfsInstance : SuperBlockBackend {
                     ?.id
                     ?.toString()
             }
-        }else if(name.toString() == "mounts") {
-            return symlink(superBlock, SELF_INODE + 1UL) {"self/mounts"}
+        } else if (name.toString() == MOUNTS_NAME) {
+            return symlink(superBlock, MOUNTS_INODE) { "self/mounts" }
+        } else if (name.toString() == COROUTINES_NAME) {
+            return directory(
+                superBlock,
+                COROUTINES_INODE,
+                ProcCoroutineDirectory(),
+            )
         }
         return name.pid()?.let { processDirectory(superBlock, it) }
     }
 
-    fun rootEntries(superBlock: SuperBlock): List<DirectoryEntry> =
+    fun rootEntries(): List<DirectoryEntry> =
         buildList {
-            var baseInode = 0UL
             RootFile.entries.forEach { file ->
                 add(
                     entry(
@@ -90,24 +100,22 @@ private class ProcfsInstance : SuperBlockBackend {
                         InodeType.REGULAR
                     )
                 )
-                baseInode = file.inodeId
             }
-            baseInode += 1UL
             add(
                 entry(
                     SELF_NAME,
-                    baseInode,
+                    SELF_INODE,
                     InodeType.SYMLINK
                 )
             )
-            baseInode += 1UL
             add(
                 entry(
-                    "mounts",
-                    baseInode,
+                    MOUNTS_NAME,
+                    MOUNTS_INODE,
                     InodeType.SYMLINK
                 )
             )
+            add(entry(COROUTINES_NAME, COROUTINES_INODE, InodeType.DIRECTORY))
             ProcessManager.snapshotProcesses().forEach { process ->
                 add(
                     entry(
@@ -171,7 +179,7 @@ private class ProcfsInstance : SuperBlockBackend {
         ),
     )
 
-    private fun text(
+    fun text(
         superBlock: SuperBlock,
         id: ULong,
         render: () -> ByteArray?,
@@ -206,7 +214,7 @@ private class ProcfsInstance : SuperBlockBackend {
             updateMetadata { it.copy(uid = process.euid.toUInt(), gid = process.egid.toUInt()) }
         }
 
-    private fun entry(
+    fun entry(
         name: String,
         id: ULong,
         type: InodeType
@@ -248,9 +256,7 @@ private class ProcRootDirectory(
     ): VfsResult<OpenFileBackend> =
         VfsResult.Ok(
             ProcDirectoryHandle(
-                fileSystem.rootEntries(
-                    inode.superBlock
-                )
+                fileSystem.rootEntries()
             )
         )
 }
@@ -290,7 +296,7 @@ private class ProcProcessDirectory(
     }
 }
 
-private class ProcDirectoryHandle(
+class ProcDirectoryHandle(
     private val entries: List<DirectoryEntry>,
 ) : OpenFileBackend {
     override fun iterate(
@@ -415,6 +421,8 @@ private fun VfsName.pid(): Int? = toString().toIntOrNull()?.takeIf { it > 0 }
 
 private const val ROOT_INODE = 1uL
 private const val SELF_INODE = 10uL
+private const val MOUNTS_INODE = 11uL
+private const val COROUTINES_INODE = 12uL
 private const val PROCESS_INODE_BASE = 0x100uL
 private const val PROCESS_INODE_SHIFT = 8
 private const val DIRECTORY_MODE = 0x16Du
@@ -422,4 +430,6 @@ private const val FILE_MODE = 0x124u
 private const val SYMLINK_MODE = 0x1FFu
 const val MAX_COMM_LENGTH = 15
 private const val SELF_NAME = "self"
+private const val MOUNTS_NAME = "mounts"
+private const val COROUTINES_NAME = "coroutines"
 const val KIBIBYTE = 1024uL
