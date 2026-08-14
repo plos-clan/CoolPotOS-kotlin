@@ -3,8 +3,6 @@
 package org.plos_clan.cpos.drivers.usb.hid
 
 import kotlinx.cinterop.UByteVar
-import kotlinx.coroutines.launch
-import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.usb.bus.CompletionEvent
 import org.plos_clan.cpos.drivers.usb.bus.TransferStatus
 import org.plos_clan.cpos.drivers.usb.bus.UsbDriver
@@ -86,7 +84,7 @@ class Mouse(
         }
 
         for (field in layout.buttons) {
-            for (i in 0..field.reportCount.toInt()) {
+            for (i in 0 until field.reportCount.toInt()) {
                 if (field.value(data, i.toUInt()) != 0u) {
                     val buttonId = (field.usageMin + i.toUInt()) and 0xffffu
                     println("Mouse (Btn): $buttonId")
@@ -94,9 +92,7 @@ class Mouse(
             }
         }
 
-        KernelCoroutines.scope.launch {
-            hid.submitTransfer()
-        }
+        hid.transferCompletion.release()
     }
 
     companion object {
@@ -122,6 +118,5 @@ suspend fun probeMouse(iface: UsbInterface): UsbDriver? {
     val mouse = Mouse.create(iface, endpoint.desc.endpointAddress) ?: return null
     println("HID Mouse (Slot ${iface.device.slotId})")
 
-    mouse.hid.submitTransfer()
     return mouse
 }

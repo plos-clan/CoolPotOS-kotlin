@@ -3,8 +3,6 @@
 package org.plos_clan.cpos.drivers.usb.hid
 
 import kotlinx.cinterop.UByteVar
-import kotlinx.coroutines.launch
-import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.usb.bus.CompletionEvent
 import org.plos_clan.cpos.drivers.usb.bus.TransferStatus
 import org.plos_clan.cpos.drivers.usb.bus.UsbDriver
@@ -76,7 +74,7 @@ class Keyboard(
         }
 
         for (arrayField in layout.arrays) {
-            for (i in 0..arrayField.reportCount.toInt()) {
+            for (i in 0 until arrayField.reportCount.toInt()) {
                 val usage = arrayField.value(data, i.toUInt())
                 if (usage > 1u) {
                     println("Key (Std): 0x${usage.toString(16).padStart(2, '0')}")
@@ -90,9 +88,7 @@ class Keyboard(
             }
         }
 
-        KernelCoroutines.scope.launch {
-            hid.submitTransfer()
-        }
+        hid.transferCompletion.release()
     }
 
     companion object {
@@ -118,6 +114,5 @@ suspend fun probeKbd(iface: UsbInterface): UsbDriver? {
     val keyboard = Keyboard.create(iface, endpoint.desc.endpointAddress) ?: return null
     println("HID Keyboard (Slot ${iface.device.slotId})")
 
-    keyboard.hid.submitTransfer()
     return keyboard
 }

@@ -81,7 +81,7 @@ class HidField(
 
         val count = ((offset + bitSize + 7u) / 8u).toInt() - byteIndex
         var raw = 0uL
-        for (i in 0..count) {
+        for (i in 0 until count) {
             raw = raw or (data[byteIndex + i].toULong() shl (i * 8))
         }
         return ((raw shr shift) and ((1uL shl bitSize.toInt()) - 1uL)).toUInt()
@@ -231,11 +231,14 @@ class HidParser(
             val kindIndex = kind.ordinal
             val reportId = global.reportId
 
-            val layout = descriptor.reports.getOrPut(reportId) { HidReport(reportId) }
-            if (reportId != 0u.toUByte()) {
-                layout.sizeBits[0] = 8u
-                layout.sizeBits[1] = 8u
-                layout.sizeBits[2] = 8u
+            val layout = descriptor.reports.getOrPut(reportId) {
+                HidReport(reportId).also { report ->
+                    if (reportId != 0u.toUByte()) {
+                        report.sizeBits[0] = 8u
+                        report.sizeBits[1] = 8u
+                        report.sizeBits[2] = 8u
+                    }
+                }
             }
 
             val reportCount = global.reportCount
@@ -266,7 +269,7 @@ class HidParser(
             } else {
                 var itemIndex = 0
                 var rangeOffset = 0u
-                for (iteration in 0..reportCount.toInt()) {
+                for (iteration in 0 until reportCount.toInt()) {
                     var currentUsage = 0u
                     local.items.getOrNull(itemIndex)?.let { item ->
                         currentUsage = item.min + rangeOffset
