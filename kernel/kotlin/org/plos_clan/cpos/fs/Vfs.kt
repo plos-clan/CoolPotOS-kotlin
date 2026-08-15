@@ -692,6 +692,7 @@ class OpenFileDescription internal constructor(
             return IoResult.failure(VfsError.INVALID_ARGUMENT)
         }
         readError(offset, count)?.let { return IoResult.failure(it) }
+        if (positionlessBackend != null) return IoResult.failure(VfsError.ILLEGAL_SEEK)
         val prepared = destination.prepareWrite(offset, count)
             ?: return IoResult.failure(VfsError.FAULT)
         return readBackend(prepared, offset, count, FilePosition(fileOffset.toLong()))
@@ -703,17 +704,28 @@ class OpenFileDescription internal constructor(
         if (discard != null) return discard.discard(inode, count)
         val prepared = source.prepareRead(offset, count)
             ?: return IoResult.failure(VfsError.FAULT)
-        return writeBackend(prepared, offset, count)
+        return writeBackend(prepared, offset, count, position)
     }
 
     internal fun write(source: PreparedBufferSource, offset: Int, count: Int): IoResult {
         writeError(offset, count)?.let { return IoResult.failure(it) }
-        return writeBackend(source, offset, count)
+        return writeBackend(source, offset, count, position)
     }
 
-    internal fun discardWrite(count: Int): IoResult? {
-        writeError(0, count)?.let { return IoResult.failure(it) }
-        return (positionlessBackend as? DiscardingOpenFileBackend)?.discard(inode, count)
+    fun writeAt(
+        fileOffset: ULong,
+        source: BufferSource,
+        offset: Int,
+        count: Int,
+    ): IoResult {
+        if (fileOffset > Long.MAX_VALUE.toULong()) {
+            return IoResult.failure(VfsError.INVALID_ARGUMENT)
+        }
+        writeError(offset, count)?.let { return IoResult.failure(it) }
+        if (positionlessBackend != null) return IoResult.failure(VfsError.ILLEGAL_SEEK)
+        val prepared = source.prepareRead(offset, count)
+            ?: return IoResult.failure(VfsError.FAULT)
+        return writeBackend(prepared, offset, count, FilePosition(fileOffset.toLong()))
     }
 
     fun iterate(emit: (entry: DirectoryEntry, nextOffset: Long) -> Boolean): VfsResult<Unit> {
@@ -802,12 +814,20 @@ class OpenFileDescription internal constructor(
         }
     }
 
-    private fun writeBackend(source: PreparedBufferSource, offset: Int, count: Int): IoResult {
+    private fun writeBackend(
+        source: PreparedBufferSource,
+        offset: Int,
+        count: Int,
+        filePosition: FilePosition,
+    ): IoResult {
         val positionless = positionlessBackend
         if (positionless == null) {
+            if (filePosition !== position) {
+                return backend.write(inode, source, offset, count, filePosition, false)
+            }
             return positionLock.withLock {
                 val append = statusFlags.load() and OpenFlags.O_APPEND != 0
-                backend.write(inode, source, offset, count, position, append)
+                backend.write(inode, source, offset, count, filePosition, append)
             }
         }
         val waitable = positionless as? WaitableOpenFileBackend

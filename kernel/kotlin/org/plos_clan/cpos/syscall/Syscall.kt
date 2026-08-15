@@ -44,6 +44,8 @@ private enum class LinuxSyscall(
     RT_SIGACTION(13, ::rtSigaction),
     RT_SIGPROCMASK(14, ::rtSigprocmask),
     IOCTL(16, ::ioctl),
+    PREAD64(17, ::pread64),
+    PWRITE64(18, ::pwrite64),
     READV(19, ::readv),
     WRITEV(20, ::writev),
     ACCESS(21, ::access),

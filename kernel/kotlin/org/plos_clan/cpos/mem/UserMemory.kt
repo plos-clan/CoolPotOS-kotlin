@@ -18,7 +18,7 @@ class UserMemory private constructor(
     private val pageDirectory: PageDirectory,
     private val address: ULong,
     private val addressSpace: AddressSpace?,
-) : BufferSource, BufferDestination {
+) : IoBuffer {
     private var preparedVirtualPage = ULong.MAX_VALUE
     private var preparedWritable = false
     private var firstPhysicalPage = 0uL
@@ -210,7 +210,9 @@ class UserMemory private constructor(
         validUserRange(0, size)
 
     private fun validUserRange(offset: Int, size: Int): Boolean {
-        if (offset < 0 || size < 0 || address >= USER_VIRTUAL_ADDRESS_LIMIT) return false
+        if (offset < 0 || size < 0) return false
+        if (size == 0) return true
+        if (address >= USER_VIRTUAL_ADDRESS_LIMIT) return false
         val available = USER_VIRTUAL_ADDRESS_LIMIT - address
         return offset.toULong() <= available && size.toULong() <= available - offset.toULong()
     }

@@ -2,7 +2,10 @@
 
 package org.plos_clan.cpos.syscall
 
+import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.UByteVar
+import kotlinx.cinterop.plus
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.AccessMode
 import org.plos_clan.cpos.fs.CreateDisposition
@@ -12,8 +15,10 @@ import org.plos_clan.cpos.fs.FileMode
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.Inode
 import org.plos_clan.cpos.fs.InodeType
+import org.plos_clan.cpos.fs.IoResult
 import org.plos_clan.cpos.fs.MountFlags
 import org.plos_clan.cpos.fs.OpenFlags
+import org.plos_clan.cpos.fs.OpenFileDescription
 import org.plos_clan.cpos.fs.OpenOptions
 import org.plos_clan.cpos.fs.SeekOrigin
 import org.plos_clan.cpos.fs.SymlinkBackend
@@ -21,13 +26,14 @@ import org.plos_clan.cpos.fs.VfsError
 import org.plos_clan.cpos.fs.VfsPath
 import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsResult
-import org.plos_clan.cpos.mem.ByteArrayBuffer
+import org.plos_clan.cpos.mem.IoBuffer
+import org.plos_clan.cpos.mem.PreparedBufferDestination
+import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.syscall.Syscall.copyPath
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.syscall.Syscall.partialOrError
-import org.plos_clan.cpos.syscall.Syscall.userMemory
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.Errno
@@ -1127,227 +1133,233 @@ private fun scanPollDescriptors(
     return ready
 }
 
-internal fun read(regs: PtraceRegisters, process: Process): Long {
-    val file = process.fdTable.acquire(regs[PtraceRegisters.IDX_RDI])
-        ?: return errno(Errno.EBADF)
-    try {
-        val requested = minOf(regs[PtraceRegisters.IDX_RDX], MAX_RW_COUNT)
-        if (requested == 0uL) {
-            return 0L
-        }
+internal fun read(regs: PtraceRegisters, process: Process): Long =
+    FileIo.read(regs, process)
 
-        val userAddress = regs[PtraceRegisters.IDX_RSI]
-        val buffer = UserMemory(process.addressSpace, userAddress)
-        val count = requested.toInt()
-        val destination = buffer.prepareWrite(0, count)
-            ?: return errno(Errno.EFAULT)
+internal fun write(regs: PtraceRegisters, process: Process): Long =
+    FileIo.write(regs, process)
 
-        val result = file.read(destination, 0, count)
-        return result.raw
-    } finally {
-        file.release()
+internal fun pread64(regs: PtraceRegisters, process: Process): Long =
+    FileIo.pread64(regs, process)
+
+internal fun pwrite64(regs: PtraceRegisters, process: Process): Long =
+    FileIo.pwrite64(regs, process)
+
+internal fun readv(regs: PtraceRegisters, process: Process): Long =
+    FileIo.readv(regs, process)
+
+internal fun writev(regs: PtraceRegisters, process: Process): Long =
+    FileIo.writev(regs, process)
+
+private object FileIo {
+    fun read(regs: PtraceRegisters, process: Process): Long =
+        scalar(Direction.READ, positioned = false, regs, process)
+
+    fun write(regs: PtraceRegisters, process: Process): Long =
+        scalar(Direction.WRITE, positioned = false, regs, process)
+
+    fun pread64(regs: PtraceRegisters, process: Process): Long =
+        scalar(Direction.READ, positioned = true, regs, process)
+
+    fun pwrite64(regs: PtraceRegisters, process: Process): Long =
+        scalar(Direction.WRITE, positioned = true, regs, process)
+
+    fun readv(regs: PtraceRegisters, process: Process): Long =
+        vector(Direction.READ, regs, process)
+
+    fun writev(regs: PtraceRegisters, process: Process): Long =
+        vector(Direction.WRITE, regs, process)
+
+    private fun scalar(
+        direction: Direction,
+        positioned: Boolean,
+        regs: PtraceRegisters,
+        process: Process,
+    ): Long = withFile(regs, process) { file ->
+        val count = minOf(regs[PtraceRegisters.IDX_RDX], MAX_RW_COUNT).toInt()
+        val position = regs[PtraceRegisters.IDX_R10].takeIf { positioned }
+        val buffer = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
+        direction.transfer(file, buffer, count, position).raw
     }
-}
 
-internal fun write(regs: PtraceRegisters, process: Process): Long {
-    val file = process.fdTable.acquire(regs[PtraceRegisters.IDX_RDI])
-        ?: return errno(Errno.EBADF)
-    try {
-        val requested = minOf(regs[PtraceRegisters.IDX_RDX], MAX_RW_COUNT)
-        if (requested == 0uL) {
-            return 0L
-        }
-
-        val userAddress = regs[PtraceRegisters.IDX_RSI]
-        val buffer = UserMemory(process.addressSpace, userAddress)
-        val count = requested.toInt()
-        val result = if (file.inode.type == InodeType.PIPE) {
-            val source = buffer.prepareRead(0, count)
-                ?: return errno(Errno.EFAULT)
-            file.write(source, 0, count)
-        } else {
-            file.write(buffer, 0, count)
-        }
-        return result.raw
-    } finally {
-        file.release()
-    }
-}
-
-internal fun readv(regs: PtraceRegisters, process: Process): Long {
-    val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
-        ?: return errno(Errno.EBADF)
-    val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
-    try {
-        val vectorCountValue = regs[PtraceRegisters.IDX_RDX]
-        if (vectorCountValue > MAX_IO_VECTORS.toULong()) {
-            return errno(Errno.EINVAL)
-        }
-
-        val vectorCount = vectorCountValue.toInt()
-        if (vectorCount == 0) return 0L
-        val vectors = UserMemory(
-            process.addressSpace,
+    private fun vector(
+        direction: Direction,
+        regs: PtraceRegisters,
+        process: Process,
+    ): Long = withFile(regs, process) { file ->
+        val vectorCount = regs[PtraceRegisters.IDX_RDX]
+        if (vectorCount > MAX_IO_VECTORS.toULong()) return@withFile errno(Errno.EINVAL)
+        val buffer = UserIoVector.fromUser(
+            process,
             regs[PtraceRegisters.IDX_RSI],
-        ).copyFromUser(vectorCount * IO_VECTOR_SIZE)
-            ?: return errno(Errno.EFAULT)
-        val cursor = IoVectorCursor(process, vectors, vectorCount)
-        val requested = cursor.remaining
-        if (requested == 0uL) {
-            return 0L
+            vectorCount.toInt(),
+        ) ?: return@withFile errno(Errno.EFAULT)
+        direction.transfer(file, buffer, buffer.size, null).raw
+    }
+
+    private inline fun withFile(
+        regs: PtraceRegisters,
+        process: Process,
+        operation: (OpenFileDescription) -> Long,
+    ): Long {
+        val descriptor = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
+            ?: return errno(Errno.EBADF)
+        val file = process.fdTable.acquire(descriptor) ?: return errno(Errno.EBADF)
+        return try {
+            operation(file)
+        } finally {
+            file.release()
         }
-        val buffer = ByteArray(minOf(requested, IO_CHUNK_SIZE.toULong()).toInt())
-        val transferBuffer = ByteArrayBuffer(buffer)
-        var transferred = 0uL
-        while (cursor.remaining != 0uL) {
-            val count = minOf(cursor.remaining, buffer.size.toULong()).toInt()
-            if (!cursor.isWritable(count)) {
-                return partialOrError(transferred, Errno.EFAULT)
+    }
+
+    private enum class Direction {
+        READ,
+        WRITE;
+
+        fun transfer(
+            file: OpenFileDescription,
+            buffer: IoBuffer,
+            count: Int,
+            position: ULong?,
+        ): IoResult = when (this) {
+            READ -> if (position == null) {
+                file.read(buffer, 0, count)
+            } else {
+                file.readAt(position, buffer, 0, count)
             }
 
-            val result = file.read(transferBuffer, 0, count)
-            if (!result.isSuccess) {
-                return if (transferred != 0uL) transferred.toLong() else result.raw
+            WRITE -> if (position == null) {
+                file.write(buffer, 0, count)
+            } else {
+                file.writeAt(position, buffer, 0, count)
             }
-            val current = result.bytesTransferred
-            if (current == 0) return transferred.toLong()
-            if (!cursor.copyToUser(buffer, current)) {
-                return partialOrError(transferred, Errno.EFAULT)
-            }
-
-            transferred += current.toULong()
-            if (current < count) return transferred.toLong()
         }
-        return transferred.toLong()
-    } finally {
-        file.release()
     }
 }
 
-internal fun writev(regs: PtraceRegisters, process: Process): Long {
-    val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
-        ?: return errno(Errno.EBADF)
-    val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
-    try {
-        val vectorCountValue = regs[PtraceRegisters.IDX_RDX]
-        if (vectorCountValue > MAX_IO_VECTORS.toULong()) {
-            return errno(Errno.EINVAL)
-        }
+private class UserIoVector private constructor(
+    private val segments: Array<Segment>,
+    val size: Int,
+) : IoBuffer {
+    override fun prepareRead(offset: Int, count: Int): PreparedBufferSource? =
+        if (prepare(offset, count, writable = false)) PreparedBufferSource(this) else null
 
-        val vectorCount = vectorCountValue.toInt()
-        if (vectorCount == 0) return 0L
-        val vectors = UserMemory(
-            process.addressSpace,
-            regs[PtraceRegisters.IDX_RSI],
-        ).copyFromUser(vectorCount * IO_VECTOR_SIZE)
-            ?: return errno(Errno.EFAULT)
-        val cursor = IoVectorCursor(process, vectors, vectorCount)
-        val requested = cursor.remaining
-        if (requested == 0uL) {
-            return 0L
-        }
-        file.discardWrite(requested.toInt())?.let { return it.raw }
+    override fun prepareWrite(offset: Int, count: Int): PreparedBufferDestination? =
+        if (prepare(offset, count, writable = true)) PreparedBufferDestination(this) else null
 
-        val buffer = ByteArray(minOf(requested, IO_CHUNK_SIZE.toULong()).toInt())
-        val transferBuffer = ByteArrayBuffer(buffer)
-        var transferred = 0uL
-        while (cursor.remaining != 0uL) {
-            val count = minOf(cursor.remaining, buffer.size.toULong()).toInt()
-            if (!cursor.copyFromUser(buffer, count)) {
-                return partialOrError(transferred, Errno.EFAULT)
-            }
-
-            val result = file.write(transferBuffer, 0, count)
-            if (!result.isSuccess) {
-                return if (transferred != 0uL) transferred.toLong() else result.raw
-            }
-            val current = result.bytesTransferred
-            if (current == 0) return transferred.toLong()
-            transferred += current.toULong()
-            if (current < count) return transferred.toLong()
-        }
-        return transferred.toLong()
-    } finally {
-        file.release()
-    }
-}
-
-private class IoVectorCursor(
-    private val process: Process,
-    private val vectors: ByteArray,
-    private val vectorCount: Int,
-) {
-    private val input = LittleEndianBuffer(vectors)
-
-    var remaining = totalLength()
-        private set
-
-    private var index = 0
-    private var offset = 0uL
-
-    fun isWritable(count: Int): Boolean = visit(count, false) { user, _, size ->
-        user.isWritable(size)
-    }
-
-    fun copyFromUser(destination: ByteArray, count: Int): Boolean =
-        visit(count, true) { user, bufferOffset, size ->
-            user.copyFromUser(destination, bufferOffset, size)
-        }
-
-    fun copyToUser(source: ByteArray, count: Int): Boolean =
-        visit(count, true) { user, bufferOffset, size ->
-            user.copyToUser(source, bufferOffset, size)
-        }
-
-    private inline fun visit(
+    override fun copyTo(
+        sourceOffset: Int,
+        destination: ByteArray,
+        destinationOffset: Int,
         count: Int,
-        advance: Boolean,
-        operation: (UserMemory, Int, Int) -> Boolean,
-    ): Boolean {
-        if (count < 0 || count.toULong() > remaining) return false
-
-        var currentIndex = index
-        var currentOffset = offset
-        var processed = 0
-        while (processed < count) {
-            if (currentIndex >= vectorCount) return false
-            val vectorOffset = currentIndex * IO_VECTOR_SIZE
-            val vectorLength = input.readU64(vectorOffset + ULong.SIZE_BYTES)
-            if (currentOffset >= vectorLength) {
-                currentIndex++
-                currentOffset = 0uL
-                continue
-            }
-
-            val size = minOf(
-                (count - processed).toULong(),
-                vectorLength - currentOffset,
-            ).toInt()
-            val user = userMemory(
-                process,
-                input.readU64(vectorOffset),
-                currentOffset,
-            ) ?: return false
-            if (!operation(user, processed, size)) return false
-            processed += size
-            currentOffset += size.toULong()
+    ): Int {
+        if (destinationOffset < 0 || count < 0 || destinationOffset > destination.size - count) {
+            return 0
         }
-
-        if (advance) {
-            index = currentIndex
-            offset = currentOffset
-            remaining -= count.toULong()
+        return transfer(sourceOffset, count) { segment, segmentOffset, copied, chunk ->
+            segment.memory.copyTo(
+                segmentOffset,
+                destination,
+                destinationOffset + copied,
+                chunk,
+            )
         }
-        return true
     }
 
-    private fun totalLength(): ULong {
-        var total = 0uL
-        repeat(vectorCount) { current ->
-            val length = input.readU64(current * IO_VECTOR_SIZE + ULong.SIZE_BYTES)
-            total += minOf(length, MAX_RW_COUNT - total)
+    override fun copyFrom(
+        destinationOffset: Int,
+        source: ByteArray,
+        sourceOffset: Int,
+        count: Int,
+    ): Int {
+        if (sourceOffset < 0 || count < 0 || sourceOffset > source.size - count) return 0
+        return transfer(destinationOffset, count) { segment, segmentOffset, copied, chunk ->
+            segment.memory.copyFrom(segmentOffset, source, sourceOffset + copied, chunk)
         }
-        return total
+    }
+
+    override fun copyFrom(
+        destinationOffset: Int,
+        source: CPointer<UByteVar>,
+        count: Int,
+    ): Int = transfer(destinationOffset, count) { segment, segmentOffset, copied, chunk ->
+        segment.memory.copyFrom(segmentOffset, requireNotNull(source + copied), chunk)
+    }
+
+    override fun fill(destinationOffset: Int, count: Int, value: Byte): Int =
+        transfer(destinationOffset, count) { segment, segmentOffset, _, chunk ->
+            segment.memory.fill(segmentOffset, chunk, value)
+        }
+
+    private fun prepare(offset: Int, count: Int, writable: Boolean): Boolean =
+        transfer(offset, count) { segment, segmentOffset, _, chunk ->
+            val prepared = if (writable) {
+                segment.memory.prepareWrite(segmentOffset, chunk)
+            } else {
+                segment.memory.prepareRead(segmentOffset, chunk)
+            }
+            if (prepared == null) 0 else chunk
+        } == count
+
+    private inline fun transfer(
+        offset: Int,
+        count: Int,
+        operation: (Segment, Int, Int, Int) -> Int,
+    ): Int {
+        if (offset < 0 || count < 0 || offset > size - count || count == 0) return 0
+
+        var segmentIndex = segmentIndex(offset)
+        var segmentStart = if (segmentIndex == 0) 0 else segments[segmentIndex - 1].endOffset
+        var copied = 0
+        while (copied < count) {
+            val segment = segments[segmentIndex]
+            val segmentOffset = offset + copied - segmentStart
+            val chunk = minOf(count - copied, segment.endOffset - segmentStart - segmentOffset)
+            val current = operation(segment, segmentOffset, copied, chunk)
+            if (current !in 1..chunk) break
+            copied += current
+            if (current < chunk) break
+            segmentStart = segment.endOffset
+            segmentIndex++
+        }
+        return copied
+    }
+
+    private fun segmentIndex(offset: Int): Int {
+        var low = 0
+        var high = segments.lastIndex
+        while (low < high) {
+            val middle = (low + high) ushr 1
+            if (offset < segments[middle].endOffset) high = middle else low = middle + 1
+        }
+        return low
+    }
+
+    private data class Segment(val memory: UserMemory, val endOffset: Int)
+
+    companion object {
+        fun fromUser(process: Process, address: ULong, count: Int): UserIoVector? {
+            if (count == 0) return UserIoVector(emptyArray(), 0)
+            val vectorBytes = UserMemory(process.addressSpace, address)
+                .copyFromUser(count * IO_VECTOR_SIZE) ?: return null
+            val input = LittleEndianBuffer(vectorBytes)
+            val segments = ArrayList<Segment>(count)
+            var size = 0
+            repeat(count) { index ->
+                val vectorOffset = index * IO_VECTOR_SIZE
+                val available = MAX_RW_COUNT - size.toULong()
+                val length = minOf(input.readU64(vectorOffset + ULong.SIZE_BYTES), available)
+                    .toInt()
+                if (length != 0) {
+                    size += length
+                    segments += Segment(
+                        UserMemory(process.addressSpace, input.readU64(vectorOffset)),
+                        size,
+                    )
+                }
+            }
+            return UserIoVector(segments.toTypedArray(), size)
+        }
     }
 }
 

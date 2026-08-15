@@ -34,6 +34,8 @@ interface BufferDestination {
     fun fill(destinationOffset: Int, count: Int, value: Byte = 0): Int
 }
 
+interface IoBuffer : BufferSource, BufferDestination
+
 value class PreparedBufferSource internal constructor(
     private val source: BufferSource,
 ) {
@@ -62,7 +64,7 @@ value class PreparedBufferDestination internal constructor(
         destination.fill(destinationOffset, count, value)
 }
 
-class ByteArrayBuffer(private val bytes: ByteArray) : BufferSource, BufferDestination {
+class ByteArrayBuffer(private val bytes: ByteArray) : IoBuffer {
     override fun prepareRead(offset: Int, count: Int): PreparedBufferSource? =
         if (validRange(offset, count)) PreparedBufferSource(this) else null
 
