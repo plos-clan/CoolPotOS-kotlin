@@ -8,17 +8,22 @@ import org.plos_clan.cpos.utils.Cmdline
 object FileSystemManager {
     val vfs = Vfs()
 
+    private val builtInFileSystems = listOf<FileSystemType>(
+        Tmpfs,
+        Devtmpfs,
+        Procfs,
+        Erofs,
+        Overlayfs,
+    )
+
     var kernelContext: FileSystemContext? = null
         private set
 
-    fun initialize(): Boolean {
-        return register(Tmpfs) && register(Devtmpfs) && register(Procfs) &&
-            register(Erofs) && register(Overlayfs)
-    }
+    fun initialize(): Boolean = builtInFileSystems.all(::register)
 
     fun mountRootfs(): Boolean {
         if (kernelContext != null) return true
-        val moduleName = Cmdline["rootfs"] ?: "cachyos-rootfs-x86_64.erofs"
+        val moduleName = Cmdline["rootfs"] ?: "rootfs-x86_64.erofs"
         val module = ModuleManager[moduleName] ?: run {
             println("VFS: rootfs module '$moduleName' is unavailable")
             return false

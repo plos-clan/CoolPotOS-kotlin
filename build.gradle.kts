@@ -300,7 +300,7 @@ private class BuildConfig(private val project: Project) {
         ),
     )
     val vdso = VdsoConfig(paths, tools, arch)
-    private val rootfsName = "cachyos-rootfs-$arch.erofs"
+    private val rootfsName = "rootfs-$arch.erofs"
     val kernel = KernelConfig(paths, mlibc, vdso, tools, arch, debug, toolRoot)
     val userland = UserlandConfig(
         image = setting(

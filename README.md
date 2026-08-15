@@ -13,11 +13,11 @@
 - Symmetric multiprocessing
 - Buddy allocator & 4-level page table
 - TSC-deadline apic timer
-- USB Driver(HID Keyboard & Mouse)
+- USB subsystem (XHCI, HID)
 - RRS-handoff scheduler
 - VDSO
 - ACPI AML
-- devtmpfs & procfs & erofs
+- devtmpfs & procfs & erofs rootfs
 - Linux programs binary compatible (glibc)
 - GC & Coroutine & runtime exception
 
@@ -60,24 +60,30 @@ You need to install:
 - Kotlin/Native (`konanc`, `cinterop`)
 - Clang (`clang`, `clang++`)
 - LLD (`ld.lld`)
-- Rootless Podman (for CachyOS userland packaging)
+- Rootless Podman (for userland packaging)
 - `xorriso` (for ISO creation)
 - `qemu-system-x86_64` (for emulation)
 - Git and Gradle (included with Kotlin/Native)
 
-The ISO contains a zstd-compressed CachyOS x86_64 root filesystem at
-`/boot/cachyos-rootfs-x86_64.erofs`. The build pulls the latest official OCI
-image through rootless Podman, installs the exact Bash/Coreutils runtime package
-set into an empty root through the USTC Arch Linux and CachyOS mirrors, removes
-development files, documentation, package metadata, and other build-time
-content, then emits a read-only EROFS image with 1 MiB zstd pclusters, packed
-fragments, and deduplication. The kernel reads its metadata and data on demand
-and mounts a writable tmpfs overlay above it. The package set and rootfs pruning
-rules are kept in `assets/userland.sh`; Gradle only invokes that script and
-checks its EROFS output. Override the image with `-PuserlandImage=...` or
-`USERLAND_IMAGE`. QEMU uses 2 GiB by default so the kernel can retain the
-compressed rootfs module and allocate the writable overlay; override it with
-`-PqemuMemory=...` or `QEMU_MEMORY`.
+**Overridable environment variables:**
+
+The assignments below show the default values. Set an environment variable to
+override its value for a build.
+
+| Environment variable                              | Purpose                                |
+|---------------------------------------------------|----------------------------------------|
+| `DEBUG_MODE=false`                                | Build a debug kernel and wait for gdb. |
+| `CROSS_CC=clang`                                  | C compiler executable.                 |
+| `CROSS_CXX=clang++`                               | C++ compiler executable.               |
+| `LINKER=ld.lld`                                   | Kernel linker executable.              |
+| `OBJCOPY=llvm-objcopy`                            | Object-copy executable.                |
+| `XORRISO=xorriso`                                 | ISO creation executable.               |
+| `QEMU=qemu-system-x86_64`                         | QEMU executable.                       |
+| `KONAN_TOOLROOT=~/.konan/dependencies/xxx`        | Kotlin/Native GNU toolchain root.      |
+| `MLIBC_PREFIX=build/mlibc-x86_64/prefix`          | mlibc installation prefix.             |
+| `USERLAND_IMAGE=docker.io/cachyos/cachyos:latest` | OCI image used to build the rootfs.    |
+| `QEMU_CPU_SET=0-7`                                | Host CPU set passed to `taskset`.      |
+| `QEMU_MEMORY=2g`                                  | Guest memory passed to QEMU.           |
 
 ## Kernel coroutines
 
