@@ -3,20 +3,28 @@ package org.plos_clan.cpos.fs.procfs
 import org.plos_clan.cpos.fault.IrqAction
 import org.plos_clan.cpos.fault.IrqController
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
+import org.plos_clan.cpos.mem.PageCache
 import org.plos_clan.cpos.mem.RuntimeMemory
 import org.plos_clan.cpos.tasks.SMProcessor
 
 object MemoryInfoFile : ProcFSRender {
     override fun render(): ByteArray {
+        RuntimeMemory.reclaim(ULong.MAX_VALUE)
         val physical = BuddyFrameAllocator.statistics()
+        val cache = PageCache.statistics()
         val gc = RuntimeMemory.lastCollectionStatistics()
+        val reclaimable = minOf(
+            cache.reclaimableBytes,
+            physical.totalBytes - physical.freeBytes,
+        )
+        val available = physical.freeBytes + reclaimable
 
         return buildString {
             appendMetric("MemTotal", physical.totalBytes / KIBIBYTE, "kB")
-            appendMetric("MemFree", physical.availableBytes / KIBIBYTE, "kB")
-            appendMetric("MemAvailable", physical.availableBytes / KIBIBYTE, "kB")
+            appendMetric("MemFree", physical.freeBytes / KIBIBYTE, "kB")
+            appendMetric("MemAvailable", available / KIBIBYTE, "kB")
             appendMetric("Buffers", 0uL, "kB")
-            appendMetric("Cached", 0uL, "kB")
+            appendMetric("Cached", cache.cachedBytes / KIBIBYTE, "kB")
             appendMetric("SwapCached", 0uL, "kB")
             appendMetric("SwapTotal", 0uL, "kB")
             appendMetric("SwapFree", 0uL, "kB")

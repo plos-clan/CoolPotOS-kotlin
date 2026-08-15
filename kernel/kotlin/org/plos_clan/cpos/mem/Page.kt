@@ -29,6 +29,12 @@ internal const val USER_VIRTUAL_ADDRESS_LIMIT = 0x0000_8000_0000_0000uL
 private val PTE_PARENT_FLAGS = PTE_PRESENT or PTE_WRITABLE or PTE_USER
 internal val MMIO_PTE_FLAGS = PTE_PRESENT or PTE_WRITABLE or PTE_NO_CACHE or PTE_NO_EXECUTE
 
+internal enum class FrameReleaseResult {
+    RELEASED,
+    REFERENCED,
+    CONTENDED,
+}
+
 internal object UserFrameReferences {
     private const val PAGE_SHIFT = 12
     private const val SECTION_FRAME_BITS = 12
@@ -58,10 +64,24 @@ internal object UserFrameReferences {
         }
     }
 
-    fun release(frame: ULong) {
-        if (lock.withLock { releaseLocked(frame) }) {
-            BuddyFrameAllocator.freeFrames(frame, 1uL)
+    fun release(frame: ULong): Boolean =
+        lock.withLock { releaseLocked(frame) } &&
+            BuddyFrameAllocator.free(frame, 1uL)
+
+    fun releaseExclusive(frame: ULong): FrameReleaseResult {
+        var result = FrameReleaseResult.REFERENCED
+        if (!lock.tryWithLock {
+            if (referenceCount(frame) <= 1) {
+                check(releaseLocked(frame))
+                result = FrameReleaseResult.RELEASED
+            }
+        }) return FrameReleaseResult.CONTENDED
+        if (result != FrameReleaseResult.RELEASED) return result
+
+        check(BuddyFrameAllocator.free(frame, 1uL)) {
+            "Page cache released an invalid frame"
         }
+        return result
     }
 
     fun releaseAll(frames: Iterable<ULong>) {
@@ -86,30 +106,29 @@ internal object UserFrameReferences {
             }
             result
         }
-        BuddyFrameAllocator.freeFrames(reclaimed)
+        BuddyFrameAllocator.free(reclaimed)
     }
 
     fun isExclusive(frame: ULong): Boolean = lock.withLock {
         referenceCount(frame) <= 1
     }
 
-    fun copyOnWrite(frame: ULong): ULong? = lock.withLock {
-        if (referenceCount(frame) <= 1) {
-            return@withLock frame
-        }
-
-        val replacement = BuddyFrameAllocator.allocateFrames(1uL)
-            ?: return@withLock null
+    fun copyOnWrite(frame: ULong): ULong? {
+        if (isExclusive(frame)) return frame
+        val replacement = BuddyFrameAllocator.allocate(1uL)
+        if (replacement == INVALID_FRAME) return null
         val source = Hhdm.toVirtualPointer<UByteVar>(frame)
         val destination = Hhdm.toVirtualPointer<UByteVar>(replacement)
         if (source == null || destination == null) {
-            BuddyFrameAllocator.freeFrames(replacement, 1uL)
-            return@withLock null
+            BuddyFrameAllocator.free(replacement, 1uL)
+            return null
         }
 
         memcpy(destination, source, PAGE_SIZE_BYTES)
-        section(replacement)[sectionIndex(replacement)] = 1
-        replacement
+        lock.withLock {
+            section(replacement)[sectionIndex(replacement)] = 1
+        }
+        return replacement
     }
 
     private fun releaseLocked(frame: ULong): Boolean {
@@ -270,7 +289,7 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
             pml4[index] = 0uL
         }
         UserFrameReferences.releaseAll(userFrames)
-        BuddyFrameAllocator.freeFrames(tableFrames)
+        BuddyFrameAllocator.free(tableFrames)
         if ((read_cr3() and PTE_ADDR_MASK) == pml4PhysicalAddress) {
             bridge.write_cr3(pml4PhysicalAddress)
         }
@@ -281,7 +300,7 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
             "Paging: cannot destroy the active directory"
         }
         clearUserMappings()
-        BuddyFrameAllocator.freeFrames(pml4PhysicalAddress, 1uL)
+        BuddyFrameAllocator.free(pml4PhysicalAddress, 1uL)
     }
 
     internal fun protectUserPage(
@@ -584,12 +603,13 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
     }
 
     private fun allocateTableFrame(allocatedFrames: MutableList<ULong>): ULong? {
-        val frameAddress = BuddyFrameAllocator.allocateFrames(1uL) ?: run {
+        val frameAddress = BuddyFrameAllocator.allocate(1uL)
+        if (frameAddress == INVALID_FRAME) {
             println("Paging: failed to allocate frame while cloning directory")
             return null
         }
         val table = frameAddress.toVirtualPointer<ULongVar>() ?: run {
-            BuddyFrameAllocator.freeFrames(frameAddress, 1uL)
+            BuddyFrameAllocator.free(frameAddress, 1uL)
             return null
         }
         table.clear()
@@ -599,7 +619,7 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
 
     private fun releaseTableFrames(allocatedFrames: List<ULong>) {
         for (index in allocatedFrames.lastIndex downTo 0) {
-            BuddyFrameAllocator.freeFrames(allocatedFrames[index], 1uL)
+            BuddyFrameAllocator.free(allocatedFrames[index], 1uL)
         }
     }
 
@@ -652,14 +672,15 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
             return (entry and PTE_ADDR_MASK).toVirtualPointer()
         }
 
-        val frameAddress = BuddyFrameAllocator.allocateFrames(1uL) ?: run {
+        val frameAddress = BuddyFrameAllocator.allocate(1uL)
+        if (frameAddress == INVALID_FRAME) {
             println("Paging: failed to allocate frame for paging structure")
             return null
         }
 
         val tablePointer = frameAddress.toVirtualPointer<ULongVar>() ?: run {
             println("Paging: frame to pointer conversion failed for ${frameAddress.hex()}")
-            BuddyFrameAllocator.freeFrames(frameAddress, 1uL)
+            BuddyFrameAllocator.free(frameAddress, 1uL)
             return null
         }
 

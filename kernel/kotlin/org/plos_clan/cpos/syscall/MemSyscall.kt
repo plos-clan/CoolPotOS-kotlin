@@ -4,13 +4,13 @@ package org.plos_clan.cpos.syscall
 
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.InodeType
+import org.plos_clan.cpos.fs.OpenFileDescription
 import org.plos_clan.cpos.mem.ByteArrayBuffer
+import org.plos_clan.cpos.mem.FileRegionBacking
 import org.plos_clan.cpos.mem.MEMORY_REGION_ACCESS_MASK
 import org.plos_clan.cpos.mem.MemoryMapRequest
 import org.plos_clan.cpos.mem.MemoryMapResult
-import org.plos_clan.cpos.mem.MemoryRegionBacking
 import org.plos_clan.cpos.mem.MemoryRegionType
-import org.plos_clan.cpos.mem.VDSFileBacking
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.tasks.Process
@@ -41,14 +41,10 @@ private const val PROT_READ = 0x1uL
 private const val PROT_WRITE = 0x2uL
 private const val PROT_EXEC = 0x4uL
 
-class MappedFile(private val file: org.plos_clan.cpos.fs.OpenFileDescription) :
-    MemoryRegionBacking(), VDSFileBacking {
-    init {
-        check(file.retain())
-    }
+class MappedFile(file: OpenFileDescription) : FileRegionBacking(file) {
 
-    override val immutablePageSource: Any?
-        get() = file.immutablePageSource
+    override val cacheSource
+        get() = file.cacheSource ?: this
 
     override val sharedMemoryIdentity: Any
         get() = file.inode
@@ -57,10 +53,6 @@ class MappedFile(private val file: org.plos_clan.cpos.fs.OpenFileDescription) :
         val result = file.readAt(offset, ByteArrayBuffer(destination), 0, destination.size)
         return if (result.isSuccess) result.bytesTransferred else result.raw.toInt()
     }
-
-    override fun close() = file.release()
-
-    override val getFile get() = file
 }
 
 private fun mmapResult(result: MemoryMapResult<ULong>): Long = when (result) {

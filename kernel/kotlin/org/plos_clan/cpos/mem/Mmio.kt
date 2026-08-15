@@ -77,7 +77,7 @@ class MmioRegion private constructor(
         val frames = ownedFrames
         ownedFrames = 0uL
         if (frames > 0uL) {
-            BuddyFrameAllocator.freeFrames(physicalAddress, frames)
+            BuddyFrameAllocator.free(physicalAddress, frames)
         }
     }
 
@@ -94,10 +94,11 @@ class MmioRegion private constructor(
         fun allocate(pageCount: ULong = 1uL): MmioRegion? {
             require(pageCount > 0uL) { "pageCount must be positive" }
 
-            val physical = BuddyFrameAllocator.allocateFrames(pageCount) ?: return null
+            val physical = BuddyFrameAllocator.allocate(pageCount)
+            if (physical == INVALID_FRAME) return null
             val byteLength = pageCount * PAGE_SIZE_BYTES
             val virtual = mapPhysical(physical, byteLength, populate = true) ?: run {
-                BuddyFrameAllocator.freeFrames(physical, pageCount)
+                BuddyFrameAllocator.free(physical, pageCount)
                 return null
             }
             memset(virtual.toPointer<UByteVar>(), 0, byteLength)

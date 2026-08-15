@@ -11,6 +11,7 @@ import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.mem.AddressSpace
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
+import org.plos_clan.cpos.mem.INVALID_FRAME
 import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -308,7 +309,7 @@ object ProcessManager {
         ) ?: return null
         val kernelFsBase = bridge.create_kernel_runtime_tcb()
         if (kernelFsBase == 0uL) {
-            BuddyFrameAllocator.freeFrames(stack.physicalBase, stack.pages)
+            BuddyFrameAllocator.free(stack.physicalBase, stack.pages)
             return null
         }
         return newThread(
@@ -385,7 +386,8 @@ object ProcessManager {
         }
 
         val pages = stackPages.takeIf { it != 0uL } ?: DEFAULT_THREAD_STACK_PAGES
-        val physicalBase = BuddyFrameAllocator.allocateFrames(pages) ?: run {
+        val physicalBase = BuddyFrameAllocator.allocate(pages)
+        if (physicalBase == INVALID_FRAME) {
             println("ProcessManager: failed to allocate stack for thread '$name'")
             return null
         }

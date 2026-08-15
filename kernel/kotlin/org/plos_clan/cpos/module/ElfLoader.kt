@@ -8,6 +8,7 @@ import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsResult
 import org.plos_clan.cpos.mem.AddressSpace
 import org.plos_clan.cpos.mem.ByteArrayBuffer
+import org.plos_clan.cpos.mem.FileRegionBacking
 import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.mem.MEMORY_REGION_EXECUTABLE
 import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
@@ -16,7 +17,6 @@ import org.plos_clan.cpos.mem.MemoryRegion
 import org.plos_clan.cpos.mem.MemoryRegionBacking
 import org.plos_clan.cpos.mem.MemoryRegionType
 import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
-import org.plos_clan.cpos.mem.VDSFileBacking
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.LittleEndianBuffer
@@ -405,15 +405,13 @@ object ElfLoader {
 }
 
 class ElfBacking(
-    private val file: OpenFileDescription,
+    file: OpenFileDescription,
     private val segments: List<LoadSegment>,
-) : MemoryRegionBacking(), VDSFileBacking {
-    init {
-        check(file.retain())
-    }
-
-    override val immutablePageSource: Any?
-        get() = file.immutablePageSource
+) : FileRegionBacking(file) {
+    override val identity: Any = ElfPageCacheIdentity(
+        file.cacheSource?.identity ?: file,
+        segments,
+    )
 
     override fun read(offset: ULong, destination: ByteArray): Int {
         val end = checkedAdd(offset, destination.size.toULong()) ?: return -EIO
@@ -433,16 +431,17 @@ class ElfBacking(
         }
         return destination.size
     }
-
-    override fun close() = file.release()
-
-    override val getFile get() = file
 }
 
 private enum class ElfObjectType {
     EXECUTABLE,
     DYNAMIC,
 }
+
+private data class ElfPageCacheIdentity(
+    val file: Any,
+    val segments: List<LoadSegment>,
+)
 
 private data class ElfFile(
     val file: OpenFileDescription,

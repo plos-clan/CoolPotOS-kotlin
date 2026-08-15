@@ -233,41 +233,22 @@ private class ErofsInstance private constructor(
     }
 
     private class RegularBackend(
-        private val instance: ErofsInstance,
-        private val node: FileNode,
-    ) : InodeBackend {
+        instance: ErofsInstance,
+        node: FileNode,
+    ) : InodeBackend, CachedFileBackend {
+        private val packed = instance.packed
+        private val fragment = node.fragment
+
         override val type: InodeType = InodeType.REGULAR
 
         override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
-            VfsResult.Ok(FileHandle(instance.packed, node.fragment))
-    }
+            VfsResult.Ok(this)
 
-    private class FileHandle(
-        private val packed: PackedData,
-        private val fragment: Fragment,
-    ) : OpenFileBackend {
-        override val immutablePageSource: Any = fragment
-
-        override fun read(
-            inode: Inode,
-            destination: PreparedBufferDestination,
-            destinationOffset: Int,
-            count: Int,
-            position: FilePosition,
-        ): IoResult {
-            if (count == 0 || position.value < 0 || position.value.toULong() >= fragment.size) {
-                return IoResult.success(0)
-            }
-            val available = minOf(count.toULong(), fragment.size - position.value.toULong()).toInt()
-            val copied = packed.read(
-                fragment.offset + position.value.toULong(),
-                destination,
-                destinationOffset,
-                available,
-            ) ?: return IoResult.failure(VfsError.IO)
-            if (copied == 0) return IoResult.failure(VfsError.FAULT)
-            position.value += copied
-            return IoResult.success(copied)
+        override fun read(offset: ULong, destination: ByteArray): Int {
+            if (offset >= fragment.size) return 0
+            val count = minOf(destination.size.toULong(), fragment.size - offset).toInt()
+            val target = checkNotNull(ByteArrayBuffer(destination).prepareWrite(0, count))
+            return packed.read(fragment.offset + offset, target, 0, count) ?: -1
         }
     }
 

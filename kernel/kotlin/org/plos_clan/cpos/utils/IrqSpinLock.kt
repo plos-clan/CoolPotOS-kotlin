@@ -22,4 +22,19 @@ class IrqSpinLock {
             bridge.irq_restore(flags)
         }
     }
+
+    inline fun tryWithLock(block: () -> Unit): Boolean {
+        val flags = bridge.irq_save()
+        if (!held.compareAndSet(expectedValue = false, newValue = true)) {
+            bridge.irq_restore(flags)
+            return false
+        }
+        try {
+            block()
+        } finally {
+            held.store(false)
+            bridge.irq_restore(flags)
+        }
+        return true
+    }
 }

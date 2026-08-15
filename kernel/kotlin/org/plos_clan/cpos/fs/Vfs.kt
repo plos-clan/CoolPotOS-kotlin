@@ -4,6 +4,10 @@ package org.plos_clan.cpos.fs
 
 import org.plos_clan.cpos.mem.BufferDestination
 import org.plos_clan.cpos.mem.BufferSource
+import org.plos_clan.cpos.mem.PageCache
+import org.plos_clan.cpos.mem.PageCacheFailure
+import org.plos_clan.cpos.mem.PageCacheProvider
+import org.plos_clan.cpos.mem.PageCacheSource
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
@@ -21,6 +25,7 @@ enum class VfsError(val errno: Int) {
     IO(5),
     BAD_DESCRIPTOR(9),
     WOULD_BLOCK(11),
+    NO_MEMORY(12),
     PERMISSION_DENIED(13),
     FAULT(14),
     BUSY(16),
@@ -324,9 +329,6 @@ interface FileContent {
 }
 
 interface OpenFileBackend {
-    val immutablePageSource: Any?
-        get() = null
-
     fun read(
         inode: Inode,
         destination: PreparedBufferDestination,
@@ -357,6 +359,33 @@ interface OpenFileBackend {
         -VfsError.NOT_SUPPORTED.errno.toLong()
 
     fun release() {}
+}
+
+internal interface CachedFileBackend : OpenFileBackend, PageCacheSource {
+    override fun read(
+        inode: Inode,
+        destination: PreparedBufferDestination,
+        destinationOffset: Int,
+        count: Int,
+        position: FilePosition,
+    ): IoResult {
+        if (count == 0 || position.value < 0) return IoResult.success(0)
+        val sourceOffset = position.value.toULong()
+        val fileSize = inode.metadata().size
+        if (sourceOffset >= fileSize) return IoResult.success(0)
+
+        val available = minOf(count.toULong(), fileSize - sourceOffset).toInt()
+        val result = PageCache.read(this, sourceOffset, destination, destinationOffset, available)
+        if (!result.isSuccess) {
+            val error = when (result.failure) {
+                PageCacheFailure.OUT_OF_MEMORY -> VfsError.NO_MEMORY
+                PageCacheFailure.IO_ERROR -> VfsError.IO
+            }
+            return IoResult.failure(error)
+        }
+        position.value += result.bytes
+        return IoResult.success(result.bytes)
+    }
 }
 
 enum class IoEvent {
@@ -611,8 +640,8 @@ class OpenFileDescription internal constructor(
     val offset: Long
         get() = positionLock.withLock { position.value }
 
-    internal val immutablePageSource: Any?
-        get() = backend.immutablePageSource
+    internal val cacheSource: PageCacheSource?
+        get() = (backend as? PageCacheProvider)?.cacheSource
 
     fun getStatusFlags(): Int = statusFlags.load()
 

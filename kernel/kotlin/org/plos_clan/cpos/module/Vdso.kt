@@ -21,9 +21,6 @@ import org.plos_clan.cpos.utils.alignUp
 object Vdso : MemoryRegionBacking() {
     private var image = ByteArray(0)
 
-    override val immutablePageSource: Any
-        get() = this
-
     fun initialize(): Boolean = memScoped {
         val embedded = alloc<bridge.vdso_image>()
         if (!bridge.runtime_vdso_initialize(embedded.ptr)) return@memScoped false

@@ -1,6 +1,7 @@
 package org.plos_clan.cpos.fs
 
 import org.plos_clan.cpos.mem.ByteArrayBuffer
+import org.plos_clan.cpos.mem.PageCacheProvider
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 
@@ -377,9 +378,9 @@ private class OverlayInstance(options: OverlayfsOptions) : SuperBlockBackend {
         private val inode: Inode,
         private val target: Inode,
         private val delegate: OpenFileBackend,
-    ) : OpenFileBackend {
-        override val immutablePageSource: Any?
-            get() = delegate.immutablePageSource
+    ) : OpenFileBackend, PageCacheProvider {
+        override val cacheSource
+            get() = (delegate as? PageCacheProvider)?.cacheSource
 
         override fun read(
             inode: Inode,

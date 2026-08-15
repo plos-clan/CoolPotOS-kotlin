@@ -4,11 +4,11 @@ import org.plos_clan.cpos.drivers.char.TtyManager
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.VfsName
 import org.plos_clan.cpos.fs.VfsResult
+import org.plos_clan.cpos.mem.FileRegionBacking
 import org.plos_clan.cpos.mem.MEMORY_REGION_EXECUTABLE
 import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.mem.MEMORY_REGION_WRITABLE
 import org.plos_clan.cpos.mem.MemoryRegionType
-import org.plos_clan.cpos.mem.VDSFileBacking
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.tasks.TaskState
@@ -150,7 +150,7 @@ fun Process.maps(): String {
             // 文件与其他映射
             when (region.type) {
                 MemoryRegionType.FILE, MemoryRegionType.IMAGE -> {
-                    val file = (region.backing as VDSFileBacking).getFile
+                    val file = (region.backing as FileRegionBacking).file
 
                     val path = when (val res = FileSystemManager.vfs.absolutePath(
                         context = process.getFSContext(),

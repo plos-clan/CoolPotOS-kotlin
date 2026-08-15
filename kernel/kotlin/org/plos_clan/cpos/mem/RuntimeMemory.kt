@@ -31,7 +31,7 @@ internal data class GarbageCollectionStatistics(
     val durationNanoseconds: ULong,
 )
 
-internal object RuntimeMemory : PhysicalFrameReclaimer {
+internal object RuntimeMemory : FrameReclaimer {
     private var initialized = false
 
     fun initialize(): Boolean {
@@ -45,7 +45,7 @@ internal object RuntimeMemory : PhysicalFrameReclaimer {
             println("Runtime memory: failed to install the physical-memory provider")
             return false
         }
-        BuddyFrameAllocator.installReclaimer(this)
+        BuddyFrameAllocator.register(this)
         initialized = true
         return true
     }
@@ -55,24 +55,25 @@ internal object RuntimeMemory : PhysicalFrameReclaimer {
         if (frameCount == 0uL) {
             return null
         }
-        reclaimFrames()
+        reclaim(frameCount)
 
-        val physicalAddress = BuddyFrameAllocator.allocateFramesRaw(frameCount)
-        if (physicalAddress == INVALID_PHYSICAL_ADDRESS) {
-            return null
-        }
+        val physicalAddress = BuddyFrameAllocator.allocate(frameCount)
+        if (physicalAddress == INVALID_FRAME) return null
 
         return Hhdm.toVirtual(physicalAddress).toPointer<UByteVar>()
     }
 
-    override fun reclaimFrames() {
-        while (true) {
-            val pointer = runtime_vm_take_released() ?: return
+    override fun reclaim(target: ULong): ULong {
+        var reclaimed = 0uL
+        while (reclaimed < target) {
+            val pointer = runtime_vm_take_released() ?: return reclaimed
             val byteLength = pointer.reinterpret<ULongVar>()[0]
             check(release(pointer, byteLength)) {
                 "Runtime memory provider received an invalid released block"
             }
+            reclaimed += requiredFrames(byteLength)
         }
+        return reclaimed
     }
 
     private fun release(pointer: COpaquePointer, byteLength: ULong): Boolean {
@@ -82,7 +83,7 @@ internal object RuntimeMemory : PhysicalFrameReclaimer {
             return false
         }
 
-        return BuddyFrameAllocator.freeFramesRaw(virtualAddress - Hhdm.offset, frameCount)
+        return BuddyFrameAllocator.free(virtualAddress - Hhdm.offset, frameCount)
     }
 
     internal fun lastCollectionStatistics(): GarbageCollectionStatistics? {

@@ -10,16 +10,16 @@
 
 ## Feature
 
-* Symmetric multiprocessing
-* Buddy allocator & 4-level page table
-* TSC-deadline apic timer
-* USB Driver(HID Keyboard & Mouse)
-* RRS-handoff scheduler
-* Vdso
-* ACPI AML
-* devtmpfs & procfs & erofs
-* glibc dynamic program
-* GC & Coroutine & runtime exception
+- Symmetric multiprocessing
+- Buddy allocator & 4-level page table
+- TSC-deadline apic timer
+- USB Driver(HID Keyboard & Mouse)
+- RRS-handoff scheduler
+- VDSO
+- ACPI AML
+- devtmpfs & procfs & erofs
+- Linux programs binary compatible (glibc)
+- GC & Coroutine & runtime exception
 
 ## Build
 
@@ -103,12 +103,12 @@ other kernel work can run. AML SCI/GPE pending events run in a dedicated child
 of the kernel scope; it processes bounded batches and suspends when idle rather
 than polling in the bootstrap loop.
 
-## License
-
-This project is licensed under the [0BSD License](LICENSE).
-
-## Dependency
+## Dependencies
 
 * mlibc [managarm/mlibc](https://github.com/managarm/mlibc)
 * libos-terminal [plos-clan/libos-terminal](https://github.com/plos-clan/libos-terminal)
 * libzstd-decompress [facebook/zstd](https://github.com/facebook/zstd)
+
+## License
+
+This project is licensed under the [0BSD License](LICENSE).

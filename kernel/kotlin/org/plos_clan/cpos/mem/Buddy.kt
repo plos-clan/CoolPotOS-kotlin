@@ -14,7 +14,7 @@ import org.plos_clan.cpos.utils.isPageAligned
 
 private const val BITS_PER_WORD = ULong.SIZE_BITS
 private const val MAX_ZONE_ORDER = Int.SIZE_BITS - 2
-internal const val INVALID_PHYSICAL_ADDRESS = ULong.MAX_VALUE
+internal const val INVALID_FRAME = ULong.MAX_VALUE
 
 private data class MemoryRange(
     val base: ULong,
@@ -34,11 +34,11 @@ private data class MemmapDecision(
 
 data class PhysicalMemoryStatistics(
     val totalBytes: ULong,
-    val availableBytes: ULong,
+    val freeBytes: ULong,
 )
 
-internal interface PhysicalFrameReclaimer {
-    fun reclaimFrames()
+internal interface FrameReclaimer {
+    fun reclaim(target: ULong): ULong
 }
 
 private enum class MemmapType(
@@ -132,7 +132,7 @@ private class BuddyZone(
 
     fun allocate(order: Int): ULong {
         if (order > maxOrder) {
-            return INVALID_PHYSICAL_ADDRESS
+            return INVALID_FRAME
         }
 
         var sourceOrder = order
@@ -145,7 +145,7 @@ private class BuddyZone(
             sourceOrder++
         }
         if (block < 0) {
-            return INVALID_PHYSICAL_ADDRESS
+            return INVALID_FRAME
         }
 
         while (sourceOrder > order) {
@@ -202,71 +202,86 @@ object BuddyFrameAllocator {
     private var managedFrames = 0uL
     private var usableFrames = 0uL
     private var initialized = false
-    private var reclaimer: PhysicalFrameReclaimer? = null
+    private var reclaimers = emptyArray<FrameReclaimer>()
 
     val isReady: Boolean
         get() = initialized
 
     fun initialize(): Boolean = lock.withLock { initialized || initializeLocked() }
 
-    fun allocateFrames(frameCount: ULong): ULong? {
-        var address = allocateFramesRaw(frameCount)
-        if (address == INVALID_PHYSICAL_ADDRESS) {
-            reclaimer?.reclaimFrames()
-            address = allocateFramesRaw(frameCount)
+    fun allocate(count: ULong): ULong {
+        var address = allocateAvailable(count)
+        if (address != INVALID_FRAME) return address
+
+        val order = requiredOrder(count) ?: return INVALID_FRAME
+        val target = 1uL shl order
+        val installed = lock.withLock { reclaimers }
+        for (reclaimer in installed) {
+            do {
+                val reclaimed = reclaimer.reclaim(target)
+                if (reclaimed == 0uL) break
+                address = allocateAvailable(count)
+                if (address != INVALID_FRAME) return address
+            } while (true)
         }
-        return if (address == INVALID_PHYSICAL_ADDRESS) null else address
+        return INVALID_FRAME
     }
 
-    internal fun installReclaimer(candidate: PhysicalFrameReclaimer) {
-        check(reclaimer == null) { "Physical frame reclaimer is already installed" }
-        reclaimer = candidate
-    }
-
-    internal fun allocateFramesRaw(frameCount: ULong): ULong = lock.withLock {
-        if (frameCount == 0uL || !initialized) {
-            return@withLock INVALID_PHYSICAL_ADDRESS
-        }
-
-        val order = requiredOrder(frameCount) ?: return@withLock INVALID_PHYSICAL_ADDRESS
-        var zoneIndex = 0
-        while (zoneIndex < zones.size) {
-            val address = zones[zoneIndex].allocate(order)
-            if (address != INVALID_PHYSICAL_ADDRESS) {
-                usableFrames -= 1uL shl order
-                return@withLock address
+    internal fun register(candidate: FrameReclaimer) {
+        while (true) {
+            val observed = lock.withLock {
+                check(reclaimers.none { it === candidate }) {
+                    "Frame reclaimer is already registered"
+                }
+                reclaimers
             }
-            zoneIndex++
+            val updated = observed + candidate
+            val installed = lock.withLock {
+                if (reclaimers !== observed) return@withLock false
+                reclaimers = updated
+                true
+            }
+            if (installed) return
         }
-        INVALID_PHYSICAL_ADDRESS
     }
 
-    fun freeFrames(physicalAddress: ULong, frameCount: ULong): Boolean =
-        freeFramesRaw(physicalAddress, frameCount)
+    private fun allocateAvailable(count: ULong): ULong = lock.withLock {
+        if (count == 0uL || !initialized) {
+            return@withLock INVALID_FRAME
+        }
 
-    internal fun freeFramesRaw(physicalAddress: ULong, frameCount: ULong): Boolean = lock.withLock {
-        freeFramesLocked(physicalAddress, frameCount)
+        val order = requiredOrder(count) ?: return@withLock INVALID_FRAME
+        for (zone in zones) {
+            val address = zone.allocate(order)
+            if (address == INVALID_FRAME) continue
+            usableFrames -= 1uL shl order
+            return@withLock address
+        }
+        INVALID_FRAME
     }
 
-    fun freeFrames(physicalAddresses: List<ULong>): Boolean = lock.withLock {
+    fun free(address: ULong, count: ULong): Boolean = lock.withLock {
+        freeLocked(address, count)
+    }
+
+    fun free(addresses: List<ULong>): Boolean = lock.withLock {
         var succeeded = true
         var index = 0
-        while (index < physicalAddresses.size) {
-            succeeded = freeFramesLocked(physicalAddresses[index], 1uL) && succeeded
+        while (index < addresses.size) {
+            succeeded = freeLocked(addresses[index], 1uL) && succeeded
             index++
         }
         succeeded
     }
 
     fun statistics(): PhysicalMemoryStatistics {
-        reclaimer?.reclaimFrames()
         var totalBytes = 0uL
-        var availableBytes = 0uL
+        var freeBytes = 0uL
         lock.withLock {
             totalBytes = managedFrames * PAGE_SIZE_BYTES
-            availableBytes = usableFrames * PAGE_SIZE_BYTES
+            freeBytes = usableFrames * PAGE_SIZE_BYTES
         }
-        return PhysicalMemoryStatistics(totalBytes, availableBytes)
+        return PhysicalMemoryStatistics(totalBytes, freeBytes)
     }
 
     private fun initializeLocked(): Boolean {
@@ -296,19 +311,16 @@ object BuddyFrameAllocator {
         return initialized
     }
 
-    private fun freeFramesLocked(physicalAddress: ULong, frameCount: ULong): Boolean {
-        if (frameCount == 0uL || !physicalAddress.isPageAligned() || !initialized) {
+    private fun freeLocked(address: ULong, count: ULong): Boolean {
+        if (count == 0uL || !address.isPageAligned() || !initialized) {
             return false
         }
 
-        val order = requiredOrder(frameCount) ?: return false
-        var zoneIndex = 0
-        while (zoneIndex < zones.size) {
-            if (zones[zoneIndex].free(physicalAddress, order)) {
-                usableFrames += 1uL shl order
-                return true
-            }
-            zoneIndex++
+        val order = requiredOrder(count) ?: return false
+        for (zone in zones) {
+            if (!zone.free(address, order)) continue
+            usableFrames += 1uL shl order
+            return true
         }
         return false
     }

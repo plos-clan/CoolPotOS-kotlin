@@ -3,15 +3,12 @@
 package org.plos_clan.cpos.mem
 
 import kotlinx.cinterop.UByteVar
-import kotlinx.cinterop.addressOf
-import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.fs.OpenFileDescription
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.alignUp
 import org.plos_clan.cpos.utils.isPageAligned
-import platform.posix.memcpy
 import platform.posix.memset
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -57,16 +54,9 @@ data class MemoryRegion(
         get() = end - start
 }
 
-interface VDSFileBacking {
-    val getFile: OpenFileDescription
-}
-
 @OptIn(ExperimentalAtomicApi::class)
-abstract class MemoryRegionBacking {
+abstract class MemoryRegionBacking : PageCacheSource {
     private val references = AtomicInt(1)
-
-    internal open val immutablePageSource: Any?
-        get() = null
 
     internal open val sharedMemoryIdentity: Any
         get() = this
@@ -94,70 +84,19 @@ abstract class MemoryRegionBacking {
         }
     }
 
-    abstract fun read(offset: ULong, destination: ByteArray): Int
+    abstract override fun read(offset: ULong, destination: ByteArray): Int
 
     protected abstract fun close()
 }
 
-private const val FILE_PAGE_CACHE_CAPACITY = 1024
-
-private data class FilePageKey(
-    val source: Any,
-    val offset: ULong,
-)
-
-
-private object FilePageCache {
-    private val lock = IrqSpinLock()
-    private val frames = mutableMapOf<FilePageKey, ULong>()
-    private val fifo = ArrayDeque<FilePageKey>()
-
-    fun acquire(backing: MemoryRegionBacking, offset: ULong): ULong? {
-        val source = backing.immutablePageSource ?: return null
-        val key = FilePageKey(source, offset)
-        lock.withLock {
-            frames[key]?.let { frame ->
-                UserFrameReferences.retain(frame)
-                return@withLock frame
-            }
-        }?.let { return it }
-
-        val frame = BuddyFrameAllocator.allocateFrames(1uL) ?: return null
-        val destination = Hhdm.toVirtualPointer<UByteVar>(frame)
-        if (destination == null) {
-            BuddyFrameAllocator.freeFrames(frame, 1uL)
-            return null
-        }
-        memset(destination, 0, PAGE_SIZE_BYTES)
-        val data = ByteArray(PAGE_SIZE_BYTES.toInt())
-        val count = backing.read(offset, data)
-        if (count < 0 || count > data.size) {
-            BuddyFrameAllocator.freeFrames(frame, 1uL)
-            return null
-        }
-        if (count != 0) {
-            data.usePinned { sourcePointer ->
-                memcpy(destination, sourcePointer.addressOf(0), count.toULong())
-            }
-        }
-
-        UserFrameReferences.retain(frame)
-        return lock.withLock {
-            frames[key]?.let { existing ->
-                UserFrameReferences.retain(existing)
-                UserFrameReferences.release(frame)
-                return@withLock existing
-            }
-            while (fifo.size >= FILE_PAGE_CACHE_CAPACITY) {
-                val evicted = fifo.removeFirst()
-                frames.remove(evicted)?.let(UserFrameReferences::release)
-            }
-            frames[key] = frame
-            fifo.addLast(key)
-            UserFrameReferences.retain(frame)
-            frame
-        }
+abstract class FileRegionBacking(
+    val file: OpenFileDescription,
+) : MemoryRegionBacking() {
+    init {
+        check(file.retain())
     }
+
+    final override fun close() = file.release()
 }
 
 data class MemoryMapRequest(
@@ -450,7 +389,8 @@ class AddressSpace internal constructor(
         scratch: ByteArray? = null,
     ): PageFaultResult {
         if (region.type == MemoryRegionType.MMIO) {
-            val physicalAddress = region.offset.alignDown(PAGE_SIZE_BYTES) + (page - region.start)
+            val physicalAddress = region.offset.alignDown(PAGE_SIZE_BYTES) +
+                (page - region.start)
             return if (pageDirectory.mapPage(page, physicalAddress, MMIO_PTE_FLAGS)) {
                 PageFaultResult.RESOLVED
             } else {
@@ -459,57 +399,48 @@ class AddressSpace internal constructor(
         }
 
         val backing = region.backing
-        if (backing?.immutablePageSource != null) {
-            FilePageCache.acquire(backing, region.offset + (page - region.start))?.let { frame ->
-                val access = region.access
-                val mapped = pageDirectory.mapUserPage(
-                    virtualAddress = page,
-                    physicalAddress = frame,
-                    writable = false,
-                    executable = (access and MEMORY_REGION_EXECUTABLE) != 0uL,
-                )
-                UserFrameReferences.release(frame)
-                if (!mapped) return PageFaultResult.MAPPING_FAILED
-                return PageFaultResult.RESOLVED
-            }
-        }
-
-        val physicalAddress = BuddyFrameAllocator.allocateFrames(1uL)
-        if (physicalAddress == null) return PageFaultResult.OUT_OF_MEMORY
-        val destination = Hhdm.toVirtualPointer<UByteVar>(physicalAddress)
-        if (destination == null) {
-            BuddyFrameAllocator.freeFrames(physicalAddress, 1uL)
-            return PageFaultResult.MAPPING_FAILED
-        }
-        memset(destination, 0, PAGE_SIZE_BYTES)
-
-        if (backing != null) {
-            val buffer = scratch ?: ByteArray(PAGE_SIZE_BYTES.toInt())
-            if (scratch != null) buffer.fill(0)
-            val count = backing.read(region.offset + (page - region.start), buffer)
-            if (count < 0 || count > buffer.size) {
-                BuddyFrameAllocator.freeFrames(physicalAddress, 1uL)
-                return PageFaultResult.IO_ERROR
-            }
-            if (count != 0) {
-                buffer.usePinned { source ->
-                    memcpy(destination, source.addressOf(0), count.toULong())
+        val backingOffset = region.offset + (page - region.start)
+        val physicalAddress = if (backing != null) {
+            val cached = PageCache.acquire(
+                backing.cacheSource,
+                backingOffset,
+                scratch ?: faultScratch,
+            )
+            if (!cached.isSuccess) {
+                return when (cached.failure) {
+                    PageCacheFailure.OUT_OF_MEMORY -> PageFaultResult.OUT_OF_MEMORY
+                    PageCacheFailure.IO_ERROR -> PageFaultResult.IO_ERROR
                 }
             }
+            cached.frame
+        } else {
+            val frame = BuddyFrameAllocator.allocate(1uL)
+            if (frame == INVALID_FRAME) return PageFaultResult.OUT_OF_MEMORY
+            val destination = Hhdm.toVirtualPointer<UByteVar>(frame)
+            if (destination == null) {
+                BuddyFrameAllocator.free(frame, 1uL)
+                return PageFaultResult.MAPPING_FAILED
+            }
+            memset(destination, 0, PAGE_SIZE_BYTES)
+            frame
         }
 
         val access = region.access
+        val writable = backing == null &&
+            (access and MEMORY_REGION_WRITABLE) != 0uL
+        val executable = (access and MEMORY_REGION_EXECUTABLE) != 0uL
         val mapped = pageDirectory.mapUserPage(
             virtualAddress = page,
             physicalAddress = physicalAddress,
-            writable = (access and MEMORY_REGION_WRITABLE) != 0uL,
-            executable = (access and MEMORY_REGION_EXECUTABLE) != 0uL,
+            writable = writable,
+            executable = executable,
         )
-        if (!mapped) {
-            BuddyFrameAllocator.freeFrames(physicalAddress, 1uL)
-            return PageFaultResult.MAPPING_FAILED
+        if (backing != null) {
+            PageCache.release(physicalAddress)
+        } else if (!mapped) {
+            BuddyFrameAllocator.free(physicalAddress, 1uL)
         }
-        return PageFaultResult.RESOLVED
+        return if (mapped) PageFaultResult.RESOLVED else PageFaultResult.MAPPING_FAILED
     }
 
     fun unmap(address: ULong, length: ULong): MemoryMapResult<Unit> {
