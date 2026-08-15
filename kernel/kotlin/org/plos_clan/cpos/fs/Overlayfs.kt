@@ -41,8 +41,8 @@ private class OverlayInstance(options: OverlayfsOptions) : SuperBlockBackend {
         val backend = when (location.type) {
             InodeType.DIRECTORY -> DirectoryBackend(this, superBlock, location)
             InodeType.REGULAR -> FileBackend(this, location)
-            InodeType.SYMLINK -> SymlinkBackend(location)
-            else -> UnsupportedBackend(location.type)
+            InodeType.SYMLINK -> SymlinkBackend(this, location)
+            else -> UnsupportedBackend(this, location, location.type)
         }
         return Inode(InodeId(nextInodeId++), superBlock, backend, metadata).also {
             location.overlayInode = it
@@ -52,6 +52,9 @@ private class OverlayInstance(options: OverlayfsOptions) : SuperBlockBackend {
     private var nextInodeId = 1uL
 
     internal fun rootInode(superBlock: SuperBlock): Inode = inode(superBlock, root)
+
+    override fun sync(): VfsResult<Unit> =
+        root.upper?.mount?.superBlock?.backend?.sync() ?: VfsResult.Ok(Unit)
 
     private fun child(superBlock: SuperBlock, directory: Location, name: VfsName): Inode? {
         val location = childLocation(directory, name) ?: return null
@@ -140,15 +143,54 @@ private class OverlayInstance(options: OverlayfsOptions) : SuperBlockBackend {
         return VfsResult.Ok(FileHandle(inode, targetInode, delegate))
     }
 
-    private fun truncate(location: Location, inode: Inode, size: ULong): VfsResult<Unit> {
+    private fun resize(location: Location, inode: Inode, size: ULong): VfsResult<Unit> {
         if (!ensureWritable(location)) return VfsResult.Err(VfsError.READ_ONLY)
         val target = location.upper ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val targetInode = target.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val backend = targetInode.backend as? TruncatableBackend
+        val backend = targetInode.backend as? RegularFileBackend
             ?: return VfsResult.Err(VfsError.NOT_SUPPORTED)
-        val result = backend.truncate(targetInode, size)
+        val result = backend.resize(targetInode, size)
         if (result is VfsResult.Ok) inode.updateMetadata { it.copy(size = size) }
         return result
+    }
+
+    private fun allocate(
+        location: Location,
+        inode: Inode,
+        offset: ULong,
+        length: ULong,
+        mode: FileAllocationMode,
+    ): VfsResult<Unit> {
+        if (!ensureWritable(location)) return VfsResult.Err(VfsError.READ_ONLY)
+        val target = location.upper ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val targetInode = target.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val backend = targetInode.backend as? RegularFileBackend
+            ?: return VfsResult.Err(VfsError.NOT_SUPPORTED)
+        val result = backend.allocate(targetInode, offset, length, mode)
+        if (result is VfsResult.Ok) {
+            inode.updateMetadata { it.copy(size = targetInode.metadata().size) }
+        }
+        return result
+    }
+
+    private fun setMode(location: Location, inode: Inode, mode: FileMode): VfsResult<Unit> {
+        if (!ensureWritable(location)) return VfsResult.Err(VfsError.READ_ONLY)
+        val target = location.upper ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val targetInode = target.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val result = targetInode.backend.setMode(targetInode, mode)
+        if (result is VfsResult.Ok) inode.updateMetadata { it.copy(mode = mode) }
+        return result
+    }
+
+    private fun sync(location: Location, dataOnly: Boolean): VfsResult<Unit> {
+        val targetInode = (location.upper ?: location.lower)?.inode
+            ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        return targetInode.backend.sync(targetInode, dataOnly)
+    }
+
+    private fun allocatedBlocks(location: Location): ULong {
+        val targetInode = (location.upper ?: location.lower)?.inode ?: return 0uL
+        return targetInode.backend.allocatedBlocks(targetInode)
     }
 
     private fun link(location: Location): VfsResult<VfsPathname> {
@@ -322,11 +364,24 @@ private class OverlayInstance(options: OverlayfsOptions) : SuperBlockBackend {
         }
     }
 
+    private interface Backend : InodeBackend {
+        val instance: OverlayInstance
+        val location: Location
+
+        override fun setMode(inode: Inode, mode: FileMode): VfsResult<Unit> =
+            instance.setMode(location, inode, mode)
+
+        override fun sync(inode: Inode, dataOnly: Boolean): VfsResult<Unit> =
+            instance.sync(location, dataOnly)
+
+        override fun allocatedBlocks(inode: Inode): ULong = instance.allocatedBlocks(location)
+    }
+
     private class DirectoryBackend(
-        private val instance: OverlayInstance,
+        override val instance: OverlayInstance,
         private val superBlock: SuperBlock,
-        private val location: Location,
-    ) : org.plos_clan.cpos.fs.DirectoryBackend {
+        override val location: Location,
+    ) : org.plos_clan.cpos.fs.DirectoryBackend, Backend {
         override val type: InodeType = InodeType.DIRECTORY
         override fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?> =
             VfsResult.Ok(instance.child(superBlock, location, name))
@@ -364,14 +419,19 @@ private class OverlayInstance(options: OverlayfsOptions) : SuperBlockBackend {
     }
 
     private class FileBackend(
-        private val instance: OverlayInstance,
-        private val location: Location,
-    ) : TruncatableBackend {
-        override val type: InodeType = InodeType.REGULAR
+        override val instance: OverlayInstance,
+        override val location: Location,
+    ) : RegularFileBackend(), Backend {
         override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
             instance.open(location, inode, options)
-        override fun truncate(inode: Inode, size: ULong): VfsResult<Unit> =
-            instance.truncate(location, inode, size)
+        override fun resize(inode: Inode, size: ULong): VfsResult<Unit> =
+            instance.resize(location, inode, size)
+        override fun allocate(
+            inode: Inode,
+            offset: ULong,
+            length: ULong,
+            mode: FileAllocationMode,
+        ): VfsResult<Unit> = instance.allocate(location, inode, offset, length, mode)
     }
 
     private class FileHandle(
@@ -407,8 +467,9 @@ private class OverlayInstance(options: OverlayfsOptions) : SuperBlockBackend {
     }
 
     private class SymlinkBackend(
-        private val location: Location,
-    ) : org.plos_clan.cpos.fs.SymlinkBackend {
+        override val instance: OverlayInstance,
+        override val location: Location,
+    ) : org.plos_clan.cpos.fs.SymlinkBackend, Backend {
         override val type: InodeType = InodeType.SYMLINK
         override fun readLink(inode: Inode): VfsResult<VfsPathname> =
             (location.upper ?: location.lower)?.inode?.let { source ->
@@ -418,7 +479,11 @@ private class OverlayInstance(options: OverlayfsOptions) : SuperBlockBackend {
             VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
     }
 
-    private class UnsupportedBackend(override val type: InodeType) : InodeBackend {
+    private class UnsupportedBackend(
+        override val instance: OverlayInstance,
+        override val location: Location,
+        override val type: InodeType,
+    ) : Backend {
         override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
             VfsResult.Err(VfsError.NOT_SUPPORTED)
     }

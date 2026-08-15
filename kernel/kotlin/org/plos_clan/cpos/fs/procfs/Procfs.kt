@@ -17,6 +17,7 @@ import org.plos_clan.cpos.fs.InodeType
 import org.plos_clan.cpos.fs.IoResult
 import org.plos_clan.cpos.fs.OpenFileBackend
 import org.plos_clan.cpos.fs.OpenOptions
+import org.plos_clan.cpos.fs.RegularFileBackend
 import org.plos_clan.cpos.fs.SuperBlock
 import org.plos_clan.cpos.fs.SuperBlockBackend
 import org.plos_clan.cpos.fs.SymlinkBackend
@@ -320,8 +321,7 @@ class ProcDirectoryHandle(
 
 private class ProcTextFile(
     private val render: () -> ByteArray?,
-) : InodeBackend {
-    override val type: InodeType = InodeType.REGULAR
+) : RegularFileBackend() {
 
     override fun open(
         inode: Inode,

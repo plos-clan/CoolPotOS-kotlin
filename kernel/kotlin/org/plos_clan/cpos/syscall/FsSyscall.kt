@@ -10,10 +10,12 @@ import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.AccessMode
 import org.plos_clan.cpos.fs.CreateDisposition
 import org.plos_clan.cpos.fs.DirectoryEntry
+import org.plos_clan.cpos.fs.FileAllocationMode
 import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.FileMode
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.Inode
+import org.plos_clan.cpos.fs.InodeMetadata
 import org.plos_clan.cpos.fs.InodeType
 import org.plos_clan.cpos.fs.IoResult
 import org.plos_clan.cpos.fs.MountFlags
@@ -51,6 +53,9 @@ private const val AT_SYMLINK_NOFOLLOW = 0x100
 private const val AT_EACCESS = 0x200
 private const val AT_NO_AUTOMOUNT = 0x800
 private const val AT_EMPTY_PATH = 0x1000
+private const val AT_STATX_FORCE_SYNC = 0x2000
+private const val AT_STATX_DONT_SYNC = 0x4000
+private const val AT_STATX_SYNC_TYPE = AT_STATX_FORCE_SYNC or AT_STATX_DONT_SYNC
 private const val O_CLOEXEC = 0x0008_0000uL
 private const val O_NONBLOCK = 0x0000_0800uL
 private const val POLL_FD_SIZE = 8
@@ -75,8 +80,8 @@ private const val F_DUPFD_CLOEXEC = 1_030
 private const val F_GETFD_FLAGS = FileDescriptorFlags.FD_CLOEXEC
 
 private const val STAT_SIZE = 144
+private const val STATX_SIZE = 256
 private const val STATFS_SIZE = 120
-private const val STAT_BLOCK_SIZE = 512uL
 private const val STAT_BLKSIZE = 4096uL
 private const val DIRENT64_HEADER_SIZE = 19
 private const val DIRENT64_ALIGNMENT = 8
@@ -89,46 +94,87 @@ private const val S_IFBLK = 0x6000u
 private const val S_IFREG = 0x8000u
 private const val S_IFLNK = 0xA000u
 private const val S_IFSOCK = 0xC000u
+private const val S_ISGID = 0x400u
+private const val S_IALLUGO = 0xFFFu
+
+private const val FALLOC_FL_KEEP_SIZE = 0x01
+
+private const val STATX_SUPPORTED_FIELDS = 0x71fu
+private const val STATX_RESERVED = 0x8000_0000u
 
 private const val ST_RDONLY = 0x1uL
 private const val ST_NOSUID = 0x2uL
 private const val ST_NODEV = 0x4uL
 private const val ST_NOEXEC = 0x8uL
 
-private class LinuxStat(private val inode: Inode) : NativeStruct {
+private data class LinuxFileStatus(
+    val inodeId: ULong,
+    val type: InodeType,
+    val metadata: InodeMetadata,
+    val blocks: ULong,
+) {
+    val mode: UInt
+        get() = metadata.mode.bits or when (type) {
+            InodeType.REGULAR -> S_IFREG
+            InodeType.DIRECTORY -> S_IFDIR
+            InodeType.SYMLINK -> S_IFLNK
+            InodeType.CHARACTER_DEVICE -> S_IFCHR
+            InodeType.BLOCK_DEVICE -> S_IFBLK
+            InodeType.PIPE -> S_IFIFO
+            InodeType.SOCKET -> S_IFSOCK
+        }
+
+    val deviceMajor: UInt
+        get() = (metadata.deviceNumber shr 8 and 0xfffuL).toUInt()
+
+    val deviceMinor: UInt
+        get() = ((metadata.deviceNumber and 0xffuL) or
+            (metadata.deviceNumber shr 12 and 0xfffff00uL)).toUInt()
+
+    companion object {
+        fun snapshot(inode: Inode) = LinuxFileStatus(
+            inodeId = inode.id.value,
+            type = inode.type,
+            metadata = inode.metadata(),
+            blocks = inode.backend.allocatedBlocks(inode),
+        )
+    }
+}
+
+private class LinuxStat(private val status: LinuxFileStatus) : NativeStruct {
     override fun toNativeBytes(): ByteArray = ByteArray(STAT_SIZE).also { buffer ->
-        val metadata = inode.metadata()
         LittleEndianBuffer(buffer).apply {
             writeU64(0, 0uL) // st_dev
-            writeU64(8, inode.id.value)
-            writeU64(16, metadata.linkCount.toULong())
-            writeU32(24, metadata.mode.bits or typeBits(inode.type))
-            writeU32(28, metadata.uid)
-            writeU32(32, metadata.gid)
+            writeU64(8, status.inodeId)
+            writeU64(16, status.metadata.linkCount.toULong())
+            writeU32(24, status.mode)
+            writeU32(28, status.metadata.uid)
+            writeU32(32, status.metadata.gid)
             writeU32(36, 0u) // __pad0
-            writeU64(40, metadata.deviceNumber)
-            writeU64(48, metadata.size)
+            writeU64(40, status.metadata.deviceNumber)
+            writeU64(48, status.metadata.size)
             writeU64(56, STAT_BLKSIZE)
-            writeU64(64, blocksFor(metadata.size))
+            writeU64(64, status.blocks)
         }
     }
+}
 
-    private fun typeBits(type: InodeType): UInt = when (type) {
-        InodeType.REGULAR -> S_IFREG
-        InodeType.DIRECTORY -> S_IFDIR
-        InodeType.SYMLINK -> S_IFLNK
-        InodeType.CHARACTER_DEVICE -> S_IFCHR
-        InodeType.BLOCK_DEVICE -> S_IFBLK
-        InodeType.PIPE -> S_IFIFO
-        InodeType.SOCKET -> S_IFSOCK
-    }
-
-    private fun blocksFor(size: ULong): ULong =
-        if (size > ULong.MAX_VALUE - (STAT_BLOCK_SIZE - 1uL)) {
-            ULong.MAX_VALUE
-        } else {
-            (size + STAT_BLOCK_SIZE - 1uL) / STAT_BLOCK_SIZE
+private class LinuxStatx(private val status: LinuxFileStatus) : NativeStruct {
+    override fun toNativeBytes(): ByteArray = ByteArray(STATX_SIZE).also { buffer ->
+        LittleEndianBuffer(buffer).apply {
+            writeU32(0, STATX_SUPPORTED_FIELDS)
+            writeU32(4, STAT_BLKSIZE.toUInt())
+            writeU32(16, status.metadata.linkCount)
+            writeU32(20, status.metadata.uid)
+            writeU32(24, status.metadata.gid)
+            writeU16(28, status.mode.toUShort())
+            writeU64(32, status.inodeId)
+            writeU64(40, status.metadata.size)
+            writeU64(48, status.blocks)
+            writeU32(128, status.deviceMajor)
+            writeU32(132, status.deviceMinor)
         }
+    }
 }
 
 private class LinuxStatFs(private val path: VfsPath) : NativeStruct {
@@ -291,6 +337,99 @@ internal fun close(regs: PtraceRegisters, process: Process): Long {
     return if (process.fdTable.close(fd)) 0L else errno(Errno.EBADF)
 }
 
+internal fun fsync(regs: PtraceRegisters, process: Process): Long =
+    syncFile(process, regs[PtraceRegisters.IDX_RDI], dataOnly = false)
+
+internal fun fdatasync(regs: PtraceRegisters, process: Process): Long =
+    syncFile(process, regs[PtraceRegisters.IDX_RDI], dataOnly = true)
+
+private fun syncFile(process: Process, rawFd: ULong, dataOnly: Boolean): Long {
+    val fd = fileDescriptor(rawFd) ?: return errno(Errno.EBADF)
+    val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
+    return try {
+        when (val result = file.sync(dataOnly)) {
+            is VfsResult.Ok -> 0L
+            is VfsResult.Err -> errno(result.error.errno)
+        }
+    } finally {
+        file.release()
+    }
+}
+
+internal fun truncate(regs: PtraceRegisters, process: Process): Long {
+    val size = regs[PtraceRegisters.IDX_RSI]
+    if (size > Long.MAX_VALUE.toULong()) return errno(Errno.EINVAL)
+    val pathname = copyPath(process, regs[PtraceRegisters.IDX_RDI])
+        ?: return errno(Errno.EFAULT)
+    val path = when (val result = resolveAt(
+        process,
+        AT_FDCWD,
+        VfsPathname.fromBytes(pathname),
+        followFinalSymlink = true,
+    )) {
+        is VfsResult.Ok -> result.value
+        is VfsResult.Err -> return errno(result.error.errno)
+    }
+    val inode = path.inode ?: return errno(Errno.ENOENT)
+    if (inode.type == InodeType.DIRECTORY) return errno(Errno.EISDIR)
+    if (MountFlags.READ_ONLY in path.mount.flags) return errno(Errno.EROFS)
+    if (!process.mayWrite(inode.metadata())) return errno(Errno.EACCES)
+    return when (val result = FileSystemManager.vfs.resize(path, size)) {
+        is VfsResult.Ok -> 0L
+        is VfsResult.Err -> errno(result.error.errno)
+    }
+}
+
+internal fun ftruncate(regs: PtraceRegisters, process: Process): Long {
+    val size = regs[PtraceRegisters.IDX_RSI]
+    if (size > Long.MAX_VALUE.toULong()) return errno(Errno.EINVAL)
+    val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI]) ?: return errno(Errno.EBADF)
+    val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
+    return try {
+        if (file.inode.type != InodeType.REGULAR) return errno(Errno.EINVAL)
+        if (!file.access.canWrite) return errno(Errno.EBADF)
+        when (val result = FileSystemManager.vfs.resize(file.path, size)) {
+            is VfsResult.Ok -> 0L
+            is VfsResult.Err -> errno(result.error.errno)
+        }
+    } finally {
+        file.release()
+    }
+}
+
+internal fun fallocate(regs: PtraceRegisters, process: Process): Long {
+    val rawMode = regs[PtraceRegisters.IDX_RSI]
+    val mode = when (rawMode) {
+        0uL -> FileAllocationMode.EXTEND
+        FALLOC_FL_KEEP_SIZE.toULong() -> FileAllocationMode.KEEP_SIZE
+        else -> return errno(Errno.EOPNOTSUPP)
+    }
+    val offset = regs[PtraceRegisters.IDX_RDX]
+    val length = regs[PtraceRegisters.IDX_R10]
+    if (offset > Long.MAX_VALUE.toULong() || length == 0uL ||
+        length > Long.MAX_VALUE.toULong() - offset
+    ) {
+        return errno(Errno.EINVAL)
+    }
+    val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI]) ?: return errno(Errno.EBADF)
+    val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
+    return try {
+        if (!file.access.canWrite) return errno(Errno.EBADF)
+        when (file.inode.type) {
+            InodeType.PIPE -> return errno(Errno.ESPIPE)
+            InodeType.DIRECTORY -> return errno(Errno.EISDIR)
+            InodeType.REGULAR -> Unit
+            else -> return errno(Errno.ENODEV)
+        }
+        when (val result = FileSystemManager.vfs.allocate(file.path, offset, length, mode)) {
+            is VfsResult.Ok -> 0L
+            is VfsResult.Err -> errno(result.error.errno)
+        }
+    } finally {
+        file.release()
+    }
+}
+
 internal fun pipe(regs: PtraceRegisters, process: Process): Long =
     createPipe(process, regs[PtraceRegisters.IDX_RDI], 0uL)
 
@@ -378,29 +517,15 @@ internal fun fchownAt(regs: PtraceRegisters, process: Process): Long {
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RSI])
         ?: return errno(Errno.EFAULT)
     val dirFd = regs[PtraceRegisters.IDX_RDI].toUInt().toInt()
-    val target = if (pathname.isEmpty() && flags.toInt() and AT_EMPTY_PATH != 0) {
-        if (dirFd == AT_FDCWD) {
-            process.context?.workingDirectory ?: return errno(Errno.ENOENT)
-        } else {
-            if (dirFd < 0) return errno(Errno.EBADF)
-            val file = process.fdTable.acquire(dirFd) ?: return errno(Errno.EBADF)
-            try {
-                file.path
-            } finally {
-                file.release()
-            }
-        }
-    } else {
-        if (pathname.isEmpty()) return errno(Errno.ENOENT)
-        when (val result = resolveAt(
-            process,
-            dirFd,
-            VfsPathname.fromBytes(pathname),
-            flags.toInt() and AT_SYMLINK_NOFOLLOW == 0,
-        )) {
-            is VfsResult.Ok -> result.value
-            is VfsResult.Err -> return errno(result.error.errno)
-        }
+    val target = when (val result = resolveAt(
+        process = process,
+        dirFd = dirFd,
+        pathname = VfsPathname.fromBytes(pathname),
+        followFinalSymlink = flags.toInt() and AT_SYMLINK_NOFOLLOW == 0,
+        allowEmpty = flags.toInt() and AT_EMPTY_PATH != 0,
+    )) {
+        is VfsResult.Ok -> result.value
+        is VfsResult.Err -> return errno(result.error.errno)
     }
     return changeOwner(
         process,
@@ -445,6 +570,95 @@ private fun changeOwner(process: Process, path: VfsPath, uid: ULong, gid: ULong)
         )
     }
     return 0L
+}
+
+internal fun chmod(regs: PtraceRegisters, process: Process): Long = changeModeAt(
+    process = process,
+    dirFd = AT_FDCWD,
+    pathnameAddress = regs[PtraceRegisters.IDX_RDI],
+    rawMode = regs[PtraceRegisters.IDX_RSI],
+    flags = 0uL,
+)
+
+internal fun fchmod(regs: PtraceRegisters, process: Process): Long {
+    val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI]) ?: return errno(Errno.EBADF)
+    val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
+    return try {
+        if (file.access == AccessMode.PATH) errno(Errno.EBADF)
+        else changeMode(process, file.path, regs[PtraceRegisters.IDX_RSI])
+    } finally {
+        file.release()
+    }
+}
+
+internal fun fchmodAt(regs: PtraceRegisters, process: Process): Long = changeModeAt(
+    process = process,
+    dirFd = regs[PtraceRegisters.IDX_RDI].toUInt().toInt(),
+    pathnameAddress = regs[PtraceRegisters.IDX_RSI],
+    rawMode = regs[PtraceRegisters.IDX_RDX],
+    flags = 0uL,
+)
+
+internal fun fchmodAt2(regs: PtraceRegisters, process: Process): Long = changeModeAt(
+    process = process,
+    dirFd = regs[PtraceRegisters.IDX_RDI].toUInt().toInt(),
+    pathnameAddress = regs[PtraceRegisters.IDX_RSI],
+    rawMode = regs[PtraceRegisters.IDX_RDX],
+    flags = regs[PtraceRegisters.IDX_R10],
+)
+
+private fun changeModeAt(
+    process: Process,
+    dirFd: Int,
+    pathnameAddress: ULong,
+    rawMode: ULong,
+    flags: ULong,
+): Long {
+    val supportedFlags = (AT_SYMLINK_NOFOLLOW or AT_EMPTY_PATH).toULong()
+    if (flags > UInt.MAX_VALUE.toULong() || flags and supportedFlags.inv() != 0uL) {
+        return errno(Errno.EINVAL)
+    }
+    val pathname = copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
+    val target = when (val result = resolveAt(
+        process = process,
+        dirFd = dirFd,
+        pathname = VfsPathname.fromBytes(pathname),
+        followFinalSymlink = flags.toInt() and AT_SYMLINK_NOFOLLOW == 0,
+        allowEmpty = flags.toInt() and AT_EMPTY_PATH != 0,
+    )) {
+        is VfsResult.Ok -> result.value
+        is VfsResult.Err -> return errno(result.error.errno)
+    }
+    if (target.inode?.type == InodeType.SYMLINK) return errno(Errno.EOPNOTSUPP)
+    return changeMode(process, target, rawMode)
+}
+
+private fun changeMode(process: Process, path: VfsPath, rawMode: ULong): Long {
+    if (MountFlags.READ_ONLY in path.mount.flags) return errno(Errno.EROFS)
+    val inode = path.inode ?: return errno(Errno.ENOENT)
+    val metadata = inode.metadata()
+    if (process.euid != 0 && process.fsuid.toUInt() != metadata.uid) {
+        return errno(Errno.EPERM)
+    }
+
+    var mode = rawMode.toUInt() and S_IALLUGO
+    if (process.euid != 0 && metadata.gid != process.fsgid.toUInt()) {
+        mode = mode and S_ISGID.inv()
+    }
+    return when (val result = FileSystemManager.vfs.setMode(path, FileMode(mode))) {
+        is VfsResult.Ok -> 0L
+        is VfsResult.Err -> errno(result.error.errno)
+    }
+}
+
+private fun Process.mayWrite(metadata: InodeMetadata): Boolean {
+    if (euid == 0) return true
+    val shift = when {
+        fsuid.toUInt() == metadata.uid -> 6
+        fsgid.toUInt() == metadata.gid -> 3
+        else -> 0
+    }
+    return metadata.mode.bits shr shift and 0x2u != 0u
 }
 
 internal fun stat(regs: PtraceRegisters, process: Process): Long = statPath(
@@ -546,29 +760,15 @@ private fun accessAt(
     val supportedFlags = (AT_EACCESS or AT_SYMLINK_NOFOLLOW or AT_EMPTY_PATH).toULong()
     if (flags and supportedFlags.inv() != 0uL) return errno(Errno.EINVAL)
     val pathname = copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
-    val context = process.context ?: return errno(Errno.ENOENT)
-    val emptyPath = pathname.isEmpty()
-    val target = if (emptyPath && flags.toInt() and AT_EMPTY_PATH != 0) {
-        if (dirFd == AT_FDCWD) context.workingDirectory else {
-            if (dirFd < 0) return errno(Errno.EBADF)
-            val file = process.fdTable.acquire(dirFd) ?: return errno(Errno.EBADF)
-            try {
-                file.path
-            } finally {
-                file.release()
-            }
-        }
-    } else {
-        if (emptyPath) return errno(Errno.ENOENT)
-        when (val result = resolveAt(
-            process,
-            dirFd,
-            VfsPathname.fromBytes(pathname),
-            flags.toInt() and AT_SYMLINK_NOFOLLOW == 0,
-        )) {
-            is VfsResult.Ok -> result.value
-            is VfsResult.Err -> return errno(result.error.errno)
-        }
+    val target = when (val result = resolveAt(
+        process = process,
+        dirFd = dirFd,
+        pathname = VfsPathname.fromBytes(pathname),
+        followFinalSymlink = flags.toInt() and AT_SYMLINK_NOFOLLOW == 0,
+        allowEmpty = flags.toInt() and AT_EMPTY_PATH != 0,
+    )) {
+        is VfsResult.Ok -> result.value
+        is VfsResult.Err -> return errno(result.error.errno)
     }
     val inode = target.inode ?: return errno(Errno.ENOENT)
     val permissions = inode.metadata().mode.bits
@@ -589,31 +789,59 @@ internal fun newFstatAt(regs: PtraceRegisters, process: Process): Long {
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RSI])
         ?: return errno(Errno.EFAULT)
     val dirFd = regs[PtraceRegisters.IDX_RDI].toUInt().toInt()
-    val follow = flags.toInt() and AT_SYMLINK_NOFOLLOW == 0
-    val context = process.context ?: return errno(Errno.ENOENT)
-    val target = if (pathname.isEmpty() && flags.toInt() and AT_EMPTY_PATH != 0) {
-        if (dirFd == AT_FDCWD) {
-            context.workingDirectory
-        } else {
-            if (dirFd < 0) return errno(Errno.EBADF)
-            val file = process.fdTable.acquire(dirFd) ?: return errno(Errno.EBADF)
-            try {
-                file.path
-            } finally {
-                file.release()
-            }
-        }
+    val target = when (val result = resolveAt(
+        process = process,
+        dirFd = dirFd,
+        pathname = VfsPathname.fromBytes(pathname),
+        followFinalSymlink = flags.toInt() and AT_SYMLINK_NOFOLLOW == 0,
+        allowEmpty = flags.toInt() and AT_EMPTY_PATH != 0,
+    )) {
+        is VfsResult.Ok -> result.value
+        is VfsResult.Err -> return errno(result.error.errno)
+    }
+    val inode = target.inode ?: return errno(Errno.ENOENT)
+    return copyStat(process, regs[PtraceRegisters.IDX_RDX], inode)
+}
+
+internal fun statx(regs: PtraceRegisters, process: Process): Long {
+    val flags = regs[PtraceRegisters.IDX_RDX]
+    val supportedFlags = (AT_SYMLINK_NOFOLLOW or AT_NO_AUTOMOUNT or AT_EMPTY_PATH or
+        AT_STATX_SYNC_TYPE).toULong()
+    if (flags > UInt.MAX_VALUE.toULong() || flags and supportedFlags.inv() != 0uL ||
+        flags.toInt() and AT_STATX_SYNC_TYPE == AT_STATX_SYNC_TYPE
+    ) {
+        return errno(Errno.EINVAL)
+    }
+    val mask = regs[PtraceRegisters.IDX_R10]
+    if (mask > UInt.MAX_VALUE.toULong() || mask.toUInt() and STATX_RESERVED != 0u) {
+        return errno(Errno.EINVAL)
+    }
+
+    val pathnameAddress = regs[PtraceRegisters.IDX_RSI]
+    val pathname = if (pathnameAddress == 0uL && flags.toInt() and AT_EMPTY_PATH != 0) {
+        ByteArray(0)
     } else {
-        when (val result = resolveAt(process, dirFd, VfsPathname.fromBytes(pathname), follow)) {
-            is VfsResult.Ok -> result.value
+        copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
+    }
+    val target = when (val result = resolveAt(
+        process = process,
+        dirFd = regs[PtraceRegisters.IDX_RDI].toUInt().toInt(),
+        pathname = VfsPathname.fromBytes(pathname),
+        followFinalSymlink = flags.toInt() and AT_SYMLINK_NOFOLLOW == 0,
+        allowEmpty = flags.toInt() and AT_EMPTY_PATH != 0,
+    )) {
+        is VfsResult.Ok -> result.value
+        is VfsResult.Err -> return errno(result.error.errno)
+    }
+    val inode = target.inode ?: return errno(Errno.ENOENT)
+    if (flags.toInt() and AT_STATX_FORCE_SYNC != 0) {
+        when (val result = inode.backend.sync(inode, dataOnly = false)) {
+            is VfsResult.Ok -> Unit
             is VfsResult.Err -> return errno(result.error.errno)
         }
     }
-    val inode = target.inode ?: return errno(Errno.ENOENT)
-    return if (UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDX]).copyToUser(
-            LinuxStat(inode).toNativeBytes(),
-        )
-    ) {
+    val status = LinuxStatx(LinuxFileStatus.snapshot(inode)).toNativeBytes()
+    return if (UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_R8]).copyToUser(status)) {
         0L
     } else {
         errno(Errno.EFAULT)
@@ -645,25 +873,15 @@ private fun readlinkAt(
 ): Long {
     if (bufferSize == 0uL) return errno(Errno.EINVAL)
     val pathname = copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
-    val path = if (pathname.isEmpty()) {
-        if (dirFd == AT_FDCWD) return errno(Errno.ENOENT)
-        if (dirFd < 0) return errno(Errno.EBADF)
-        val file = process.fdTable.acquire(dirFd) ?: return errno(Errno.EBADF)
-        try {
-            file.path
-        } finally {
-            file.release()
-        }
-    } else {
-        when (val result = resolveAt(
-            process,
-            dirFd,
-            VfsPathname.fromBytes(pathname),
-            followFinalSymlink = false,
-        )) {
-            is VfsResult.Ok -> result.value
-            is VfsResult.Err -> return errno(result.error.errno)
-        }
+    val path = when (val result = resolveAt(
+        process = process,
+        dirFd = dirFd,
+        pathname = VfsPathname.fromBytes(pathname),
+        followFinalSymlink = false,
+        allowEmpty = dirFd != AT_FDCWD,
+    )) {
+        is VfsResult.Ok -> result.value
+        is VfsResult.Err -> return errno(result.error.errno)
     }
     val inode = path.inode ?: return errno(Errno.ENOENT)
     if (inode.type != InodeType.SYMLINK) return errno(Errno.EINVAL)
@@ -685,27 +903,30 @@ private fun resolveAt(
     dirFd: Int,
     pathname: VfsPathname,
     followFinalSymlink: Boolean,
+    allowEmpty: Boolean = false,
 ): VfsResult<VfsPath> {
+    if (pathname.size == 0 && !allowEmpty) return VfsResult.Err(VfsError.NOT_FOUND)
     val context = process.context ?: return VfsResult.Err(VfsError.NOT_FOUND)
     if (pathname.isAbsolute || dirFd == AT_FDCWD) {
-        return FileSystemManager.vfs.resolve(context, pathname, followFinalSymlink)
+        return FileSystemManager.vfs.resolveAt(
+            context = context,
+            directory = context.workingDirectory,
+            pathname = pathname,
+            followFinalSymlink = followFinalSymlink,
+            allowEmpty = allowEmpty,
+        )
     }
-    if (dirFd < 0) {
-        return VfsResult.Err(VfsError.BAD_DESCRIPTOR)
-    }
+    if (dirFd < 0) return VfsResult.Err(VfsError.BAD_DESCRIPTOR)
     val directory = process.fdTable.acquire(dirFd)
         ?: return VfsResult.Err(VfsError.BAD_DESCRIPTOR)
     return try {
-        if (directory.inode.type != InodeType.DIRECTORY) {
-            VfsResult.Err(VfsError.NOT_DIRECTORY)
-        } else {
-            FileSystemManager.vfs.resolveAt(
-                context = context,
-                directory = directory.path,
-                pathname = pathname,
-                followFinalSymlink = followFinalSymlink,
-            )
-        }
+        FileSystemManager.vfs.resolveAt(
+            context = context,
+            directory = directory.path,
+            pathname = pathname,
+            followFinalSymlink = followFinalSymlink,
+            allowEmpty = allowEmpty,
+        )
     } finally {
         directory.release()
     }
@@ -716,12 +937,7 @@ internal fun fstat(regs: PtraceRegisters, process: Process): Long {
         ?: return errno(Errno.EBADF)
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
     return try {
-        val data = LinuxStat(file.inode).toNativeBytes()
-        if (UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI]).copyToUser(data)) {
-            0L
-        } else {
-            errno(Errno.EFAULT)
-        }
+        copyStat(process, regs[PtraceRegisters.IDX_RSI], file.inode)
     } finally {
         file.release()
     }
@@ -773,25 +989,28 @@ private fun statPath(
     followFinalSymlink: Boolean,
 ): Long {
     val pathname = copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
-    val context = process.context
-        ?: return errno(Errno.ENOENT)
-    val path = when (
-        val result = FileSystemManager.vfs.resolve(
-            context = context,
-            pathname = VfsPathname.fromBytes(pathname),
-            followFinalSymlink = followFinalSymlink,
-        )
-    ) {
+    val path = when (val result = resolveAt(
+        process = process,
+        dirFd = AT_FDCWD,
+        pathname = VfsPathname.fromBytes(pathname),
+        followFinalSymlink = followFinalSymlink,
+    )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
     val inode = path.inode ?: return errno(Errno.ENOENT)
-    return if (UserMemory(process.addressSpace, statAddress).copyToUser(LinuxStat(inode).toNativeBytes())) {
+    return copyStat(process, statAddress, inode)
+}
+
+private fun copyStat(process: Process, address: ULong, inode: Inode): Long =
+    if (UserMemory(process.addressSpace, address).copyToUser(
+            LinuxStat(LinuxFileStatus.snapshot(inode)).toNativeBytes(),
+        )
+    ) {
         0L
     } else {
         errno(Errno.EFAULT)
     }
-}
 
 internal fun lseek(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])

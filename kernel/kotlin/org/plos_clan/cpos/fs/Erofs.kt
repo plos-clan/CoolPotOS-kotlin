@@ -235,11 +235,9 @@ private class ErofsInstance private constructor(
     private class RegularBackend(
         instance: ErofsInstance,
         node: FileNode,
-    ) : InodeBackend, CachedFileBackend {
+    ) : RegularFileBackend(), CachedFileBackend {
         private val packed = instance.packed
         private val fragment = node.fragment
-
-        override val type: InodeType = InodeType.REGULAR
 
         override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
             VfsResult.Ok(this)

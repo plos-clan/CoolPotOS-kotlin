@@ -84,7 +84,7 @@ private class DevtmpfsInstance : SuperBlockBackend, DeviceRegistryObserver {
 
 private class DevtmpfsDeviceNode(
     val device: Device,
-) : InodeBackend {
+) : InodeBackend, MutableMetadataBackend {
     override val type: InodeType =
         if (device.type == DeviceType.BLOCK) InodeType.BLOCK_DEVICE
         else InodeType.CHARACTER_DEVICE

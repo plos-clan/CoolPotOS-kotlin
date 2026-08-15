@@ -20,6 +20,8 @@ import org.plos_clan.cpos.utils.PollEvents
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
+internal const val ALLOCATION_BLOCK_SIZE = 512uL
+
 enum class VfsError(val errno: Int) {
     INTERRUPTED(4),
     IO(5),
@@ -269,11 +271,45 @@ interface InodeBackend {
 
     fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend>
 
+    fun setMode(inode: Inode, mode: FileMode): VfsResult<Unit> =
+        VfsResult.Err(VfsError.NOT_SUPPORTED)
+
+    fun sync(inode: Inode, dataOnly: Boolean): VfsResult<Unit> =
+        inode.superBlock.backend.sync()
+
+    fun allocatedBlocks(inode: Inode): ULong {
+        val size = inode.metadata().size
+        return size / ALLOCATION_BLOCK_SIZE +
+            if (size % ALLOCATION_BLOCK_SIZE == 0uL) 0uL else 1uL
+    }
+
     fun evict(inode: Inode) {}
 }
 
-interface TruncatableBackend : InodeBackend {
-    fun truncate(inode: Inode, size: ULong): VfsResult<Unit>
+interface MutableMetadataBackend : InodeBackend {
+    override fun setMode(inode: Inode, mode: FileMode): VfsResult<Unit> {
+        inode.updateMetadata { it.copy(mode = mode) }
+        return VfsResult.Ok(Unit)
+    }
+}
+
+enum class FileAllocationMode(val keepsSize: Boolean) {
+    EXTEND(false),
+    KEEP_SIZE(true),
+}
+
+abstract class RegularFileBackend : InodeBackend {
+    final override val type: InodeType = InodeType.REGULAR
+
+    open fun resize(inode: Inode, size: ULong): VfsResult<Unit> =
+        VfsResult.Err(VfsError.NOT_SUPPORTED)
+
+    open fun allocate(
+        inode: Inode,
+        offset: ULong,
+        length: ULong,
+        mode: FileAllocationMode,
+    ): VfsResult<Unit> = VfsResult.Err(VfsError.NOT_SUPPORTED)
 }
 
 interface ContentBackedFile {
@@ -649,6 +685,14 @@ class OpenFileDescription internal constructor(
         statusFlags.store(flags and (OpenFlags.O_APPEND or OpenFlags.O_NONBLOCK))
     }
 
+    fun sync(dataOnly: Boolean): VfsResult<Unit> = when {
+        references.load() == 0 || access == AccessMode.PATH ->
+            VfsResult.Err(VfsError.BAD_DESCRIPTOR)
+        inode.type == InodeType.PIPE || inode.type == InodeType.SOCKET ->
+            VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        else -> inode.backend.sync(inode, dataOnly)
+    }
+
     fun retain(): Boolean {
         val previous = references.fetchAndAdd(1)
         if (previous in 1 until Int.MAX_VALUE) return true
@@ -1000,15 +1044,21 @@ class Vfs(
         directory: VfsPath,
         pathname: VfsPathname,
         followFinalSymlink: Boolean = true,
+        allowEmpty: Boolean = false,
     ): VfsResult<VfsPath> {
         if (pathname.size == 0) {
-            return VfsResult.Err(VfsError.NOT_FOUND)
+            return if (allowEmpty) VfsResult.Ok(directory)
+            else VfsResult.Err(VfsError.NOT_FOUND)
+        }
+        val start = when {
+            pathname.isAbsolute -> context.root
+            directory.inode?.type == InodeType.DIRECTORY -> directory
+            else -> return VfsResult.Err(VfsError.NOT_DIRECTORY)
         }
         val components = when (val result = pathname.components()) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        val start = if (pathname.isAbsolute) context.root else directory
         return walk(context, start, components, followFinalSymlink)
     }
 
@@ -1084,9 +1134,7 @@ class Vfs(
         }
 
         if (options.truncate && inode.type == InodeType.REGULAR) {
-            val truncatable = inode.backend as? TruncatableBackend
-            val result = truncatable?.truncate(inode, 0uL)
-                ?: VfsResult.Err(VfsError.NOT_SUPPORTED)
+            val result = resize(path, 0uL)
             if (result is VfsResult.Err) {
                 backend.release()
                 inode.releaseOpenReference()
@@ -1103,6 +1151,42 @@ class Vfs(
                 backend = backend,
             )
         )
+    }
+
+    fun resize(path: VfsPath, size: ULong): VfsResult<Unit> {
+        if (MountFlags.READ_ONLY in path.mount.flags) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
+        val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val backend = inode.backend as? RegularFileBackend
+            ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        return backend.resize(inode, size)
+    }
+
+    fun allocate(
+        path: VfsPath,
+        offset: ULong,
+        length: ULong,
+        mode: FileAllocationMode,
+    ): VfsResult<Unit> {
+        if (length == 0uL || offset > ULong.MAX_VALUE - length) {
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+        if (MountFlags.READ_ONLY in path.mount.flags) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
+        val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val backend = inode.backend as? RegularFileBackend
+            ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        return backend.allocate(inode, offset, length, mode)
+    }
+
+    fun setMode(path: VfsPath, mode: FileMode): VfsResult<Unit> {
+        if (MountFlags.READ_ONLY in path.mount.flags) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
+        val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        return inode.backend.setMode(inode, mode)
     }
 
     internal fun createFile(

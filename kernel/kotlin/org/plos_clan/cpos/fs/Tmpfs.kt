@@ -136,7 +136,7 @@ internal class TmpfsInstance(
 internal class TmpfsDirectory(
     private val fileSystem: TmpfsInstance,
     private val automatic: Boolean,
-) : DirectoryBackend {
+) : DirectoryBackend, MutableMetadataBackend {
     override val type: InodeType = InodeType.DIRECTORY
     override val cachePositiveLookups: Boolean
         get() = fileSystem.cacheDirectoryLookups
@@ -306,8 +306,7 @@ private class TmpfsDirectoryHandle(private val directory: TmpfsDirectory) : Open
 
 private class TmpfsRegularFile(
     private val fileSystem: TmpfsInstance,
-) : TruncatableBackend, ContentBackedFile {
-    override val type: InodeType = InodeType.REGULAR
+) : RegularFileBackend(), MutableMetadataBackend, ContentBackedFile {
 
     private val lock = IrqSpinLock()
     private val pages = mutableMapOf<ULong, ByteArray>()
@@ -341,14 +340,20 @@ private class TmpfsRegularFile(
     override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
         VfsResult.Ok(TmpfsRegularHandle(this))
 
-    override fun truncate(inode: Inode, size: ULong): VfsResult<Unit> {
-        lock.withLock {
+    override fun resize(inode: Inode, size: ULong): VfsResult<Unit> = lock.withLock {
+        if (size < inode.metadata().size) {
             val pageSize = fileSystem.pageSize.toULong()
             val firstRemovedPage = if (size == 0uL) 0uL else (size - 1uL) / pageSize + 1uL
-            val removed = pages.keys.filter { it >= firstRemovedPage }
-            removed.forEach(pages::remove)
-            if (removed.isNotEmpty()) {
-                fileSystem.release(removed.size.toULong() * pageSize)
+            var removedPages = 0uL
+            val iterator = pages.iterator()
+            while (iterator.hasNext()) {
+                if (iterator.next().key >= firstRemovedPage) {
+                    iterator.remove()
+                    removedPages++
+                }
+            }
+            if (removedPages != 0uL) {
+                fileSystem.release(removedPages * pageSize)
             }
 
             if (size != 0uL) {
@@ -360,7 +365,91 @@ private class TmpfsRegularFile(
             contentSize = minOf(contentSize.toULong(), size).toInt()
         }
         inode.updateMetadata { it.copy(size = size) }
-        return VfsResult.Ok(Unit)
+        VfsResult.Ok(Unit)
+    }
+
+    override fun allocate(
+        inode: Inode,
+        offset: ULong,
+        length: ULong,
+        mode: FileAllocationMode,
+    ): VfsResult<Unit> = lock.withLock {
+        val pageSize = fileSystem.pageSize.toULong()
+        val end = offset + length
+        val firstPage = offset / pageSize
+        val lastPage = (end - 1uL) / pageSize
+
+        val requestedPages = lastPage - firstPage + 1uL
+        var existingPages = 0uL
+        if (requestedPages <= pages.size.toULong()) {
+            var pageIndex = firstPage
+            while (true) {
+                if (pageIndex in pages) existingPages++
+                if (pageIndex == lastPage) break
+                pageIndex++
+            }
+        } else {
+            for (pageIndex in pages.keys) {
+                if (pageIndex >= firstPage && pageIndex <= lastPage) existingPages++
+            }
+        }
+        val missingPages = requestedPages - existingPages
+        if (missingPages == 0uL) {
+            if (!mode.keepsSize) inode.updateMetadata { it.copy(size = maxOf(it.size, end)) }
+            return@withLock VfsResult.Ok(Unit)
+        }
+        if (missingPages > Int.MAX_VALUE.toULong() ||
+            missingPages > ULong.MAX_VALUE / pageSize
+        ) {
+            return@withLock VfsResult.Err(VfsError.NO_SPACE)
+        }
+
+        val reservedBytes = missingPages * pageSize
+        if (!fileSystem.reserve(reservedBytes)) {
+            return@withLock VfsResult.Err(VfsError.NO_SPACE)
+        }
+        val added = try {
+            ArrayList<ULong>(missingPages.toInt())
+        } catch (_: OutOfMemoryError) {
+            fileSystem.release(reservedBytes)
+            return@withLock VfsResult.Err(VfsError.NO_MEMORY)
+        }
+        try {
+            var pageIndex = firstPage
+            while (true) {
+                if (pageIndex !in pages) {
+                    val page = ByteArray(fileSystem.pageSize)
+                    val destination = checkNotNull(ByteArrayBuffer(page).prepareWrite(0, page.size))
+                    copyContent(pageIndex * pageSize, destination, 0, page.size)
+                    added += pageIndex
+                    pages[pageIndex] = page
+                }
+                if (pageIndex == lastPage) break
+                pageIndex++
+            }
+        } catch (_: OutOfMemoryError) {
+            added.forEach(pages::remove)
+            fileSystem.release(reservedBytes)
+            return@withLock VfsResult.Err(VfsError.NO_MEMORY)
+        }
+        if (!mode.keepsSize) inode.updateMetadata { it.copy(size = maxOf(it.size, end)) }
+        VfsResult.Ok(Unit)
+    }
+
+    override fun allocatedBlocks(inode: Inode): ULong = lock.withLock {
+        val pageSize = fileSystem.pageSize.toULong()
+        val contentPages = if (contentSize == 0) {
+            0uL
+        } else {
+            (contentSize.toULong() - 1uL) / pageSize + 1uL
+        }
+        var allocatedPages = contentPages
+        for (pageIndex in pages.keys) {
+            if (pageIndex >= contentPages) allocatedPages++
+        }
+        val allocatedBytes = allocatedPages * pageSize
+        allocatedBytes / ALLOCATION_BLOCK_SIZE +
+            if (allocatedBytes % ALLOCATION_BLOCK_SIZE == 0uL) 0uL else 1uL
     }
 
     override fun evict(inode: Inode) {
