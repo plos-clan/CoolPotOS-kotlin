@@ -21,8 +21,11 @@ import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 internal const val ALLOCATION_BLOCK_SIZE = 512uL
+internal const val EXTENDED_ATTRIBUTE_VALUE_MAX = 65_536
 
 enum class VfsError(val errno: Int) {
+    NOT_PERMITTED(1),
+    NO_SUCH_DEVICE_OR_ADDRESS(6),
     INTERRUPTED(4),
     IO(5),
     BAD_DESCRIPTOR(9),
@@ -42,9 +45,13 @@ enum class VfsError(val errno: Int) {
     NO_SPACE(28),
     ILLEGAL_SEEK(29),
     READ_ONLY(30),
+    TOO_MANY_LINKS(31),
     BROKEN_PIPE(32),
+    RANGE(34),
+    NAME_TOO_LONG(36),
     NOT_EMPTY(39),
     TOO_MANY_SYMLINKS(40),
+    NO_DATA(61),
     NOT_SUPPORTED(95),
     NOT_FOUND(2);
 
@@ -102,12 +109,14 @@ class VfsName private constructor(private val bytes: ByteArray) {
     override fun toString(): String = bytes.decodeToString()
 
     companion object {
+        const val MAX_LENGTH = 255
         internal val ROOT = VfsName(ByteArray(0))
 
         fun fromBytes(bytes: ByteArray): VfsResult<VfsName> {
             if (bytes.isEmpty() || bytes.any { it == 0.toByte() || it == '/'.code.toByte() }) {
                 return VfsResult.Err(VfsError.INVALID_ARGUMENT)
             }
+            if (bytes.size > MAX_LENGTH) return VfsResult.Err(VfsError.NAME_TOO_LONG)
             return VfsResult.Ok(VfsName(bytes.copyOf()))
         }
 
@@ -124,6 +133,12 @@ class VfsPathname private constructor(private val bytes: ByteArray) {
 
     val size: Int
         get() = bytes.size
+
+    val requiresDirectory: Boolean
+        get() = bytes.lastOrNull() == '/'.code.toByte()
+
+    val isRoot: Boolean
+        get() = bytes.isNotEmpty() && bytes.all { it == '/'.code.toByte() }
 
     fun copyBytes(): ByteArray = bytes.copyOf()
 
@@ -146,6 +161,9 @@ class VfsPathname private constructor(private val bytes: ByteArray) {
             while (cursor < bytes.size && bytes[cursor] != '/'.code.toByte()) {
                 cursor++
             }
+            if (cursor - start > VfsName.MAX_LENGTH) {
+                return VfsResult.Err(VfsError.NAME_TOO_LONG)
+            }
             components += VfsName.fromPath(bytes, start, cursor)
         }
         return VfsResult.Ok(components)
@@ -163,6 +181,41 @@ class VfsPathname private constructor(private val bytes: ByteArray) {
 
         fun fromString(path: String): VfsPathname = VfsPathname(path.encodeToByteArray())
     }
+}
+
+class ExtendedAttributeName private constructor(private val bytes: ByteArray) {
+    private val hash = bytes.contentHashCode()
+
+    val size: Int
+        get() = bytes.size
+
+    internal fun copyInto(destination: ByteArray, offset: Int) {
+        bytes.copyInto(destination, offset)
+    }
+
+    override fun equals(other: Any?): Boolean =
+        this === other || other is ExtendedAttributeName && bytes.contentEquals(other.bytes)
+
+    override fun hashCode(): Int = hash
+
+    override fun toString(): String = bytes.decodeToString()
+
+    companion object {
+        const val MAX_LENGTH = 255
+
+        fun fromBytes(bytes: ByteArray): VfsResult<ExtendedAttributeName> = when {
+            bytes.isEmpty() -> VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            bytes.size > MAX_LENGTH -> VfsResult.Err(VfsError.RANGE)
+            bytes.any { it == 0.toByte() } -> VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            else -> VfsResult.Ok(ExtendedAttributeName(bytes.copyOf()))
+        }
+    }
+}
+
+enum class ExtendedAttributeMode {
+    CREATE_OR_REPLACE,
+    CREATE,
+    REPLACE,
 }
 
 value class InodeId(val value: ULong)
@@ -215,6 +268,9 @@ data class OpenOptions(
     val append: Boolean = false,
     val directoryOnly: Boolean = false,
     val followFinalSymlink: Boolean = true,
+    val nonBlocking: Boolean = false,
+    val createUid: UInt = 0u,
+    val createGid: UInt = 0u,
 )
 
 value class MountFlags(val bits: UInt) {
@@ -283,14 +339,54 @@ interface InodeBackend {
             if (size % ALLOCATION_BLOCK_SIZE == 0uL) 0uL else 1uL
     }
 
+    fun getExtendedAttribute(
+        inode: Inode,
+        name: ExtendedAttributeName,
+    ): VfsResult<ByteArray> = VfsResult.Err(VfsError.NOT_SUPPORTED)
+
+    fun listExtendedAttributes(inode: Inode): VfsResult<ByteArray> =
+        VfsResult.Err(VfsError.NOT_SUPPORTED)
+
+    fun setExtendedAttribute(
+        inode: Inode,
+        name: ExtendedAttributeName,
+        value: ByteArray,
+        mode: ExtendedAttributeMode,
+    ): VfsResult<Unit> = VfsResult.Err(VfsError.NOT_SUPPORTED)
+
+    fun removeExtendedAttribute(
+        inode: Inode,
+        name: ExtendedAttributeName,
+    ): VfsResult<Unit> = VfsResult.Err(VfsError.NOT_SUPPORTED)
+
     fun evict(inode: Inode) {}
 }
 
-interface MutableMetadataBackend : InodeBackend {
+interface MutableInodeBackend : InodeBackend {
     override fun setMode(inode: Inode, mode: FileMode): VfsResult<Unit> {
         inode.updateMetadata { it.copy(mode = mode) }
         return VfsResult.Ok(Unit)
     }
+
+    override fun getExtendedAttribute(
+        inode: Inode,
+        name: ExtendedAttributeName,
+    ): VfsResult<ByteArray> = inode.getExtendedAttribute(name)
+
+    override fun listExtendedAttributes(inode: Inode): VfsResult<ByteArray> =
+        inode.listExtendedAttributes()
+
+    override fun setExtendedAttribute(
+        inode: Inode,
+        name: ExtendedAttributeName,
+        value: ByteArray,
+        mode: ExtendedAttributeMode,
+    ): VfsResult<Unit> = inode.setExtendedAttribute(name, value, mode)
+
+    override fun removeExtendedAttribute(
+        inode: Inode,
+        name: ExtendedAttributeName,
+    ): VfsResult<Unit> = inode.removeExtendedAttribute(name)
 }
 
 enum class FileAllocationMode(val keepsSize: Boolean) {
@@ -320,6 +416,37 @@ interface SymlinkBackend : InodeBackend {
     fun readLink(inode: Inode): VfsResult<VfsPathname>
 }
 
+sealed class NodeKind {
+    data object Regular : NodeKind()
+    data object Directory : NodeKind()
+    data object Fifo : NodeKind()
+    data object Socket : NodeKind()
+    data class SymbolicLink(val target: VfsPathname) : NodeKind()
+    data class Device(val type: InodeType, val number: ULong) : NodeKind() {
+        init {
+            require(type == InodeType.CHARACTER_DEVICE || type == InodeType.BLOCK_DEVICE)
+        }
+    }
+}
+
+data class NodeCreation(
+    val kind: NodeKind,
+    val mode: FileMode,
+    val uid: UInt = 0u,
+    val gid: UInt = 0u,
+)
+
+enum class RemoveMode {
+    FILE,
+    DIRECTORY,
+}
+
+enum class RenameMode {
+    REPLACE,
+    NO_REPLACE,
+    EXCHANGE,
+}
+
 interface DirectoryBackend : InodeBackend {
     val cachePositiveLookups: Boolean
         get() = true
@@ -329,19 +456,28 @@ interface DirectoryBackend : InodeBackend {
 
     fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?>
 
-    fun create(directory: Inode, name: VfsName, mode: FileMode): VfsResult<Inode> =
+    fun create(directory: Inode, name: VfsName, node: NodeCreation): VfsResult<Inode> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
 
-    fun mkdir(directory: Inode, name: VfsName, mode: FileMode): VfsResult<Inode> =
+    fun link(directory: Inode, name: VfsName, target: Inode): VfsResult<Unit> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
 
-    fun symlink(directory: Inode, name: VfsName, target: VfsPathname): VfsResult<Inode> =
-        VfsResult.Err(VfsError.NOT_SUPPORTED)
+    fun rename(
+        sourceDirectory: Inode,
+        sourceName: VfsName,
+        source: Inode,
+        targetDirectory: Inode,
+        targetName: VfsName,
+        target: Inode?,
+        mode: RenameMode,
+    ): VfsResult<Unit> = VfsResult.Err(VfsError.NOT_SUPPORTED)
 
-    fun unlink(directory: Inode, name: VfsName): VfsResult<Unit> =
-        VfsResult.Err(VfsError.NOT_SUPPORTED)
-
-    fun rmdir(directory: Inode, name: VfsName): VfsResult<Unit> =
+    fun remove(
+        directory: Inode,
+        name: VfsName,
+        target: Inode,
+        mode: RemoveMode,
+    ): VfsResult<Unit> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
 }
 
@@ -505,6 +641,7 @@ class Inode internal constructor(
 ) {
     private val lock = IrqSpinLock()
     private var currentMetadata = metadata
+    private var extendedAttributes: MutableMap<ExtendedAttributeName, ByteArray>? = null
     private var openReferences = 0
     private var evicted = false
 
@@ -528,6 +665,64 @@ class Inode internal constructor(
             backend.evict(this)
         }
     }
+
+    internal fun getExtendedAttribute(name: ExtendedAttributeName): VfsResult<ByteArray> =
+        lock.withLock {
+            val value = extendedAttributes?.get(name)
+                ?: return@withLock VfsResult.Err(VfsError.NO_DATA)
+            VfsResult.Ok(value.copyOf())
+        }
+
+    internal fun listExtendedAttributes(): VfsResult<ByteArray> = lock.withLock {
+        val attributes = extendedAttributes ?: return@withLock VfsResult.Ok(ByteArray(0))
+        val size = attributes.keys.sumOf { it.size + 1 }
+        val result = ByteArray(size)
+        var offset = 0
+        for (name in attributes.keys) {
+            name.copyInto(result, offset)
+            offset += name.size + 1
+        }
+        VfsResult.Ok(result)
+    }
+
+    internal fun setExtendedAttribute(
+        name: ExtendedAttributeName,
+        value: ByteArray,
+        mode: ExtendedAttributeMode,
+    ): VfsResult<Unit> = lock.withLock {
+        if (value.size > EXTENDED_ATTRIBUTE_VALUE_MAX) {
+            return@withLock VfsResult.Err(VfsError.RANGE)
+        }
+        val attributes = extendedAttributes
+        val exists = attributes?.containsKey(name) == true
+        if (mode == ExtendedAttributeMode.CREATE && exists) {
+            return@withLock VfsResult.Err(VfsError.ALREADY_EXISTS)
+        }
+        if (mode == ExtendedAttributeMode.REPLACE && !exists) {
+            return@withLock VfsResult.Err(VfsError.NO_DATA)
+        }
+        if (!exists) {
+            val listSize = attributes?.keys?.sumOf { it.size + 1 } ?: 0
+            if (name.size + 1 > EXTENDED_ATTRIBUTE_VALUE_MAX - listSize) {
+                return@withLock VfsResult.Err(VfsError.NO_SPACE)
+            }
+        }
+        val destination = attributes ?: linkedMapOf<ExtendedAttributeName, ByteArray>().also {
+            extendedAttributes = it
+        }
+        destination[name] = value.copyOf()
+        VfsResult.Ok(Unit)
+    }
+
+    internal fun removeExtendedAttribute(name: ExtendedAttributeName): VfsResult<Unit> =
+        lock.withLock {
+            val attributes = extendedAttributes
+            if (attributes?.remove(name) == null) {
+                return@withLock VfsResult.Err(VfsError.NO_DATA)
+            }
+            if (attributes.isEmpty()) extendedAttributes = null
+            VfsResult.Ok(Unit)
+        }
 
     internal fun acquireOpenReference(): Boolean = lock.withLock {
         if (evicted) {
@@ -556,34 +751,104 @@ class Inode internal constructor(
 
 class Dentry internal constructor(
     val superBlock: SuperBlock,
-    val name: VfsName,
-    val parent: Dentry?,
+    name: VfsName,
+    parent: Dentry?,
     inode: Inode?,
 ) {
     private val lock = IrqSpinLock()
+    private var currentName = name
+    private var currentParent = parent
     private var currentInode = inode
     private val children = mutableMapOf<VfsName, Dentry>()
+
+    val name: VfsName
+        get() = lock.withLock { currentName }
+
+    val parent: Dentry?
+        get() = lock.withLock { currentParent }
 
     fun inode(): Inode? = lock.withLock { currentInode }
 
     internal fun cachedChild(name: VfsName): Dentry? = lock.withLock { children[name] }
 
     internal fun cacheChild(name: VfsName, inode: Inode?): Dentry = lock.withLock {
-        children[name]?.also {
-            if (inode != null) {
-                it.install(inode)
+        children[name]?.let { cached ->
+            val current = cached.inode()
+            if (inode == null || current == null || current === inode) {
+                if (current !== inode) cached.install(inode)
+                return@withLock cached
             }
-            return@withLock it
+            cached.detach()
         }
         Dentry(superBlock, name, this, inode).also { children[name] = it }
     }
 
-    internal fun markChildNegative(name: VfsName) {
-        lock.withLock { children[name] }?.install(null)
+    internal fun markChildNegative(name: VfsName, expected: Dentry) {
+        lock.withLock {
+            children[name]?.takeIf { it === expected }?.install(null)
+        }
+    }
+
+    internal fun invalidateNegativeChild(name: VfsName) {
+        lock.withLock {
+            val child = children[name] ?: return@withLock
+            if (child.inode() == null) children.remove(name)
+        }
+    }
+
+    internal fun renameChild(
+        source: Dentry,
+        targetParent: Dentry,
+        targetName: VfsName,
+        exchange: Dentry?,
+    ) {
+        renameLock.withLock {
+            if (this === targetParent) {
+                lock.withLock { renameChildLocked(source, targetParent, targetName, exchange) }
+            } else {
+                lock.withLock {
+                    targetParent.lock.withLock {
+                        renameChildLocked(source, targetParent, targetName, exchange)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun renameChildLocked(
+        source: Dentry,
+        targetParent: Dentry,
+        targetName: VfsName,
+        exchange: Dentry?,
+    ) {
+        if (children[source.currentName] === source) {
+            children.remove(source.currentName)
+        }
+        if (exchange == null) {
+            targetParent.children.put(targetName, source)?.detach()
+        } else {
+            targetParent.children[targetName] = source
+            children[source.currentName] = exchange
+            exchange.relocate(this, source.currentName)
+        }
+        source.relocate(targetParent, targetName)
+    }
+
+    private fun relocate(parent: Dentry, name: VfsName) = lock.withLock {
+        currentParent = parent
+        currentName = name
+    }
+
+    private fun detach() = lock.withLock {
+        currentParent = null
     }
 
     private fun install(inode: Inode?) {
         lock.withLock { currentInode = inode }
+    }
+
+    private companion object {
+        val renameLock = IrqSpinLock()
     }
 }
 
@@ -962,9 +1227,9 @@ class Vfs(
 
     fun createPipe(context: FileSystemContext): VfsResult<Pair<OpenFileDescription, OpenFileDescription>> {
         val superBlock = context.workingDirectory.mount.superBlock
-        val state = PipeState()
-        val readInode = pipeInode(superBlock, state, writable = false)
-        val writeInode = pipeInode(superBlock, state, writable = true)
+        val state = PipeState(readers = 1, writers = 1)
+        val readInode = pipeInode(superBlock, state, AccessMode.READ)
+        val writeInode = pipeInode(superBlock, state, AccessMode.WRITE)
         if (!readInode.acquireOpenReference() || !writeInode.acquireOpenReference()) {
             return VfsResult.Err(VfsError.IO)
         }
@@ -974,13 +1239,13 @@ class Vfs(
                 inode = readInode,
                 access = AccessMode.READ,
                 append = false,
-                backend = PipeEndpoint(state, writable = false),
+                backend = PipeEndpoint(state, AccessMode.READ),
             ) to OpenFileDescription(
                 path = context.workingDirectory,
                 inode = writeInode,
                 access = AccessMode.WRITE,
                 append = false,
-                backend = PipeEndpoint(state, writable = true),
+                backend = PipeEndpoint(state, AccessMode.WRITE),
             ),
         )
     }
@@ -988,11 +1253,11 @@ class Vfs(
     private fun pipeInode(
         superBlock: SuperBlock,
         state: PipeState,
-        writable: Boolean,
+        access: AccessMode,
     ): Inode = Inode(
         id = pipeLock.withLock { InodeId(nextPipeInode--) },
         superBlock = superBlock,
-        backend = PipeInode(state, writable),
+        backend = PipeInode(state, access),
         metadata = InodeMetadata(FileMode(0x1A4u)),
     )
 
@@ -1059,7 +1324,18 @@ class Vfs(
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        return walk(context, start, components, followFinalSymlink)
+        val result = walk(
+            context,
+            start,
+            components,
+            followFinalSymlink || pathname.requiresDirectory,
+        )
+        if (result is VfsResult.Ok && pathname.requiresDirectory &&
+            result.value.inode?.type != InodeType.DIRECTORY
+        ) {
+            return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        }
+        return result
     }
 
     fun open(
@@ -1116,6 +1392,11 @@ class Vfs(
         }
         if (options.access.canWrite && MountFlags.READ_ONLY in path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
+        }
+        if (MountFlags.NO_DEVICE in path.mount.flags &&
+            (inode.type == InodeType.CHARACTER_DEVICE || inode.type == InodeType.BLOCK_DEVICE)
+        ) {
+            return VfsResult.Err(VfsError.PERMISSION_DENIED)
         }
         if (!inode.acquireOpenReference()) {
             return VfsResult.Err(VfsError.NOT_FOUND)
@@ -1189,6 +1470,38 @@ class Vfs(
         return inode.backend.setMode(inode, mode)
     }
 
+    fun getExtendedAttribute(
+        inode: Inode,
+        name: ExtendedAttributeName,
+    ): VfsResult<ByteArray> = inode.backend.getExtendedAttribute(inode, name)
+
+    fun listExtendedAttributes(inode: Inode): VfsResult<ByteArray> =
+        inode.backend.listExtendedAttributes(inode)
+
+    fun setExtendedAttribute(
+        mount: Mount,
+        inode: Inode,
+        name: ExtendedAttributeName,
+        value: ByteArray,
+        mode: ExtendedAttributeMode,
+    ): VfsResult<Unit> {
+        if (MountFlags.READ_ONLY in mount.flags) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
+        return inode.backend.setExtendedAttribute(inode, name, value, mode)
+    }
+
+    fun removeExtendedAttribute(
+        mount: Mount,
+        inode: Inode,
+        name: ExtendedAttributeName,
+    ): VfsResult<Unit> {
+        if (MountFlags.READ_ONLY in mount.flags) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
+        return inode.backend.removeExtendedAttribute(inode, name)
+    }
+
     internal fun createFile(
         directory: VfsPath,
         name: VfsName,
@@ -1197,9 +1510,11 @@ class Vfs(
         contentOffset: Int,
         contentSize: Int,
     ): VfsResult<VfsPath> {
-        val path = when (val result = createChild(directory, name) { backend, parent ->
-            backend.create(parent, name, mode)
-        }) {
+        val path = when (val result = createChild(
+            directory,
+            name,
+            NodeCreation(NodeKind.Regular, mode),
+        )) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
@@ -1211,64 +1526,120 @@ class Vfs(
 
         val parent = directory.inode ?: return VfsResult.Err(VfsError.IO)
         val backend = parent.backend as? DirectoryBackend ?: return VfsResult.Err(VfsError.IO)
-        backend.unlink(parent, name)
-        directory.dentry.markChildNegative(name)
+        backend.remove(parent, name, inode, RemoveMode.FILE)
+        directory.dentry.markChildNegative(name, path.dentry)
         return VfsResult.Err(VfsError.IO)
     }
 
-    internal fun mkdirAt(
+    fun createNode(
+        context: FileSystemContext,
         directory: VfsPath,
-        name: VfsName,
-        mode: FileMode,
-    ): VfsResult<VfsPath> = createChild(directory, name) { backend, parent ->
-        backend.mkdir(parent, name, mode)
+        pathname: VfsPathname,
+        node: NodeCreation,
+    ): VfsResult<VfsPath> {
+        if (pathname.isRoot) return VfsResult.Err(VfsError.ALREADY_EXISTS)
+        val parent = when (val result = resolveParent(context, directory, pathname)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        if (pathname.requiresDirectory && node.kind != NodeKind.Directory &&
+            !parent.name.isDot && !parent.name.isDotDot
+        ) {
+            return when (val existing = lookupChild(context, parent.path, parent.name)) {
+                is VfsResult.Ok -> VfsResult.Err(VfsError.ALREADY_EXISTS)
+                is VfsResult.Err -> existing
+            }
+        }
+        return createChild(parent.path, parent.name, node)
     }
 
-    internal fun symlinkAt(
-        directory: VfsPath,
-        name: VfsName,
-        target: VfsPathname,
-    ): VfsResult<VfsPath> = createChild(directory, name) { backend, parent ->
-        backend.symlink(parent, name, target)
-    }
-
-    fun mkdir(
+    fun createNode(
         context: FileSystemContext,
         pathname: VfsPathname,
-        mode: FileMode = FileMode(0x1EDu),
-    ): VfsResult<VfsPath> {
-        val parent = when (val result = resolveParent(context, pathname)) {
-            is VfsResult.Ok -> result.value
-            is VfsResult.Err -> return result
-        }
-        if (MountFlags.READ_ONLY in parent.path.mount.flags) {
-            return VfsResult.Err(VfsError.READ_ONLY)
-        }
-        val directory = parent.path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val backend = directory.backend as? DirectoryBackend
-            ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        node: NodeCreation,
+    ): VfsResult<VfsPath> = createNode(context, context.workingDirectory, pathname, node)
 
-        when (val existing = lookupChild(context, parent.path, parent.name)) {
-            is VfsResult.Ok -> return VfsResult.Err(VfsError.ALREADY_EXISTS)
-            is VfsResult.Err -> if (existing.error != VfsError.NOT_FOUND) return existing
-        }
-
-        val inode = when (val result = backend.mkdir(directory, parent.name, mode)) {
-            is VfsResult.Ok -> result.value
-            is VfsResult.Err -> return result
-        }
-        val dentry = parent.path.dentry.cacheChild(parent.name, inode)
-        return VfsResult.Ok(VfsPath(parent.path.mount, dentry))
-    }
-
-    fun symlink(
+    fun remove(
         context: FileSystemContext,
-        target: VfsPathname,
-        linkPath: VfsPathname,
-    ): VfsResult<VfsPath> {
-        val parent = when (val result = resolveParent(context, linkPath)) {
+        directory: VfsPath,
+        pathname: VfsPathname,
+        mode: RemoveMode,
+    ): VfsResult<Unit> {
+        if (pathname.isRoot) return VfsResult.Err(VfsError.BUSY)
+        val parent = when (val result = resolveParent(context, directory, pathname)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
+        }
+        if (parent.name.isDot || parent.name.isDotDot) {
+            return VfsResult.Err(
+                when (mode) {
+                    RemoveMode.FILE -> VfsError.IS_DIRECTORY
+                    RemoveMode.DIRECTORY -> if (parent.name.isDot) {
+                        VfsError.INVALID_ARGUMENT
+                    } else {
+                        VfsError.NOT_EMPTY
+                    }
+                },
+            )
+        }
+        if (MountFlags.READ_ONLY in parent.path.mount.flags) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
+        val target = when (
+            val result = lookupChild(context, parent.path, parent.name, followMount = false)
+        ) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        if (context.namespace.mountedAt(target) != null) {
+            return VfsResult.Err(VfsError.BUSY)
+        }
+        val inode = target.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        if (pathname.requiresDirectory && inode.type != InodeType.DIRECTORY) {
+            return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        }
+        val removesDirectory = mode == RemoveMode.DIRECTORY
+        if (removesDirectory != (inode.type == InodeType.DIRECTORY)) {
+            return VfsResult.Err(
+                if (removesDirectory) VfsError.NOT_DIRECTORY else VfsError.IS_DIRECTORY,
+            )
+        }
+        val parentInode = parent.path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val backend = parentInode.backend as? DirectoryBackend
+            ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        val result = backend.remove(parentInode, parent.name, inode, mode)
+        if (result is VfsResult.Ok) {
+            parent.path.dentry.markChildNegative(parent.name, target.dentry)
+        }
+        return result
+    }
+
+    fun link(
+        context: FileSystemContext,
+        sourceMount: Mount,
+        sourceInode: Inode,
+        targetDirectory: VfsPath,
+        target: VfsPathname,
+    ): VfsResult<Unit> {
+        if (target.isRoot) return VfsResult.Err(VfsError.ALREADY_EXISTS)
+        if (sourceInode.type == InodeType.DIRECTORY) {
+            return VfsResult.Err(VfsError.NOT_PERMITTED)
+        }
+        val parent = when (val result = resolveParent(context, targetDirectory, target)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        if (parent.name.isDot || parent.name.isDotDot) {
+            return VfsResult.Err(VfsError.ALREADY_EXISTS)
+        }
+        if (target.requiresDirectory) {
+            return when (val existing = lookupChild(context, parent.path, parent.name)) {
+                is VfsResult.Ok -> VfsResult.Err(VfsError.ALREADY_EXISTS)
+                is VfsResult.Err -> existing
+            }
+        }
+        if (sourceMount !== parent.path.mount) {
+            return VfsResult.Err(VfsError.CROSS_DEVICE)
         }
         if (MountFlags.READ_ONLY in parent.path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
@@ -1276,25 +1647,110 @@ class Vfs(
         val directory = parent.path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = directory.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-
-        when (val existing = lookupChild(context, parent.path, parent.name)) {
-            is VfsResult.Ok -> return VfsResult.Err(VfsError.ALREADY_EXISTS)
-            is VfsResult.Err -> if (existing.error != VfsError.NOT_FOUND) return existing
+        val result = backend.link(directory, parent.name, sourceInode)
+        if (result is VfsResult.Ok) {
+            parent.path.dentry.cacheChild(parent.name, sourceInode)
         }
+        return result
+    }
 
-        val inode = when (val result = backend.symlink(directory, parent.name, target)) {
+    fun rename(
+        context: FileSystemContext,
+        sourceDirectory: VfsPath,
+        source: VfsPathname,
+        targetDirectory: VfsPath,
+        target: VfsPathname,
+        mode: RenameMode,
+    ): VfsResult<Unit> {
+        if (source.isRoot || target.isRoot) return VfsResult.Err(VfsError.BUSY)
+        val sourceParent = when (val result = resolveParent(context, sourceDirectory, source)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        val dentry = parent.path.dentry.cacheChild(parent.name, inode)
-        return VfsResult.Ok(VfsPath(parent.path.mount, dentry))
+        val targetParent = when (val result = resolveParent(context, targetDirectory, target)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        if (sourceParent.name.isDot || sourceParent.name.isDotDot ||
+            targetParent.name.isDot || targetParent.name.isDotDot
+        ) {
+            return VfsResult.Err(VfsError.BUSY)
+        }
+        if (sourceParent.path.mount !== targetParent.path.mount) {
+            return VfsResult.Err(VfsError.CROSS_DEVICE)
+        }
+        if (MountFlags.READ_ONLY in sourceParent.path.mount.flags) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
+        val sourcePath = when (
+            val result = lookupChild(context, sourceParent.path, sourceParent.name, followMount = false)
+        ) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        if (context.namespace.mountedAt(sourcePath) != null) {
+            return VfsResult.Err(VfsError.BUSY)
+        }
+        val sourceInode = sourcePath.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        if (source.requiresDirectory && sourceInode.type != InodeType.DIRECTORY) {
+            return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        }
+        if (sourceInode.type == InodeType.DIRECTORY &&
+            isDescendant(targetParent.path.dentry, sourcePath.dentry)
+        ) {
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+        val targetPath = when (
+            val result = lookupChild(context, targetParent.path, targetParent.name, followMount = false)
+        ) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> if (result.error == VfsError.NOT_FOUND) null else return result
+        }
+        if (target.requiresDirectory && targetPath?.inode?.type != InodeType.DIRECTORY) {
+            return VfsResult.Err(
+                if (targetPath == null) VfsError.NOT_FOUND else VfsError.NOT_DIRECTORY,
+            )
+        }
+        if (targetPath != null && context.namespace.mountedAt(targetPath) != null) {
+            return VfsResult.Err(VfsError.BUSY)
+        }
+        if (mode == RenameMode.EXCHANGE && targetPath == null) {
+            return VfsResult.Err(VfsError.NOT_FOUND)
+        }
+        if (mode == RenameMode.NO_REPLACE && targetPath != null) {
+            return VfsResult.Err(VfsError.ALREADY_EXISTS)
+        }
+        if (mode == RenameMode.EXCHANGE && targetPath?.inode?.type == InodeType.DIRECTORY &&
+            isDescendant(sourceParent.path.dentry, targetPath.dentry)
+        ) {
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+        if (targetPath?.inode === sourceInode) return VfsResult.Ok(Unit)
+        val sourceParentInode = sourceParent.path.inode
+            ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val targetParentInode = targetParent.path.inode
+            ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val backend = sourceParentInode.backend as? DirectoryBackend
+            ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        val result = backend.rename(
+            sourceParentInode,
+            sourceParent.name,
+            sourceInode,
+            targetParentInode,
+            targetParent.name,
+            targetPath?.inode,
+            mode,
+        )
+        if (result is VfsResult.Ok) {
+            sourceParent.path.dentry.renameChild(
+                sourcePath.dentry,
+                targetParent.path.dentry,
+                targetParent.name,
+                targetPath?.dentry.takeIf { mode == RenameMode.EXCHANGE },
+            )
+        }
+        return result
     }
-
-    fun unlink(context: FileSystemContext, pathname: VfsPathname): VfsResult<Unit> =
-        remove(context, pathname, directory = false)
-
-    fun rmdir(context: FileSystemContext, pathname: VfsPathname): VfsResult<Unit> =
-        remove(context, pathname, directory = true)
 
     fun chdir(context: FileSystemContext, pathname: VfsPathname): VfsResult<Unit> {
         val path = when (val result = resolve(context, pathname)) {
@@ -1377,9 +1833,23 @@ class Vfs(
         pathname: VfsPathname,
         options: OpenOptions,
     ): VfsResult<VfsPath> {
+        if (pathname.isRoot) {
+            return if (options.create == CreateDisposition.CREATE_NEW) {
+                VfsResult.Err(VfsError.ALREADY_EXISTS)
+            } else {
+                resolveAt(context, directory, pathname, options.followFinalSymlink)
+            }
+        }
         val parent = when (val result = resolveParent(context, directory, pathname)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
+        }
+        if (parent.name.isDot || parent.name.isDotDot) {
+            return if (options.create == CreateDisposition.CREATE_NEW) {
+                VfsResult.Err(VfsError.ALREADY_EXISTS)
+            } else {
+                resolveAt(context, directory, pathname, options.followFinalSymlink)
+            }
         }
 
         when (val existing = lookupChild(context, parent.path, parent.name)) {
@@ -1388,12 +1858,14 @@ class Vfs(
                     return VfsResult.Err(VfsError.ALREADY_EXISTS)
                 }
                 if (options.followFinalSymlink && existing.value.inode?.type == InodeType.SYMLINK) {
-                    return resolve(context, pathname, followFinalSymlink = true)
+                    return resolveAt(context, directory, pathname, followFinalSymlink = true)
                 }
                 return existing
             }
             is VfsResult.Err -> if (existing.error != VfsError.NOT_FOUND) return existing
         }
+
+        if (pathname.requiresDirectory) return VfsResult.Err(VfsError.NOT_FOUND)
 
         if (MountFlags.READ_ONLY in parent.path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
@@ -1401,81 +1873,50 @@ class Vfs(
         val directory = parent.path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = directory.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val inode = when (val created = backend.create(directory, parent.name, options.createMode)) {
+        val node = NodeCreation(
+            kind = NodeKind.Regular,
+            mode = options.createMode,
+            uid = options.createUid,
+            gid = options.createGid,
+        )
+        val inode = when (val created = backend.create(directory, parent.name, node)) {
             is VfsResult.Ok -> created.value
-            is VfsResult.Err -> return created
+            is VfsResult.Err -> {
+                if (created.error == VfsError.ALREADY_EXISTS &&
+                    options.create == CreateDisposition.OPEN_OR_CREATE
+                ) {
+                    parent.path.dentry.invalidateNegativeChild(parent.name)
+                    return lookupChild(context, parent.path, parent.name)
+                }
+                return created
+            }
         }
         val dentry = parent.path.dentry.cacheChild(parent.name, inode)
         return VfsResult.Ok(VfsPath(parent.path.mount, dentry))
     }
 
-    private inline fun createChild(
+    private fun createChild(
         directory: VfsPath,
         name: VfsName,
-        create: (DirectoryBackend, Inode) -> VfsResult<Inode>,
+        node: NodeCreation,
     ): VfsResult<VfsPath> {
+        if (name.isDot || name.isDotDot) {
+            return VfsResult.Err(VfsError.ALREADY_EXISTS)
+        }
         if (MountFlags.READ_ONLY in directory.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val parent = directory.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = parent.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val inode = when (val result = create(backend, parent)) {
+        val inode = when (val result = backend.create(parent, name, node)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
         return VfsResult.Ok(VfsPath(directory.mount, directory.dentry.cacheChild(name, inode)))
     }
 
-    private fun remove(
-        context: FileSystemContext,
-        pathname: VfsPathname,
-        directory: Boolean,
-    ): VfsResult<Unit> {
-        val parent = when (val result = resolveParent(context, pathname)) {
-            is VfsResult.Ok -> result.value
-            is VfsResult.Err -> return result
-        }
-        if (MountFlags.READ_ONLY in parent.path.mount.flags) {
-            return VfsResult.Err(VfsError.READ_ONLY)
-        }
-        val target = when (
-            val result = lookupChild(context, parent.path, parent.name, followMount = false)
-        ) {
-            is VfsResult.Ok -> result.value
-            is VfsResult.Err -> return result
-        }
-        if (context.namespace.mountedAt(target) != null) {
-            return VfsResult.Err(VfsError.BUSY)
-        }
-        val inode = target.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        if (directory != (inode.type == InodeType.DIRECTORY)) {
-            return VfsResult.Err(if (directory) VfsError.NOT_DIRECTORY else VfsError.IS_DIRECTORY)
-        }
-        val parentInode = parent.path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val backend = parentInode.backend as? DirectoryBackend
-            ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val removed = if (directory) {
-            backend.rmdir(parentInode, parent.name)
-        } else {
-            backend.unlink(parentInode, parent.name)
-        }
-        if (removed is VfsResult.Ok) {
-            parent.path.dentry.markChildNegative(parent.name)
-        }
-        return removed
-    }
-
     private data class ParentPath(val path: VfsPath, val name: VfsName)
-
-    private fun resolveParent(
-        context: FileSystemContext,
-        pathname: VfsPathname,
-    ): VfsResult<ParentPath> = resolveParent(
-        context = context,
-        directory = context.workingDirectory,
-        pathname = pathname,
-    )
 
     private fun resolveParent(
         context: FileSystemContext,
@@ -1493,9 +1934,6 @@ class Vfs(
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
         val name = components.last()
-        if (name.isDot || name.isDotDot) {
-            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        }
         val start = if (pathname.isAbsolute) context.root else directory
         val parent = when (val result = walk(context, start, components.dropLast(1), true)) {
             is VfsResult.Ok -> result.value
@@ -1606,6 +2044,15 @@ class Vfs(
         }
     }
 
+    private fun isDescendant(candidate: Dentry, ancestor: Dentry): Boolean {
+        var current: Dentry? = candidate
+        while (current != null) {
+            if (current === ancestor) return true
+            current = current.parent
+        }
+        return false
+    }
+
     private fun walkUp(context: FileSystemContext, initial: VfsPath): VfsPath {
         var current = initial
         if (current == context.root) {
@@ -1630,24 +2077,39 @@ private data object PathOnlyHandle : OpenFileBackend
 
 private class PipeInode(
     private val state: PipeState,
-    private val writable: Boolean,
+    private val access: AccessMode,
 ) : InodeBackend {
     override val type: InodeType = InodeType.PIPE
 
     override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
-        VfsResult.Ok(PipeEndpoint(state, writable))
+        VfsResult.Ok(PipeEndpoint(state, access))
+}
+
+internal class FifoBackend : MutableInodeBackend {
+    override val type: InodeType = InodeType.PIPE
+    private val state = PipeState(readers = 0, writers = 0)
+
+    override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
+        state.open(options.access, options.nonBlocking)
+}
+
+internal data object SocketNodeBackend : MutableInodeBackend {
+    override val type: InodeType = InodeType.SOCKET
+
+    override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
+        VfsResult.Err(VfsError.NO_SUCH_DEVICE_OR_ADDRESS)
 }
 
 private class PipeEndpoint(
     private val state: PipeState,
-    private val writable: Boolean,
+    private val access: AccessMode,
 ) : WaitableOpenFileBackend {
     override fun read(
         inode: Inode,
         destination: PreparedBufferDestination,
         destinationOffset: Int,
         count: Int,
-    ): IoResult = if (writable) {
+    ): IoResult = if (!access.canRead) {
         IoResult.failure(VfsError.BAD_DESCRIPTOR)
     } else {
         state.read(destination, destinationOffset, count)
@@ -1659,22 +2121,20 @@ private class PipeEndpoint(
         sourceOffset: Int,
         count: Int,
         mode: IoMode,
-    ): IoResult = if (!writable) {
+    ): IoResult = if (!access.canWrite) {
         IoResult.failure(VfsError.BAD_DESCRIPTOR)
     } else {
         state.write(source, sourceOffset, count, mode)
     }
 
     override fun await(event: IoEvent, count: Int) {
-        check(writable == (event == IoEvent.WRITABLE))
+        check(if (event == IoEvent.WRITABLE) access.canWrite else access.canRead)
         state.await(event, count)
     }
 
-    override fun poll(inode: Inode, events: Int): Long = state.poll(events, writable)
+    override fun poll(inode: Inode, events: Int): Long = state.poll(events, access)
 
-    override fun release() {
-        state.close(writable)
-    }
+    override fun release() = state.close(access)
 }
 
 private class PipeWaitQueue {
@@ -1721,7 +2181,10 @@ private class PipeWaitQueue {
     }
 }
 
-private class PipeState {
+private class PipeState(
+    readers: Int,
+    writers: Int,
+) {
     private companion object {
         const val CAPACITY_PAGES = 16
         val CAPACITY_BYTES = CAPACITY_PAGES * PAGE_SIZE_BYTES.toInt()
@@ -1732,11 +2195,57 @@ private class PipeState {
     private val buffer = ByteArray(CAPACITY_BYTES)
     private val readWaiters = PipeWaitQueue()
     private val writeWaiters = PipeWaitQueue()
+    private val readerOpenWaiters = PipeWaitQueue()
+    private val writerOpenWaiters = PipeWaitQueue()
     private var head = 0
     private var tail = 0
     private var size = 0
-    private var readers = 1
-    private var writers = 1
+    private var readers = readers
+    private var writers = writers
+
+    fun open(access: AccessMode, nonBlocking: Boolean): VfsResult<OpenFileBackend> {
+        val thread = ProcessManager.currentThread()
+        var waiter: PipeWaitQueue.Waiter? = null
+        val error = lock.withLock {
+            when (access) {
+                AccessMode.READ -> {
+                    readers++
+                    writerOpenWaiters.notifyAllWaiters()
+                    if (!nonBlocking && writers == 0) {
+                        waiter = readerOpenWaiters.acquire(1, checkNotNull(thread))
+                    }
+                }
+                AccessMode.WRITE -> {
+                    if (nonBlocking && readers == 0) return@withLock VfsError.NO_SUCH_DEVICE_OR_ADDRESS
+                    writers++
+                    readerOpenWaiters.notifyAllWaiters()
+                    if (readers == 0) {
+                        waiter = writerOpenWaiters.acquire(1, checkNotNull(thread))
+                    }
+                }
+                AccessMode.READ_WRITE -> {
+                    readers++
+                    writers++
+                    readerOpenWaiters.notifyAllWaiters()
+                    writerOpenWaiters.notifyAllWaiters()
+                }
+                AccessMode.PATH -> return@withLock VfsError.BAD_DESCRIPTOR
+            }
+            null
+        }
+        if (error != null) return VfsResult.Err(error)
+        val queued = waiter
+        if (queued != null) {
+            do {
+                check(Scheduler.parkCurrent()) { "Cannot park a FIFO opener" }
+            } while (lock.withLock { !queued.ready })
+            lock.withLock {
+                if (access == AccessMode.READ) readerOpenWaiters.release(queued)
+                else writerOpenWaiters.release(queued)
+            }
+        }
+        return VfsResult.Ok(PipeEndpoint(this, access))
+    }
 
     fun read(destination: PreparedBufferDestination, offset: Int, count: Int): IoResult = lock.withLock {
         if (count == 0) return@withLock IoResult.success(0)
@@ -1823,25 +2332,27 @@ private class PipeState {
         lock.withLock { queue.release(queued) }
     }
 
-    fun poll(events: Int, writable: Boolean): Long = lock.withLock {
+    fun poll(events: Int, access: AccessMode): Long = lock.withLock {
         var available = 0
-        if (writable) {
+        if (access.canWrite) {
             if (readers == 0) available = PollEvents.POLLERR
             else if (buffer.size - size >= ATOMIC_WRITE_BYTES) {
                 available = PollEvents.NORMAL_OUTPUT
             }
-        } else if (size != 0 || writers == 0) {
-            available = PollEvents.NORMAL_INPUT
+        }
+        if (access.canRead && (size != 0 || writers == 0)) {
+            available = available or PollEvents.NORMAL_INPUT
         }
         (available and events).toLong()
     }
 
-    fun close(writable: Boolean) = lock.withLock {
-        if (writable) {
+    fun close(access: AccessMode) = lock.withLock {
+        if (access.canWrite) {
             check(writers > 0)
             writers--
             if (writers == 0) readWaiters.notifyAllWaiters()
-        } else {
+        }
+        if (access.canRead) {
             check(readers > 0)
             readers--
             if (readers == 0) writeWaiters.notifyAllWaiters()

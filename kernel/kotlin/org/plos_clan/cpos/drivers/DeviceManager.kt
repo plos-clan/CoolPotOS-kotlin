@@ -35,6 +35,12 @@ value class DeviceNumber private constructor(val value: ULong) {
                 ((minor.toULong() and 0xfffff00uL) shl 12)
             return DeviceNumber(encoded)
         }
+
+        fun fromEncoded(value: ULong): DeviceNumber? {
+            val major = (value shr 8 and 0xfffuL).toUInt()
+            val minor = ((value and 0xffuL) or (value shr 12 and 0xfffff00uL)).toUInt()
+            return create(major, minor)?.takeIf { it.value == value }
+        }
     }
 }
 
@@ -196,6 +202,9 @@ object DeviceManager {
         }
         match
     }
+
+    fun find(type: DeviceType, number: DeviceNumber): Device? =
+        lock.withLock { devicesByNumber[DeviceKey(type, number)] }
 
     fun observe(observer: DeviceRegistryObserver) {
         lock.withLock {

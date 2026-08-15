@@ -91,7 +91,11 @@ object FileSystemManager {
         flags: MountFlags,
     ): Boolean {
         val target = VfsPathname.fromString(path)
-        val created = vfs.mkdir(context, target)
+        val created = vfs.createNode(
+            context,
+            target,
+            NodeCreation(NodeKind.Directory, FileMode(0x1EDu)),
+        )
         if (created is VfsResult.Err && created.error != VfsError.ALREADY_EXISTS) {
             println("VFS: failed to create $path in overlay: ${created.error}")
             return false

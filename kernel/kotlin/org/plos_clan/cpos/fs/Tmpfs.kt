@@ -27,7 +27,7 @@ object Tmpfs : FileSystemType {
         }
         val instance = TmpfsInstance(configuration)
         val superBlock = SuperBlock(this, instance) { sb ->
-            instance.newDirectory(sb, FileMode(0x1EDu))
+            instance.newDirectory(sb, FileMode(0x1EDu), parent = null)
         }
         return VfsResult.Ok(superBlock)
     }
@@ -38,30 +38,44 @@ internal class TmpfsInstance(
     internal val cacheDirectoryLookups: Boolean = true,
 ) : SuperBlockBackend {
     private val lock = IrqSpinLock()
+    private val mutationLock = IrqSpinLock()
     private var nextInodeId = 1uL
     private var allocatedBytes = 0uL
 
     val pageSize: Int
         get() = options.pageSize
 
-    fun newRegularFile(superBlock: SuperBlock, mode: FileMode): Inode =
+    fun newRegularFile(
+        superBlock: SuperBlock,
+        mode: FileMode,
+        uid: UInt = 0u,
+        gid: UInt = 0u,
+    ): Inode =
         newInode(
             superBlock,
             TmpfsRegularFile(this),
-            InodeMetadata(mode = mode, linkCount = 1u),
+            InodeMetadata(mode = mode, linkCount = 1u, uid = uid, gid = gid),
         )
 
     fun newDirectory(
         superBlock: SuperBlock,
         mode: FileMode,
+        uid: UInt = 0u,
+        gid: UInt = 0u,
         automatic: Boolean = false,
+        parent: Inode?,
     ): Inode = newInode(
         superBlock,
-        TmpfsDirectory(this, automatic),
-        InodeMetadata(mode = mode, linkCount = 2u),
+        TmpfsDirectory(this, automatic, parent),
+        InodeMetadata(mode = mode, linkCount = 2u, uid = uid, gid = gid),
     )
 
-    fun newSymlink(superBlock: SuperBlock, target: VfsPathname): Inode =
+    fun newSymlink(
+        superBlock: SuperBlock,
+        target: VfsPathname,
+        uid: UInt = 0u,
+        gid: UInt = 0u,
+    ): Inode =
         newInode(
             superBlock = superBlock,
             backend = TmpfsSymlink(target),
@@ -69,8 +83,44 @@ internal class TmpfsInstance(
                 mode = FileMode(0x1FFu),
                 size = target.size.toULong(),
                 linkCount = 1u,
+                uid = uid,
+                gid = gid,
             ),
         )
+
+    fun newNode(superBlock: SuperBlock, node: NodeCreation, parent: Inode): Inode =
+        when (val kind = node.kind) {
+            NodeKind.Regular -> newRegularFile(superBlock, node.mode, node.uid, node.gid)
+            NodeKind.Directory -> newDirectory(
+                superBlock,
+                node.mode,
+                node.uid,
+                node.gid,
+                parent = parent,
+            )
+            NodeKind.Fifo -> newInode(
+                superBlock,
+                FifoBackend(),
+                InodeMetadata(node.mode, linkCount = 1u, uid = node.uid, gid = node.gid),
+            )
+            NodeKind.Socket -> newInode(
+                superBlock,
+                SocketNodeBackend,
+                InodeMetadata(node.mode, linkCount = 1u, uid = node.uid, gid = node.gid),
+            )
+            is NodeKind.SymbolicLink -> newSymlink(superBlock, kind.target, node.uid, node.gid)
+            is NodeKind.Device -> newInode(
+                superBlock,
+                DeviceNode(kind.type, kind.number),
+                InodeMetadata(
+                    mode = node.mode,
+                    linkCount = 1u,
+                    deviceNumber = kind.number,
+                    uid = node.uid,
+                    gid = node.gid,
+                ),
+            )
+        }
 
     fun installSpecialNode(
         root: Inode,
@@ -80,7 +130,7 @@ internal class TmpfsInstance(
     ): Boolean {
         if (path.isEmpty()) return false
         val directory = root.backend as? TmpfsDirectory ?: return false
-        return directory.installSpecialNode(root, path, 0, backend, metadata)
+        return mutate { directory.installSpecialNode(root, path, 0, backend, metadata) }
     }
 
     fun removeSpecialNode(
@@ -90,7 +140,7 @@ internal class TmpfsInstance(
     ): Boolean {
         if (path.isEmpty()) return false
         val directory = root.backend as? TmpfsDirectory ?: return false
-        return directory.removeSpecialNode(root, path, 0, matches)
+        return mutate { directory.removeSpecialNode(root, path, 0, matches) }
     }
 
     fun reserve(bytes: ULong): Boolean = lock.withLock {
@@ -111,6 +161,8 @@ internal class TmpfsInstance(
             allocatedBytes -= bytes
         }
     }
+
+    fun <T> mutate(operation: () -> T): T = mutationLock.withLock(operation)
 
     private fun newInode(
         superBlock: SuperBlock,
@@ -136,7 +188,8 @@ internal class TmpfsInstance(
 internal class TmpfsDirectory(
     private val fileSystem: TmpfsInstance,
     private val automatic: Boolean,
-) : DirectoryBackend, MutableMetadataBackend {
+    private var parent: Inode?,
+) : DirectoryBackend, MutableInodeBackend {
     override val type: InodeType = InodeType.DIRECTORY
     override val cachePositiveLookups: Boolean
         get() = fileSystem.cacheDirectoryLookups
@@ -149,45 +202,98 @@ internal class TmpfsDirectory(
     override fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?> =
         lock.withLock { VfsResult.Ok(children[name]) }
 
-    override fun create(directory: Inode, name: VfsName, mode: FileMode): VfsResult<Inode> =
-        add(name) { fileSystem.newRegularFile(directory.superBlock, mode) }
-
-    override fun mkdir(directory: Inode, name: VfsName, mode: FileMode): VfsResult<Inode> =
-        when (val result = add(name) { fileSystem.newDirectory(directory.superBlock, mode) }) {
-            is VfsResult.Ok -> {
-                directory.updateMetadata { it.copy(linkCount = it.linkCount + 1u) }
-                result
-            }
-            is VfsResult.Err -> result
-        }
-
-    override fun symlink(
+    override fun create(
         directory: Inode,
         name: VfsName,
-        target: VfsPathname,
-    ): VfsResult<Inode> = add(name) { fileSystem.newSymlink(directory.superBlock, target) }
-
-    override fun unlink(directory: Inode, name: VfsName): VfsResult<Unit> = lock.withLock {
-        val inode = children[name] ?: return@withLock VfsResult.Err(VfsError.NOT_FOUND)
-        if (inode.type == InodeType.DIRECTORY) {
-            return@withLock VfsResult.Err(VfsError.IS_DIRECTORY)
+        node: NodeCreation,
+    ): VfsResult<Inode> = fileSystem.mutate {
+        lock.withLock {
+            if (children.containsKey(name)) {
+                return@withLock VfsResult.Err(VfsError.ALREADY_EXISTS)
+            }
+            if (node.kind == NodeKind.Directory &&
+                directory.metadata().linkCount == UInt.MAX_VALUE
+            ) {
+                return@withLock VfsResult.Err(VfsError.TOO_MANY_LINKS)
+            }
+            val inode = fileSystem.newNode(directory.superBlock, node, directory)
+            children[name] = inode
+            if (node.kind == NodeKind.Directory) {
+                directory.updateMetadata { it.copy(linkCount = it.linkCount + 1u) }
+            }
+            VfsResult.Ok(inode)
         }
-        children.remove(name)
-        inode.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
-        VfsResult.Ok(Unit)
     }
 
-    override fun rmdir(directory: Inode, name: VfsName): VfsResult<Unit> = lock.withLock {
-        val inode = children[name] ?: return@withLock VfsResult.Err(VfsError.NOT_FOUND)
-        val child = inode.backend as? TmpfsDirectory
-            ?: return@withLock VfsResult.Err(VfsError.NOT_DIRECTORY)
-        if (!child.isEmpty()) {
-            return@withLock VfsResult.Err(VfsError.NOT_EMPTY)
+    override fun link(directory: Inode, name: VfsName, target: Inode): VfsResult<Unit> =
+        fileSystem.mutate {
+            lock.withLock {
+                if (children.containsKey(name)) {
+                    return@withLock VfsResult.Err(VfsError.ALREADY_EXISTS)
+                }
+                val links = target.metadata().linkCount
+                if (links == UInt.MAX_VALUE) {
+                    return@withLock VfsResult.Err(VfsError.TOO_MANY_LINKS)
+                }
+                children[name] = target
+                target.updateMetadata { it.copy(linkCount = links + 1u) }
+                VfsResult.Ok(Unit)
+            }
         }
-        children.remove(name)
-        directory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
-        inode.updateMetadata { it.copy(linkCount = 0u) }
-        VfsResult.Ok(Unit)
+
+    override fun rename(
+        sourceDirectory: Inode,
+        sourceName: VfsName,
+        source: Inode,
+        targetDirectory: Inode,
+        targetName: VfsName,
+        target: Inode?,
+        mode: RenameMode,
+    ): VfsResult<Unit> {
+        val targetBackend = targetDirectory.backend as? TmpfsDirectory
+            ?: return VfsResult.Err(VfsError.CROSS_DEVICE)
+        if (targetBackend.fileSystem !== fileSystem) return VfsResult.Err(VfsError.CROSS_DEVICE)
+        return fileSystem.mutate {
+            withLocks(sourceDirectory, targetDirectory, targetBackend) {
+                renameLocked(
+                    sourceDirectory,
+                    sourceName,
+                    source,
+                    targetDirectory,
+                    targetName,
+                    targetBackend,
+                    target,
+                    mode,
+                )
+            }
+        }
+    }
+
+    override fun remove(
+        directory: Inode,
+        name: VfsName,
+        target: Inode,
+        mode: RemoveMode,
+    ): VfsResult<Unit> = fileSystem.mutate {
+        lock.withLock {
+            val inode = children[name] ?: return@withLock VfsResult.Err(VfsError.NOT_FOUND)
+            if (inode !== target) return@withLock VfsResult.Err(VfsError.NOT_FOUND)
+            if (mode == RemoveMode.DIRECTORY) {
+                val child = inode.backend as? TmpfsDirectory
+                    ?: return@withLock VfsResult.Err(VfsError.NOT_DIRECTORY)
+                if (!child.isEmpty()) return@withLock VfsResult.Err(VfsError.NOT_EMPTY)
+                directory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
+                child.parent = null
+                inode.updateMetadata { it.copy(linkCount = 0u) }
+            } else {
+                if (inode.type == InodeType.DIRECTORY) {
+                    return@withLock VfsResult.Err(VfsError.IS_DIRECTORY)
+                }
+                inode.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
+            }
+            children.remove(name)
+            VfsResult.Ok(Unit)
+        }
     }
 
     override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
@@ -218,6 +324,7 @@ internal class TmpfsDirectory(
                 directory.superBlock,
                 FileMode(0x1EDu),
                 automatic = true,
+                parent = directory,
             )
             children[name] = child
             directory.updateMetadata { it.copy(linkCount = it.linkCount + 1u) }
@@ -234,6 +341,7 @@ internal class TmpfsDirectory(
         if (!installed && created && childDirectory.isEmpty()) {
             children.remove(name)
             directory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
+            childDirectory.parent = null
             child.updateMetadata { it.copy(linkCount = 0u) }
         }
         installed
@@ -264,6 +372,7 @@ internal class TmpfsDirectory(
         if (removed && childDirectory.automatic && childDirectory.isEmpty()) {
             children.remove(name)
             directory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
+            childDirectory.parent = null
             child.updateMetadata { it.copy(linkCount = 0u) }
         }
         removed
@@ -271,13 +380,125 @@ internal class TmpfsDirectory(
 
     private fun isEmpty(): Boolean = lock.withLock { children.isEmpty() }
 
-    private fun add(name: VfsName, create: () -> Inode): VfsResult<Inode> = lock.withLock {
-        if (children.containsKey(name)) {
-            return@withLock VfsResult.Err(VfsError.ALREADY_EXISTS)
+    private fun renameLocked(
+        sourceDirectory: Inode,
+        sourceName: VfsName,
+        expectedSource: Inode,
+        targetDirectory: Inode,
+        targetName: VfsName,
+        target: TmpfsDirectory,
+        expectedTarget: Inode?,
+        mode: RenameMode,
+    ): VfsResult<Unit> {
+        val source = children[sourceName] ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        if (source !== expectedSource) return VfsResult.Err(VfsError.NOT_FOUND)
+        val replaced = target.children[targetName]
+        if (replaced !== expectedTarget) return VfsResult.Err(VfsError.NOT_FOUND)
+        if (this === target && sourceName == targetName) return VfsResult.Ok(Unit)
+        if (mode == RenameMode.NO_REPLACE && replaced != null) {
+            return VfsResult.Err(VfsError.ALREADY_EXISTS)
         }
-        val inode = create()
-        children[name] = inode
-        VfsResult.Ok(inode)
+        if (source === replaced) return VfsResult.Ok(Unit)
+        if (source.type == InodeType.DIRECTORY && isWithin(targetDirectory, source)) {
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+        if (mode == RenameMode.EXCHANGE) {
+            val exchanged = replaced ?: return VfsResult.Err(VfsError.NOT_FOUND)
+            if (exchanged.type == InodeType.DIRECTORY && isWithin(sourceDirectory, exchanged)) {
+                return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            }
+            if (this !== target) {
+                val gainsDirectory = if (source.type == InodeType.DIRECTORY) {
+                    targetDirectory.takeIf { exchanged.type != InodeType.DIRECTORY }
+                } else {
+                    sourceDirectory.takeIf { exchanged.type == InodeType.DIRECTORY }
+                }
+                if (gainsDirectory?.metadata()?.linkCount == UInt.MAX_VALUE) {
+                    return VfsResult.Err(VfsError.TOO_MANY_LINKS)
+                }
+            }
+            children[sourceName] = exchanged
+            target.children[targetName] = source
+            if (this !== target) {
+                val sourceIsDirectory = source.type == InodeType.DIRECTORY
+                val targetIsDirectory = exchanged.type == InodeType.DIRECTORY
+                if (sourceIsDirectory) {
+                    (source.backend as TmpfsDirectory).parent = targetDirectory
+                }
+                if (targetIsDirectory) {
+                    (exchanged.backend as TmpfsDirectory).parent = sourceDirectory
+                }
+                if (sourceIsDirectory != targetIsDirectory) {
+                    if (sourceIsDirectory) {
+                        sourceDirectory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
+                        targetDirectory.updateMetadata { it.copy(linkCount = it.linkCount + 1u) }
+                    } else {
+                        sourceDirectory.updateMetadata { it.copy(linkCount = it.linkCount + 1u) }
+                        targetDirectory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
+                    }
+                }
+            }
+            return VfsResult.Ok(Unit)
+        }
+
+        if (replaced != null) {
+            val sourceIsDirectory = source.type == InodeType.DIRECTORY
+            if (sourceIsDirectory != (replaced.type == InodeType.DIRECTORY)) {
+                return VfsResult.Err(
+                    if (sourceIsDirectory) VfsError.NOT_DIRECTORY else VfsError.IS_DIRECTORY,
+                )
+            }
+            val replacedDirectory = replaced.backend as? TmpfsDirectory
+            if (replacedDirectory != null && !replacedDirectory.isEmpty()) {
+                return VfsResult.Err(VfsError.NOT_EMPTY)
+            }
+        }
+        if (source.type == InodeType.DIRECTORY && this !== target && replaced == null &&
+            targetDirectory.metadata().linkCount == UInt.MAX_VALUE
+        ) {
+            return VfsResult.Err(VfsError.TOO_MANY_LINKS)
+        }
+
+        children.remove(sourceName)
+        target.children[targetName] = source
+        if (source.type == InodeType.DIRECTORY && this !== target) {
+            (source.backend as TmpfsDirectory).parent = targetDirectory
+            sourceDirectory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
+            targetDirectory.updateMetadata { it.copy(linkCount = it.linkCount + 1u) }
+        }
+        if (replaced != null) {
+            if (replaced.type == InodeType.DIRECTORY) {
+                targetDirectory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
+                (replaced.backend as TmpfsDirectory).parent = null
+                replaced.updateMetadata { it.copy(linkCount = 0u) }
+            } else {
+                replaced.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
+            }
+        }
+        return VfsResult.Ok(Unit)
+    }
+
+    private fun isWithin(directory: Inode, ancestor: Inode): Boolean {
+        var current: Inode? = directory
+        while (current != null) {
+            if (current === ancestor) return true
+            current = (current.backend as? TmpfsDirectory)?.parent
+        }
+        return false
+    }
+
+    private fun <T> withLocks(
+        source: Inode,
+        target: Inode,
+        targetBackend: TmpfsDirectory,
+        operation: () -> T,
+    ): T {
+        if (this === targetBackend) return lock.withLock(operation)
+        return if (source.id.value < target.id.value) {
+            lock.withLock { targetBackend.lock.withLock(operation) }
+        } else {
+            targetBackend.lock.withLock { lock.withLock(operation) }
+        }
     }
 }
 
@@ -306,7 +527,7 @@ private class TmpfsDirectoryHandle(private val directory: TmpfsDirectory) : Open
 
 private class TmpfsRegularFile(
     private val fileSystem: TmpfsInstance,
-) : RegularFileBackend(), MutableMetadataBackend, ContentBackedFile {
+) : RegularFileBackend(), MutableInodeBackend, ContentBackedFile {
 
     private val lock = IrqSpinLock()
     private val pages = mutableMapOf<ULong, ByteArray>()
@@ -607,7 +828,9 @@ private class TmpfsRegularHandle(private val file: TmpfsRegularFile) : OpenFileB
     ): IoResult = file.write(inode, source, sourceOffset, count, position, append)
 }
 
-private class TmpfsSymlink(private val target: VfsPathname) : SymlinkBackend {
+private class TmpfsSymlink(
+    private val target: VfsPathname,
+) : SymlinkBackend, MutableInodeBackend {
     override val type: InodeType = InodeType.SYMLINK
 
     override fun readLink(inode: Inode): VfsResult<VfsPathname> = VfsResult.Ok(target)

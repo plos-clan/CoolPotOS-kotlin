@@ -4,6 +4,7 @@ import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceBackend
 import org.plos_clan.cpos.drivers.DeviceIoEvent
 import org.plos_clan.cpos.drivers.DeviceManager
+import org.plos_clan.cpos.drivers.DeviceNumber
 import org.plos_clan.cpos.drivers.DeviceRegistryObserver
 import org.plos_clan.cpos.drivers.DeviceType
 import org.plos_clan.cpos.drivers.DiscardingDeviceBackend
@@ -40,7 +41,7 @@ private class DevtmpfsInstance : SuperBlockBackend, DeviceRegistryObserver {
     private var root: Inode? = null
 
     fun createRoot(superBlock: SuperBlock): Inode {
-        val inode = storage.newDirectory(superBlock, FileMode(0x1EDu))
+        val inode = storage.newDirectory(superBlock, FileMode(0x1EDu), parent = null)
         root = inode
         DeviceManager.observe(this)
         return inode
@@ -51,7 +52,11 @@ private class DevtmpfsInstance : SuperBlockBackend, DeviceRegistryObserver {
         storage.installSpecialNode(
             root = root,
             path = devicePath(device),
-            backend = DevtmpfsDeviceNode(device),
+            backend = DeviceNode(
+                if (device.type == DeviceType.BLOCK) InodeType.BLOCK_DEVICE
+                else InodeType.CHARACTER_DEVICE,
+                device.number.value,
+            ),
             metadata = InodeMetadata(
                 mode = FileMode(0x180u),
                 linkCount = 1u,
@@ -63,7 +68,7 @@ private class DevtmpfsInstance : SuperBlockBackend, DeviceRegistryObserver {
     override fun deviceUnregistered(device: Device) {
         val root = root ?: return
         storage.removeSpecialNode(root, devicePath(device)) { backend ->
-            backend is DevtmpfsDeviceNode && backend.device === device
+            backend is DeviceNode && backend.matches(device)
         }
     }
 
@@ -82,21 +87,31 @@ private class DevtmpfsInstance : SuperBlockBackend, DeviceRegistryObserver {
         }
 }
 
-private class DevtmpfsDeviceNode(
-    val device: Device,
-) : InodeBackend, MutableMetadataBackend {
-    override val type: InodeType =
-        if (device.type == DeviceType.BLOCK) InodeType.BLOCK_DEVICE
-        else InodeType.CHARACTER_DEVICE
+internal class DeviceNode(
+    override val type: InodeType,
+    encodedNumber: ULong,
+) : MutableInodeBackend {
+    private val number = requireNotNull(DeviceNumber.fromEncoded(encodedNumber))
+
+    init {
+        require(type == InodeType.CHARACTER_DEVICE || type == InodeType.BLOCK_DEVICE)
+    }
 
     override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> {
+        val deviceType = if (type == InodeType.BLOCK_DEVICE) DeviceType.BLOCK else DeviceType.CHARACTER
+        val device = DeviceManager.find(deviceType, number)
+            ?: return VfsResult.Err(VfsError.NO_SUCH_DEVICE_OR_ADDRESS)
         val backend = device.backend.open(device)
             ?: return VfsResult.Err(VfsError.NO_DEVICE)
         return VfsResult.Ok(DeviceOpenFile.open(device, backend))
     }
+
+    fun matches(device: Device): Boolean = device.number == number &&
+        type == if (device.type == DeviceType.BLOCK) InodeType.BLOCK_DEVICE
+        else InodeType.CHARACTER_DEVICE
 }
 
-private sealed class DeviceOpenFile(
+internal sealed class DeviceOpenFile(
     protected val device: Device,
     protected val backend: DeviceBackend,
 ) : OpenFileBackend {

@@ -125,6 +125,7 @@ class Process internal constructor(
     var rgid: Int = 0,
     var sgid: Int = 0,
     var fsgid: Int = egid,
+    var fileCreationMask: UInt = 0x12u,
     var sessionId: Int = id,
     var processGroupId: Int = id,
     val parentId: Int = 0,
@@ -189,6 +190,7 @@ class Process internal constructor(
         egid = parent.egid
         sgid = parent.sgid
         fsgid = parent.fsgid
+        fileCreationMask = parent.fileCreationMask
         sessionId = parent.sessionId
         processGroupId = parent.processGroupId
         signalMask = parent.signalMask
