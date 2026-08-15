@@ -4,11 +4,16 @@ package org.plos_clan.cpos.syscall
 
 import KERNEL_NAME
 import kotlinx.cinterop.ExperimentalForeignApi
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.acpi.Fadt
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.syscall.Syscall.errno
+import org.plos_clan.cpos.syscall.Syscall.partialOrError
+import org.plos_clan.cpos.syscall.Syscall.userMemory
 import org.plos_clan.cpos.tasks.Process
+import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.Errno
+import org.plos_clan.cpos.utils.KernelRandom
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.PtraceRegisters
@@ -28,7 +33,26 @@ private const val REBOOT_CMD_RESTART2 = 0xA1B2C3D4UL
 private const val REBOOT_CMD_SW_SUSPEND = 0xD000FCE2UL
 private const val REBOOT_CMD_KEXEC = 0x45584543UL
 
-data class UtsName(
+private const val MAX_CLOCK_ID = 7
+private const val SUPPORTED_CLOCKS = 0xf3u
+
+private const val GETRANDOM_MAX = 0x1ff_ffffuL
+private const val GETRANDOM_FLAGS = 0x7uL
+private const val RANDOM_CHUNK_SIZE = 4096
+
+private const val NANOSECONDS_PER_SECOND = 1_000_000_000uL
+private const val NANOSECONDS_PER_MICROSECOND = 1_000uL
+
+private class LinuxTimeval(val seconds: Long, val microseconds: Long) : NativeStruct {
+    override fun toNativeBytes(): ByteArray = ByteArray(Long.SIZE_BYTES * 2).also { buffer ->
+        LittleEndianBuffer(buffer).apply {
+            writeU64(0, seconds.toULong())
+            writeU64(Long.SIZE_BYTES, microseconds.toULong())
+        }
+    }
+}
+
+private data class UtsName(
     val sysname: String,
     val nodename: String,
     val release: String,
@@ -55,10 +79,6 @@ data class UtsName(
             }
         }
 
-    override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
-        TODO("Not yet implemented")
-    }
-
     private fun fields(): List<Pair<String, String>> = listOf(
         "sysname" to sysname,
         "nodename" to nodename,
@@ -75,7 +95,7 @@ data class UtsName(
     }
 }
 
-data class TimeSpec(var sec: Long, var nsec: Long) : NativeStruct {
+internal data class TimeSpec(var sec: Long, var nsec: Long) : NativeStruct {
     override fun toNativeBytes(): ByteArray =
         ByteArray(NATIVE_SIZE).also { buffer ->
             LittleEndianBuffer(buffer).apply {
@@ -105,7 +125,16 @@ data class TimeSpec(var sec: Long, var nsec: Long) : NativeStruct {
     }
 }
 
-fun sysReboot(regs: PtraceRegisters, process: Process): Long {
+private val UTS_NAME = UtsName(
+    sysname = "CoolPotOS",
+    nodename = "localhost",
+    release = KERNEL_NAME,
+    version = "v0.0.1",
+    machine = "x86_64",
+    domainname = "",
+).toNativeBytes()
+
+internal fun reboot(regs: PtraceRegisters, process: Process): Long {
     val magic1 = regs[PtraceRegisters.IDX_RDI]
     val magic2 = regs[PtraceRegisters.IDX_RSI]
     val command = regs[PtraceRegisters.IDX_RDX]
@@ -130,17 +159,114 @@ fun sysReboot(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-fun sysUname(regs: PtraceRegisters, process: Process): Long {
+internal fun uname(regs: PtraceRegisters, process: Process): Long {
     val userBuffer = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI])
+    return if (userBuffer.copyToUser(UTS_NAME)) 0L else errno(Errno.EFAULT)
+}
 
-    val utsName = UtsName(
-        sysname = "CoolPotOS",
-        nodename = "localhost",
-        release = KERNEL_NAME,
-        version = "v0.0.1",
-        machine = "x86_64",
-        domainname = ""
+internal fun time(regs: PtraceRegisters, process: Process): Long {
+    if (!TscClock.isReady) return errno(Errno.EIO)
+    val seconds = TscClock.nanoTime() / NANOSECONDS_PER_SECOND
+    val outputAddress = regs[PtraceRegisters.IDX_RDI]
+    if (outputAddress != 0uL) {
+        val result = Syscall.copyWordToUser(process, outputAddress, seconds)
+        if (result != 0L) return result
+    }
+    return seconds.toLong()
+}
+
+internal fun clockGetTime(regs: PtraceRegisters, process: Process): Long {
+    val clockId = regs[PtraceRegisters.IDX_RDI]
+    if (clockId > MAX_CLOCK_ID.toULong() ||
+        SUPPORTED_CLOCKS and (1u shl clockId.toInt()) == 0u
+    ) {
+        return errno(Errno.EINVAL)
+    }
+    if (!TscClock.isReady) return errno(Errno.EIO)
+    val now = TscClock.nanoTime()
+    val value = TimeSpec(
+        sec = (now / NANOSECONDS_PER_SECOND).toLong(),
+        nsec = (now % NANOSECONDS_PER_SECOND).toLong(),
     )
+    return if (UserMemory(
+            process.addressSpace,
+            regs[PtraceRegisters.IDX_RSI],
+        ).copyToUser(value.toNativeBytes())
+    ) {
+        0L
+    } else {
+        errno(Errno.EFAULT)
+    }
+}
 
-    return if (userBuffer.copyToUser(utsName.toNativeBytes())) 0L else errno(Errno.EFAULT)
+internal fun getTimeOfDay(regs: PtraceRegisters, process: Process): Long {
+    if (!TscClock.isReady) return errno(Errno.EIO)
+    val now = TscClock.nanoTime()
+    val time = LinuxTimeval(
+        seconds = (now / NANOSECONDS_PER_SECOND).toLong(),
+        microseconds = ((now % NANOSECONDS_PER_SECOND) / NANOSECONDS_PER_MICROSECOND).toLong(),
+    )
+    val timeAddress = regs[PtraceRegisters.IDX_RDI]
+    if (timeAddress != 0uL &&
+        !UserMemory(process.addressSpace, timeAddress).copyToUser(time.toNativeBytes())
+    ) {
+        return errno(Errno.EFAULT)
+    }
+    val timezoneAddress = regs[PtraceRegisters.IDX_RSI]
+    return if (timezoneAddress == 0uL ||
+        UserMemory(process.addressSpace, timezoneAddress).copyToUser(ByteArray(8))
+    ) {
+        0L
+    } else {
+        errno(Errno.EFAULT)
+    }
+}
+
+internal fun nanoSleep(regs: PtraceRegisters, process: Process): Long {
+    val bytes = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI])
+        .copyFromUser(TimeSpec.NATIVE_SIZE)
+        ?: return errno(Errno.EFAULT)
+    val requested = TimeSpec(0, 0)
+    if (!requested.updateFromNativeBytes(bytes) ||
+        requested.sec < 0 || requested.nsec !in 0 until NANOSECONDS_PER_SECOND.toLong()
+    ) {
+        return errno(Errno.EINVAL)
+    }
+    if (!TscClock.isReady) return errno(Errno.EIO)
+
+    val seconds = requested.sec.toULong()
+    val nanoseconds = requested.nsec.toULong()
+    val duration = if (seconds > (ULong.MAX_VALUE - nanoseconds) / NANOSECONDS_PER_SECOND) {
+        ULong.MAX_VALUE
+    } else {
+        seconds * NANOSECONDS_PER_SECOND + nanoseconds
+    }
+    val start = TscClock.nanoTime()
+    val deadline = if (duration > ULong.MAX_VALUE - start) ULong.MAX_VALUE else start + duration
+    while (TscClock.nanoTime() < deadline) {
+        Scheduler.yieldCurrent()
+        bridge.wait_for_interrupt()
+    }
+    return 0L
+}
+
+internal fun getRandom(regs: PtraceRegisters, process: Process): Long {
+    val flags = regs[PtraceRegisters.IDX_RDX]
+    if (flags and GETRANDOM_FLAGS.inv() != 0uL) return errno(Errno.EINVAL)
+
+    val requested = minOf(regs[PtraceRegisters.IDX_RSI], GETRANDOM_MAX)
+    if (requested == 0uL) return 0L
+    val buffer = ByteArray(minOf(requested, RANDOM_CHUNK_SIZE.toULong()).toInt())
+    var transferred = 0uL
+    while (transferred < requested) {
+        val count = minOf(requested - transferred, buffer.size.toULong()).toInt()
+        val output = userMemory(process, regs[PtraceRegisters.IDX_RDI], transferred)
+            ?: return partialOrError(transferred, Errno.EFAULT)
+        KernelRandom.fill(buffer, size = count, salt = process.id.toULong() xor transferred)
+        if (!output.copyToUser(buffer, size = count)) {
+            return partialOrError(transferred, Errno.EFAULT)
+        }
+        transferred += count.toULong()
+    }
+    return transferred.toLong()
 }

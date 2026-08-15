@@ -42,11 +42,15 @@ data class ResourceLimit(val soft: ULong, val hard: ULong) {
 
 class ProcessLimits {
     private val lock = IrqSpinLock()
-    private val values = Array(ProcessResource.entries.size) { ProcessResource.entries[it].initial }
+    private val values = Array(ProcessResource.entries.size) {
+        ProcessResource.entries[it].initial
+    }
 
-    fun get(resource: ProcessResource): ResourceLimit = lock.withLock { values[resource.ordinal] }
+    fun get(resource: ProcessResource): ResourceLimit = lock.withLock {
+        values[resource.ordinal]
+    }
 
-    fun set(resource: ProcessResource, limit: ResourceLimit) {
-        lock.withLock { values[resource.ordinal] = limit }
+    fun replace(resource: ProcessResource, limit: ResourceLimit) = lock.withLock {
+        values[resource.ordinal].also { values[resource.ordinal] = limit }
     }
 }

@@ -40,8 +40,9 @@ private const val SUPPORTED_MMAP_FLAGS = 0x001f_f93fuL
 private const val PROT_READ = 0x1uL
 private const val PROT_WRITE = 0x2uL
 private const val PROT_EXEC = 0x4uL
+private const val SUPPORTED_PROT = 0x7uL
 
-class MappedFile(file: OpenFileDescription) : FileRegionBacking(file) {
+private class MappedFile(file: OpenFileDescription) : FileRegionBacking(file) {
 
     override val cacheSource
         get() = file.cacheSource ?: this
@@ -65,7 +66,7 @@ private fun memoryMapStatus(result: MemoryMapResult<Unit>): Long = when (result)
     is MemoryMapResult.Err -> errno(result.errno)
 }
 
-fun sysMprotect(regs: PtraceRegisters, process: Process): Long {
+internal fun mprotect(regs: PtraceRegisters, process: Process): Long {
     val protection = regs[PtraceRegisters.IDX_RDX]
     if ((protection and SUPPORTED_PROT.inv()) != 0uL) {
         return errno(Errno.EINVAL)
@@ -79,7 +80,7 @@ fun sysMprotect(regs: PtraceRegisters, process: Process): Long {
     )
 }
 
-fun sysMunmap(regs: PtraceRegisters, process: Process): Long =
+internal fun munmap(regs: PtraceRegisters, process: Process): Long =
     memoryMapStatus(
         process.addressSpace.unmap(
             address = regs[PtraceRegisters.IDX_RDI],
@@ -87,7 +88,7 @@ fun sysMunmap(regs: PtraceRegisters, process: Process): Long =
         ),
     )
 
-fun sysMmap(regs: PtraceRegisters, process: Process): Long {
+internal fun mmap(regs: PtraceRegisters, process: Process): Long {
     val hint = regs[PtraceRegisters.IDX_RDI]
     val length = regs[PtraceRegisters.IDX_RSI]
     val protection = regs[PtraceRegisters.IDX_RDX]

@@ -7,7 +7,6 @@
 
 ---
 
-
 ## Feature
 
 - Symmetric multiprocessing

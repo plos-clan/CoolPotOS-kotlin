@@ -50,6 +50,13 @@ private const val O_NONBLOCK = 0x0000_0800uL
 private const val POLL_FD_SIZE = 8
 private const val MAX_POLL_FDS = 1024
 private const val NANOSECONDS_PER_MILLISECOND = 1_000_000uL
+private const val SUPPORTED_OPEN_FLAGS =
+    OpenFlags.O_ACCMODE or OpenFlags.O_CREAT or OpenFlags.O_EXCL or
+            OpenFlags.O_NOCTTY or OpenFlags.O_TRUNC or OpenFlags.O_APPEND or
+            OpenFlags.O_NONBLOCK or OpenFlags.O_DSYNC or OpenFlags.O_SYNC or
+            OpenFlags.O_ASYNC or OpenFlags.O_DIRECT or OpenFlags.O_LARGEFILE or
+            OpenFlags.O_DIRECTORY or OpenFlags.O_NOFOLLOW or OpenFlags.O_NOATIME or
+            OpenFlags.O_CLOEXEC or OpenFlags.O_PATH or OpenFlags.O_TMPFILE
 
 private const val F_DUPFD = 0
 private const val F_GETFD = 1
@@ -171,7 +178,7 @@ private class LinuxDirent64(
         }
 }
 
-fun sysOpen(regs: PtraceRegisters, process: Process): Long {
+internal fun open(regs: PtraceRegisters, process: Process): Long {
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EFAULT)
     return open(
@@ -182,7 +189,7 @@ fun sysOpen(regs: PtraceRegisters, process: Process): Long {
     )
 }
 
-fun sysOpenAt(regs: PtraceRegisters, process: Process): Long {
+internal fun openAt(regs: PtraceRegisters, process: Process): Long {
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RSI])
         ?: return errno(Errno.EFAULT)
     val dirFd = regs[PtraceRegisters.IDX_RDI].toUInt().toInt()
@@ -272,14 +279,22 @@ private fun open(
     }
 }
 
-fun sysClose(regs: PtraceRegisters, process: Process): Long {
+internal fun close(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     return if (process.fdTable.close(fd)) 0L else errno(Errno.EBADF)
 }
 
-fun sysPipe2(regs: PtraceRegisters, process: Process): Long {
-    val flags = regs[PtraceRegisters.IDX_RSI]
+internal fun pipe(regs: PtraceRegisters, process: Process): Long =
+    createPipe(process, regs[PtraceRegisters.IDX_RDI], 0uL)
+
+internal fun pipe2(regs: PtraceRegisters, process: Process): Long = createPipe(
+    process,
+    regs[PtraceRegisters.IDX_RDI],
+    regs[PtraceRegisters.IDX_RSI],
+)
+
+private fun createPipe(process: Process, outputAddress: ULong, flags: ULong): Long {
     if (flags and (O_CLOEXEC or O_NONBLOCK).inv() != 0uL) {
         return errno(Errno.EINVAL)
     }
@@ -314,7 +329,7 @@ fun sysPipe2(regs: PtraceRegisters, process: Process): Long {
             writeU32(Int.SIZE_BYTES, writeFd.toUInt())
         }
     }
-    if (!UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI]).copyToUser(output)) {
+    if (!UserMemory(process.addressSpace, outputAddress).copyToUser(output)) {
         process.fdTable.close(readFd)
         process.fdTable.close(writeFd)
         return errno(Errno.EFAULT)
@@ -322,7 +337,7 @@ fun sysPipe2(regs: PtraceRegisters, process: Process): Long {
     return 0L
 }
 
-fun sysChown(regs: PtraceRegisters, process: Process): Long = chownPath(
+internal fun chown(regs: PtraceRegisters, process: Process): Long = chownPath(
     process,
     pathnameAddress = regs[PtraceRegisters.IDX_RDI],
     uid = regs[PtraceRegisters.IDX_RSI],
@@ -330,7 +345,7 @@ fun sysChown(regs: PtraceRegisters, process: Process): Long = chownPath(
     followFinalSymlink = true,
 )
 
-fun sysLchown(regs: PtraceRegisters, process: Process): Long = chownPath(
+internal fun lchown(regs: PtraceRegisters, process: Process): Long = chownPath(
     process,
     pathnameAddress = regs[PtraceRegisters.IDX_RDI],
     uid = regs[PtraceRegisters.IDX_RSI],
@@ -338,7 +353,7 @@ fun sysLchown(regs: PtraceRegisters, process: Process): Long = chownPath(
     followFinalSymlink = false,
 )
 
-fun sysFchown(regs: PtraceRegisters, process: Process): Long {
+internal fun fchown(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI]) ?: return errno(Errno.EBADF)
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
     return try {
@@ -348,7 +363,7 @@ fun sysFchown(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-fun sysFchownat(regs: PtraceRegisters, process: Process): Long {
+internal fun fchownAt(regs: PtraceRegisters, process: Process): Long {
     val flags = regs[PtraceRegisters.IDX_R8]
     val supportedFlags = (AT_SYMLINK_NOFOLLOW or AT_EMPTY_PATH).toULong()
     if (flags > UInt.MAX_VALUE.toULong() || flags and supportedFlags.inv() != 0uL) {
@@ -426,21 +441,21 @@ private fun changeOwner(process: Process, path: VfsPath, uid: ULong, gid: ULong)
     return 0L
 }
 
-fun sysStat(regs: PtraceRegisters, process: Process): Long = statPath(
+internal fun stat(regs: PtraceRegisters, process: Process): Long = statPath(
     process = process,
     pathnameAddress = regs[PtraceRegisters.IDX_RDI],
     statAddress = regs[PtraceRegisters.IDX_RSI],
     followFinalSymlink = true,
 )
 
-fun sysLstat(regs: PtraceRegisters, process: Process): Long = statPath(
+internal fun lstat(regs: PtraceRegisters, process: Process): Long = statPath(
     process = process,
     pathnameAddress = regs[PtraceRegisters.IDX_RDI],
     statAddress = regs[PtraceRegisters.IDX_RSI],
     followFinalSymlink = false,
 )
 
-fun sysStatfs(regs: PtraceRegisters, process: Process): Long {
+internal fun statfs(regs: PtraceRegisters, process: Process): Long {
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EFAULT)
     if (pathname.isEmpty()) return errno(Errno.ENOENT)
@@ -454,7 +469,7 @@ fun sysStatfs(regs: PtraceRegisters, process: Process): Long {
     return copyStatFs(process, regs[PtraceRegisters.IDX_RSI], path)
 }
 
-fun sysFstatfs(regs: PtraceRegisters, process: Process): Long {
+internal fun fstatfs(regs: PtraceRegisters, process: Process): Long {
     val descriptor = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     val file = process.fdTable.acquire(descriptor) ?: return errno(Errno.EBADF)
@@ -472,7 +487,7 @@ private fun copyStatFs(process: Process, address: ULong, path: VfsPath): Long =
         errno(Errno.EFAULT)
     }
 
-fun sysAccess(regs: PtraceRegisters, process: Process): Long {
+internal fun access(regs: PtraceRegisters, process: Process): Long {
     val mode = regs[PtraceRegisters.IDX_RSI]
     if (mode > 0x7uL) {
         return errno(Errno.EINVAL)
@@ -498,7 +513,7 @@ fun sysAccess(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-fun sysFaccessat(regs: PtraceRegisters, process: Process): Long = accessAt(
+internal fun faccessAt(regs: PtraceRegisters, process: Process): Long = accessAt(
     process = process,
     dirFd = regs[PtraceRegisters.IDX_RDI].toUInt().toInt(),
     pathnameAddress = regs[PtraceRegisters.IDX_RSI],
@@ -506,7 +521,7 @@ fun sysFaccessat(regs: PtraceRegisters, process: Process): Long = accessAt(
     flags = 0uL,
 )
 
-fun sysFaccessat2(regs: PtraceRegisters, process: Process): Long = accessAt(
+internal fun faccessAt2(regs: PtraceRegisters, process: Process): Long = accessAt(
     process = process,
     dirFd = regs[PtraceRegisters.IDX_RDI].toUInt().toInt(),
     pathnameAddress = regs[PtraceRegisters.IDX_RSI],
@@ -558,7 +573,7 @@ private fun accessAt(
     }
 }
 
-fun sysNewfstatat(regs: PtraceRegisters, process: Process): Long {
+internal fun newFstatAt(regs: PtraceRegisters, process: Process): Long {
     val flags = regs[PtraceRegisters.IDX_R10]
     val supportedFlags = (AT_SYMLINK_NOFOLLOW or AT_NO_AUTOMOUNT or AT_EMPTY_PATH).toULong()
     if (flags and supportedFlags.inv() != 0uL || flags > UInt.MAX_VALUE.toULong()) {
@@ -599,7 +614,7 @@ fun sysNewfstatat(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-fun sysReadlink(regs: PtraceRegisters, process: Process): Long = readlinkAt(
+internal fun readlink(regs: PtraceRegisters, process: Process): Long = readlinkAt(
     process = process,
     dirFd = AT_FDCWD,
     pathnameAddress = regs[PtraceRegisters.IDX_RDI],
@@ -607,7 +622,7 @@ fun sysReadlink(regs: PtraceRegisters, process: Process): Long = readlinkAt(
     bufferSize = regs[PtraceRegisters.IDX_RDX],
 )
 
-fun sysReadlinkat(regs: PtraceRegisters, process: Process): Long = readlinkAt(
+internal fun readlinkAt(regs: PtraceRegisters, process: Process): Long = readlinkAt(
     process = process,
     dirFd = regs[PtraceRegisters.IDX_RDI].toUInt().toInt(),
     pathnameAddress = regs[PtraceRegisters.IDX_RSI],
@@ -690,7 +705,7 @@ private fun resolveAt(
     }
 }
 
-fun sysFstat(regs: PtraceRegisters, process: Process): Long {
+internal fun fstat(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
@@ -706,7 +721,7 @@ fun sysFstat(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-fun sysGetdents64(regs: PtraceRegisters, process: Process): Long {
+internal fun getdents64(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     val requested = regs[PtraceRegisters.IDX_RDX]
@@ -772,7 +787,7 @@ private fun statPath(
     }
 }
 
-fun sysLseek(regs: PtraceRegisters, process: Process): Long {
+internal fun lseek(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     val whenceValue = regs[PtraceRegisters.IDX_RDX]
@@ -803,7 +818,7 @@ fun sysLseek(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-fun sysDup(regs: PtraceRegisters, process: Process): Long {
+internal fun dup(regs: PtraceRegisters, process: Process): Long {
     val oldFd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     val file = process.fdTable.acquire(oldFd) ?: return errno(Errno.EBADF)
@@ -815,7 +830,7 @@ fun sysDup(regs: PtraceRegisters, process: Process): Long {
     return newFd.toLong()
 }
 
-fun sysDup2(regs: PtraceRegisters, process: Process): Long {
+internal fun dup2(regs: PtraceRegisters, process: Process): Long {
     val oldFd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     val newFd = fileDescriptor(regs[PtraceRegisters.IDX_RSI])
@@ -827,7 +842,7 @@ fun sysDup2(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-fun sysFcntl(regs: PtraceRegisters, process: Process): Long {
+internal fun fcntl(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     val command = regs[PtraceRegisters.IDX_RSI]
@@ -888,7 +903,7 @@ fun sysFcntl(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-fun sysPoll(regs: PtraceRegisters, process: Process): Long {
+internal fun poll(regs: PtraceRegisters, process: Process): Long {
     val countValue = regs[PtraceRegisters.IDX_RSI]
     if (countValue > MAX_POLL_FDS.toULong()) {
         return errno(Errno.EINVAL)
@@ -928,7 +943,7 @@ fun sysPoll(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-fun sysPselect6(regs: PtraceRegisters, process: Process): Long {
+internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
     val nfdsValue = regs[PtraceRegisters.IDX_RDI]
     if (nfdsValue > MAX_POLL_FDS.toULong()) return errno(Errno.EINVAL)
     val nfds = nfdsValue.toInt()
@@ -1112,7 +1127,7 @@ private fun scanPollDescriptors(
     return ready
 }
 
-fun sysRead(regs: PtraceRegisters, process: Process): Long {
+internal fun read(regs: PtraceRegisters, process: Process): Long {
     val file = process.fdTable.acquire(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     try {
@@ -1134,7 +1149,7 @@ fun sysRead(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-fun sysWrite(regs: PtraceRegisters, process: Process): Long {
+internal fun write(regs: PtraceRegisters, process: Process): Long {
     val file = process.fdTable.acquire(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     try {
@@ -1159,7 +1174,7 @@ fun sysWrite(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-fun sysReadv(regs: PtraceRegisters, process: Process): Long {
+internal fun readv(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
@@ -1209,7 +1224,7 @@ fun sysReadv(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-fun sysWritev(regs: PtraceRegisters, process: Process): Long {
+internal fun writev(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
@@ -1336,7 +1351,7 @@ private class IoVectorCursor(
     }
 }
 
-fun sysIoctl(regs: PtraceRegisters, process: Process): Long {
+internal fun ioctl(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
@@ -1353,7 +1368,7 @@ fun sysIoctl(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-fun sysChdir(regs: PtraceRegisters, process: Process): Long {
+internal fun chdir(regs: PtraceRegisters, process: Process): Long {
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EFAULT)
     if (pathname.isEmpty()) return errno(Errno.ENOENT)
@@ -1367,7 +1382,7 @@ fun sysChdir(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-fun sysFchdir(regs: PtraceRegisters, process: Process): Long {
+internal fun fchdir(regs: PtraceRegisters, process: Process): Long {
     val descriptor = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     val file = process.fdTable.acquire(descriptor) ?: return errno(Errno.EBADF)
@@ -1382,7 +1397,7 @@ fun sysFchdir(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-fun sysGetCWD(regs: PtraceRegisters, process: Process): Long {
+internal fun getCwd(regs: PtraceRegisters, process: Process): Long {
     val userAddress = regs[PtraceRegisters.IDX_RDI]
     val length = regs[PtraceRegisters.IDX_RSI]
     if (userAddress == 0UL) return errno(Errno.EFAULT)
