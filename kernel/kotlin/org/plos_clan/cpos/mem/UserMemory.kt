@@ -8,6 +8,8 @@ import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.get
 import kotlinx.cinterop.plus
 import kotlinx.cinterop.usePinned
+import org.plos_clan.cpos.mem.addressspace.AddressSpace
+import org.plos_clan.cpos.mem.addressspace.PageFaultResult
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.toVirtualPointer

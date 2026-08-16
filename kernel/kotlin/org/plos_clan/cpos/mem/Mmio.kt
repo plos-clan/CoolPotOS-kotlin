@@ -11,6 +11,12 @@ import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.UShortVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set
+import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE
+import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_WRITABLE
+import org.plos_clan.cpos.mem.addressspace.MemoryMapRequest
+import org.plos_clan.cpos.mem.addressspace.MemoryMapResult
+import org.plos_clan.cpos.mem.addressspace.MemoryRegionType
+import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown

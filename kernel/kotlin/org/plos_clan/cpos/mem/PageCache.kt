@@ -6,6 +6,8 @@ import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.plus
 import kotlinx.cinterop.usePinned
+import org.plos_clan.cpos.mem.page.FrameReleaseResult
+import org.plos_clan.cpos.mem.page.UserFrameReferences
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown

@@ -1,8 +1,17 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.mem
+package org.plos_clan.cpos.mem.addressspace
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
+import org.plos_clan.cpos.mem.BuddyFrameAllocator
+import org.plos_clan.cpos.mem.Hhdm
+import org.plos_clan.cpos.mem.INVALID_FRAME
+import org.plos_clan.cpos.mem.MMIO_PTE_FLAGS
+import org.plos_clan.cpos.mem.PageCache
+import org.plos_clan.cpos.mem.PageCacheFailure
+import org.plos_clan.cpos.mem.PageDirectory
+import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown

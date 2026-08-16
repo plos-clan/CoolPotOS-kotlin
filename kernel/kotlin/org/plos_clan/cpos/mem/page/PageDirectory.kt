@@ -8,6 +8,9 @@ import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set
+import org.plos_clan.cpos.mem.addressspace.MemoryRegion
+import org.plos_clan.cpos.mem.page.PageTableAllocation
+import org.plos_clan.cpos.mem.page.UserFrameReferences
 import org.plos_clan.cpos.utils.*
 internal const val PTE_PRESENT = 0x001uL
 internal const val PTE_WRITABLE = 0x002uL

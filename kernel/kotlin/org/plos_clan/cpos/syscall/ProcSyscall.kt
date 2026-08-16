@@ -6,7 +6,7 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.VfsResult
 import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.mem.UserMemory
-import org.plos_clan.cpos.module.ElfLoader
+import org.plos_clan.cpos.module.elf.ElfLoader
 import org.plos_clan.cpos.syscall.Syscall.copyWordToUser
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.tasks.Process

@@ -1,8 +1,13 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.mem
+package org.plos_clan.cpos.mem.page
 
 import bridge.read_cr3
+import kotlinx.cinterop.ExperimentalForeignApi
+import org.plos_clan.cpos.mem.BuddyFrameAllocator
+import org.plos_clan.cpos.mem.PTE_ADDR_MASK
+import org.plos_clan.cpos.mem.PageDirectory
+import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.utils.*
 
 object KernelPageDirectory {

@@ -1,9 +1,9 @@
-package org.plos_clan.cpos.module
+package org.plos_clan.cpos.module.elf
 
 import org.plos_clan.cpos.fs.OpenFileDescription
 import org.plos_clan.cpos.mem.ByteArrayBuffer
-import org.plos_clan.cpos.mem.FileRegionBacking
-import org.plos_clan.cpos.module.ElfLayout.checkedAdd
+import org.plos_clan.cpos.mem.addressspace.FileRegionBacking
+import org.plos_clan.cpos.module.elf.ElfLayout.checkedAdd
 
 private const val EIO = 5
 

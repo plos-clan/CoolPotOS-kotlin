@@ -1,8 +1,11 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.mem
+package org.plos_clan.cpos.mem.page
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ULongVar
+import org.plos_clan.cpos.mem.BuddyFrameAllocator
+import org.plos_clan.cpos.mem.INVALID_FRAME
 import org.plos_clan.cpos.utils.clear
 import org.plos_clan.cpos.utils.toVirtualPointer
 

@@ -2,13 +2,15 @@
 
 package org.plos_clan.cpos.module
 
-import org.plos_clan.cpos.mem.AddressSpace
-import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
-import org.plos_clan.cpos.mem.MEMORY_REGION_WRITABLE
-import org.plos_clan.cpos.mem.MemoryRegion
-import org.plos_clan.cpos.mem.MemoryRegionType
+import org.plos_clan.cpos.mem.addressspace.AddressSpace
+import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE
+import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_WRITABLE
+import org.plos_clan.cpos.mem.addressspace.MemoryRegion
+import org.plos_clan.cpos.mem.addressspace.MemoryRegionType
 import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.module.elf.ElfInterpreterLoadResult
+import org.plos_clan.cpos.module.elf.ElfLoadResult
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.KernelRandom
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES

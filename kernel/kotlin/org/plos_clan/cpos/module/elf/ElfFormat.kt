@@ -1,4 +1,4 @@
-package org.plos_clan.cpos.module
+package org.plos_clan.cpos.module.elf
 
 import org.plos_clan.cpos.fs.OpenFileDescription
 

@@ -11,8 +11,8 @@ import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.staticCFunction
-import org.plos_clan.cpos.mem.KernelPageDirectory
-import org.plos_clan.cpos.mem.PageFaultResult
+import org.plos_clan.cpos.mem.page.KernelPageDirectory
+import org.plos_clan.cpos.mem.addressspace.PageFaultResult
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.utils.InterruptFrame

@@ -8,11 +8,11 @@ import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.FileDescriptorTable
 import org.plos_clan.cpos.fs.FileSystemContext
 import org.plos_clan.cpos.fs.FileSystemManager
-import org.plos_clan.cpos.mem.AddressSpace
+import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.INVALID_FRAME
-import org.plos_clan.cpos.mem.KernelPageDirectory
+import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown

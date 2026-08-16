@@ -1,6 +1,7 @@
-package org.plos_clan.cpos.mem
+package org.plos_clan.cpos.mem.addressspace
 
 import org.plos_clan.cpos.fs.OpenFileDescription
+import org.plos_clan.cpos.mem.PageCacheSource
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 

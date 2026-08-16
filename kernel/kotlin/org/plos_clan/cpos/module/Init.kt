@@ -6,6 +6,7 @@ import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.OpenOptions
 import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsResult
+import org.plos_clan.cpos.module.elf.ElfLoader
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Cmdline

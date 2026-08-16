@@ -7,11 +7,11 @@ import org.plos_clan.cpos.fs.InodeType
 import org.plos_clan.cpos.fs.MountFlag
 import org.plos_clan.cpos.fs.OpenFileDescription
 import org.plos_clan.cpos.mem.ByteArrayBuffer
-import org.plos_clan.cpos.mem.FileRegionBacking
-import org.plos_clan.cpos.mem.MEMORY_REGION_ACCESS_MASK
-import org.plos_clan.cpos.mem.MemoryMapRequest
-import org.plos_clan.cpos.mem.MemoryMapResult
-import org.plos_clan.cpos.mem.MemoryRegionType
+import org.plos_clan.cpos.mem.addressspace.FileRegionBacking
+import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_ACCESS_MASK
+import org.plos_clan.cpos.mem.addressspace.MemoryMapRequest
+import org.plos_clan.cpos.mem.addressspace.MemoryMapResult
+import org.plos_clan.cpos.mem.addressspace.MemoryRegionType
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.tasks.Process

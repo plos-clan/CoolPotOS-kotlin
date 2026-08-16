@@ -1,4 +1,4 @@
-package org.plos_clan.cpos.mem
+package org.plos_clan.cpos.mem.addressspace
 
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown

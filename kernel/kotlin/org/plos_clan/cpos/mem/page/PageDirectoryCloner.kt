@@ -6,6 +6,9 @@ import bridge.read_cr3
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set
+import org.plos_clan.cpos.mem.addressspace.MemoryRegion
+import org.plos_clan.cpos.mem.page.PageTableAllocation
+import org.plos_clan.cpos.mem.page.UserFrameReferences
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PTE_COUNT
 import org.plos_clan.cpos.utils.toVirtualPointer

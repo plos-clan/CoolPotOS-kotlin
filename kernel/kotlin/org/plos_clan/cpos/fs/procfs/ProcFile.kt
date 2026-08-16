@@ -4,11 +4,11 @@ import org.plos_clan.cpos.drivers.char.TtyManager
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.VfsName
 import org.plos_clan.cpos.fs.VfsResult
-import org.plos_clan.cpos.mem.FileRegionBacking
-import org.plos_clan.cpos.mem.MEMORY_REGION_EXECUTABLE
-import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
-import org.plos_clan.cpos.mem.MEMORY_REGION_WRITABLE
-import org.plos_clan.cpos.mem.MemoryRegionType
+import org.plos_clan.cpos.mem.addressspace.FileRegionBacking
+import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_EXECUTABLE
+import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE
+import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_WRITABLE
+import org.plos_clan.cpos.mem.addressspace.MemoryRegionType
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.tasks.ProcessState

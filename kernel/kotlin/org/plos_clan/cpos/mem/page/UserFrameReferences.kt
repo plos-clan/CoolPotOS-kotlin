@@ -1,10 +1,13 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.mem
+package org.plos_clan.cpos.mem.page
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
-import kotlinx.cinterop.get
 import kotlinx.cinterop.set
+import org.plos_clan.cpos.mem.BuddyFrameAllocator
+import org.plos_clan.cpos.mem.Hhdm
+import org.plos_clan.cpos.mem.INVALID_FRAME
 import org.plos_clan.cpos.utils.*
 import platform.posix.memcpy
 

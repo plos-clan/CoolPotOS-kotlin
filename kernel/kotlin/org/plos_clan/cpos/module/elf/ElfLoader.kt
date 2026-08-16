@@ -1,4 +1,4 @@
-package org.plos_clan.cpos.module
+package org.plos_clan.cpos.module.elf
 
 import org.plos_clan.cpos.fs.AccessMode
 import org.plos_clan.cpos.fs.FileSystemManager
@@ -8,25 +8,28 @@ import org.plos_clan.cpos.fs.OpenOptions
 import org.plos_clan.cpos.fs.VfsError
 import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsResult
-import org.plos_clan.cpos.mem.AddressSpace
+import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.mem.ByteArrayBuffer
-import org.plos_clan.cpos.mem.KernelPageDirectory
-import org.plos_clan.cpos.mem.MEMORY_REGION_EXECUTABLE
-import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
-import org.plos_clan.cpos.mem.MEMORY_REGION_WRITABLE
-import org.plos_clan.cpos.mem.MemoryRegion
-import org.plos_clan.cpos.mem.MemoryRegionBacking
-import org.plos_clan.cpos.mem.MemoryRegionType
+import org.plos_clan.cpos.mem.page.KernelPageDirectory
+import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_EXECUTABLE
+import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE
+import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_WRITABLE
+import org.plos_clan.cpos.mem.addressspace.MemoryRegion
+import org.plos_clan.cpos.mem.addressspace.MemoryRegionBacking
+import org.plos_clan.cpos.mem.addressspace.MemoryRegionType
 import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
-import org.plos_clan.cpos.module.ElfLayout.checkedAdd
-import org.plos_clan.cpos.module.ElfLayout.fitsInFile
-import org.plos_clan.cpos.module.ElfLayout.isPowerOfTwo
+import org.plos_clan.cpos.module.UserStackBuilder
+import org.plos_clan.cpos.module.Vdso
+import org.plos_clan.cpos.module.elf.ElfLayout.checkedAdd
+import org.plos_clan.cpos.module.elf.ElfLayout.fitsInFile
+import org.plos_clan.cpos.module.elf.ElfLayout.isPowerOfTwo
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.alignUp
+import kotlin.collections.iterator
 
 private const val ELF64_HEADER_SIZE = 64
 private const val ELF64_PROGRAM_HEADER_SIZE = 56
