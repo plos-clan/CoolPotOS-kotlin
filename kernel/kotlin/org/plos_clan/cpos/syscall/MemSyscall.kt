@@ -172,23 +172,23 @@ internal fun mmap(regs: PtraceRegisters, process: Process): Long {
 
         val backing = MappedFile(file)
         return try {
-            mmapResult(
-                process.addressSpace.map(
-                    MemoryMapRequest(
-                        hint = hint,
-                        length = length,
-                        access = access,
-                        maximumAccess = maximumAccess,
-                        fixed = fixed,
-                        noReplace = noReplace,
-                        shared = shared,
-                        type = MemoryRegionType.FILE,
-                        offset = offset,
-                        backing = backing,
-                        populate = (flags and (MAP_POPULATE or MAP_LOCKED)) != 0uL,
-                    ),
+            val result = process.addressSpace.map(
+                MemoryMapRequest(
+                    hint = hint,
+                    length = length,
+                    access = access,
+                    maximumAccess = maximumAccess,
+                    fixed = fixed,
+                    noReplace = noReplace,
+                    shared = shared,
+                    type = MemoryRegionType.FILE,
+                    offset = offset,
+                    backing = backing,
+                    populate = (flags and (MAP_POPULATE or MAP_LOCKED)) != 0uL,
                 ),
             )
+            if (result is MemoryMapResult.Ok) file.recordAccess()
+            mmapResult(result)
         } finally {
             backing.release()
         }

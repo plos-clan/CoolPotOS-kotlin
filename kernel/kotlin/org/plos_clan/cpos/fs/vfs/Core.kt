@@ -220,6 +220,7 @@ data class InodeMetadata(
     val deviceNumber: ULong = 0uL,
     val uid: UInt = 0u,
     val gid: UInt = 0u,
+    val timestamps: InodeTimestamps = InodeTimestamps.now(),
 )
 
 enum class AccessMode {
@@ -250,8 +251,10 @@ data class OpenOptions(
     val directoryOnly: Boolean = false,
     val followFinalSymlink: Boolean = true,
     val nonBlocking: Boolean = false,
+    val noAtime: Boolean = false,
     val createUid: UInt = 0u,
     val createGid: UInt = 0u,
+    val privileged: Boolean = false,
 )
 
 enum class MountFlag(bit: Int, internal val optionName: String? = null) {
@@ -274,6 +277,17 @@ enum class MountFlag(bit: Int, internal val optionName: String? = null) {
 value class MountFlags private constructor(private val bits: UInt) {
     operator fun contains(flag: MountFlag): Boolean = bits and flag.mask != 0u
     operator fun plus(flag: MountFlag): MountFlags = MountFlags(bits or flag.mask)
+
+    internal fun withDefaultAtimePolicy(): MountFlags {
+        val policies = MountFlag.NO_ATIME.mask or MountFlag.RELATIVE_ATIME.mask or
+            MountFlag.STRICT_ATIME.mask
+        val policy = when {
+            bits and MountFlag.STRICT_ATIME.mask != 0u -> MountFlag.STRICT_ATIME.mask
+            bits and MountFlag.NO_ATIME.mask != 0u -> MountFlag.NO_ATIME.mask
+            else -> MountFlag.RELATIVE_ATIME.mask
+        }
+        return MountFlags(bits and policies.inv() or policy)
+    }
 
     companion object {
         val NONE = MountFlags(0u)

@@ -49,6 +49,39 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
 
     override fun createRoot(superBlock: SuperBlock): Inode = inode(superBlock, root)
 
+    override fun updateTimestamps(
+        inode: Inode,
+        update: InodeTimestampUpdate,
+    ): VfsResult<Unit> {
+        val location = (inode.backend as? OverlayNodeBackend)?.location
+        if (location == null) {
+            inode.updateMetadata(update)
+            return VfsResult.Ok(Unit)
+        }
+        val access = update == InodeTimestampEvent.ACCESSED ||
+            update == InodeTimestampEvent.RELATIVE_ACCESS
+        if (access && location.upper == null) {
+            inode.updateMetadata(update)
+            return VfsResult.Ok(Unit)
+        }
+        if (update is InodeTimestampSet && !OverlayCopyUp.ensureWritable(location)) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
+        val target = location.upper ?: location.lower
+            ?: return VfsResult.Err(VfsError.READ_ONLY)
+        val targetInode = target.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val result = target.mount.superBlock.backend.updateTimestamps(targetInode, update)
+        if (result is VfsResult.Err && result.error == VfsError.READ_ONLY && access) {
+            inode.updateMetadata(update)
+            return VfsResult.Ok(Unit)
+        }
+        if (result is VfsResult.Ok) {
+            val timestamps = targetInode.metadata().timestamps
+            inode.updateMetadata(InodeTimestampEvent.NONE) { it.copy(timestamps = timestamps) }
+        }
+        return result
+    }
+
     override fun sync(): VfsResult<Unit> =
         checkNotNull(root.upper).mount.superBlock.backend.sync()
 
@@ -111,8 +144,17 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
             backend.remove(parent, name, upperTarget, mode)
         } else VfsResult.Ok(Unit)
         if (result is VfsResult.Err) return result
-        val remainingLinks = child.upper?.inode?.metadata()?.linkCount ?: 0u
-        child.overlayInode?.updateMetadata { it.copy(linkCount = remainingLinks) }
+        if (upperTarget == null) {
+            val timestampResult = parent.superBlock.backend.updateTimestamps(
+                parent,
+                InodeTimestampEvent.CONTENT_CHANGED,
+            )
+            if (timestampResult is VfsResult.Err) return timestampResult
+        }
+        val metadata = child.upper?.inode?.metadata()
+        child.overlayInode?.updateMetadata(
+            if (metadata == null) InodeTimestampEvent.STATUS_CHANGED else InodeTimestampEvent.NONE,
+        ) { current -> metadata ?: current.copy(linkCount = 0u) }
         if (child.lower != null) whiteouts += Whiteout(directory, name)
         directory.invalidate(name)
         return VfsResult.Ok(Unit)
@@ -135,7 +177,10 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
         val result = backend.link(parent, name, source)
         if (result is VfsResult.Ok) {
-            overlayInode.updateMetadata { it.copy(linkCount = source.metadata().linkCount) }
+            val metadata = source.metadata()
+            overlayInode.updateMetadata(InodeTimestampEvent.NONE) {
+                it.copy(linkCount = metadata.linkCount, timestamps = metadata.timestamps)
+            }
             reveal(directory, name)
             childLocation(directory, name)?.overlayInode = overlayInode
         }
@@ -203,8 +248,11 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
         val sourceOverlay = source.overlayInode
         val targetOverlay = target?.overlayInode
         if (mode != RenameMode.EXCHANGE) {
-            val links = target?.upper?.inode?.metadata()?.linkCount ?: 0u
-            targetOverlay?.updateMetadata { it.copy(linkCount = links) }
+            val metadata = target?.upper?.inode?.metadata()
+            targetOverlay?.updateMetadata(
+                if (metadata == null) InodeTimestampEvent.STATUS_CHANGED
+                else InodeTimestampEvent.NONE,
+            ) { current -> metadata ?: current.copy(linkCount = 0u) }
         }
         if (mode != RenameMode.EXCHANGE && source.lower != null) {
             whiteouts += Whiteout(sourceDirectory, sourceName)
@@ -237,6 +285,7 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
             targetName,
         ).also { it.overlayInode = sourceOverlay }
         targetDirectory.cache(targetName, movedSource)
+        sourceOverlay?.let { refreshMetadata(movedSource, it) }
         if (mode == RenameMode.EXCHANGE) {
             val exchanged = checkNotNull(target)
             val movedTarget = OverlayLocation(
@@ -246,6 +295,7 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
                 sourceName,
             ).also { it.overlayInode = targetOverlay }
             sourceDirectory.cache(sourceName, movedTarget)
+            targetOverlay?.let { refreshMetadata(movedTarget, it) }
         }
         return VfsResult.Ok(Unit)
     }
@@ -274,7 +324,7 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
         val backend = targetInode.backend as? RegularFileBackend
             ?: return VfsResult.Err(VfsError.NOT_SUPPORTED)
         val result = backend.resize(targetInode, size)
-        if (result is VfsResult.Ok) inode.updateMetadata { it.copy(size = size) }
+        if (result is VfsResult.Ok) refreshMetadata(location, inode)
         return result
     }
 
@@ -291,9 +341,7 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
         val backend = targetInode.backend as? RegularFileBackend
             ?: return VfsResult.Err(VfsError.NOT_SUPPORTED)
         val result = backend.allocate(targetInode, offset, length, mode)
-        if (result is VfsResult.Ok) {
-            inode.updateMetadata { it.copy(size = targetInode.metadata().size) }
-        }
+        if (result is VfsResult.Ok) refreshMetadata(location, inode)
         return result
     }
 
@@ -302,7 +350,20 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
         val target = location.upper ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val targetInode = target.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val result = targetInode.backend.setMode(targetInode, mode)
-        if (result is VfsResult.Ok) inode.updateMetadata { it.copy(mode = mode) }
+        if (result is VfsResult.Ok) refreshMetadata(location, inode)
+        return result
+    }
+
+    internal fun setOwner(
+        location: OverlayLocation,
+        inode: Inode,
+        uid: UInt?,
+        gid: UInt?,
+    ): VfsResult<Unit> {
+        if (!OverlayCopyUp.ensureWritable(location)) return VfsResult.Err(VfsError.READ_ONLY)
+        val targetInode = location.upper?.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val result = targetInode.backend.setOwner(targetInode, uid, gid)
+        if (result is VfsResult.Ok) refreshMetadata(location, inode)
         return result
     }
 
@@ -319,7 +380,7 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
 
     internal fun refreshMetadata(location: OverlayLocation, inode: Inode) {
         val metadata = (location.upper ?: location.lower)?.inode?.metadata() ?: return
-        inode.updateMetadata { metadata }
+        inode.updateMetadata(InodeTimestampEvent.NONE) { metadata }
     }
 
     internal fun getExtendedAttribute(
@@ -339,22 +400,28 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
 
     internal fun setExtendedAttribute(
         location: OverlayLocation,
+        overlayInode: Inode,
         name: ExtendedAttributeName,
         value: ByteArray,
         mode: ExtendedAttributeMode,
     ): VfsResult<Unit> {
         if (!OverlayCopyUp.ensureWritable(location)) return VfsResult.Err(VfsError.READ_ONLY)
         val inode = location.upper?.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        return inode.backend.setExtendedAttribute(inode, name, value, mode)
+        val result = inode.backend.setExtendedAttribute(inode, name, value, mode)
+        if (result is VfsResult.Ok) refreshMetadata(location, overlayInode)
+        return result
     }
 
     internal fun removeExtendedAttribute(
         location: OverlayLocation,
+        overlayInode: Inode,
         name: ExtendedAttributeName,
     ): VfsResult<Unit> {
         if (!OverlayCopyUp.ensureWritable(location)) return VfsResult.Err(VfsError.READ_ONLY)
         val inode = location.upper?.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        return inode.backend.removeExtendedAttribute(inode, name)
+        val result = inode.backend.removeExtendedAttribute(inode, name)
+        if (result is VfsResult.Ok) refreshMetadata(location, overlayInode)
+        return result
     }
 
     internal fun link(location: OverlayLocation): VfsResult<VfsPathname> {

@@ -19,11 +19,14 @@ class Inode internal constructor(
 
     fun metadata(): InodeMetadata = lock.withLock { currentMetadata }
 
-    internal fun updateMetadata(update: (InodeMetadata) -> InodeMetadata) {
+    internal fun updateMetadata(
+        timestamps: InodeTimestampUpdate = InodeTimestampEvent.STATUS_CHANGED,
+        update: (InodeMetadata) -> InodeMetadata = { it },
+    ) {
         var shouldEvict = false
         lock.withLock {
             if (!evicted) {
-                currentMetadata = update(currentMetadata)
+                currentMetadata = updateMetadataLocked(timestamps, update)
                 if (currentMetadata.linkCount == 0u && openReferences == 0) {
                     evicted = true
                     shouldEvict = true
@@ -80,6 +83,7 @@ class Inode internal constructor(
             extendedAttributes = it
         }
         destination[name] = value.copyOf()
+        currentMetadata = updateMetadataLocked(InodeTimestampEvent.STATUS_CHANGED)
         VfsResult.Ok(Unit)
     }
 
@@ -90,8 +94,20 @@ class Inode internal constructor(
                 return@withLock VfsResult.Err(VfsError.NO_DATA)
             }
             if (attributes.isEmpty()) extendedAttributes = null
+            currentMetadata = updateMetadataLocked(InodeTimestampEvent.STATUS_CHANGED)
             VfsResult.Ok(Unit)
         }
+
+    private fun updateMetadataLocked(
+        timestamps: InodeTimestampUpdate,
+        update: (InodeMetadata) -> InodeMetadata = { it },
+    ): InodeMetadata {
+        val metadata = update(currentMetadata)
+        if (!timestamps.requiresCurrentTime) return metadata
+        val updatedTimestamps = timestamps.apply(metadata.timestamps, VfsTimestamp.now())
+        return if (updatedTimestamps == metadata.timestamps) metadata
+        else metadata.copy(timestamps = updatedTimestamps)
+    }
 
     internal fun acquireOpenReference(): Boolean = lock.withLock {
         if (evicted) {

@@ -141,8 +141,10 @@ private fun open(
         directoryOnly = flags and OpenFlags.O_DIRECTORY != 0,
         followFinalSymlink = flags and OpenFlags.O_NOFOLLOW == 0,
         nonBlocking = flags and OpenFlags.O_NONBLOCK != 0,
+        noAtime = !pathOnly && flags and OpenFlags.O_NOATIME != 0,
         createUid = process.fsuid.toUInt(),
         createGid = process.fsgid.toUInt(),
+        privileged = process.euid == 0,
     )
     val opened = if (directory == null) {
         FileSystemManager.vfs.open(context, vfsPathname, options)
@@ -272,7 +274,7 @@ internal fun truncate(regs: PtraceRegisters, process: Process): Long {
     if (inode.type == InodeType.DIRECTORY) return errno(Errno.EISDIR)
     if (MountFlag.READ_ONLY in path.mount.flags) return errno(Errno.EROFS)
     if (!process.mayWrite(inode.metadata())) return errno(Errno.EACCES)
-    return when (val result = FileSystemManager.vfs.resize(path, size)) {
+    return when (val result = FileSystemManager.vfs.resize(path.mount, inode, size)) {
         is VfsResult.Ok -> 0L
         is VfsResult.Err -> errno(result.error.errno)
     }
@@ -286,7 +288,7 @@ internal fun ftruncate(regs: PtraceRegisters, process: Process): Long {
     return try {
         if (file.inode.type != InodeType.REGULAR) return errno(Errno.EINVAL)
         if (!file.access.canWrite) return errno(Errno.EBADF)
-        when (val result = FileSystemManager.vfs.resize(file.path, size)) {
+        when (val result = FileSystemManager.vfs.resize(file.path.mount, file.inode, size)) {
             is VfsResult.Ok -> 0L
             is VfsResult.Err -> errno(result.error.errno)
         }
@@ -319,7 +321,13 @@ internal fun fallocate(regs: PtraceRegisters, process: Process): Long {
             InodeType.REGULAR -> Unit
             else -> return errno(Errno.ENODEV)
         }
-        when (val result = FileSystemManager.vfs.allocate(file.path, offset, length, mode)) {
+        when (val result = FileSystemManager.vfs.allocate(
+            file.path.mount,
+            file.inode,
+            offset,
+            length,
+            mode,
+        )) {
             is VfsResult.Ok -> 0L
             is VfsResult.Err -> errno(result.error.errno)
         }

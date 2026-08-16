@@ -37,12 +37,20 @@ internal data class DiskInode(
             val gid = if (extended) image.u32(location + 28uL).toUInt() else {
                 image.u16(location + 26uL).toUInt()
             }
+            val modificationTime = if (extended) {
+                val nanoseconds = image.u32(location + 40uL)
+                if (nanoseconds >= VfsTimestamp.NANOSECONDS_PER_SECOND.toULong()) return null
+                VfsTimestamp(image.u64(location + 32uL).toLong(), nanoseconds.toUInt())
+            } else {
+                header.buildTime
+            }
             val metadata = InodeMetadata(
                 mode = FileMode(mode.toUInt()),
                 size = size,
                 linkCount = links,
                 uid = uid,
                 gid = gid,
+                timestamps = InodeTimestamps.fromModificationTime(modificationTime),
             )
             return DiskInode(
                 location,
@@ -88,6 +96,7 @@ internal data class Header(
     val blockSize: Int,
     val rootNid: ULong,
     val packedNid: ULong,
+    val buildTime: VfsTimestamp,
     private val metadataStart: ULong,
 ) {
     companion object {
@@ -129,10 +138,13 @@ internal data class Header(
             ) return null
             val packedNid = image.u64(offset + 96uL)
             if (packedNid == 0uL) return null
+            val buildTimeNanoseconds = image.u32(offset + 32uL)
+            if (buildTimeNanoseconds >= VfsTimestamp.NANOSECONDS_PER_SECOND.toULong()) return null
             return Header(
                 blockSize,
                 image.u16(offset + 14uL).toULong(),
                 packedNid,
+                VfsTimestamp(image.u64(offset + 24uL).toLong(), buildTimeNanoseconds.toUInt()),
                 image.u32(offset + 40uL) * blockSize.toULong(),
             )
         }

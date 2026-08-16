@@ -132,6 +132,13 @@ internal fun fcntl(regs: PtraceRegisters, process: Process): Long {
         F_SETFL -> {
             val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
             try {
+                val enablesNoAtime = argument.toInt() and OpenFlags.O_NOATIME != 0 &&
+                    file.getStatusFlags() and OpenFlags.O_NOATIME == 0
+                if (enablesNoAtime && process.euid != 0 &&
+                    process.fsuid.toUInt() != file.inode.metadata().uid
+                ) {
+                    return errno(Errno.EPERM)
+                }
                 file.setStatusFlags(argument.toInt())
                 0L
             } finally {

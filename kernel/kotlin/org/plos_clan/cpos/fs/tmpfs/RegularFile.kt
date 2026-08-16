@@ -33,7 +33,9 @@ internal class TmpfsRegularFile(
             true
         }
         if (attached) {
-            inode.updateMetadata { it.copy(size = size.toULong()) }
+            inode.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
+                it.copy(size = size.toULong())
+            }
         }
         return attached
     }
@@ -42,7 +44,8 @@ internal class TmpfsRegularFile(
         VfsResult.Ok(TmpfsRegularHandle(this))
 
     override fun resize(inode: Inode, size: ULong): VfsResult<Unit> = lock.withLock {
-        if (size < inode.metadata().size) {
+        val previousSize = inode.metadata().size
+        if (size < previousSize) {
             val pageSize = fileSystem.pageSize.toULong()
             val firstRemovedPage = if (size == 0uL) 0uL else (size - 1uL) / pageSize + 1uL
             var removedPages = 0uL
@@ -65,7 +68,7 @@ internal class TmpfsRegularFile(
             }
             contentSize = minOf(contentSize.toULong(), size).toInt()
         }
-        inode.updateMetadata { it.copy(size = size) }
+        inode.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) { it.copy(size = size) }
         VfsResult.Ok(Unit)
     }
 
@@ -96,7 +99,9 @@ internal class TmpfsRegularFile(
         }
         val missingPages = requestedPages - existingPages
         if (missingPages == 0uL) {
-            if (!mode.keepsSize) inode.updateMetadata { it.copy(size = maxOf(it.size, end)) }
+            inode.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
+                if (mode.keepsSize) it else it.copy(size = maxOf(it.size, end))
+            }
             return@withLock VfsResult.Ok(Unit)
         }
         if (missingPages > Int.MAX_VALUE.toULong() ||
@@ -133,7 +138,9 @@ internal class TmpfsRegularFile(
             fileSystem.release(reservedBytes)
             return@withLock VfsResult.Err(VfsError.NO_MEMORY)
         }
-        if (!mode.keepsSize) inode.updateMetadata { it.copy(size = maxOf(it.size, end)) }
+        inode.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
+            if (mode.keepsSize) it else it.copy(size = maxOf(it.size, end))
+        }
         VfsResult.Ok(Unit)
     }
 
@@ -206,6 +213,7 @@ internal class TmpfsRegularFile(
         position: FilePosition,
         append: Boolean,
     ): IoResult = lock.withLock {
+        if (count == 0) return@withLock IoResult.success(0)
         var cursor = if (append) inode.metadata().size else position.value.toULong()
         if (position.value < 0 || cursor > Long.MAX_VALUE.toULong() ||
             count.toLong() > Long.MAX_VALUE - cursor.toLong()
@@ -246,7 +254,9 @@ internal class TmpfsRegularFile(
             return@withLock IoResult.failure(if (noSpace) VfsError.NO_SPACE else VfsError.FAULT)
         }
         position.value = cursor.toLong()
-        inode.updateMetadata { it.copy(size = maxOf(it.size, cursor)) }
+        inode.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
+            it.copy(size = maxOf(it.size, cursor))
+        }
         IoResult.success(copied)
     }
 

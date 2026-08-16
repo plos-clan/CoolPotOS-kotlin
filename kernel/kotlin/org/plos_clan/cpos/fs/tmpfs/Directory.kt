@@ -33,8 +33,9 @@ internal class TmpfsDirectory(
             }
             val inode = fileSystem.newNode(directory.superBlock, node, directory)
             children[name] = inode
-            if (node.kind == NodeKind.Directory) {
-                directory.updateMetadata { it.copy(linkCount = it.linkCount + 1u) }
+            directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
+                if (node.kind == NodeKind.Directory) it.copy(linkCount = it.linkCount + 1u)
+                else it
             }
             VfsResult.Ok(inode)
         }
@@ -52,6 +53,7 @@ internal class TmpfsDirectory(
                 }
                 children[name] = target
                 target.updateMetadata { it.copy(linkCount = links + 1u) }
+                directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED)
                 VfsResult.Ok(Unit)
             }
         }
@@ -97,7 +99,9 @@ internal class TmpfsDirectory(
                 val child = inode.backend as? TmpfsDirectory
                     ?: return@withLock VfsResult.Err(VfsError.NOT_DIRECTORY)
                 if (!child.isEmpty()) return@withLock VfsResult.Err(VfsError.NOT_EMPTY)
-                directory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
+                directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
+                    it.copy(linkCount = it.linkCount - 1u)
+                }
                 child.parent = null
                 inode.updateMetadata { it.copy(linkCount = 0u) }
             } else {
@@ -105,6 +109,7 @@ internal class TmpfsDirectory(
                     return@withLock VfsResult.Err(VfsError.IS_DIRECTORY)
                 }
                 inode.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
+                directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED)
             }
             children.remove(name)
             VfsResult.Ok(Unit)
@@ -129,6 +134,7 @@ internal class TmpfsDirectory(
         if (index == path.lastIndex) {
             if (children.containsKey(name)) return@withLock false
             children[name] = fileSystem.newSpecialNode(directory.superBlock, backend, metadata)
+            directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED)
             return@withLock true
         }
 
@@ -142,7 +148,6 @@ internal class TmpfsDirectory(
                 parent = directory,
             )
             children[name] = child
-            directory.updateMetadata { it.copy(linkCount = it.linkCount + 1u) }
             created = true
         }
         val childDirectory = child.backend as? TmpfsDirectory ?: return@withLock false
@@ -155,9 +160,12 @@ internal class TmpfsDirectory(
         )
         if (!installed && created && childDirectory.isEmpty()) {
             children.remove(name)
-            directory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
             childDirectory.parent = null
             child.updateMetadata { it.copy(linkCount = 0u) }
+        } else if (installed && created) {
+            directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
+                it.copy(linkCount = it.linkCount + 1u)
+            }
         }
         installed
     }
@@ -174,6 +182,7 @@ internal class TmpfsDirectory(
             if (!matches(child.backend)) return@withLock false
             children.remove(name)
             child.updateMetadata { it.copy(linkCount = 0u) }
+            directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED)
             return@withLock true
         }
 
@@ -186,7 +195,9 @@ internal class TmpfsDirectory(
         )
         if (removed && childDirectory.automatic && childDirectory.isEmpty()) {
             children.remove(name)
-            directory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
+            directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
+                it.copy(linkCount = it.linkCount - 1u)
+            }
             childDirectory.parent = null
             child.updateMetadata { it.copy(linkCount = 0u) }
         }
@@ -243,16 +254,25 @@ internal class TmpfsDirectory(
                 if (targetIsDirectory) {
                     (exchanged.backend as TmpfsDirectory).parent = sourceDirectory
                 }
-                if (sourceIsDirectory != targetIsDirectory) {
-                    if (sourceIsDirectory) {
-                        sourceDirectory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
-                        targetDirectory.updateMetadata { it.copy(linkCount = it.linkCount + 1u) }
-                    } else {
-                        sourceDirectory.updateMetadata { it.copy(linkCount = it.linkCount + 1u) }
-                        targetDirectory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
+                sourceDirectory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
+                    when {
+                        sourceIsDirectory == targetIsDirectory -> it
+                        sourceIsDirectory -> it.copy(linkCount = it.linkCount - 1u)
+                        else -> it.copy(linkCount = it.linkCount + 1u)
                     }
                 }
+                targetDirectory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
+                    when {
+                        sourceIsDirectory == targetIsDirectory -> it
+                        sourceIsDirectory -> it.copy(linkCount = it.linkCount + 1u)
+                        else -> it.copy(linkCount = it.linkCount - 1u)
+                    }
+                }
+            } else {
+                sourceDirectory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED)
             }
+            source.updateMetadata()
+            exchanged.updateMetadata()
             return VfsResult.Ok(Unit)
         }
 
@@ -276,20 +296,39 @@ internal class TmpfsDirectory(
 
         children.remove(sourceName)
         target.children[targetName] = source
-        if (source.type == InodeType.DIRECTORY && this !== target) {
+        val movesDirectory = source.type == InodeType.DIRECTORY && this !== target
+        if (movesDirectory) {
             (source.backend as TmpfsDirectory).parent = targetDirectory
-            sourceDirectory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
-            targetDirectory.updateMetadata { it.copy(linkCount = it.linkCount + 1u) }
         }
         if (replaced != null) {
             if (replaced.type == InodeType.DIRECTORY) {
-                targetDirectory.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
                 (replaced.backend as TmpfsDirectory).parent = null
                 replaced.updateMetadata { it.copy(linkCount = 0u) }
             } else {
                 replaced.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
             }
         }
+        if (this === target) {
+            sourceDirectory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
+                if (replaced?.type == InodeType.DIRECTORY) {
+                    it.copy(linkCount = it.linkCount - 1u)
+                } else {
+                    it
+                }
+            }
+        } else {
+            sourceDirectory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
+                if (movesDirectory) it.copy(linkCount = it.linkCount - 1u) else it
+            }
+            targetDirectory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
+                if (movesDirectory && replaced == null) {
+                    it.copy(linkCount = it.linkCount + 1u)
+                } else {
+                    it
+                }
+            }
+        }
+        source.updateMetadata()
         return VfsResult.Ok(Unit)
     }
 

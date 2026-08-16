@@ -134,6 +134,7 @@ private enum class LinuxSyscall(
     FACCESSAT(269, ::faccessAt),
     PSELECT6(270, ::pselect6),
     SET_ROBUST_LIST(273, ::setRobustList),
+    UTIMENSAT(280, ::utimensAt),
     FALLOCATE(285, ::fallocate),
     PIPE2(293, ::pipe2),
     PRLIMIT64(302, ::prlimit64),

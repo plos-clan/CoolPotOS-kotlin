@@ -26,20 +26,21 @@ class OpenFileDescription private constructor(
     val path: VfsPath,
     val inode: Inode,
     val access: AccessMode,
-    append: Boolean,
+    initialStatusFlags: Int,
     private val backend: OpenFileBackend,
 ) {
     private val references = AtomicInt(1)
     private val positionLock = IrqSpinLock()
     private val position = FilePosition()
     private val positionlessBackend = backend as? PositionlessOpenFileBackend
-    private val statusFlags = AtomicInt(if (append) OpenFlags.O_APPEND else 0)
+    private val statusFlags = AtomicInt(initialStatusFlags)
 
     companion object {
         internal fun open(
             path: VfsPath,
             inode: Inode,
             options: OpenOptions,
+            truncate: Boolean = options.truncate,
         ): VfsResult<OpenFileDescription> {
             if (!path.mount.retain()) return VfsResult.Err(VfsError.NOT_FOUND)
             if (!inode.acquireOpenReference()) {
@@ -59,7 +60,7 @@ class OpenFileDescription private constructor(
                     }
                 }
             }
-            if (options.truncate && inode.type == InodeType.REGULAR) {
+            if (truncate && inode.type == InodeType.REGULAR) {
                 val result = (inode.backend as? RegularFileBackend)?.resize(inode, 0uL)
                     ?: VfsResult.Err(VfsError.INVALID_ARGUMENT)
                 if (result is VfsResult.Err) {
@@ -70,7 +71,15 @@ class OpenFileDescription private constructor(
                 }
             }
             return VfsResult.Ok(
-                OpenFileDescription(path, inode, options.access, options.append, backend),
+                OpenFileDescription(
+                    path,
+                    inode,
+                    options.access,
+                    (if (options.append) OpenFlags.O_APPEND else 0) or
+                        (if (options.nonBlocking) OpenFlags.O_NONBLOCK else 0) or
+                        (if (options.noAtime) OpenFlags.O_NOATIME else 0),
+                    backend,
+                ),
             )
         }
     }
@@ -84,7 +93,13 @@ class OpenFileDescription private constructor(
     fun getStatusFlags(): Int = statusFlags.load()
 
     fun setStatusFlags(flags: Int) {
-        statusFlags.store(flags and (OpenFlags.O_APPEND or OpenFlags.O_NONBLOCK))
+        statusFlags.store(
+            flags and (OpenFlags.O_APPEND or OpenFlags.O_NONBLOCK or OpenFlags.O_NOATIME),
+        )
+    }
+
+    internal fun recordAccess() {
+        if (statusFlags.load() and OpenFlags.O_NOATIME == 0) path.mount.recordAccess(inode)
     }
 
     fun sync(dataOnly: Boolean): VfsResult<Unit> = when {
@@ -182,12 +197,14 @@ class OpenFileDescription private constructor(
         if (inode.type != InodeType.DIRECTORY) {
             return VfsResult.Err(VfsError.NOT_DIRECTORY)
         }
-        return positionLock.withLock {
+        val result = positionLock.withLock {
             if (references.load() == 0) {
                 return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
             }
             backend.iterate(inode, position, emit)
         }
+        if (result is VfsResult.Ok) recordAccess()
+        return result
     }
 
     fun ioctl(command: Int, args: UserMemory): Long = positionLock.withLock {
@@ -246,17 +263,20 @@ class OpenFileDescription private constructor(
         if (positionless == null) {
             if (filePosition !== position) {
                 return backend.read(inode, destination, offset, count, filePosition)
+                    .recordAccess(count)
             }
             return positionLock.withLock {
                 backend.read(inode, destination, offset, count, filePosition)
-            }
+            }.recordAccess(count)
         }
         val waitable = positionless as? WaitableOpenFileBackend
-            ?: return positionless.read(inode, destination, offset, count)
+            ?: return positionless.read(inode, destination, offset, count).recordAccess(count)
         while (true) {
             val mode = currentIoMode()
             val result = waitable.read(inode, destination, offset, count)
-            if (result.error != VfsError.WOULD_BLOCK || mode == IoMode.NON_BLOCKING) return result
+            if (result.error != VfsError.WOULD_BLOCK || mode == IoMode.NON_BLOCKING) {
+                return result.recordAccess(count)
+            }
             waitable.await(IoEvent.READABLE, count)
         }
     }
@@ -320,4 +340,9 @@ class OpenFileDescription private constructor(
     private fun currentIoMode(): IoMode =
         if (statusFlags.load() and OpenFlags.O_NONBLOCK == 0) IoMode.BLOCKING
         else IoMode.NON_BLOCKING
+
+    private fun IoResult.recordAccess(requested: Int): IoResult {
+        if (isSuccess && requested != 0) this@OpenFileDescription.recordAccess()
+        return this
+    }
 }

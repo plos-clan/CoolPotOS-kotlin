@@ -57,6 +57,11 @@ internal object OverlayCopyUp {
             location.upper = null
             return false
         }
+        upperInode.updateMetadata(InodeTimestampEvent.NONE) { current ->
+            current.copy(
+                timestamps = location.overlayInode?.metadata()?.timestamps ?: metadata.timestamps,
+            )
+        }
         return true
     }
 
@@ -154,6 +159,11 @@ internal object OverlayCopyUp {
         if (!copyExtendedAttributes(lowerInode, inode)) {
             backend.remove(parentInode, name, inode, RemoveMode.DIRECTORY)
             return null
+        }
+        inode.updateMetadata(InodeTimestampEvent.NONE) { current ->
+            current.copy(
+                timestamps = location.overlayInode?.metadata()?.timestamps ?: metadata.timestamps,
+            )
         }
         return VfsPath(upperParent.mount, upperParent.dentry.cacheChild(name, inode)).also {
             location.upper = it

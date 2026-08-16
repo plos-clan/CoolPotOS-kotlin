@@ -35,6 +35,14 @@ abstract class FileSystemType(
 interface SuperBlockBackend {
     fun createRoot(superBlock: SuperBlock): Inode
 
+    fun updateTimestamps(
+        inode: Inode,
+        update: InodeTimestampUpdate,
+    ): VfsResult<Unit> {
+        inode.updateMetadata(update)
+        return VfsResult.Ok(Unit)
+    }
+
     fun sync(): VfsResult<Unit> = VfsResult.Ok(Unit)
 
     fun release() {}
@@ -58,6 +66,9 @@ interface InodeBackend {
     fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend>
 
     fun setMode(inode: Inode, mode: FileMode): VfsResult<Unit> =
+        VfsResult.Err(VfsError.NOT_SUPPORTED)
+
+    fun setOwner(inode: Inode, uid: UInt?, gid: UInt?): VfsResult<Unit> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
 
     fun sync(inode: Inode, dataOnly: Boolean): VfsResult<Unit> =
@@ -94,7 +105,14 @@ interface InodeBackend {
 
 interface MutableInodeBackend : InodeBackend {
     override fun setMode(inode: Inode, mode: FileMode): VfsResult<Unit> {
-        inode.updateMetadata { it.copy(mode = mode) }
+        inode.updateMetadata(InodeTimestampEvent.STATUS_CHANGED) { it.copy(mode = mode) }
+        return VfsResult.Ok(Unit)
+    }
+
+    override fun setOwner(inode: Inode, uid: UInt?, gid: UInt?): VfsResult<Unit> {
+        inode.updateMetadata(InodeTimestampEvent.STATUS_CHANGED) {
+            it.copy(uid = uid ?: it.uid, gid = gid ?: it.gid)
+        }
         return VfsResult.Ok(Unit)
     }
 

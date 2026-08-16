@@ -9,10 +9,12 @@ import org.plos_clan.cpos.fs.InodeType
 import org.plos_clan.cpos.fs.MountFlag
 import org.plos_clan.cpos.fs.MountFlags
 import org.plos_clan.cpos.fs.VfsPath
+import org.plos_clan.cpos.fs.VfsTimestamp
 import org.plos_clan.cpos.syscall.FsConstants.DIRENT64_ALIGNMENT
 import org.plos_clan.cpos.syscall.FsConstants.DIRENT64_HEADER_SIZE
 import org.plos_clan.cpos.syscall.FsConstants.STATFS_SIZE
 import org.plos_clan.cpos.syscall.FsConstants.STATX_SIZE
+import org.plos_clan.cpos.syscall.FsConstants.STATX_BTIME
 import org.plos_clan.cpos.syscall.FsConstants.STATX_SUPPORTED_FIELDS
 import org.plos_clan.cpos.syscall.FsConstants.STAT_BLKSIZE
 import org.plos_clan.cpos.syscall.FsConstants.STAT_SIZE
@@ -83,6 +85,12 @@ internal class LinuxStat(private val status: LinuxFileStatus) : NativeStruct {
             writeU64(48, status.metadata.size)
             writeU64(56, STAT_BLKSIZE)
             writeU64(64, status.blocks)
+            writeU64(72, status.metadata.timestamps.accessTime.seconds.toULong())
+            writeU64(80, status.metadata.timestamps.accessTime.nanoseconds.toULong())
+            writeU64(88, status.metadata.timestamps.modificationTime.seconds.toULong())
+            writeU64(96, status.metadata.timestamps.modificationTime.nanoseconds.toULong())
+            writeU64(104, status.metadata.timestamps.changeTime.seconds.toULong())
+            writeU64(112, status.metadata.timestamps.changeTime.nanoseconds.toULong())
         }
     }
 }
@@ -90,7 +98,8 @@ internal class LinuxStat(private val status: LinuxFileStatus) : NativeStruct {
 internal class LinuxStatx(private val status: LinuxFileStatus) : NativeStruct {
     override fun toNativeBytes(): ByteArray = ByteArray(STATX_SIZE).also { buffer ->
         LittleEndianBuffer(buffer).apply {
-            writeU32(0, STATX_SUPPORTED_FIELDS)
+            val birthTime = status.metadata.timestamps.birthTime
+            writeU32(0, STATX_SUPPORTED_FIELDS or if (birthTime == null) 0u else STATX_BTIME)
             writeU32(4, STAT_BLKSIZE.toUInt())
             writeU32(16, status.metadata.linkCount)
             writeU32(20, status.metadata.uid)
@@ -99,9 +108,18 @@ internal class LinuxStatx(private val status: LinuxFileStatus) : NativeStruct {
             writeU64(32, status.inodeId)
             writeU64(40, status.metadata.size)
             writeU64(48, status.blocks)
+            writeTimestamp(64, status.metadata.timestamps.accessTime)
+            birthTime?.let { writeTimestamp(80, it) }
+            writeTimestamp(96, status.metadata.timestamps.changeTime)
+            writeTimestamp(112, status.metadata.timestamps.modificationTime)
             writeU32(128, status.deviceMajor)
             writeU32(132, status.deviceMinor)
         }
+    }
+
+    private fun LittleEndianBuffer.writeTimestamp(offset: Int, timestamp: VfsTimestamp) {
+        writeU64(offset, timestamp.seconds.toULong())
+        writeU32(offset + Long.SIZE_BYTES, timestamp.nanoseconds)
     }
 }
 

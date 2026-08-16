@@ -75,7 +75,7 @@ class Vfs(maxSymlinkDepth: Int = 40) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
 
-        val path = when (options.create) {
+        val opened = when (options.create) {
             CreateDisposition.OPEN_EXISTING -> when (
                 val result = resolveAt(
                     context,
@@ -84,7 +84,7 @@ class Vfs(maxSymlinkDepth: Int = 40) {
                     options.followFinalSymlink,
                 )
             ) {
-                is VfsResult.Ok -> result.value
+                is VfsResult.Ok -> OpenedPath(result.value, created = false)
                 is VfsResult.Err -> return result
             }
 
@@ -96,7 +96,11 @@ class Vfs(maxSymlinkDepth: Int = 40) {
             }
         }
 
+        val path = opened.path
         val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        if (options.noAtime && !options.privileged && options.createUid != inode.metadata().uid) {
+            return VfsResult.Err(VfsError.NOT_PERMITTED)
+        }
         if (inode.type == InodeType.SYMLINK) {
             return VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
         }
@@ -116,21 +120,26 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         ) {
             return VfsResult.Err(VfsError.PERMISSION_DENIED)
         }
-        return OpenFileDescription.open(path, inode, options)
+        return OpenFileDescription.open(
+            path,
+            inode,
+            options,
+            truncate = options.truncate && !opened.created,
+        )
     }
 
-    fun resize(path: VfsPath, size: ULong): VfsResult<Unit> {
-        if (MountFlag.READ_ONLY in path.mount.flags) {
+    fun resize(mount: Mount, inode: Inode, size: ULong): VfsResult<Unit> {
+        if (MountFlag.READ_ONLY in mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = inode.backend as? RegularFileBackend
             ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         return backend.resize(inode, size)
     }
 
     fun allocate(
-        path: VfsPath,
+        mount: Mount,
+        inode: Inode,
         offset: ULong,
         length: ULong,
         mode: FileAllocationMode,
@@ -138,21 +147,38 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         if (length == 0uL || offset > ULong.MAX_VALUE - length) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
-        if (MountFlag.READ_ONLY in path.mount.flags) {
+        if (MountFlag.READ_ONLY in mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = inode.backend as? RegularFileBackend
             ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         return backend.allocate(inode, offset, length, mode)
     }
 
-    fun setMode(path: VfsPath, mode: FileMode): VfsResult<Unit> {
-        if (MountFlag.READ_ONLY in path.mount.flags) {
+    fun setMode(mount: Mount, inode: Inode, mode: FileMode): VfsResult<Unit> {
+        if (MountFlag.READ_ONLY in mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         return inode.backend.setMode(inode, mode)
+    }
+
+    fun setOwner(mount: Mount, inode: Inode, uid: UInt?, gid: UInt?): VfsResult<Unit> {
+        if (MountFlag.READ_ONLY in mount.flags) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
+        return inode.backend.setOwner(inode, uid, gid)
+    }
+
+    fun updateTimestamps(
+        mount: Mount,
+        inode: Inode,
+        update: InodeTimestampSet,
+    ): VfsResult<Unit> {
+        if (update.omitsBoth) return VfsResult.Ok(Unit)
+        if (MountFlag.READ_ONLY in mount.flags) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
+        return inode.superBlock.backend.updateTimestamps(inode, update)
     }
 
     fun getExtendedAttribute(

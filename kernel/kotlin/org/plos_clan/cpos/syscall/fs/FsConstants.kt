@@ -18,6 +18,8 @@ internal object FsConstants {
     const val AT_STATX_FORCE_SYNC = 0x2000
     const val AT_STATX_DONT_SYNC = 0x4000
     const val AT_STATX_SYNC_TYPE = AT_STATX_FORCE_SYNC or AT_STATX_DONT_SYNC
+    const val UTIME_NOW = 1_073_741_823L
+    const val UTIME_OMIT = 1_073_741_822L
     const val O_CLOEXEC = 0x0008_0000uL
     const val O_NONBLOCK = 0x0000_0800uL
     const val POLL_FD_SIZE = 8
@@ -68,7 +70,8 @@ internal object FsConstants {
 
     const val XATTR_CREATE = 0x1
     const val XATTR_REPLACE = 0x2
-    const val STATX_SUPPORTED_FIELDS = 0x71fu
+    const val STATX_SUPPORTED_FIELDS = 0x7ffu
+    const val STATX_BTIME = 0x800u
     const val STATX_RESERVED = 0x8000_0000u
 
     const val ST_RDONLY = 0x1uL

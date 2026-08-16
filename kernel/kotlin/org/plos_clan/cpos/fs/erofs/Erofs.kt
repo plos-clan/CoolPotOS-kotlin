@@ -45,6 +45,11 @@ private class ErofsInstance private constructor(
     override fun createRoot(superBlock: SuperBlock): Inode =
         inode(superBlock, header.rootNid) ?: error("EROFS root inode is invalid")
 
+    override fun updateTimestamps(
+        inode: Inode,
+        update: InodeTimestampUpdate,
+    ): VfsResult<Unit> = VfsResult.Err(VfsError.READ_ONLY)
+
     private fun inode(superBlock: SuperBlock, nid: ULong): Inode? {
         inodeLock.withLock { inodeCache[nid] }?.let { return it }
         val node = readNode(nid) ?: return null

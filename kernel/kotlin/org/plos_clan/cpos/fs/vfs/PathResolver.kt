@@ -168,7 +168,7 @@ internal class VfsPathResolver(
             val symlink = inode.backend as? SymlinkBackend
                 ?: return VfsResult.Err(VfsError.NOT_SUPPORTED)
             val target = when (val result = symlink.readLink(inode)) {
-                is VfsResult.Ok -> result.value
+                is VfsResult.Ok -> result.value.also { next.mount.recordAccess(inode) }
                 is VfsResult.Err -> return result
             }
             val targetComponents = when (val result = target.components()) {

@@ -11,11 +11,12 @@ class Mount internal constructor(
     val superBlock: SuperBlock,
     val source: String,
     val root: Dentry = superBlock.root,
-    val flags: MountFlags = MountFlags.NONE,
+    flags: MountFlags = MountFlags.NONE,
     attachment: VfsPath? = null,
 ) {
     private val references = AtomicInt(1)
     private val attachmentReference = AtomicReference(attachment)
+    val flags = flags.withDefaultAtimePolicy()
 
     init {
         require(root.superBlock === superBlock)
@@ -58,6 +59,22 @@ class Mount internal constructor(
         var current: Mount? = this
         while (current != null && current !== ancestor) current = current.attachment?.mount
         return current === ancestor
+    }
+
+    internal fun recordAccess(inode: Inode) {
+        val update = when {
+            MountFlag.READ_ONLY in flags || MountFlag.NO_ATIME in flags ->
+                InodeTimestampEvent.NONE
+            inode.type == InodeType.DIRECTORY && MountFlag.NO_DIRECTORY_ATIME in flags ->
+                InodeTimestampEvent.NONE
+            inode.type != InodeType.REGULAR && inode.type != InodeType.DIRECTORY &&
+                inode.type != InodeType.SYMLINK -> InodeTimestampEvent.NONE
+            MountFlag.STRICT_ATIME in flags -> InodeTimestampEvent.ACCESSED
+            else -> InodeTimestampEvent.RELATIVE_ACCESS
+        }
+        if (update != InodeTimestampEvent.NONE) {
+            superBlock.backend.updateTimestamps(inode, update)
+        }
     }
 
     private fun releaseResources() {

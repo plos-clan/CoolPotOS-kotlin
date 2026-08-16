@@ -1,5 +1,10 @@
 package org.plos_clan.cpos.fs
 
+internal data class OpenedPath(
+    val path: VfsPath,
+    val created: Boolean,
+)
+
 internal class VfsNodeOperations(
     private val paths: VfsPathResolver,
 ) {
@@ -145,10 +150,10 @@ internal class VfsNodeOperations(
         if (MountFlag.READ_ONLY in parent.path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        val directory = parent.path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val backend = directory.backend as? DirectoryBackend
+        val parentInode = parent.path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val backend = parentInode.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val result = backend.link(directory, parent.name, sourceInode)
+        val result = backend.link(parentInode, parent.name, sourceInode)
         if (result is VfsResult.Ok) {
             parent.path.dentry.cacheChild(parent.name, sourceInode)
         }
@@ -258,12 +263,12 @@ internal class VfsNodeOperations(
         directory: VfsPath,
         pathname: VfsPathname,
         options: OpenOptions,
-    ): VfsResult<VfsPath> {
+    ): VfsResult<OpenedPath> {
         if (pathname.isRoot) {
             return if (options.create == CreateDisposition.CREATE_NEW) {
                 VfsResult.Err(VfsError.ALREADY_EXISTS)
             } else {
-                paths.resolveAt(context, directory, pathname, options.followFinalSymlink)
+                resolveExisting(context, directory, pathname, options.followFinalSymlink)
             }
         }
         val parent = when (val result = paths.resolveParent(context, directory, pathname)) {
@@ -274,7 +279,7 @@ internal class VfsNodeOperations(
             return if (options.create == CreateDisposition.CREATE_NEW) {
                 VfsResult.Err(VfsError.ALREADY_EXISTS)
             } else {
-                paths.resolveAt(context, directory, pathname, options.followFinalSymlink)
+                resolveExisting(context, directory, pathname, options.followFinalSymlink)
             }
         }
 
@@ -284,14 +289,9 @@ internal class VfsNodeOperations(
                     return VfsResult.Err(VfsError.ALREADY_EXISTS)
                 }
                 if (options.followFinalSymlink && existing.value.inode?.type == InodeType.SYMLINK) {
-                    return paths.resolveAt(
-                        context,
-                        directory,
-                        pathname,
-                        followFinalSymlink = true,
-                    )
+                    return resolveExisting(context, directory, pathname, followSymlink = true)
                 }
-                return existing
+                return VfsResult.Ok(OpenedPath(existing.value, created = false))
             }
             is VfsResult.Err -> if (existing.error != VfsError.NOT_FOUND) return existing
         }
@@ -301,8 +301,8 @@ internal class VfsNodeOperations(
         if (MountFlag.READ_ONLY in parent.path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        val directory = parent.path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val backend = directory.backend as? DirectoryBackend
+        val parentInode = parent.path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val backend = parentInode.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
         val node = NodeCreation(
             kind = NodeKind.Regular,
@@ -310,20 +310,37 @@ internal class VfsNodeOperations(
             uid = options.createUid,
             gid = options.createGid,
         )
-        val inode = when (val created = backend.create(directory, parent.name, node)) {
+        val inode = when (val created = backend.create(parentInode, parent.name, node)) {
             is VfsResult.Ok -> created.value
             is VfsResult.Err -> {
                 if (created.error == VfsError.ALREADY_EXISTS &&
                     options.create == CreateDisposition.OPEN_OR_CREATE
                 ) {
                     parent.path.dentry.invalidateNegativeChild(parent.name)
-                    return paths.lookupChild(context, parent.path, parent.name)
+                    return resolveExisting(
+                        context,
+                        directory,
+                        pathname,
+                        options.followFinalSymlink,
+                    )
                 }
                 return created
             }
         }
         val dentry = parent.path.dentry.cacheChild(parent.name, inode)
-        return VfsResult.Ok(VfsPath(parent.path.mount, dentry))
+        return VfsResult.Ok(OpenedPath(VfsPath(parent.path.mount, dentry), created = true))
+    }
+
+    private fun resolveExisting(
+        context: FileSystemContext,
+        directory: VfsPath,
+        pathname: VfsPathname,
+        followSymlink: Boolean,
+    ): VfsResult<OpenedPath> = when (
+        val result = paths.resolveAt(context, directory, pathname, followSymlink)
+    ) {
+        is VfsResult.Ok -> VfsResult.Ok(OpenedPath(result.value, created = false))
+        is VfsResult.Err -> result
     }
 
     private fun createChild(

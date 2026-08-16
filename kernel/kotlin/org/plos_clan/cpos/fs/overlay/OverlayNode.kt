@@ -34,6 +34,9 @@ internal interface OverlayNodeBackend : InodeBackend {
     override fun setMode(inode: Inode, mode: FileMode): VfsResult<Unit> =
         instance.setMode(location, inode, mode)
 
+    override fun setOwner(inode: Inode, uid: UInt?, gid: UInt?): VfsResult<Unit> =
+        instance.setOwner(location, inode, uid, gid)
+
     override fun sync(inode: Inode, dataOnly: Boolean): VfsResult<Unit> =
         instance.sync(location, dataOnly)
 
@@ -52,12 +55,12 @@ internal interface OverlayNodeBackend : InodeBackend {
         name: ExtendedAttributeName,
         value: ByteArray,
         mode: ExtendedAttributeMode,
-    ): VfsResult<Unit> = instance.setExtendedAttribute(location, name, value, mode)
+    ): VfsResult<Unit> = instance.setExtendedAttribute(location, inode, name, value, mode)
 
     override fun removeExtendedAttribute(
         inode: Inode,
         name: ExtendedAttributeName,
-    ): VfsResult<Unit> = instance.removeExtendedAttribute(location, name)
+    ): VfsResult<Unit> = instance.removeExtendedAttribute(location, inode, name)
 }
 
 internal class OverlayDirectoryBackend(
@@ -85,7 +88,9 @@ internal class OverlayDirectoryBackend(
     override fun link(directory: Inode, name: VfsName, target: Inode): VfsResult<Unit> {
         val source = (target.backend as? OverlayNodeBackend)?.location
             ?: return VfsResult.Err(VfsError.CROSS_DEVICE)
-        return instance.link(location, name, source, target)
+        return instance.link(location, name, source, target).also { result ->
+            if (result is VfsResult.Ok) instance.refreshMetadata(location, directory)
+        }
     }
     override fun rename(
         sourceDirectory: Inode,
@@ -191,7 +196,10 @@ internal class OverlayFileHandle(
         append: Boolean,
     ): IoResult =
         delegate.write(target, source, sourceOffset, count, position, append).also { result ->
-            if (result.isSuccess) inode.updateMetadata { it.copy(size = target.metadata().size) }
+            if (result.isSuccess) {
+                val metadata = target.metadata()
+                inode.updateMetadata(InodeTimestampEvent.NONE) { metadata }
+            }
         }
 
     override fun release() = delegate.release()

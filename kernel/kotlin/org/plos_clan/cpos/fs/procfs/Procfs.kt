@@ -12,6 +12,8 @@ import org.plos_clan.cpos.fs.FileSystemType
 import org.plos_clan.cpos.fs.Inode
 import org.plos_clan.cpos.fs.InodeId
 import org.plos_clan.cpos.fs.InodeMetadata
+import org.plos_clan.cpos.fs.InodeTimestampEvent
+import org.plos_clan.cpos.fs.InodeTimestamps
 import org.plos_clan.cpos.fs.InodeType
 import org.plos_clan.cpos.fs.IoResult
 import org.plos_clan.cpos.fs.OpenFileBackend
@@ -24,6 +26,7 @@ import org.plos_clan.cpos.fs.VfsError
 import org.plos_clan.cpos.fs.VfsName
 import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsResult
+import org.plos_clan.cpos.fs.VfsTimestamp
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.Process
@@ -152,6 +155,7 @@ internal class ProcfsInstance : SuperBlockBackend {
             linkCount = 2u,
             uid = owner?.euid?.toUInt() ?: 0u,
             gid = owner?.egid?.toUInt() ?: 0u,
+            timestamps = InodeTimestamps.fromModificationTime(VfsTimestamp.now()),
         ),
     )
 
@@ -170,6 +174,7 @@ internal class ProcfsInstance : SuperBlockBackend {
             mode = FileMode(mode),
             uid = owner?.euid?.toUInt() ?: 0u,
             gid = owner?.egid?.toUInt() ?: 0u,
+            timestamps = InodeTimestamps.fromModificationTime(VfsTimestamp.now()),
         ),
     )
 
@@ -187,6 +192,7 @@ internal class ProcfsInstance : SuperBlockBackend {
             mode = FileMode(mode),
             uid = owner?.euid?.toUInt() ?: 0u,
             gid = owner?.egid?.toUInt() ?: 0u,
+            timestamps = InodeTimestamps.fromModificationTime(VfsTimestamp.now()),
         ),
     )
 
@@ -314,8 +320,12 @@ private class ProcTextFile(
 ) : RegularFileBackend() {
 
     override fun resize(inode: Inode, size: ULong): VfsResult<Unit> =
-        if (write != null && size == 0uL) VfsResult.Ok(Unit)
-        else VfsResult.Err(VfsError.NOT_SUPPORTED)
+        if (write != null && size == 0uL) {
+            inode.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED)
+            VfsResult.Ok(Unit)
+        } else {
+            VfsResult.Err(VfsError.NOT_SUPPORTED)
+        }
 
     override fun open(
         inode: Inode,
@@ -381,6 +391,7 @@ private class ProcTextHandle(
         return when (val result = update(input)) {
             is VfsResult.Ok -> {
                 position.value = count.toLong()
+                inode.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED)
                 IoResult.success(count)
             }
             is VfsResult.Err -> IoResult.failure(result.error)
