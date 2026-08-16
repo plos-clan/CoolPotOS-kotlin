@@ -10,7 +10,6 @@ import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsResult
 import org.plos_clan.cpos.mem.AddressSpace
 import org.plos_clan.cpos.mem.ByteArrayBuffer
-import org.plos_clan.cpos.mem.FileRegionBacking
 import org.plos_clan.cpos.mem.KernelPageDirectory
 import org.plos_clan.cpos.mem.MEMORY_REGION_EXECUTABLE
 import org.plos_clan.cpos.mem.MEMORY_REGION_READABLE
@@ -19,6 +18,9 @@ import org.plos_clan.cpos.mem.MemoryRegion
 import org.plos_clan.cpos.mem.MemoryRegionBacking
 import org.plos_clan.cpos.mem.MemoryRegionType
 import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
+import org.plos_clan.cpos.module.ElfLayout.checkedAdd
+import org.plos_clan.cpos.module.ElfLayout.fitsInFile
+import org.plos_clan.cpos.module.ElfLayout.isPowerOfTwo
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.LittleEndianBuffer
@@ -41,7 +43,6 @@ private const val PROGRAM_TYPE_PHDR = 6u
 private const val PROGRAM_FLAG_EXECUTABLE = 0x1u
 private const val PROGRAM_FLAG_WRITABLE = 0x2u
 private const val PROGRAM_FLAG_READABLE = 0x4u
-private const val EIO = 5
 
 const val DEFAULT_INTERPRETER_LOAD_BIAS = 0x0000_1000_0000_0000uL
 
@@ -424,97 +425,3 @@ object ElfLoader {
         return data
     }
 }
-
-class ElfBacking(
-    file: OpenFileDescription,
-    private val segments: List<LoadSegment>,
-) : FileRegionBacking(file) {
-    override val identity: Any = ElfPageCacheIdentity(
-        file.cacheSource?.identity ?: file,
-        segments,
-    )
-
-    override fun read(offset: ULong, destination: ByteArray): Int {
-        val end = checkedAdd(offset, destination.size.toULong()) ?: return -EIO
-        for (segment in segments) {
-            val fileEnd = checkedAdd(segment.start, segment.header.fileSize) ?: return -EIO
-            val start = maxOf(offset, segment.start)
-            val segmentEnd = minOf(end, fileEnd)
-            if (start >= segmentEnd) continue
-            val count = (segmentEnd - start).toInt()
-            val result = file.readAt(
-                fileOffset = segment.header.fileOffset + (start - segment.start),
-                destination = ByteArrayBuffer(destination),
-                offset = (start - offset).toInt(),
-                count = count,
-            )
-            if (!result.isSuccess || result.bytesTransferred != count) return -EIO
-        }
-        return destination.size
-    }
-}
-
-private enum class ElfObjectType {
-    EXECUTABLE,
-    DYNAMIC,
-}
-
-private data class ElfPageCacheIdentity(
-    val file: Any,
-    val segments: List<LoadSegment>,
-)
-
-private data class ElfFile(
-    val file: OpenFileDescription,
-    val image: ElfImage,
-)
-
-private data class ElfHeader(
-    val type: UShort,
-    val machine: UShort,
-    val version: UInt,
-    val entryPoint: ULong,
-    val programHeaderOffset: ULong,
-    val headerSize: UShort,
-    val programHeaderEntrySize: UShort,
-    val programHeaderCount: UShort,
-)
-
-data class ProgramHeader(
-    val type: UInt,
-    val flags: UInt,
-    val fileOffset: ULong,
-    val virtualAddress: ULong,
-    val fileSize: ULong,
-    val memorySize: ULong,
-    val alignment: ULong,
-)
-
-private data class ElfImage(
-    val header: ElfHeader,
-    val programHeaders: List<ProgramHeader>,
-    val type: ElfObjectType,
-    val interpreterPath: String?,
-)
-
-data class LoadSegment(
-    val header: ProgramHeader,
-    val start: ULong,
-    val end: ULong,
-    val executable: Boolean,
-)
-
-private data class PagePlan(
-    var readable: Boolean = false,
-    var writable: Boolean = false,
-    var executable: Boolean = false,
-)
-
-private fun checkedAdd(left: ULong, right: ULong): ULong? =
-    if (left > ULong.MAX_VALUE - right) null else left + right
-
-private fun fitsInFile(offset: ULong, size: ULong, fileSize: ULong): Boolean =
-    offset <= fileSize && size <= fileSize - offset
-
-private fun ULong.isPowerOfTwo(): Boolean =
-    this != 0uL && (this and (this - 1uL)) == 0uL

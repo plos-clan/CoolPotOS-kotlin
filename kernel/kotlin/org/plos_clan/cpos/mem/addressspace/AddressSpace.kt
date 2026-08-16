@@ -3,24 +3,13 @@
 package org.plos_clan.cpos.mem
 
 import kotlinx.cinterop.UByteVar
-import org.plos_clan.cpos.fs.OpenFileDescription
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.alignUp
 import org.plos_clan.cpos.utils.isPageAligned
 import platform.posix.memset
-import kotlin.concurrent.atomics.AtomicInt
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
-const val MEMORY_REGION_READABLE = 0x1uL
-const val MEMORY_REGION_WRITABLE = 0x2uL
-const val MEMORY_REGION_EXECUTABLE = 0x4uL
-
-internal const val MEMORY_REGION_ACCESS_MASK = 0x7uL
-
-const val USER_MMAP_START = 0x0000_0000_0001_0000uL
-const val USER_MMAP_END = 0x0000_7f00_0000_0000uL
 private const val MMIO_VIRTUAL_BASE = 0xffff_ff00_0000_0000uL
 private const val MMIO_VIRTUAL_END = 0xffff_ff80_0000_0000uL
 
@@ -30,111 +19,6 @@ private const val EACCES = 13
 private const val EFAULT = 14
 private const val EEXIST = 17
 private const val EINVAL = 22
-
-enum class MemoryRegionType {
-    ANONYMOUS,
-    FILE,
-    IMAGE,
-    STACK,
-    VDSO,
-    MMIO,
-}
-
-data class MemoryRegion(
-    var start: ULong,
-    var end: ULong,
-    var access: ULong,
-    val name: String?,
-    val maximumAccess: ULong = MEMORY_REGION_ACCESS_MASK,
-    val type: MemoryRegionType = MemoryRegionType.ANONYMOUS,
-    var offset: ULong = 0uL,
-    val shared: Boolean = false,
-    internal val backing: MemoryRegionBacking? = null,
-    internal val sharedIdentity: Any? = null,
-) {
-    val length: ULong
-        get() = end - start
-}
-
-@OptIn(ExperimentalAtomicApi::class)
-abstract class MemoryRegionBacking : PageCacheSource {
-    private val references = AtomicInt(1)
-
-    internal open val sharedMemoryIdentity: Any
-        get() = this
-
-    internal fun retain(): Boolean {
-        var observed = references.load()
-        while (observed in 1 until Int.MAX_VALUE) {
-            if (references.compareAndSet(observed, observed + 1)) {
-                return true
-            }
-            observed = references.load()
-        }
-        return false
-    }
-
-    internal fun release() {
-        var observed = references.load()
-        while (observed > 0) {
-            if (!references.compareAndSet(observed, observed - 1)) {
-                observed = references.load()
-                continue
-            }
-            if (observed == 1) close()
-            return
-        }
-    }
-
-    abstract override fun read(offset: ULong, destination: ByteArray): Int
-
-    protected abstract fun close()
-}
-
-abstract class FileRegionBacking(
-    val file: OpenFileDescription,
-) : MemoryRegionBacking() {
-    init {
-        check(file.retain())
-    }
-
-    final override fun close() = file.release()
-}
-
-data class MemoryMapRequest(
-    val hint: ULong,
-    val length: ULong,
-    val access: ULong,
-    val fixed: Boolean,
-    val noReplace: Boolean,
-    val shared: Boolean,
-    val type: MemoryRegionType,
-    val maximumAccess: ULong = MEMORY_REGION_ACCESS_MASK,
-    val offset: ULong = 0uL,
-    val name: String? = null,
-    val backing: MemoryRegionBacking? = null,
-    val populate: Boolean = false,
-)
-
-sealed interface MemoryMapResult<out T> {
-    data class Ok<T>(val value: T) : MemoryMapResult<T>
-    data class Err(val errno: Int) : MemoryMapResult<Nothing>
-}
-
-internal data class SharedMemoryLocation(
-    val identity: Any,
-    val offset: ULong,
-)
-
-enum class PageFaultResult {
-    RESOLVED,
-    INVALID_ADDRESS,
-    ACCESS_DENIED,
-    OUT_OF_MEMORY,
-    IO_ERROR,
-    MAPPING_FAILED,
-}
-
 class AddressSpace internal constructor(
     val pageDirectory: PageDirectory,
     private val start: ULong,
@@ -143,7 +27,7 @@ class AddressSpace internal constructor(
 ) {
     private val limit = if (user) USER_VIRTUAL_ADDRESS_LIMIT else end
 
-    private val regions = mutableListOf<MemoryRegion>()
+    private val regions = MemoryRegionMap(start, end, limit)
     private val lock = IrqSpinLock()
     private val faultScratch = ByteArray(PAGE_SIZE_BYTES.toInt())
 
@@ -156,53 +40,44 @@ class AddressSpace internal constructor(
     }
 
     val used: ULong
-        get() = lock.withLock { regions.fold(0uL) { total, region -> total + region.length } }
+        get() = lock.withLock { regions.used }
 
-    fun snapshotRegions() : List<MemoryRegion> = lock.withLock {
-        List(regions.size) { index ->
-            regions[index].copy()
-        }
-    }
+    fun snapshotRegions(): List<MemoryRegion> = lock.withLock(regions::snapshot)
 
     fun fork(): AddressSpace = lock.withLock {
         val directory = pageDirectory.cloneDirectory(
-            sharedRegions = regions.filter(MemoryRegion::shared),
+            sharedRegions = regions.sharedRegions(),
         )
         AddressSpace(directory, start, end, user).also { child ->
-            child.regions += regions.map { region ->
-                check(region.backing?.retain() != false)
-                region.copy()
-            }
+            regions.copyRetainedInto(child.regions)
         }
     }
 
     fun clear() {
         lock.withLock {
-            regions.forEach { it.backing?.release() }
-            regions.clear()
+            regions.releaseAll()
             pageDirectory.clearUserMappings()
         }
     }
 
     fun destroy() {
         lock.withLock {
-            regions.forEach { it.backing?.release() }
-            regions.clear()
+            regions.releaseAll()
         }
         pageDirectory.destroyUserDirectory()
     }
 
     fun find(address: ULong): MemoryRegion? = lock.withLock {
-        findLocked(address)?.copy()
+        regions.find(address)?.copy()
     }
 
     fun findIntersection(start: ULong, end: ULong): MemoryRegion? = lock.withLock {
-        findIntersectionLocked(start, end)?.copy()
+        regions.intersection(start, end)?.copy()
     }
 
     internal fun sharedMemoryLocation(address: ULong, size: ULong): SharedMemoryLocation? =
         lock.withLock {
-            val region = findLocked(address) ?: return@withLock null
+            val region = regions.find(address) ?: return@withLock null
             if (!region.shared || size > region.end - address) return@withLock null
             SharedMemoryLocation(
                 identity = region.sharedIdentity ?: return@withLock null,
@@ -212,34 +87,8 @@ class AddressSpace internal constructor(
 
     fun insert(region: MemoryRegion): Boolean = insertAll(listOf(region))
 
-    fun insertAll(regionsToInsert: List<MemoryRegion>): Boolean {
-        if (regionsToInsert.isEmpty()) {
-            return true
-        }
-        val additions = regionsToInsert.map { it.copy() }.sortedBy(MemoryRegion::start)
-        if (additions.any { !validRegion(it) } ||
-            additions.zipWithNext().any { (left, right) -> left.end > right.start }
-        ) {
-            return false
-        }
-
-        return lock.withLock {
-            if (additions.any { findIntersectionLocked(it.start, it.end) != null }) {
-                return@withLock false
-            }
-            val retained = mutableListOf<MemoryRegionBacking>()
-            for (addition in additions) {
-                val backing = addition.backing
-                if (backing != null && !backing.retain()) {
-                    retained.asReversed().forEach(MemoryRegionBacking::release)
-                    return@withLock false
-                }
-                if (backing != null) retained += backing
-            }
-            additions.forEach(::insertLocked)
-            true
-        }
-    }
+    fun insertAll(regionsToInsert: List<MemoryRegion>): Boolean =
+        lock.withLock { regions.insertCopies(regionsToInsert) }
 
     fun map(request: MemoryMapRequest): MemoryMapResult<ULong> {
         val alignedLength = alignLength(request.length)
@@ -259,11 +108,11 @@ class AddressSpace internal constructor(
         val selection = lock.withLock {
             val selected = if (request.fixed) {
                 if (!request.hint.isPageAligned() ||
-                    !validMmapRange(request.hint, alignedLength)
+                    !regions.validMmapRange(request.hint, alignedLength)
                 ) {
                     return@withLock null
                 }
-                if (findIntersectionLocked(request.hint, request.hint + alignedLength) != null) {
+                if (regions.intersection(request.hint, request.hint + alignedLength) != null) {
                     if (request.noReplace) {
                         return@withLock Pair(ULong.MAX_VALUE, null)
                     }
@@ -271,7 +120,7 @@ class AddressSpace internal constructor(
                 }
                 request.hint
             } else {
-                findUnmappedAreaLocked(request.hint, alignedLength)
+                regions.findUnmappedArea(request.hint, alignedLength)
                     ?: return@withLock null
             }
 
@@ -293,7 +142,7 @@ class AddressSpace internal constructor(
             )
             if (request.backing?.retain() == false) {
                 null
-            } else if (!insertLocked(region)) {
+            } else if (!regions.insertOwned(region)) {
                 request.backing?.release()
                 null
             } else {
@@ -308,7 +157,7 @@ class AddressSpace internal constructor(
         val region = requireNotNull(selection.second)
 
         if (!request.populate || request.access == 0uL) {
-            lock.withLock { mergeAroundLocked(region) }
+            lock.withLock { regions.mergeAround(region) }
             return MemoryMapResult.Ok(start)
         }
 
@@ -337,10 +186,9 @@ class AddressSpace internal constructor(
             return MemoryMapResult.Err(failureErrno)
         }
 
-        lock.withLock { mergeAroundLocked(region) }
+        lock.withLock { regions.mergeAround(region) }
         return MemoryMapResult.Ok(start)
     }
-
 
     fun faultIn(
         address: ULong,
@@ -350,7 +198,7 @@ class AddressSpace internal constructor(
         if (address >= limit) {
             return@withLock PageFaultResult.INVALID_ADDRESS
         }
-        val region = findLocked(address)
+        val region = regions.find(address)
             ?: return@withLock PageFaultResult.INVALID_ADDRESS
         val access = region.access
         if (access == 0uL ||
@@ -472,7 +320,7 @@ class AddressSpace internal constructor(
 
         return lock.withLock {
             val end = address + alignedLength
-            if (!rangeFullyCoveredLocked(address, end)) {
+            if (!regions.fullyCovers(address, end)) {
                 return@withLock MemoryMapResult.Err(ENOMEM)
             }
             val exceedsAccessLimit = regions.any { region ->
@@ -482,12 +330,12 @@ class AddressSpace internal constructor(
             if (exceedsAccessLimit) {
                 return@withLock MemoryMapResult.Err(EACCES)
             }
-            splitAtLocked(address)
-            splitAtLocked(end)
+            regions.splitAt(address)
+            regions.splitAt(end)
 
-            val affected = regions.filter { it.start >= address && it.end <= end }
+            val splitRegions = regions.intersecting(address, end)
             val accessible = access != 0uL
-            for (region in affected) {
+            for (region in splitRegions) {
                 var page = region.start
                 while (page < region.end) {
                     if (pageDirectory.userPageFrame(page) != null &&
@@ -505,10 +353,10 @@ class AddressSpace internal constructor(
                 }
             }
 
-            affected.forEach { region ->
+            splitRegions.forEach { region ->
                 region.access = access
             }
-            affected.forEach(::mergeAroundLocked)
+            splitRegions.forEach(regions::mergeAround)
             MemoryMapResult.Ok(Unit)
         }
     }
@@ -524,23 +372,12 @@ class AddressSpace internal constructor(
             address += PAGE_SIZE_BYTES
         }
         lock.withLock {
-            regions.indexOfFirst { it === region }
-                .takeIf { it >= 0 }
-                ?.let { index ->
-                    regions.removeAt(index).backing?.release()
-                }
+            regions.removeOwned(region)?.backing?.release()
         }
     }
 
     private fun unmapRangeLocked(start: ULong, end: ULong) {
-        splitAtLocked(start)
-        splitAtLocked(end)
-        val iterator = regions.listIterator()
-        while (iterator.hasNext()) {
-            val region = iterator.next()
-            if (region.end <= start) continue
-            if (region.start >= end) break
-
+        regions.removeRange(start, end).forEach { region ->
             var address = region.start
             while (address < region.end) {
                 if (user) {
@@ -551,142 +388,8 @@ class AddressSpace internal constructor(
                 address += PAGE_SIZE_BYTES
             }
             region.backing?.release()
-            iterator.remove()
         }
     }
-
-    private fun rangeFullyCoveredLocked(start: ULong, end: ULong): Boolean {
-        var cursor = start
-        while (cursor < end) {
-            val region = findLocked(cursor) ?: return false
-            if (region.end <= cursor) return false
-            cursor = minOf(region.end, end)
-        }
-        return true
-    }
-
-    private fun splitAtLocked(address: ULong) {
-        val index = regions.indexOfFirst { address > it.start && address < it.end }
-        if (index < 0) return
-        val left = regions[index]
-        check(left.backing?.retain() != false)
-        val right = left.copy(
-            start = address,
-            offset = left.offset + (address - left.start),
-        )
-        left.end = address
-        regions.add(index + 1, right)
-    }
-
-    private fun mergeAroundLocked(target: MemoryRegion) {
-        var index = regions.indexOfFirst { it === target }
-        if (index < 0) return
-        if (index > 0 && canMerge(regions[index - 1], regions[index])) {
-            mergeLocked(index - 1)
-            index--
-        }
-        while (index + 1 < regions.size && canMerge(regions[index], regions[index + 1])) {
-            mergeLocked(index)
-        }
-    }
-
-    private fun mergeLocked(leftIndex: Int) {
-        val left = regions[leftIndex]
-        val right = regions.removeAt(leftIndex + 1)
-        left.end = right.end
-        right.backing?.release()
-    }
-
-    private fun canMerge(left: MemoryRegion, right: MemoryRegion): Boolean =
-        left.end == right.start &&
-            left.access == right.access &&
-            left.maximumAccess == right.maximumAccess &&
-            left.name == right.name &&
-            left.type == right.type &&
-            left.shared == right.shared &&
-            left.sharedIdentity === right.sharedIdentity &&
-            left.backing === right.backing &&
-            ((left.type != MemoryRegionType.FILE && left.type != MemoryRegionType.MMIO) ||
-                left.offset + left.length == right.offset)
-
-    private fun insertLocked(region: MemoryRegion): Boolean {
-        if (!validRegion(region) || findIntersectionLocked(region.start, region.end) != null) {
-            return false
-        }
-        val index = regions.indexOfFirst { it.start > region.start }
-            .let { if (it < 0) regions.size else it }
-        regions.add(index, region)
-        return true
-    }
-
-    private fun findLocked(address: ULong): MemoryRegion? {
-        var low = 0
-        var high = regions.lastIndex
-        while (low <= high) {
-            val middle = (low + high) ushr 1
-            val region = regions[middle]
-            when {
-                address < region.start -> high = middle - 1
-                address >= region.end -> low = middle + 1
-                else -> return region
-            }
-        }
-        return null
-    }
-
-    private fun findIntersectionLocked(start: ULong, end: ULong): MemoryRegion? =
-        regions.firstOrNull { start < it.end && it.start < end }
-
-    private fun findUnmappedAreaLocked(hint: ULong, length: ULong): ULong? {
-        val alignedHint = hint.alignDown(PAGE_SIZE_BYTES)
-        if (alignedHint >= start &&
-            alignedHint <= end - length &&
-            findIntersectionLocked(alignedHint, alignedHint + length) == null
-        ) {
-            return alignedHint
-        }
-
-        if (alignedHint >= start && alignedHint < end - length) {
-            findGapLocked(alignedHint + length, end, length)?.let { return it }
-            findGapLocked(start, alignedHint, length)?.let { return it }
-        }
-        return findGapLocked(start, end, length)
-    }
-
-    private fun findGapLocked(windowStart: ULong, windowEnd: ULong, length: ULong): ULong? {
-        val start = windowStart.alignUp(PAGE_SIZE_BYTES) ?: return null
-        val end = windowEnd.alignDown(PAGE_SIZE_BYTES)
-        if (start >= end || length > end - start) return null
-
-        var cursor = start
-        var best: ULong? = null
-        for (region in regions) {
-            if (region.end <= cursor) continue
-            if (region.start >= end) break
-            val gapEnd = minOf(region.start, end)
-            if (gapEnd > cursor && gapEnd - cursor >= length) {
-                best = gapEnd - length
-            }
-            cursor = maxOf(cursor, region.end.alignUp(PAGE_SIZE_BYTES) ?: return best)
-            if (cursor >= end) return best
-        }
-        if (end > cursor && end - cursor >= length) {
-            best = end - length
-        }
-        return best
-    }
-
-    private fun validRegion(region: MemoryRegion): Boolean =
-        region.start < region.end &&
-            region.start.isPageAligned() &&
-            region.end.isPageAligned() &&
-            (region.maximumAccess and MEMORY_REGION_ACCESS_MASK.inv()) == 0uL &&
-            (region.access and region.maximumAccess.inv()) == 0uL &&
-            region.end <= limit
-
-    private fun validMmapRange(address: ULong, length: ULong): Boolean =
-        address in start..<end &&
-            length <= end - address
 
     private fun validRange(address: ULong, length: ULong): Boolean =
         address < limit &&
