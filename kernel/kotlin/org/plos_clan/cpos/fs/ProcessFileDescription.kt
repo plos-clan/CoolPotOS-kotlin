@@ -105,6 +105,8 @@ class FileDescriptorTable {
         return if (file.retain()) file else null
     }
 
+    fun snapshotDescriptors(): IntArray = lock.withLock { entries.occupiedIndices() }
+
     fun dup2(oldFd: Int, newFd: Int): Boolean = lock.withLock {
         if (newFd !in entries.indices) {
             return@withLock false
@@ -204,6 +206,20 @@ class FileDescriptorTable {
                 index = (segmentIndex + 1) * SEGMENT_SIZE
             }
             return null
+        }
+
+        fun occupiedIndices(): IntArray {
+            val count = segments.sumOf { segment -> segment.load().count { it != null } }
+            val result = IntArray(count)
+            var resultIndex = 0
+            segments.forEachIndexed { segmentIndex, segment ->
+                segment.load().forEachIndexed { offset, descriptor ->
+                    if (descriptor != null) {
+                        result[resultIndex++] = segmentIndex * SEGMENT_SIZE + offset
+                    }
+                }
+            }
+            return result
         }
 
         fun removeIf(predicate: (FileDescriptor) -> Boolean): List<FileDescriptor> = buildList {

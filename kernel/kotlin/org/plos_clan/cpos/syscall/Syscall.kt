@@ -88,6 +88,7 @@ private enum class LinuxSyscall(
     SETPGID(109, ::setPgid),
     GETPPID(110, ::getPpid),
     GETPGRP(111, ::getPgrp),
+    SETSID(112, ::setSid),
     GETRESUID(118, ::getResUid),
     GETRESGID(120, ::getResGid),
     SETFSUID(122, ::setFsUid),

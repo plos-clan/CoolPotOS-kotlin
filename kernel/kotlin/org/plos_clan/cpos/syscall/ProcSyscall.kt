@@ -10,6 +10,7 @@ import org.plos_clan.cpos.module.elf.ElfLoader
 import org.plos_clan.cpos.syscall.Syscall.copyWordToUser
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.tasks.Process
+import org.plos_clan.cpos.tasks.ProcessGroupResult
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.tasks.ProcessState
@@ -142,21 +143,19 @@ internal fun getPpid(regs: PtraceRegisters, process: Process): Long = process.pa
 internal fun getPgrp(regs: PtraceRegisters, process: Process): Long = process.processGroupId.toLong()
 
 internal fun setPgid(regs: PtraceRegisters, process: Process): Long {
-    val pid = regs[PtraceRegisters.IDX_RDI]
-    val requestedGroup = regs[PtraceRegisters.IDX_RSI]
-    if (pid > Int.MAX_VALUE.toULong() || requestedGroup > Int.MAX_VALUE.toULong()) {
-        return errno(Errno.EINVAL)
+    val pid = regs[PtraceRegisters.IDX_RDI].toInt()
+    val group = regs[PtraceRegisters.IDX_RSI].toInt()
+    if (pid < 0) return errno(Errno.ESRCH)
+    if (group < 0) return errno(Errno.EINVAL)
+    return when (ProcessManager.setProcessGroup(process, pid, group)) {
+        ProcessGroupResult.SUCCESS -> 0L
+        ProcessGroupResult.NO_SUCH_PROCESS -> errno(Errno.ESRCH)
+        ProcessGroupResult.NOT_PERMITTED -> errno(Errno.EPERM)
     }
-    val target = if (pid == 0uL) {
-        process
-    } else {
-        ProcessManager.findProcess(pid.toInt()) ?: return errno(Errno.ESRCH)
-    }
-    val group = if (requestedGroup == 0uL) target.id else requestedGroup.toInt()
-    if (group <= 0) return errno(Errno.EINVAL)
-    target.processGroupId = group
-    return 0L
 }
+
+internal fun setSid(regs: PtraceRegisters, process: Process): Long =
+    if (ProcessManager.createSession(process)) process.id.toLong() else errno(Errno.EPERM)
 
 internal fun setFsUid(regs: PtraceRegisters, process: Process): Long {
     val requested = regs[PtraceRegisters.IDX_RDI]

@@ -10,7 +10,6 @@ import org.plos_clan.cpos.fs.FilePosition
 import org.plos_clan.cpos.fs.FileSystemOptions
 import org.plos_clan.cpos.fs.FileSystemType
 import org.plos_clan.cpos.fs.Inode
-import org.plos_clan.cpos.fs.InodeBackend
 import org.plos_clan.cpos.fs.InodeId
 import org.plos_clan.cpos.fs.InodeMetadata
 import org.plos_clan.cpos.fs.InodeType
@@ -26,8 +25,10 @@ import org.plos_clan.cpos.fs.VfsName
 import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
+import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 
 object Procfs : FileSystemType("proc", 0x9fa0uL) {
     override fun createBackend(options: FileSystemOptions): VfsResult<SuperBlockBackend> =
@@ -56,59 +57,22 @@ internal class ProcfsInstance : SuperBlockBackend {
         RootFile.from(name)?.let { file ->
             return text(superBlock, file.inodeId) { file.render() }
         }
-        if (name.toString() == SELF_NAME) {
-            return symlink(superBlock, SELF_INODE) {
-                ProcessManager.currentProcess()
-                    ?.takeUnless(Process::isKernelProcess)
-                    ?.id
-                    ?.toString()
-            }
-        } else if (name.toString() == MOUNTS_NAME) {
-            return symlink(superBlock, MOUNTS_INODE) { "self/mounts" }
-        } else if (name.toString() == COROUTINES_NAME) {
-            return directory(
-                superBlock,
-                COROUTINES_INODE,
-                ProcCoroutineDirectory(this),
-            )
+        RootNode.from(name)?.let { node ->
+            return node.create(this, superBlock)
         }
-        return name.pid()?.let { processDirectory(superBlock, it) }
+        return name.decimalInt()?.takeIf { it > 0 }?.let { processDirectory(superBlock, it) }
     }
 
     fun rootEntries(): List<DirectoryEntry> =
         buildList {
             RootFile.entries.forEach { file ->
-                add(
-                    entry(
-                        file.fileName,
-                        file.inodeId,
-                        InodeType.REGULAR
-                    )
-                )
+                add(entry(file.fileName, file.inodeId, InodeType.REGULAR))
             }
-            add(
-                entry(
-                    SELF_NAME,
-                    SELF_INODE,
-                    InodeType.SYMLINK
-                )
-            )
-            add(
-                entry(
-                    MOUNTS_NAME,
-                    MOUNTS_INODE,
-                    InodeType.SYMLINK
-                )
-            )
-            add(entry(COROUTINES_NAME, COROUTINES_INODE, InodeType.DIRECTORY))
+            RootNode.entries.forEach { node ->
+                add(entry(node.fileName, node.inodeId, node.type))
+            }
             ProcessManager.snapshotProcesses().forEach { process ->
-                add(
-                    entry(
-                        process.id.toString(),
-                        processInode(process.id),
-                        InodeType.DIRECTORY
-                    )
-                )
+                add(entry(process.id.toString(), ProcInode.process(process.id), InodeType.DIRECTORY))
             }
         }
 
@@ -119,20 +83,47 @@ internal class ProcfsInstance : SuperBlockBackend {
     ): Inode? {
         val process = ProcessManager.findProcess(pid)?.takeUnless(Process::isKernelProcess)
             ?: return null
-        val file = ProcessFile.from(name) ?: return null
-        return text(superBlock, processInode(pid, file.ordinal + 1)) {
-            ProcessManager.findProcess(pid)
-                ?.takeUnless(Process::isKernelProcess)
-                ?.let(file::render)
-        }.withOwner(process)
+        ProcessFile.from(name)?.let { file ->
+            return text(
+                superBlock = superBlock,
+                id = ProcInode.process(pid, file.ordinal.toUInt() + 1u),
+                owner = process,
+            ) {
+                ProcessManager.findProcess(pid)
+                    ?.takeUnless(Process::isKernelProcess)
+                    ?.let(file::render)
+            }
+        }
+        return if (name.toString() == FD_NAME) {
+            directory(
+                superBlock = superBlock,
+                id = ProcInode.process(pid, FD_DIRECTORY_ENTRY),
+                backend = ProcDescriptorDirectory(this, pid),
+                mode = DESCRIPTOR_DIRECTORY_MODE,
+                owner = process,
+            )
+        } else {
+            null
+        }
     }
 
     fun processEntries(process: Process): List<DirectoryEntry> =
-        ProcessFile.entries.map { file ->
-            entry(
-                file.fileName,
-                processInode(process.id, file.ordinal + 1),
-                InodeType.REGULAR,
+        buildList(ProcessFile.entries.size + 1) {
+            ProcessFile.entries.forEach { file ->
+                add(
+                    entry(
+                        file.fileName,
+                        ProcInode.process(process.id, file.ordinal.toUInt() + 1u),
+                        InodeType.REGULAR,
+                    ),
+                )
+            }
+            add(
+                entry(
+                    FD_NAME,
+                    ProcInode.process(process.id, FD_DIRECTORY_ENTRY),
+                    InodeType.DIRECTORY,
+                ),
             )
         }
 
@@ -144,60 +135,64 @@ internal class ProcfsInstance : SuperBlockBackend {
             ?: return null
         return directory(
             superBlock = superBlock,
-            id = processInode(pid),
+            id = ProcInode.process(pid),
             backend = ProcProcessDirectory(this, pid),
-        ).withOwner(process)
+            owner = process,
+        )
     }
 
-    private fun directory(
+    internal fun directory(
         superBlock: SuperBlock,
         id: ULong,
         backend: DirectoryBackend,
+        mode: UInt = DIRECTORY_MODE,
+        owner: Process? = null,
     ): Inode = Inode(
         id = InodeId(id),
         superBlock = superBlock,
         backend = backend,
         metadata = InodeMetadata(
-            FileMode(
-                DIRECTORY_MODE
-            ), linkCount = 2u
+            mode = FileMode(mode),
+            linkCount = 2u,
+            uid = owner?.euid?.toUInt() ?: 0u,
+            gid = owner?.egid?.toUInt() ?: 0u,
         ),
     )
 
-    fun text(
+    internal fun text(
         superBlock: SuperBlock,
         id: ULong,
+        mode: UInt = FILE_MODE,
+        owner: Process? = null,
+        write: ((ByteArray) -> VfsResult<Unit>)? = null,
         render: () -> ByteArray?,
     ): Inode = Inode(
         id = InodeId(id),
         superBlock = superBlock,
-        backend = ProcTextFile(render),
+        backend = ProcTextFile(render, write),
         metadata = InodeMetadata(
-            FileMode(
-                FILE_MODE
-            )
+            mode = FileMode(mode),
+            uid = owner?.euid?.toUInt() ?: 0u,
+            gid = owner?.egid?.toUInt() ?: 0u,
         ),
     )
 
-    private fun symlink(
+    internal fun symlink(
         superBlock: SuperBlock,
         id: ULong,
+        mode: UInt = SYMLINK_MODE,
+        owner: Process? = null,
         target: () -> String?,
     ): Inode = Inode(
         id = InodeId(id),
         superBlock = superBlock,
         backend = ProcSymlink(target),
         metadata = InodeMetadata(
-            FileMode(
-                SYMLINK_MODE
-            )
+            mode = FileMode(mode),
+            uid = owner?.euid?.toUInt() ?: 0u,
+            gid = owner?.egid?.toUInt() ?: 0u,
         ),
     )
-
-    private fun Inode.withOwner(process: Process): Inode =
-        apply {
-            updateMetadata { it.copy(uid = process.euid.toUInt(), gid = process.egid.toUInt()) }
-        }
 
     fun entry(
         name: String,
@@ -214,76 +209,76 @@ internal class ProcfsInstance : SuperBlockBackend {
         )
     }
 
-    private fun processInode(pid: Int, entry: Int = 0): ULong =
-        PROCESS_INODE_BASE + (pid.toULong() shl PROCESS_INODE_SHIFT) + entry.toULong()
 }
 
 private class ProcRootDirectory(
     private val fileSystem: ProcfsInstance,
-) : DirectoryBackend {
-    override val type: InodeType = InodeType.DIRECTORY
-    override val cacheNegativeLookups: Boolean = false
+) : ProcDirectoryBackend() {
+    override fun resolve(superBlock: SuperBlock, name: VfsName): Inode? =
+        fileSystem.rootEntry(superBlock, name)
 
-    override fun lookup(
-        directory: Inode,
-        name: VfsName
-    ): VfsResult<Inode?> =
-        VfsResult.Ok(
-            fileSystem.rootEntry(
-                directory.superBlock,
-                name
-            )
-        )
-
-    override fun open(
-        inode: Inode,
-        options: OpenOptions
-    ): VfsResult<OpenFileBackend> =
-        VfsResult.Ok(
-            ProcDirectoryHandle(
-                fileSystem.rootEntries()
-            )
-        )
+    override fun snapshot(): VfsResult<List<DirectoryEntry>> =
+        VfsResult.Ok(fileSystem.rootEntries())
 }
 
 private class ProcProcessDirectory(
     private val fileSystem: ProcfsInstance,
     private val pid: Int,
-) : DirectoryBackend {
-    override val type: InodeType = InodeType.DIRECTORY
-    override val cacheNegativeLookups: Boolean = false
+) : ProcDirectoryBackend() {
+    override fun resolve(superBlock: SuperBlock, name: VfsName): Inode? =
+        fileSystem.processEntry(superBlock, pid, name)
 
-    override fun lookup(
-        directory: Inode,
-        name: VfsName
-    ): VfsResult<Inode?> =
-        VfsResult.Ok(
-            fileSystem.processEntry(
-                directory.superBlock,
-                pid,
-                name
-            )
-        )
-
-    override fun open(
-        inode: Inode,
-        options: OpenOptions
-    ): VfsResult<OpenFileBackend> {
+    override fun snapshot(): VfsResult<List<DirectoryEntry>> {
         val process = ProcessManager.findProcess(pid)?.takeUnless(Process::isKernelProcess)
             ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        return VfsResult.Ok(
-            ProcDirectoryHandle(
-                fileSystem.processEntries(
-                    process
-                )
-            )
-        )
+        return VfsResult.Ok(fileSystem.processEntries(process))
     }
 }
 
-class ProcDirectoryHandle(
-    private val entries: List<DirectoryEntry>,
+internal abstract class ProcDirectoryBackend : DirectoryBackend {
+    final override val type: InodeType = InodeType.DIRECTORY
+    override val cachePositiveLookups: Boolean = false
+    final override val cacheNegativeLookups: Boolean = false
+
+    protected abstract fun resolve(superBlock: SuperBlock, name: VfsName): Inode?
+
+    protected abstract fun snapshot(): VfsResult<List<DirectoryEntry>>
+
+    final override fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?> =
+        VfsResult.Ok(resolve(directory.superBlock, name))
+
+    final override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
+        VfsResult.Ok(ProcDirectoryHandle(::snapshot))
+}
+
+internal interface ProcStaticEntry {
+    val fileName: String
+    val inodeId: ULong
+    val type: InodeType
+
+    fun create(fileSystem: ProcfsInstance, superBlock: SuperBlock): Inode
+}
+
+internal class ProcStaticDirectory(
+    private val fileSystem: ProcfsInstance,
+    private val entries: List<ProcStaticEntry>,
+) : ProcDirectoryBackend() {
+    override val cachePositiveLookups: Boolean = true
+
+    override fun resolve(superBlock: SuperBlock, name: VfsName): Inode? =
+        entries.firstOrNull { it.fileName == name.toString() }
+            ?.create(fileSystem, superBlock)
+
+    override fun snapshot(): VfsResult<List<DirectoryEntry>> = VfsResult.Ok(
+        entries.map { fileSystem.entry(it.fileName, it.inodeId, it.type) },
+    )
+}
+
+private class ProcDirectoryHandle(
+    private val snapshot: () -> VfsResult<List<DirectoryEntry>>,
 ) : OpenFileBackend {
+    private var entries: List<DirectoryEntry>? = null
+
     override fun iterate(
         inode: Inode,
         position: FilePosition,
@@ -291,6 +286,10 @@ class ProcDirectoryHandle(
     ): VfsResult<Unit> {
         if (position.value !in 0..Int.MAX_VALUE.toLong()) {
             return VfsResult.Ok(Unit)
+        }
+        val entries = this.entries ?: when (val result = snapshot()) {
+            is VfsResult.Ok -> result.value.also { this.entries = it }
+            is VfsResult.Err -> return result
         }
         var index = position.value.toInt()
         while (index < entries.size) {
@@ -305,18 +304,30 @@ class ProcDirectoryHandle(
 
 private class ProcTextFile(
     private val render: () -> ByteArray?,
+    private val write: ((ByteArray) -> VfsResult<Unit>)?,
 ) : RegularFileBackend() {
+
+    override fun resize(inode: Inode, size: ULong): VfsResult<Unit> =
+        if (write != null && size == 0uL) VfsResult.Ok(Unit)
+        else VfsResult.Err(VfsError.NOT_SUPPORTED)
 
     override fun open(
         inode: Inode,
         options: OpenOptions
-    ): VfsResult<OpenFileBackend> =
-        render()?.let { VfsResult.Ok(ProcTextHandle(it)) }
+    ): VfsResult<OpenFileBackend> {
+        if (options.access.canWrite &&
+            (write == null || ProcessManager.currentProcess()?.euid != 0)
+        ) {
+            return VfsResult.Err(VfsError.PERMISSION_DENIED)
+        }
+        return render()?.let { VfsResult.Ok(ProcTextHandle(it, write)) }
             ?: VfsResult.Err(VfsError.NOT_FOUND)
+    }
 }
 
 private class ProcTextHandle(
     private val content: ByteArray,
+    private val write: ((ByteArray) -> VfsResult<Unit>)?,
 ) : OpenFileBackend {
     override fun read(
         inode: Inode,
@@ -336,6 +347,32 @@ private class ProcTextHandle(
         )
         position.value += copied
         return IoResult.success(copied)
+    }
+
+    override fun write(
+        inode: Inode,
+        source: PreparedBufferSource,
+        sourceOffset: Int,
+        count: Int,
+        position: FilePosition,
+        append: Boolean,
+    ): IoResult {
+        val update = write ?: return IoResult.failure(VfsError.PERMISSION_DENIED)
+        if (count == 0) return IoResult.success(0)
+        if (position.value != 0L || count >= PAGE_SIZE_BYTES.toInt()) {
+            return IoResult.failure(VfsError.INVALID_ARGUMENT)
+        }
+        val input = ByteArray(count)
+        if (source.copyTo(sourceOffset, input, 0, count) != count) {
+            return IoResult.failure(VfsError.FAULT)
+        }
+        return when (val result = update(input)) {
+            is VfsResult.Ok -> {
+                position.value = count.toLong()
+                IoResult.success(count)
+            }
+            is VfsResult.Err -> IoResult.failure(result.error)
+        }
     }
 }
 
@@ -401,19 +438,80 @@ private enum class RootFile(
     }
 }
 
-private fun VfsName.pid(): Int? = toString().toIntOrNull()?.takeIf { it > 0 }
+private enum class RootNode(
+    override val fileName: String,
+    override val inodeId: ULong,
+    override val type: InodeType,
+) : ProcStaticEntry {
+    SELF("self", SELF_INODE, InodeType.SYMLINK),
+    MOUNTS("mounts", MOUNTS_INODE, InodeType.SYMLINK),
+    COROUTINES("coroutines", COROUTINES_INODE, InodeType.DIRECTORY),
+    SYS("sys", SYS_INODE, InodeType.DIRECTORY),
+    ;
+
+    override fun create(fileSystem: ProcfsInstance, superBlock: SuperBlock): Inode = when (this) {
+        SELF -> fileSystem.symlink(superBlock, inodeId) {
+            ProcessManager.currentProcess()
+                ?.takeUnless(Process::isKernelProcess)
+                ?.id
+                ?.toString()
+        }
+        MOUNTS -> fileSystem.symlink(superBlock, inodeId) { "self/mounts" }
+        COROUTINES -> fileSystem.directory(
+            superBlock,
+            inodeId,
+            ProcCoroutineDirectory(fileSystem),
+        )
+        SYS -> ProcSysTree.create(fileSystem, superBlock, inodeId)
+    }
+
+    companion object {
+        fun from(name: VfsName): RootNode? =
+            entries.firstOrNull { it.fileName == name.toString() }
+    }
+}
+
+internal object ProcInode {
+    private const val COROUTINE_PREFIX = 0x8000_0000_0000_0000uL
+    private const val ID_SHIFT = UInt.SIZE_BITS
+    private const val DESCRIPTOR_FLAG = 0x8000_0000u
+
+    fun process(pid: Int, entry: UInt = 0u): ULong {
+        require(pid > 0)
+        return (pid.toULong() shl ID_SHIFT) or entry.toULong()
+    }
+
+    fun descriptor(pid: Int, fd: Int): ULong {
+        require(fd >= 0)
+        return process(pid, DESCRIPTOR_FLAG or fd.toUInt())
+    }
+
+    fun coroutine(id: Int): ULong {
+        require(id >= 0)
+        return COROUTINE_PREFIX or id.toUInt().toULong()
+    }
+}
+
+internal fun VfsName.decimalInt(): Int? {
+    val value = toString()
+    if (value.isEmpty() || value.length > 1 && value[0] == '0' ||
+        value.any { it !in '0'..'9' }
+    ) {
+        return null
+    }
+    return value.toIntOrNull()
+}
 
 private const val ROOT_INODE = 1uL
 private const val SELF_INODE = 10uL
 private const val MOUNTS_INODE = 11uL
 private const val COROUTINES_INODE = 12uL
-private const val PROCESS_INODE_BASE = 0x100uL
-private const val PROCESS_INODE_SHIFT = 8
-private const val DIRECTORY_MODE = 0x16Du
+private const val SYS_INODE = 13uL
+private const val FD_DIRECTORY_ENTRY = 0x100u
+private const val DIRECTORY_MODE = 0x16du
+private const val DESCRIPTOR_DIRECTORY_MODE = 0x140u
 private const val FILE_MODE = 0x124u
-private const val SYMLINK_MODE = 0x1FFu
+private const val SYMLINK_MODE = 0x1ffu
 const val MAX_COMM_LENGTH = 15
-private const val SELF_NAME = "self"
-private const val MOUNTS_NAME = "mounts"
-private const val COROUTINES_NAME = "coroutines"
+private const val FD_NAME = "fd"
 const val KIBIBYTE = 1024uL

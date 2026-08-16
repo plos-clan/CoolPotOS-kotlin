@@ -2,46 +2,33 @@ package org.plos_clan.cpos.fs.procfs
 
 import org.plos_clan.cpos.coroutines.CoroutineEntry
 import org.plos_clan.cpos.coroutines.KernelCoroutines
-import org.plos_clan.cpos.fs.DirectoryBackend
 import org.plos_clan.cpos.fs.DirectoryEntry
 import org.plos_clan.cpos.fs.Inode
 import org.plos_clan.cpos.fs.InodeType
-import org.plos_clan.cpos.fs.OpenFileBackend
-import org.plos_clan.cpos.fs.OpenOptions
 import org.plos_clan.cpos.fs.SuperBlock
 import org.plos_clan.cpos.fs.VfsName
 import org.plos_clan.cpos.fs.VfsResult
 
-private const val COROUTINE_INODE_BASE = 0x1_0000_0000uL
-
-internal class ProcCoroutineDirectory(private val fileSystem: ProcfsInstance) : DirectoryBackend {
-    override val type: InodeType = InodeType.DIRECTORY
-    override val cacheNegativeLookups: Boolean = false
-
-    override fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?> =
-        VfsResult.Ok(coroutineEntry(directory.superBlock, name))
-
-    override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
-        VfsResult.Ok(ProcDirectoryHandle(directoryEntries()))
-
-    private fun coroutineEntry(superBlock: SuperBlock, name: VfsName): Inode? {
-        val id = name.toString().toIntOrNull()?.takeIf { it != 0 } ?: return null
+internal class ProcCoroutineDirectory(
+    private val fileSystem: ProcfsInstance,
+) : ProcDirectoryBackend() {
+    override fun resolve(superBlock: SuperBlock, name: VfsName): Inode? {
+        val id = name.decimalInt() ?: return null
         if (KernelCoroutines.snapshotJobs().none { it.id == id }) return null
-        return fileSystem.text(superBlock, coroutineInode(id)) {
+        return fileSystem.text(superBlock, ProcInode.coroutine(id)) {
             KernelCoroutines.snapshotJobs().firstOrNull { it.id == id }?.let(::render)
         }
     }
 
-    private fun directoryEntries(): List<DirectoryEntry> =
+    override fun snapshot(): VfsResult<List<DirectoryEntry>> = VfsResult.Ok(
         KernelCoroutines.snapshotJobs().map { coroutine ->
             fileSystem.entry(
                 coroutine.id.toString(),
-                coroutineInode(coroutine.id),
+                ProcInode.coroutine(coroutine.id),
                 InodeType.REGULAR,
             )
-        }
-
-    private fun coroutineInode(id: Int): ULong = COROUTINE_INODE_BASE + id.toULong()
+        },
+    )
 
     private fun render(coroutine: CoroutineEntry): ByteArray {
         val job = coroutine.job

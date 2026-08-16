@@ -11,12 +11,16 @@ import org.plos_clan.cpos.utils.PollEvents
 
 private class PipeInode(
     private val state: PipeState,
-    private val access: AccessMode,
 ) : InodeBackend {
     override val type: InodeType = InodeType.PIPE
 
     override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
-        VfsResult.Ok(PipeEndpoint(state, access))
+        when (options.access) {
+            AccessMode.READ,
+            AccessMode.WRITE,
+            -> VfsResult.Ok(PipeEndpoint(state, options.access))
+            else -> VfsResult.Err(VfsError.BAD_DESCRIPTOR)
+        }
 }
 
 internal class FifoBackend : MutableInodeBackend {
@@ -300,11 +304,10 @@ internal class PipeFactory {
         val path = context.root
         val superBlock = path.mount.superBlock
         val state = PipeState(readers = 1, writers = 1)
-        val readInode = pipeInode(superBlock, state, AccessMode.READ)
-        val writeInode = pipeInode(superBlock, state, AccessMode.WRITE)
+        val inode = pipeInode(superBlock, state)
         val readFile = when (val result = OpenFileDescription.open(
             path,
-            readInode,
+            inode,
             OpenOptions(access = AccessMode.READ),
         )) {
             is VfsResult.Ok -> result.value
@@ -312,7 +315,7 @@ internal class PipeFactory {
         }
         val writeFile = when (val result = OpenFileDescription.open(
             path,
-            writeInode,
+            inode,
             OpenOptions(access = AccessMode.WRITE),
         )) {
             is VfsResult.Ok -> result.value
@@ -328,11 +331,10 @@ internal class PipeFactory {
     private fun pipeInode(
         superBlock: SuperBlock,
         state: PipeState,
-        access: AccessMode,
     ): Inode = Inode(
         id = lock.withLock { InodeId(nextInode--) },
         superBlock = superBlock,
-        backend = PipeInode(state, access),
+        backend = PipeInode(state),
         metadata = InodeMetadata(FileMode(0x1A4u)),
     )
 }

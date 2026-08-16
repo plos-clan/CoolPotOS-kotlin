@@ -56,10 +56,6 @@ internal class VfsPathResolver(
         context: FileSystemContext,
         initial: VfsPath,
     ): VfsResult<ByteArray> {
-        if (initial.inode == null) {
-            return VfsResult.Err(VfsError.NOT_FOUND)
-        }
-
         val components = mutableListOf<ByteArray>()
         var current = initial
         while (current != context.root) {

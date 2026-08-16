@@ -35,6 +35,17 @@ internal enum class ProcessState {
     ZOMBIE,
 }
 
+internal enum class ProcessGroupResult {
+    SUCCESS,
+    NO_SUCH_PROCESS,
+    NOT_PERMITTED,
+}
+
+internal data class ProcessMembership(
+    val sessionId: Int,
+    val processGroupId: Int,
+)
+
 class Thread(
     val id: Int,
     val process: Process,
@@ -133,8 +144,6 @@ class Process internal constructor(
     var sgid: Int = 0,
     var fsgid: Int = egid,
     var fileCreationMask: UInt = 0x12u,
-    var sessionId: Int = id,
-    var processGroupId: Int = id,
     val parentId: Int = 0,
     val startTimeTicks: ULong,
 ) {
@@ -142,6 +151,12 @@ class Process internal constructor(
         internal set
     var addressSpace = addressSpace
         internal set
+    internal var membership = ProcessMembership(id, id)
+
+    val sessionId: Int
+        get() = membership.sessionId
+    val processGroupId: Int
+        get() = membership.processGroupId
 
     val threads = mutableListOf<Thread>()
     var commandLine: ByteArray = name.encodeToByteArray() + byteArrayOf(0)
@@ -198,8 +213,7 @@ class Process internal constructor(
         sgid = parent.sgid
         fsgid = parent.fsgid
         fileCreationMask = parent.fileCreationMask
-        sessionId = parent.sessionId
-        processGroupId = parent.processGroupId
+        membership = parent.membership
         signalMask = parent.signalMask
         parent.signalActions.forEachIndexed { index, action ->
             signalActions[index] = action?.copyOf()
@@ -217,7 +231,7 @@ class Process internal constructor(
 object ProcessManager {
     private val nextThreadId = AtomicInt(0)
     private val nextProcessId = AtomicInt(0)
-    private val process = mutableListOf<Process>()
+    private val processes = mutableListOf<Process>()
     private val processLock = IrqSpinLock()
     private val threadTable = mutableMapOf<Int, Thread>()
     private val threadTableLock = IrqSpinLock()
@@ -226,7 +240,7 @@ object ProcessManager {
     private var kernelProcess: Process? = null
 
     fun initialize() {
-        if (processLock.withLock { process.isNotEmpty() }) {
+        if (processLock.withLock { processes.isNotEmpty() }) {
             return
         }
 
@@ -355,15 +369,47 @@ object ProcessManager {
     }
 
     fun findProcess(pid: Int): Process? {
-        return processLock.withLock { process.firstOrNull { it.id == pid } }
+        return processLock.withLock { processes.firstOrNull { it.id == pid } }
     }
 
     fun snapshotProcesses(): List<Process> = processLock.withLock {
-        process.filterNot(Process::isKernelProcess).sortedBy(Process::id)
+        processes.filterNot(Process::isKernelProcess).sortedBy(Process::id)
     }
 
     fun childrenOf(parentId: Int): List<Process> =
-        processLock.withLock { process.filter { it.parentId == parentId } }
+        processLock.withLock { processes.filter { it.parentId == parentId } }
+
+    internal fun createSession(process: Process): Boolean = processLock.withLock {
+        if (processes.any { it.processGroupId == process.id }) {
+            return@withLock false
+        }
+        process.membership = ProcessMembership(process.id, process.id)
+        true
+    }
+
+    internal fun setProcessGroup(
+        caller: Process,
+        pid: Int,
+        requestedGroup: Int,
+    ): ProcessGroupResult = processLock.withLock {
+        val target = if (pid == 0) caller else processes.firstOrNull { it.id == pid }
+            ?: return@withLock ProcessGroupResult.NO_SUCH_PROCESS
+        if (target !== caller && target.parentId != caller.id) {
+            return@withLock ProcessGroupResult.NO_SUCH_PROCESS
+        }
+        if (target.sessionId != caller.sessionId || target.sessionId == target.id) {
+            return@withLock ProcessGroupResult.NOT_PERMITTED
+        }
+
+        val group = requestedGroup.takeUnless { it == 0 } ?: target.id
+        val groupExists = group == target.id || processes.any {
+            it.sessionId == target.sessionId && it.processGroupId == group
+        }
+        if (!groupExists) return@withLock ProcessGroupResult.NOT_PERMITTED
+
+        target.membership = target.membership.copy(processGroupId = group)
+        ProcessGroupResult.SUCCESS
+    }
 
     fun markExited(process: Process, status: Int) {
         val context = processLock.withLock {
@@ -383,7 +429,7 @@ object ProcessManager {
         val reaped = processLock.withLock {
             child.parentId == parentId &&
                     child.state == ProcessState.ZOMBIE &&
-                    process.remove(child)
+                    processes.remove(child)
         }
         if (reaped) {
             child.addressSpace.destroy()
@@ -428,7 +474,7 @@ object ProcessManager {
         startTimeTicks = TscClock.nanoTime() / NANOSECONDS_PER_USER_TICK,
     ).also { created ->
         inherit?.let(created::inherit)
-        processLock.withLock { process += created }
+        processLock.withLock { processes += created }
     }
 
     private fun newThread(
