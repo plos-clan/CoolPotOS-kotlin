@@ -2,7 +2,6 @@ package org.plos_clan.cpos.fs.procfs
 
 import org.plos_clan.cpos.drivers.char.TtyManager
 import org.plos_clan.cpos.fs.FileSystemManager
-import org.plos_clan.cpos.fs.VfsName
 import org.plos_clan.cpos.fs.VfsResult
 import org.plos_clan.cpos.mem.addressspace.FileRegionBacking
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_EXECUTABLE
@@ -47,20 +46,16 @@ enum class ProcessFile(val fileName: String) {
         MAPS -> process.maps().encodeToByteArray()
         MOUNTS -> MountsFile.render(process)
     }
-
-    companion object {
-        fun from(name: VfsName): ProcessFile? =
-            entries.firstOrNull { it.fileName == name.toString() }
-    }
 }
 
 fun Process.stat(): String {
     val terminal = TtyManager.processTerminal(this)
+    val membership = this.membership
     val fields = buildList {
         add(stateCode().toString())
         add(parentId.toString())
-        add(processGroupId.toString())
-        add(sessionId.toString())
+        add(membership.processGroupId.toString())
+        add(membership.sessionId.toString())
         add((terminal?.deviceNumber ?: 0uL).toString())
         add((terminal?.foregroundProcessGroup ?: -1).toString())
         repeat(9) { add("0") }

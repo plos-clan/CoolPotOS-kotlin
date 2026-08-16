@@ -194,10 +194,8 @@ internal class VfsPathResolver(
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
         parent.dentry.cachedChild(name)?.let { cached ->
             val inode = cached.inode()
-            if (inode == null && backend.cacheNegativeLookups) {
-                return VfsResult.Err(VfsError.NOT_FOUND)
-            }
-            if (inode != null && backend.cachePositiveLookups) {
+            if (backend.isLookupStable(name, inode)) {
+                if (inode == null) return VfsResult.Err(VfsError.NOT_FOUND)
                 val path = VfsPath(parent.mount, cached)
                 return VfsResult.Ok(
                     if (followMount) followMounts(context.namespace, path) else path,
@@ -210,7 +208,7 @@ internal class VfsPathResolver(
             is VfsResult.Err -> return result
         }
         if (inode == null) {
-            if (backend.cacheNegativeLookups) {
+            if (backend.isLookupStable(name, null)) {
                 parent.dentry.cacheChild(name, null)
             }
             return VfsResult.Err(VfsError.NOT_FOUND)

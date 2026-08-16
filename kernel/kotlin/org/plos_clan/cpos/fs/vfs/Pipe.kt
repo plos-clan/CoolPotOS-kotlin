@@ -12,7 +12,8 @@ import org.plos_clan.cpos.utils.PollEvents
 private class PipeInode(
     private val state: PipeState,
 ) : InodeBackend {
-    override val type: InodeType = InodeType.PIPE
+    override val type: InodeType
+        get() = InodeType.PIPE
 
     override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
         when (options.access) {

@@ -143,11 +143,13 @@ class Dentry internal constructor(
     internal fun cacheChild(name: VfsName, inode: Inode?): Dentry = lock.withLock {
         children[name]?.let { cached ->
             val current = cached.inode()
-            if (inode == null || current == null || current === inode) {
+            if (inode == null || current == null ||
+                current.superBlock === inode.superBlock && current.id == inode.id
+            ) {
                 if (current !== inode) cached.install(inode)
                 return@withLock cached
             }
-            cached.detach()
+            cached.install(null)
         }
         Dentry(superBlock, name, this, inode).also { children[name] = it }
     }
@@ -194,7 +196,7 @@ class Dentry internal constructor(
             children.remove(source.currentName)
         }
         if (exchange == null) {
-            targetParent.children.put(targetName, source)?.detach()
+            targetParent.children.put(targetName, source)?.install(null)
         } else {
             targetParent.children[targetName] = source
             children[source.currentName] = exchange
@@ -206,10 +208,6 @@ class Dentry internal constructor(
     private fun relocate(parent: Dentry, name: VfsName) = lock.withLock {
         currentParent = parent
         currentName = name
-    }
-
-    private fun detach() = lock.withLock {
-        currentParent = null
     }
 
     private fun install(inode: Inode?) {

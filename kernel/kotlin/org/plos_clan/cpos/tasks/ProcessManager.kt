@@ -17,6 +17,7 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 private const val DEFAULT_THREAD_STACK_PAGES = 64uL
@@ -151,7 +152,10 @@ class Process internal constructor(
         internal set
     var addressSpace = addressSpace
         internal set
-    internal var membership = ProcessMembership(id, id)
+    private val membershipState = AtomicReference(ProcessMembership(id, id))
+
+    internal val membership: ProcessMembership
+        get() = membershipState.load()
 
     val sessionId: Int
         get() = membership.sessionId
@@ -203,6 +207,14 @@ class Process internal constructor(
         return previous
     }
 
+    internal fun establishSession() {
+        membershipState.store(ProcessMembership(id, id))
+    }
+
+    internal fun joinProcessGroup(group: Int) {
+        membershipState.store(membership.copy(processGroupId = group))
+    }
+
     internal fun inherit(parent: Process) {
         ruid = parent.ruid
         euid = parent.euid
@@ -213,7 +225,7 @@ class Process internal constructor(
         sgid = parent.sgid
         fsgid = parent.fsgid
         fileCreationMask = parent.fileCreationMask
-        membership = parent.membership
+        membershipState.store(parent.membership)
         signalMask = parent.signalMask
         parent.signalActions.forEachIndexed { index, action ->
             signalActions[index] = action?.copyOf()
@@ -383,7 +395,7 @@ object ProcessManager {
         if (processes.any { it.processGroupId == process.id }) {
             return@withLock false
         }
-        process.membership = ProcessMembership(process.id, process.id)
+        process.establishSession()
         true
     }
 
@@ -407,7 +419,7 @@ object ProcessManager {
         }
         if (!groupExists) return@withLock ProcessGroupResult.NOT_PERMITTED
 
-        target.membership = target.membership.copy(processGroupId = group)
+        target.joinProcessGroup(group)
         ProcessGroupResult.SUCCESS
     }
 

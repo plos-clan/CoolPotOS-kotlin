@@ -125,7 +125,8 @@ enum class FileAllocationMode(val keepsSize: Boolean) {
 }
 
 abstract class RegularFileBackend : InodeBackend {
-    final override val type: InodeType = InodeType.REGULAR
+    final override val type: InodeType
+        get() = InodeType.REGULAR
 
     open fun resize(inode: Inode, size: ULong): VfsResult<Unit> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
@@ -178,11 +179,8 @@ enum class RenameMode {
 }
 
 interface DirectoryBackend : InodeBackend {
-    val cachePositiveLookups: Boolean
-        get() = true
-
-    val cacheNegativeLookups: Boolean
-        get() = true
+    /** Whether this result, including a negative result, may satisfy a later lookup. */
+    fun isLookupStable(name: VfsName, inode: Inode?): Boolean = true
 
     fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?>
 

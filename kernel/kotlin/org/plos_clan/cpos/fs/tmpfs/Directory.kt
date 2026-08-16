@@ -8,10 +8,8 @@ internal class TmpfsDirectory(
     private var parent: Inode?,
 ) : DirectoryBackend, MutableInodeBackend {
     override val type: InodeType = InodeType.DIRECTORY
-    override val cachePositiveLookups: Boolean
-        get() = fileSystem.cacheDirectoryLookups
-    override val cacheNegativeLookups: Boolean
-        get() = fileSystem.cacheDirectoryLookups
+    override fun isLookupStable(name: VfsName, inode: Inode?): Boolean =
+        fileSystem.cacheDirectoryLookups
 
     private val lock = IrqSpinLock()
     private val children = linkedMapOf<VfsName, Inode>()

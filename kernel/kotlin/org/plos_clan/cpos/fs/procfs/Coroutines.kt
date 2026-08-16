@@ -10,10 +10,10 @@ import org.plos_clan.cpos.fs.VfsName
 import org.plos_clan.cpos.fs.VfsResult
 
 internal class ProcCoroutineDirectory(
-    private val fileSystem: ProcfsInstance,
-) : ProcDirectoryBackend() {
+    fileSystem: ProcfsInstance,
+) : ProcDirectoryBackend(fileSystem) {
     override fun resolve(superBlock: SuperBlock, name: VfsName): Inode? {
-        val id = name.decimalInt() ?: return null
+        val id = name.toString().decimalInt() ?: return null
         if (KernelCoroutines.snapshotJobs().none { it.id == id }) return null
         return fileSystem.text(superBlock, ProcInode.coroutine(id)) {
             KernelCoroutines.snapshotJobs().firstOrNull { it.id == id }?.let(::render)

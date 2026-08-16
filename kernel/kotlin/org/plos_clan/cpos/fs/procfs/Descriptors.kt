@@ -6,17 +6,18 @@ import org.plos_clan.cpos.fs.Inode
 import org.plos_clan.cpos.fs.InodeType
 import org.plos_clan.cpos.fs.SuperBlock
 import org.plos_clan.cpos.fs.VfsName
+import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsError
 import org.plos_clan.cpos.fs.VfsResult
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 
 internal class ProcDescriptorDirectory(
-    private val fileSystem: ProcfsInstance,
+    fileSystem: ProcfsInstance,
     private val pid: Int,
-) : ProcDirectoryBackend() {
+) : ProcDirectoryBackend(fileSystem) {
     override fun resolve(superBlock: SuperBlock, name: VfsName): Inode? {
-        val fd = name.decimalInt() ?: return null
+        val fd = name.toString().decimalInt() ?: return null
         val process = ProcessManager.findProcess(pid)?.takeUnless(Process::isKernelProcess)
             ?: return null
         if (!process.fdTable.contains(fd)) return null
@@ -47,27 +48,33 @@ internal class ProcDescriptorDirectory(
         )
     }
 
-    private fun descriptorTarget(fd: Int): String? {
+    private fun descriptorTarget(fd: Int): VfsPathname? {
         val process = ProcessManager.findProcess(pid)?.takeUnless(Process::isKernelProcess)
             ?: return null
         val file = process.fdTable.acquire(fd) ?: return null
         return try {
-            val inodeId = file.inode.id.value
-            if (file.inode.type == InodeType.PIPE &&
+            val inode = file.inode
+            val inodeId = inode.id.value
+            if (inode.type == InodeType.PIPE &&
                 file.path.dentry === file.path.mount.root
             ) {
-                return "pipe:[$inodeId]"
+                return VfsPathname.fromString("pipe:[$inodeId]")
             }
-            if (file.inode.type == InodeType.SOCKET) return "socket:[$inodeId]"
+            if (inode.type == InodeType.SOCKET) {
+                return VfsPathname.fromString("socket:[$inodeId]")
+            }
 
             val context = process.context ?: return null
             val result = FileSystemManager.vfs.absolutePath(context, file.path)
-            val path = (result as? VfsResult.Ok)?.value?.decodeToString() ?: return null
-            if (file.path.inode === file.inode) path else "$path (deleted)"
+            val path = (result as? VfsResult.Ok)?.value ?: return null
+            val pathInode = file.path.inode
+            val linked = pathInode?.superBlock === inode.superBlock && pathInode.id == inode.id
+            VfsPathname.fromBytes(if (linked) path else path + DELETED_SUFFIX)
         } finally {
             file.release()
         }
     }
 }
 
+private val DELETED_SUFFIX = " (deleted)".encodeToByteArray()
 private const val DESCRIPTOR_LINK_MODE = 0x140u
