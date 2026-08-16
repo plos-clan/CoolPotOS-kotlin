@@ -51,9 +51,7 @@ class FileDescriptorTable {
     private val lock = IrqSpinLock()
 
     fun installExact(
-        fd: Int,
-        file: OpenFileDescription,
-        flags: ULong
+        fd: Int, file: OpenFileDescription, flags: ULong
     ): Boolean = lock.withLock {
         if (fd !in entries.indices || entries[fd] != null) {
             return@withLock false
@@ -157,16 +155,15 @@ class FileDescriptorTable {
         }
     }
 
-    fun closeOnExec() {
-        val files = lock.withLock {
-            entries.indices.mapNotNull { fd ->
-                val descriptor = entries[fd]
-                descriptor?.takeIf {
-                    it.flags and FileDescriptorFlags.FD_CLOEXEC != 0uL
-                }?.file?.also { entries[fd] = null }
-            }
-        }
-        files.forEach(OpenFileDescription::release)
+    fun closeOnExec() = closeMatching { descriptor ->
+        descriptor.flags and FileDescriptorFlags.FD_CLOEXEC != 0uL
+    }
+
+    fun closeAll() = closeMatching { true }
+
+    private fun closeMatching(predicate: (FileDescriptor) -> Boolean) {
+        val descriptors = lock.withLock { entries.removeIf(predicate) }
+        descriptors.forEach { it.file.release() }
     }
 
     private class DescriptorEntries(val size: Int) {
@@ -207,6 +204,22 @@ class FileDescriptorTable {
                 index = (segmentIndex + 1) * SEGMENT_SIZE
             }
             return null
+        }
+
+        fun removeIf(predicate: (FileDescriptor) -> Boolean): List<FileDescriptor> = buildList {
+            for (segment in segments) {
+                val snapshot = segment.load()
+                var updated: Array<FileDescriptor?>? = null
+                for (index in snapshot.indices) {
+                    val descriptor = snapshot[index] ?: continue
+                    if (!predicate(descriptor)) continue
+                    val replacement = updated ?: snapshot.copyOf()
+                    replacement[index] = null
+                    updated = replacement
+                    add(descriptor)
+                }
+                updated?.let(segment::store)
+            }
         }
 
         companion object {

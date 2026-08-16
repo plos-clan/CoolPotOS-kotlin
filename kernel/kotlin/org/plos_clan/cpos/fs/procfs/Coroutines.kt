@@ -14,29 +14,31 @@ import org.plos_clan.cpos.fs.VfsResult
 
 private const val COROUTINE_INODE_BASE = 0x1_0000_0000uL
 
-class ProcCoroutineDirectory: DirectoryBackend {
+internal class ProcCoroutineDirectory(private val fileSystem: ProcfsInstance) : DirectoryBackend {
     override val type: InodeType = InodeType.DIRECTORY
     override val cacheNegativeLookups: Boolean = false
 
     override fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?> =
-        VfsResult.Ok(ProcCoroutine.coroutineEntry(directory.superBlock, name))
+        VfsResult.Ok(coroutineEntry(directory.superBlock, name))
 
     override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
-        VfsResult.Ok(ProcDirectoryHandle(ProcCoroutine.coroutineDirectoryEntries()))
-}
+        VfsResult.Ok(ProcDirectoryHandle(directoryEntries()))
 
-object ProcCoroutine {
-    fun coroutineEntry(superBlock: SuperBlock, name: VfsName): Inode? {
+    private fun coroutineEntry(superBlock: SuperBlock, name: VfsName): Inode? {
         val id = name.toString().toIntOrNull()?.takeIf { it != 0 } ?: return null
         if (KernelCoroutines.snapshotJobs().none { it.id == id }) return null
-        return Procfs.getInstance.text(superBlock, coroutineInode(id)) {
+        return fileSystem.text(superBlock, coroutineInode(id)) {
             KernelCoroutines.snapshotJobs().firstOrNull { it.id == id }?.let(::render)
         }
     }
 
-    fun coroutineDirectoryEntries(): List<DirectoryEntry> =
+    private fun directoryEntries(): List<DirectoryEntry> =
         KernelCoroutines.snapshotJobs().map { coroutine ->
-            Procfs.getInstance.entry(coroutine.id.toString(), coroutineInode(coroutine.id), InodeType.REGULAR)
+            fileSystem.entry(
+                coroutine.id.toString(),
+                coroutineInode(coroutine.id),
+                InodeType.REGULAR,
+            )
         }
 
     private fun coroutineInode(id: Int): ULong = COROUTINE_INODE_BASE + id.toULong()

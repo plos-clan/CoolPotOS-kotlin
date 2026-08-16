@@ -1,4 +1,4 @@
-package org.plos_clan.cpos.drivers.usb.unet
+package org.plos_clan.cpos.drivers.usb.adapt.unet
 
 const val REQ_SEND_ENCAPSULATED_COMMAND = 0x00u
 const val REQ_GET_ENCAPSULATED_RESPONSE = 0x01u

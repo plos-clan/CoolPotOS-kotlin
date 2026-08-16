@@ -1,7 +1,8 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.drivers.usb.hid
+package org.plos_clan.cpos.drivers.usb.adapt.hid
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.coroutines.KernelSemaphore

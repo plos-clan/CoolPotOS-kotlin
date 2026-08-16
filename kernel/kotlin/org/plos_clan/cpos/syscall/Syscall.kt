@@ -97,6 +97,8 @@ private enum class LinuxSyscall(
     STATFS(137, ::statfs),
     FSTATFS(138, ::fstatfs),
     ARCH_PRCTL(158, ::archPrctl),
+    MOUNT(165, ::mount),
+    UMOUNT2(166, ::umount2),
     REBOOT(169, ::reboot),
     GETTID(186, ::getTid),
     SETXATTR(188, ::setxattr),

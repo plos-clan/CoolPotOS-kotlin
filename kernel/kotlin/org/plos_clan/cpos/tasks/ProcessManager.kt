@@ -28,6 +28,13 @@ enum class TaskState {
     ZOMBIE,
 }
 
+internal enum class ProcessState {
+    READY,
+    RUNNING,
+    EXITING,
+    ZOMBIE,
+}
+
 class Thread(
     val id: Int,
     val process: Process,
@@ -139,7 +146,7 @@ class Process internal constructor(
     val threads = mutableListOf<Thread>()
     var commandLine: ByteArray = name.encodeToByteArray() + byteArrayOf(0)
         internal set
-    var state: TaskState = TaskState.READY
+    internal var state = ProcessState.READY
     var signalMask: ULong = 0uL
     val signalActions = arrayOfNulls<ByteArray>(64)
     val resourceLimits = ProcessLimits()
@@ -163,7 +170,7 @@ class Process internal constructor(
         val previous = fsuid
         if (requested != null &&
             (euid == 0 || requested == ruid || requested == euid ||
-                requested == suid || requested == fsuid)
+                    requested == suid || requested == fsuid)
         ) {
             fsuid = requested
         }
@@ -174,7 +181,7 @@ class Process internal constructor(
         val previous = fsgid
         if (requested != null &&
             (euid == 0 || requested == rgid || requested == egid ||
-                requested == sgid || requested == fsgid)
+                    requested == sgid || requested == fsgid)
         ) {
             fsgid = requested
         }
@@ -229,7 +236,7 @@ object ProcessManager {
             isKernelProcess = true,
             null
         ).also { process ->
-            process.state = TaskState.RUNNING
+            process.state = ProcessState.RUNNING
         }
         kernelProcess = systemProcess
 
@@ -279,7 +286,7 @@ object ProcessManager {
     ): Process {
         val addressSpace = parent?.addressSpace?.fork()
             ?: AddressSpace.user(KernelPageDirectory.getDirectory().createUserDirectory())
-        val context = parent?.context?.fork() ?: FileSystemManager.kernelContext
+        val context = parent?.context?.fork() ?: FileSystemManager.kernelContext?.fork()
         val child = newProcess(
             name = name,
             addressSpace = addressSpace,
@@ -359,17 +366,24 @@ object ProcessManager {
         processLock.withLock { process.filter { it.parentId == parentId } }
 
     fun markExited(process: Process, status: Int) {
+        val context = processLock.withLock {
+            if (process.state == ProcessState.EXITING || process.state == ProcessState.ZOMBIE) return
+            process.state = ProcessState.EXITING
+            process.context.also { process.context = null }
+        }
+        process.fdTable.closeAll()
+        context?.release()
         processLock.withLock {
             process.exitCode = status and 0xff
-            process.state = TaskState.ZOMBIE
+            process.state = ProcessState.ZOMBIE
         }
     }
 
     fun reapChild(parentId: Int, child: Process): Boolean {
         val reaped = processLock.withLock {
             child.parentId == parentId &&
-                child.state == TaskState.ZOMBIE &&
-                process.remove(child)
+                    child.state == ProcessState.ZOMBIE &&
+                    process.remove(child)
         }
         if (reaped) {
             child.addressSpace.destroy()

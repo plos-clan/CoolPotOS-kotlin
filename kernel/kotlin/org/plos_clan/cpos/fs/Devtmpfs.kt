@@ -14,34 +14,14 @@ import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 
-object Devtmpfs : FileSystemType {
-    override val name: String = "devtmpfs"
-    override val magic: ULong = 0x0102_1994uL
-    override val requiresDevice: Boolean = false
+object Devtmpfs : TmpfsFileSystemType("devtmpfs", ::DevtmpfsInstance)
 
-    override fun createSuperBlock(options: FileSystemOptions): VfsResult<SuperBlock> {
-        if (options != EmptyFileSystemOptions) {
-            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        }
-
-        val instance = DevtmpfsInstance()
-        return VfsResult.Ok(
-            SuperBlock(this, instance) { superBlock ->
-                instance.createRoot(superBlock)
-            }
-        )
-    }
-}
-
-private class DevtmpfsInstance : SuperBlockBackend, DeviceRegistryObserver {
-    private val storage = TmpfsInstance(
-        options = TmpfsOptions(),
-        cacheDirectoryLookups = false,
-    )
+private class DevtmpfsInstance(options: TmpfsOptions) :
+    TmpfsInstance(options, cacheDirectoryLookups = false), DeviceRegistryObserver {
     private var root: Inode? = null
 
-    fun createRoot(superBlock: SuperBlock): Inode {
-        val inode = storage.newDirectory(superBlock, FileMode(0x1EDu), parent = null)
+    override fun createRoot(superBlock: SuperBlock): Inode {
+        val inode = super.createRoot(superBlock)
         root = inode
         DeviceManager.observe(this)
         return inode
@@ -49,7 +29,7 @@ private class DevtmpfsInstance : SuperBlockBackend, DeviceRegistryObserver {
 
     override fun deviceRegistered(device: Device) {
         val root = root ?: return
-        storage.installSpecialNode(
+        installSpecialNode(
             root = root,
             path = devicePath(device),
             backend = DeviceNode(
@@ -67,17 +47,14 @@ private class DevtmpfsInstance : SuperBlockBackend, DeviceRegistryObserver {
 
     override fun deviceUnregistered(device: Device) {
         val root = root ?: return
-        storage.removeSpecialNode(root, devicePath(device)) { backend ->
+        removeSpecialNode(root, devicePath(device)) { backend ->
             backend is DeviceNode && backend.matches(device)
         }
     }
 
-    override fun sync(): VfsResult<Unit> = storage.sync()
-
     override fun release() {
         DeviceManager.stopObserving(this)
         root = null
-        storage.release()
     }
 
     private fun devicePath(device: Device): List<VfsName> =

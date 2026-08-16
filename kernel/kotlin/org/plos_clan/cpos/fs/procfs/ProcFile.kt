@@ -11,6 +11,7 @@ import org.plos_clan.cpos.mem.MEMORY_REGION_WRITABLE
 import org.plos_clan.cpos.mem.MemoryRegionType
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessResource
+import org.plos_clan.cpos.tasks.ProcessState
 import org.plos_clan.cpos.tasks.TaskState
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.hasBit
@@ -19,7 +20,7 @@ val Process.comm: String
     get() = name.substringAfterLast('/').ifEmpty { name }.take(MAX_COMM_LENGTH)
 
 val Process.isRunnable: Boolean
-    get() = state != TaskState.ZOMBIE && threads.any {
+    get() = state != ProcessState.ZOMBIE && threads.any {
         it.state == TaskState.READY || it.state == TaskState.RUNNING
     }
 
@@ -104,7 +105,7 @@ fun Process.status(): String {
 private fun Process.stateCode(): Char = stateDescription().first
 
 private fun Process.stateDescription(): Pair<Char, String> = when {
-    state == TaskState.ZOMBIE -> 'Z' to "zombie"
+    state == ProcessState.ZOMBIE -> 'Z' to "zombie"
     threads.any { it.state == TaskState.RUNNING } -> 'R' to "running"
     threads.any { it.state == TaskState.READY } -> 'R' to "runnable"
     else -> 'S' to "sleeping"

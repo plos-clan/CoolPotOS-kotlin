@@ -19,12 +19,8 @@ data class ErofsOptions(
     val cacheBytes: Int = DEFAULT_CACHE_BYTES,
 ) : FileSystemOptions
 
-object Erofs : FileSystemType {
-    override val name: String = "erofs"
-    override val magic: ULong = 0xe0f5_e1e2uL
-    override val requiresDevice: Boolean = true
-
-    override fun createSuperBlock(options: FileSystemOptions): VfsResult<SuperBlock> {
+object Erofs : FileSystemType("erofs", 0xe0f5_e1e2uL, requiresDevice = true) {
+    override fun createBackend(options: FileSystemOptions): VfsResult<SuperBlockBackend> {
         val configuration = options as? ErofsOptions
             ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         if (configuration.cacheBytes < 0) {
@@ -32,7 +28,7 @@ object Erofs : FileSystemType {
         }
         val instance = ErofsInstance.open(configuration.data, configuration.cacheBytes)
             ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        return VfsResult.Ok(SuperBlock(this, instance, instance::rootInode))
+        return VfsResult.Ok(instance)
     }
 }
 
@@ -53,7 +49,7 @@ private class ErofsInstance private constructor(
     private val inodeLock = IrqSpinLock()
     private val inodeCache = mutableMapOf<ULong, Inode>()
 
-    fun rootInode(superBlock: SuperBlock): Inode =
+    override fun createRoot(superBlock: SuperBlock): Inode =
         inode(superBlock, header.rootNid) ?: error("EROFS root inode is invalid")
 
     private fun inode(superBlock: SuperBlock, nid: ULong): Inode? {

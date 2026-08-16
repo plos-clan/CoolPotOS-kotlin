@@ -10,27 +10,41 @@ data class OverlayfsOptions(
     val upper: VfsPath,
 ) : FileSystemOptions
 
-object Overlayfs : FileSystemType {
-    override val name: String = "overlay"
-    override val magic: ULong = 0x794c_7630uL
-    override val requiresDevice: Boolean = false
-
-    override fun createSuperBlock(options: FileSystemOptions): VfsResult<SuperBlock> {
+object Overlayfs : FileSystemType("overlay", 0x794c_7630uL) {
+    override fun createBackend(options: FileSystemOptions): VfsResult<SuperBlockBackend> {
         val configuration = options as? OverlayfsOptions
             ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        if (configuration.lower.inode?.type != InodeType.DIRECTORY ||
-            configuration.upper.inode?.type != InodeType.DIRECTORY
-        ) {
-            return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        }
-        val instance = OverlayInstance(configuration)
-        return VfsResult.Ok(SuperBlock(this, instance) { superBlock ->
-            instance.rootInode(superBlock)
-        })
+        return OverlayInstance.open(configuration)
     }
 }
 
-private class OverlayInstance(options: OverlayfsOptions) : SuperBlockBackend {
+private class OverlayInstance private constructor(options: OverlayfsOptions) : SuperBlockBackend {
+    companion object {
+        fun open(options: OverlayfsOptions): VfsResult<OverlayInstance> {
+            val lower = options.lower.mount
+            if (!lower.retain()) return VfsResult.Err(VfsError.NOT_FOUND)
+
+            val upper = options.upper.mount
+            if (!upper.retain()) {
+                lower.release()
+                return VfsResult.Err(VfsError.NOT_FOUND)
+            }
+            if (options.lower.inode?.type != InodeType.DIRECTORY ||
+                options.upper.inode?.type != InodeType.DIRECTORY
+            ) {
+                upper.release()
+                lower.release()
+                return VfsResult.Err(VfsError.NOT_DIRECTORY)
+            }
+            if (MountFlag.READ_ONLY in upper.flags) {
+                upper.release()
+                lower.release()
+                return VfsResult.Err(VfsError.READ_ONLY)
+            }
+            return VfsResult.Ok(OverlayInstance(options))
+        }
+    }
+
     private val whiteouts = mutableSetOf<Whiteout>()
     private val root = Location(options.lower, options.upper, null, null)
 
@@ -51,10 +65,15 @@ private class OverlayInstance(options: OverlayfsOptions) : SuperBlockBackend {
 
     private var nextInodeId = 1uL
 
-    internal fun rootInode(superBlock: SuperBlock): Inode = inode(superBlock, root)
+    override fun createRoot(superBlock: SuperBlock): Inode = inode(superBlock, root)
 
     override fun sync(): VfsResult<Unit> =
-        root.upper?.mount?.superBlock?.backend?.sync() ?: VfsResult.Ok(Unit)
+        checkNotNull(root.upper).mount.superBlock.backend.sync()
+
+    override fun release() {
+        checkNotNull(root.upper).mount.release()
+        checkNotNull(root.lower).mount.release()
+    }
 
     private fun child(superBlock: SuperBlock, directory: Location, name: VfsName): Inode? {
         val location = childLocation(directory, name) ?: return null

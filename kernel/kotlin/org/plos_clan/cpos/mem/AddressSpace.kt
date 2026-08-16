@@ -26,6 +26,7 @@ private const val MMIO_VIRTUAL_END = 0xffff_ff80_0000_0000uL
 
 private const val EIO = 5
 private const val ENOMEM = 12
+private const val EACCES = 13
 private const val EFAULT = 14
 private const val EEXIST = 17
 private const val EINVAL = 22
@@ -44,6 +45,7 @@ data class MemoryRegion(
     var end: ULong,
     var access: ULong,
     val name: String?,
+    val maximumAccess: ULong = MEMORY_REGION_ACCESS_MASK,
     val type: MemoryRegionType = MemoryRegionType.ANONYMOUS,
     var offset: ULong = 0uL,
     val shared: Boolean = false,
@@ -107,6 +109,7 @@ data class MemoryMapRequest(
     val noReplace: Boolean,
     val shared: Boolean,
     val type: MemoryRegionType,
+    val maximumAccess: ULong = MEMORY_REGION_ACCESS_MASK,
     val offset: ULong = 0uL,
     val name: String? = null,
     val backing: MemoryRegionBacking? = null,
@@ -242,6 +245,8 @@ class AddressSpace internal constructor(
         val alignedLength = alignLength(request.length)
             ?: return MemoryMapResult.Err(EINVAL)
         if ((request.access and MEMORY_REGION_ACCESS_MASK.inv()) != 0uL ||
+            (request.maximumAccess and MEMORY_REGION_ACCESS_MASK.inv()) != 0uL ||
+            (request.access and request.maximumAccess.inv()) != 0uL ||
             (request.type == MemoryRegionType.FILE) != (request.backing != null) ||
             request.offset > ULong.MAX_VALUE - alignedLength
         ) {
@@ -274,6 +279,7 @@ class AddressSpace internal constructor(
                 start = selected,
                 end = selected + alignedLength,
                 access = request.access,
+                maximumAccess = request.maximumAccess,
                 name = request.name,
                 type = request.type,
                 offset = request.offset,
@@ -469,6 +475,13 @@ class AddressSpace internal constructor(
             if (!rangeFullyCoveredLocked(address, end)) {
                 return@withLock MemoryMapResult.Err(ENOMEM)
             }
+            val exceedsAccessLimit = regions.any { region ->
+                region.start < end && region.end > address &&
+                    access and region.maximumAccess.inv() != 0uL
+            }
+            if (exceedsAccessLimit) {
+                return@withLock MemoryMapResult.Err(EACCES)
+            }
             splitAtLocked(address)
             splitAtLocked(end)
 
@@ -587,6 +600,7 @@ class AddressSpace internal constructor(
     private fun canMerge(left: MemoryRegion, right: MemoryRegion): Boolean =
         left.end == right.start &&
             left.access == right.access &&
+            left.maximumAccess == right.maximumAccess &&
             left.name == right.name &&
             left.type == right.type &&
             left.shared == right.shared &&
@@ -666,6 +680,8 @@ class AddressSpace internal constructor(
         region.start < region.end &&
             region.start.isPageAligned() &&
             region.end.isPageAligned() &&
+            (region.maximumAccess and MEMORY_REGION_ACCESS_MASK.inv()) == 0uL &&
+            (region.access and region.maximumAccess.inv()) == 0uL &&
             region.end <= limit
 
     private fun validMmapRange(address: ULong, length: ULong): Boolean =

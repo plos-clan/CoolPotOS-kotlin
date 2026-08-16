@@ -8,7 +8,7 @@ import org.plos_clan.cpos.utils.Cmdline
 object FileSystemManager {
     val vfs = Vfs()
 
-    private val builtInFileSystems = listOf<FileSystemType>(
+    private val builtInFileSystems = listOf(
         Tmpfs,
         Devtmpfs,
         Procfs,
@@ -30,10 +30,10 @@ object FileSystemManager {
         }
         val lower = when (val result = vfs.createContext(
             Erofs.name,
-            MountOptions(
+            RootMountOptions(
                 source = moduleName,
-                flags = MountFlags.READ_ONLY,
-                fileSystem = ErofsOptions(module.data),
+                flags = MountFlags.of(MountFlag.READ_ONLY),
+                fileSystemOptions = ErofsOptions(module.data),
             ),
         )) {
             is VfsResult.Ok -> result.value
@@ -45,28 +45,36 @@ object FileSystemManager {
         val upper = when (val result = vfs.createContext(Tmpfs.name)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> {
+                lower.release()
                 println("VFS: failed to create overlay upper tmpfs: ${result.error}")
                 return false
             }
         }
-        val context = when (val result = vfs.createContext(
+        val overlay = vfs.createContext(
             Overlayfs.name,
-            MountOptions(fileSystem = OverlayfsOptions(lower.root, upper.root)),
-        )) {
-            is VfsResult.Ok -> result.value
+            RootMountOptions(fileSystemOptions = OverlayfsOptions(lower.root, upper.root)),
+        )
+        lower.release()
+        upper.release()
+        val context = when (overlay) {
+            is VfsResult.Ok -> overlay.value
             is VfsResult.Err -> {
-                println("VFS: failed to create OverlayFS: ${result.error}")
+                println("VFS: failed to create OverlayFS: ${overlay.error}")
                 return false
             }
         }
 
-        val devFlags = MountFlags(MountFlags.NO_EXEC.bits or MountFlags.NO_SUID.bits)
-        if (!mount(context, "/dev", Devtmpfs, devFlags)) return false
+        val devFlags = MountFlags.of(MountFlag.NO_EXEC, MountFlag.NO_SUID)
+        if (!mount(context, "/dev", Devtmpfs, devFlags)) {
+            context.release()
+            return false
+        }
 
-        val procFlags = MountFlags(
-            MountFlags.NO_EXEC.bits or MountFlags.NO_DEVICE.bits or MountFlags.NO_SUID.bits,
-        )
-        if (!mount(context, "/proc", Procfs, procFlags)) return false
+        val procFlags = devFlags + MountFlag.NO_DEVICE
+        if (!mount(context, "/proc", Procfs, procFlags)) {
+            context.release()
+            return false
+        }
         kernelContext = context
         ProcessManager.getKernelProcess()!!.context = context
         println("VFS: mounted zstd EROFS with tmpfs overlay at '/'")
@@ -103,8 +111,7 @@ object FileSystemManager {
         return when (val result = vfs.mount(
             context,
             target,
-            fileSystem.name,
-            MountOptions(flags = flags),
+            MountRequest(fileSystem.name, flags = flags),
         )) {
             is VfsResult.Ok -> true
             is VfsResult.Err -> {

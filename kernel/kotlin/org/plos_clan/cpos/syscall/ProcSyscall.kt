@@ -3,6 +3,7 @@
 package org.plos_clan.cpos.syscall
 
 import kotlinx.cinterop.ExperimentalForeignApi
+import org.plos_clan.cpos.fs.VfsResult
 import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.module.ElfLoader
@@ -11,6 +12,7 @@ import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.ProcessResource
+import org.plos_clan.cpos.tasks.ProcessState
 import org.plos_clan.cpos.tasks.ResourceLimit
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.TaskState
@@ -386,12 +388,15 @@ internal fun execve(regs: PtraceRegisters, process: Process): Long {
     val environment = readStringVector(process, regs[PtraceRegisters.IDX_RDX])
         ?: return errno(Errno.EFAULT)
     val executablePath = path.decodeToString()
-    val image = ElfLoader.loadProcess(
+    val image = when (val result = ElfLoader.loadProcess(
         path = executablePath,
         process = process,
         arguments = arguments,
         environment = environment,
-    ) ?: return errno(Errno.ENOEXEC)
+    )) {
+        is VfsResult.Ok -> result.value
+        is VfsResult.Err -> return errno(result.error.errno)
+    }
     process.installExecutable(executablePath, arguments.ifEmpty { listOf(executablePath) })
     process.fdTable.closeOnExec()
     regs[PtraceRegisters.IDX_RIP] = image.entryPoint
@@ -417,7 +422,7 @@ internal fun wait4(regs: PtraceRegisters, process: Process): Long {
             }
         }
         if (children.isEmpty()) return errno(Errno.ECHILD)
-        val exited = children.firstOrNull { it.state == TaskState.ZOMBIE }
+        val exited = children.firstOrNull { it.state == ProcessState.ZOMBIE }
         if (exited != null) {
             val status = regs[PtraceRegisters.IDX_RSI]
             if (status != 0uL &&

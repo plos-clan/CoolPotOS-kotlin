@@ -54,7 +54,7 @@ object Init {
     fun setupInitProgram() {
         val rdinit = Cmdline["rdinit"] ?: "/init"
         val process = ProcessManager.createUserProcess(rdinit)
-        val image = ElfLoader.loadProcess(
+        val image = when (val result = ElfLoader.loadProcess(
             path = rdinit,
             process = process,
             arguments = listOf(rdinit),
@@ -64,9 +64,12 @@ object Init {
                 "TERM=linux",
                 "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
             ),
-        ) ?: run {
-            println("Init: cannot load executable $rdinit")
-            return
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> {
+                println("Init: cannot load executable $rdinit: ${result.error}")
+                return
+            }
         }
         process.installExecutable(rdinit, listOf(rdinit))
 

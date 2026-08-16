@@ -1,6 +1,7 @@
 package org.plos_clan.cpos.fs.procfs
 
 import org.plos_clan.cpos.fs.FileSystemManager
+import org.plos_clan.cpos.fs.MountFlag
 import org.plos_clan.cpos.fs.MountFlags
 import org.plos_clan.cpos.fs.VfsResult
 import org.plos_clan.cpos.tasks.Process
@@ -33,22 +34,15 @@ object MountsFile {
     }
 
     private fun StringBuilder.appendOptions(flags: MountFlags) {
-        append(if (MountFlags.READ_ONLY in flags) "ro" else "rw")
-
-        if (MountFlags.NO_SUID in flags) {
-            append(",nosuid")
-        }
-        if (MountFlags.NO_DEVICE in flags) {
-            append(",nodev")
-        }
-        if (MountFlags.NO_EXEC in flags) {
-            append(",noexec")
+        append(if (MountFlag.READ_ONLY in flags) "ro" else "rw")
+        for (flag in MountFlag.entries) {
+            val option = flag.optionName ?: continue
+            if (flag in flags) append(',').append(option)
         }
     }
 
-
     fun render(process: Process): ByteArray {
-        val context = process.getFSContext()
+        val context = process.context ?: return ByteArray(0)
         val mounts = context.namespace.snapshotMounts()
 
         return buildString {

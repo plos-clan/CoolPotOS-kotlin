@@ -1,39 +1,108 @@
 package org.plos_clan.cpos.fs
 
 import org.plos_clan.cpos.mem.ByteArrayBuffer
+import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 
 data class TmpfsOptions(
     val sizeLimit: ULong? = null,
-    val pageSize: Int = 4096,
+    val pageSize: Int = PAGE_SIZE_BYTES.toInt(),
+    val rootMode: FileMode = FileMode(0x1EDu),
+    val rootUid: UInt = 0u,
+    val rootGid: UInt = 0u,
 ) : FileSystemOptions {
     init {
         require(pageSize > 0 && pageSize and (pageSize - 1) == 0)
     }
+
+    companion object {
+        internal fun parse(data: ByteArray?): VfsResult<TmpfsOptions> {
+            if (data == null || data.isEmpty()) return VfsResult.Ok(TmpfsOptions())
+
+            var sizeLimit: ULong? = null
+            var mode = 0x1EDu
+            var uid = 0u
+            var gid = 0u
+            for (option in data.decodeToString().split(',')) {
+                val separator = option.indexOf('=')
+                if (separator <= 0 || separator == option.lastIndex) {
+                    return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                }
+                val value = option.substring(separator + 1)
+                when (option.substring(0, separator)) {
+                    "size" -> sizeLimit = parseSize(value)
+                        ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                    "mode" -> mode = value.toUIntOrNull(8)?.takeIf { it <= 0xFFFu }
+                        ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                    "uid" -> uid = value.toUIntOrNull()
+                        ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                    "gid" -> gid = value.toUIntOrNull()
+                        ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                    else -> return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                }
+            }
+            return VfsResult.Ok(
+                TmpfsOptions(
+                    sizeLimit = sizeLimit,
+                    rootMode = FileMode(mode),
+                    rootUid = uid,
+                    rootGid = gid,
+                ),
+            )
+        }
+
+        private fun parseSize(value: String): ULong? {
+            if (value.endsWith('%')) {
+                val percentage = value.dropLast(1).toUIntOrNull()?.takeIf { it <= 100u }
+                    ?: return null
+                val total = BuddyFrameAllocator.statistics().totalBytes
+                val share = percentage.toULong()
+                return total / 100uL * share + total % 100uL * share / 100uL
+            }
+            val shift = when (value.lastOrNull()?.lowercaseChar()) {
+                'k' -> 10
+                'm' -> 20
+                'g' -> 30
+                't' -> 40
+                'p' -> 50
+                'e' -> 60
+                else -> 0
+            }
+            val digits = if (shift == 0) value else value.dropLast(1)
+            val units = digits.toULongOrNull() ?: return null
+            return units.takeIf { it <= ULong.MAX_VALUE shr shift }?.shl(shift)
+        }
+    }
 }
 
-object Tmpfs : FileSystemType {
-    override val name: String = "tmpfs"
-    override val magic: ULong = 0x0102_1994uL
-    override val requiresDevice: Boolean = false
+abstract class TmpfsFileSystemType protected constructor(
+    name: String,
+    private val backendFactory: (TmpfsOptions) -> SuperBlockBackend,
+) : FileSystemType(name, 0x0102_1994uL) {
+    final override fun parseOptions(
+        source: String?,
+        data: ByteArray?,
+    ): VfsResult<TmpfsOptions> =
+        TmpfsOptions.parse(data)
 
-    override fun createSuperBlock(options: FileSystemOptions): VfsResult<SuperBlock> {
+    final override fun createBackend(
+        options: FileSystemOptions,
+    ): VfsResult<SuperBlockBackend> {
         val configuration = when (options) {
             EmptyFileSystemOptions -> TmpfsOptions()
             is TmpfsOptions -> options
             else -> return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
-        val instance = TmpfsInstance(configuration)
-        val superBlock = SuperBlock(this, instance) { sb ->
-            instance.newDirectory(sb, FileMode(0x1EDu), parent = null)
-        }
-        return VfsResult.Ok(superBlock)
+        return VfsResult.Ok(backendFactory(configuration))
     }
 }
 
-internal class TmpfsInstance(
+object Tmpfs : TmpfsFileSystemType("tmpfs", ::TmpfsInstance)
+
+internal open class TmpfsInstance(
     private val options: TmpfsOptions,
     internal val cacheDirectoryLookups: Boolean = true,
 ) : SuperBlockBackend {
@@ -44,6 +113,14 @@ internal class TmpfsInstance(
 
     val pageSize: Int
         get() = options.pageSize
+
+    override fun createRoot(superBlock: SuperBlock): Inode = newDirectory(
+        superBlock = superBlock,
+        mode = options.rootMode,
+        uid = options.rootUid,
+        gid = options.rootGid,
+        parent = null,
+    )
 
     fun newRegularFile(
         superBlock: SuperBlock,

@@ -2,8 +2,10 @@ package org.plos_clan.cpos.module
 
 import org.plos_clan.cpos.fs.AccessMode
 import org.plos_clan.cpos.fs.FileSystemManager
+import org.plos_clan.cpos.fs.MountFlag
 import org.plos_clan.cpos.fs.OpenFileDescription
 import org.plos_clan.cpos.fs.OpenOptions
+import org.plos_clan.cpos.fs.VfsError
 import org.plos_clan.cpos.fs.VfsPathname
 import org.plos_clan.cpos.fs.VfsResult
 import org.plos_clan.cpos.mem.AddressSpace
@@ -72,24 +74,31 @@ object ElfLoader {
         process: Process,
         arguments: List<String> = listOf(path),
         environment: List<String> = emptyList(),
-    ): UserProcessImage? {
-        val addressSpace = AddressSpace.user(KernelPageDirectory.getDirectory().createUserDirectory())
+    ): VfsResult<UserProcessImage> {
+        val userDirectory = KernelPageDirectory.getDirectory().createUserDirectory()
+        val addressSpace = AddressSpace.user(userDirectory)
         var installed = false
         try {
-            val executableFile = open(process, path) ?: return null
+            val executableFile = when (val result = open(process, path)) {
+                is VfsResult.Ok -> result.value
+                is VfsResult.Err -> return result
+            }
 
             val executable = try {
                 loadImage(executableFile, addressSpace, path, 0uL)
             } finally {
                 executableFile.file.release()
-            } ?: return null
+            } ?: return VfsResult.Err(VfsError.EXEC_FORMAT)
 
             val interpreter = executableFile.image.interpreterPath?.let { interpreterPath ->
-                val interpreterFile = open(process, interpreterPath) ?: return null
+                val interpreterFile = when (val result = open(process, interpreterPath)) {
+                    is VfsResult.Ok -> result.value
+                    is VfsResult.Err -> return result
+                }
                 try {
                     if (interpreterFile.image.type != ElfObjectType.DYNAMIC) {
                         println("ELF: interpreter $interpreterPath is not ET_DYN")
-                        return null
+                        return VfsResult.Err(VfsError.EXEC_FORMAT)
                     }
                     loadImage(
                         file = interpreterFile,
@@ -107,9 +116,12 @@ object ElfLoader {
                     interpreterFile.file.release()
                 }
             }
-            if (executableFile.image.interpreterPath != null && interpreter == null) return null
+            if (executableFile.image.interpreterPath != null && interpreter == null) {
+                return VfsResult.Err(VfsError.EXEC_FORMAT)
+            }
 
-            val vdso = Vdso.install(addressSpace) ?: return null
+            val vdso = Vdso.install(addressSpace)
+                ?: return VfsResult.Err(VfsError.NO_MEMORY)
 
             val stack = UserStackBuilder.build(
                 process = process,
@@ -120,20 +132,24 @@ object ElfLoader {
                 interpreter = interpreter,
                 systemInfoHeader = vdso,
                 addressSpace = addressSpace,
-            ) ?: return null
+            ) ?: return VfsResult.Err(VfsError.NO_MEMORY)
 
-            if (!ProcessManager.installUserAddressSpace(process, addressSpace)) return null
+            if (!ProcessManager.installUserAddressSpace(process, addressSpace)) {
+                return VfsResult.Err(VfsError.BUSY)
+            }
             installed = true
-            return UserProcessImage(
-                entryPoint = interpreter?.entryPoint ?: executable.entryPoint,
-                stackPointer = stack.stackPointer,
+            return VfsResult.Ok(
+                UserProcessImage(
+                    entryPoint = interpreter?.entryPoint ?: executable.entryPoint,
+                    stackPointer = stack.stackPointer,
+                ),
             )
         } finally {
             if (!installed) addressSpace.destroy()
         }
     }
 
-    private fun open(process: Process, path: String): ElfFile? {
+    private fun open(process: Process, path: String): VfsResult<ElfFile> {
         val file = when (
             val result = FileSystemManager.vfs.open(
                 context = process.getFSContext(),
@@ -144,14 +160,19 @@ object ElfLoader {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> {
                 println("ELF: cannot open $path: ${result.error}")
-                return null
+                return result
             }
+        }
+        if (MountFlag.NO_EXEC in file.path.mount.flags) {
+            file.release()
+            println("ELF: execution is disabled on the mount containing $path")
+            return VfsResult.Err(VfsError.PERMISSION_DENIED)
         }
         val image = parseImage(file, path) ?: run {
             file.release()
-            return null
+            return VfsResult.Err(VfsError.EXEC_FORMAT)
         }
-        return ElfFile(file, image)
+        return VfsResult.Ok(ElfFile(file, image))
     }
 
     private fun loadImage(

@@ -18,6 +18,7 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PollEvents
 import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 internal const val ALLOCATION_BLOCK_SIZE = 512uL
@@ -28,6 +29,7 @@ enum class VfsError(val errno: Int) {
     NO_SUCH_DEVICE_OR_ADDRESS(6),
     INTERRUPTED(4),
     IO(5),
+    EXEC_FORMAT(8),
     BAD_DESCRIPTOR(9),
     WOULD_BLOCK(11),
     NO_MEMORY(12),
@@ -273,15 +275,38 @@ data class OpenOptions(
     val createGid: UInt = 0u,
 )
 
-value class MountFlags(val bits: UInt) {
-    operator fun contains(flag: MountFlags): Boolean = bits and flag.bits == flag.bits
+enum class MountFlag(bit: Int, internal val optionName: String? = null) {
+    READ_ONLY(0),
+    NO_SUID(1, "nosuid"),
+    NO_DEVICE(2, "nodev"),
+    NO_EXEC(3, "noexec"),
+    SYNCHRONOUS(4, "sync"),
+    DIRECTORY_SYNC(7, "dirsync"),
+    NO_SYMLINK_FOLLOW(8, "nosymfollow"),
+    NO_ATIME(10, "noatime"),
+    NO_DIRECTORY_ATIME(11, "nodiratime"),
+    RELATIVE_ATIME(21, "relatime"),
+    STRICT_ATIME(24, "strictatime"),
+    LAZY_TIME(25, "lazytime");
+
+    internal val mask = 1u shl bit
+}
+
+value class MountFlags private constructor(private val bits: UInt) {
+    operator fun contains(flag: MountFlag): Boolean = bits and flag.mask != 0u
+    operator fun plus(flag: MountFlag): MountFlags = MountFlags(bits or flag.mask)
 
     companion object {
         val NONE = MountFlags(0u)
-        val READ_ONLY = MountFlags(1u shl 0)
-        val NO_EXEC = MountFlags(1u shl 1)
-        val NO_DEVICE = MountFlags(1u shl 2)
-        val NO_SUID = MountFlags(1u shl 3)
+        private val supported = MountFlag.entries.fold(NONE, MountFlags::plus)
+
+        fun of(vararg flags: MountFlag): MountFlags = flags.fold(NONE, MountFlags::plus)
+
+        internal fun fromBits(bits: ULong): MountFlags? = bits
+            .takeIf { it <= UInt.MAX_VALUE.toULong() }
+            ?.toUInt()
+            ?.takeIf { it and supported.bits.inv() == 0u }
+            ?.let(::MountFlags)
     }
 }
 
@@ -289,21 +314,63 @@ interface FileSystemOptions
 
 data object EmptyFileSystemOptions : FileSystemOptions
 
-data class MountOptions(
+data class RootMountOptions(
     val source: String? = null,
     val flags: MountFlags = MountFlags.NONE,
-    val fileSystem: FileSystemOptions = EmptyFileSystemOptions,
+    val fileSystemOptions: FileSystemOptions = EmptyFileSystemOptions,
 )
 
-interface FileSystemType {
-    val name: String
-    val magic: ULong
-    val requiresDevice: Boolean
+data class MountRequest(
+    val fileSystemName: String,
+    val source: String? = null,
+    val flags: MountFlags = MountFlags.NONE,
+    val data: ByteArray? = null,
+)
 
-    fun createSuperBlock(options: FileSystemOptions): VfsResult<SuperBlock>
+enum class UnmountMode {
+    REGULAR,
+    FORCE,
+    DETACH;
+
+    internal fun unmount(namespace: MountNamespace, mount: Mount): VfsResult<Unit> = when (this) {
+        REGULAR,
+        FORCE,
+        -> when (val result = mount.superBlock.backend.sync()) {
+            is VfsResult.Ok -> namespace.unmount(mount)
+            is VfsResult.Err -> result
+        }
+        DETACH -> namespace.detach(mount)
+    }
+}
+
+abstract class FileSystemType(
+    val name: String,
+    val magic: ULong,
+    val requiresDevice: Boolean = false,
+) {
+    open fun parseOptions(source: String?, data: ByteArray?): VfsResult<FileSystemOptions> =
+        if (data == null || data.isEmpty()) VfsResult.Ok(EmptyFileSystemOptions)
+        else VfsResult.Err(VfsError.INVALID_ARGUMENT)
+
+    internal fun createSuperBlock(
+        source: String?,
+        options: FileSystemOptions,
+    ): VfsResult<SuperBlock> {
+        if (requiresDevice && source == null) {
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+        return when (val result = createBackend(options)) {
+            is VfsResult.Ok -> VfsResult.Ok(SuperBlock(this, result.value))
+            is VfsResult.Err -> result
+        }
+    }
+
+    protected abstract fun createBackend(options: FileSystemOptions): VfsResult<SuperBlockBackend>
 }
 
 interface SuperBlockBackend {
+    fun createRoot(superBlock: SuperBlock): Inode
+
     fun sync(): VfsResult<Unit> = VfsResult.Ok(Unit)
 
     fun release() {}
@@ -312,13 +379,12 @@ interface SuperBlockBackend {
 class SuperBlock internal constructor(
     val type: FileSystemType,
     val backend: SuperBlockBackend,
-    createRoot: (SuperBlock) -> Inode,
 ) {
     val root: Dentry = Dentry(
         superBlock = this,
         name = VfsName.ROOT,
         parent = null,
-        inode = createRoot(this),
+        inode = backend.createRoot(this).also { require(it.superBlock === this) },
     )
 }
 
@@ -857,20 +923,57 @@ class Mount internal constructor(
     val source: String,
     val root: Dentry = superBlock.root,
     val flags: MountFlags = MountFlags.NONE,
+    attachment: VfsPath? = null,
 ) {
+    private val references = AtomicInt(1)
+    private val attachmentReference = AtomicReference(attachment)
+
     init {
         require(root.superBlock === superBlock)
+        check(attachment?.mount?.retain() != false)
     }
 
-    internal var parent: Mount? = null
-        private set
-    internal var mountPoint: Dentry? = null
-        private set
+    internal val attachment: VfsPath?
+        get() = attachmentReference.load()
 
-    internal fun attach(parent: Mount, mountPoint: Dentry) {
-        check(this.parent == null && this.mountPoint == null)
-        this.parent = parent
-        this.mountPoint = mountPoint
+    internal fun retain(): Boolean {
+        var observed = references.load()
+        while (observed in 1 until Int.MAX_VALUE) {
+            if (references.compareAndSet(observed, observed + 1)) return true
+            observed = references.load()
+        }
+        return false
+    }
+
+    internal fun release() {
+        var observed = references.load()
+        while (observed > 0) {
+            if (!references.compareAndSet(observed, observed - 1)) {
+                observed = references.load()
+                continue
+            }
+            if (observed == 1) releaseResources()
+            return
+        }
+    }
+
+    internal fun tryBeginUnmount(): Boolean = references.compareAndSet(2, 0)
+
+    internal fun completeUnmount() = releaseResources()
+
+    internal fun detachFromParent() {
+        attachmentReference.exchange(null)?.mount?.release()
+    }
+
+    internal fun isDescendantOf(ancestor: Mount): Boolean {
+        var current: Mount? = this
+        while (current != null && current !== ancestor) current = current.attachment?.mount
+        return current === ancestor
+    }
+
+    private fun releaseResources() {
+        superBlock.backend.release()
+        detachFromParent()
     }
 }
 
@@ -882,40 +985,148 @@ data class VfsPath(val mount: Mount, val dentry: Dentry) {
 class MountNamespace internal constructor(val root: Mount) {
     private val lock = IrqSpinLock()
     private val mounts = mutableMapOf<VfsPath, Mount>()
+    private val references = AtomicInt(0)
+
+    internal fun retain(): Boolean {
+        var observed = references.load()
+        while (observed in 0 until Int.MAX_VALUE) {
+            if (references.compareAndSet(observed, observed + 1)) return true
+            observed = references.load()
+        }
+        return false
+    }
+
+    internal fun release() {
+        var observed = references.load()
+        while (observed > 0) {
+            val updated = if (observed == 1) CLOSED else observed - 1
+            if (!references.compareAndSet(observed, updated)) {
+                observed = references.load()
+                continue
+            }
+            if (updated == CLOSED) releaseResources()
+            return
+        }
+    }
 
     internal fun mountedAt(path: VfsPath): Mount? =
         lock.withLock { mounts[path] }
 
     internal fun attach(
         target: VfsPath,
-        child: Mount
+        superBlock: SuperBlock,
+        source: String,
+        flags: MountFlags,
     ): VfsResult<Unit> = lock.withLock {
-        if (mounts.containsKey(target)) {
-            VfsResult.Err(VfsError.BUSY)
-        } else {
-            child.attach(target.mount, target.dentry)
-            mounts[target] = child
-            VfsResult.Ok(Unit)
-        }
+        if (!contains(target.mount)) return@withLock VfsResult.Err(VfsError.NOT_FOUND)
+        if (mounts.containsKey(target)) return@withLock VfsResult.Err(VfsError.BUSY)
+
+        mounts[target] = Mount(
+            superBlock = superBlock,
+            source = source,
+            flags = flags,
+            attachment = target,
+        )
+        VfsResult.Ok(Unit)
     }
 
-    internal fun snapshotMounts() : Map<VfsPath, Mount> = lock.withLock {
+    internal fun unmount(mount: Mount): VfsResult<Unit> {
+        val detached = lock.withLock {
+            val target = attachedAt(mount) ?: return@withLock false
+            if (!mount.tryBeginUnmount()) return@withLock false
+            mounts.remove(target)
+            true
+        }
+        if (!detached) return VfsResult.Err(VfsError.BUSY)
+        mount.completeUnmount()
+        return VfsResult.Ok(Unit)
+    }
+
+    internal fun detach(mount: Mount): VfsResult<Unit> {
+        val subtree = lock.withLock {
+            attachedAt(mount) ?: return@withLock null
+            buildList<Mount> {
+                val iterator = mounts.entries.iterator()
+                while (iterator.hasNext()) {
+                    val candidate = iterator.next().value
+                    if (!candidate.isDescendantOf(mount)) continue
+                    add(candidate)
+                    iterator.remove()
+                }
+            }
+        } ?: return VfsResult.Err(VfsError.BUSY)
+        mount.detachFromParent()
+        mount.release()
+        subtree.forEach(Mount::release)
+        return VfsResult.Ok(Unit)
+    }
+
+    internal fun snapshotMounts(): Map<VfsPath, Mount> = lock.withLock {
         LinkedHashMap<VfsPath, Mount>(mounts.size + 1).apply {
             put(VfsPath(root, root.root), root)
             putAll(mounts)
         }
     }
+
+    private fun contains(mount: Mount): Boolean = mount === root || attachedAt(mount) != null
+
+    private fun attachedAt(mount: Mount): VfsPath? =
+        mount.attachment?.takeIf { mounts[it] === mount }
+
+    private fun releaseResources() {
+        val detached = lock.withLock {
+            mounts.values.toList().also { mounts.clear() }
+        }
+        detached.forEach(Mount::release)
+        root.release()
+    }
+
+    private companion object {
+        const val CLOSED = -1
+    }
 }
 
-class FileSystemContext internal constructor(val namespace: MountNamespace) {
-    var root: VfsPath = VfsPath(namespace.root, namespace.root.root)
-        internal set
-    var workingDirectory: VfsPath = root
-        internal set
+class FileSystemContext internal constructor(
+    val namespace: MountNamespace,
+    val root: VfsPath = VfsPath(namespace.root, namespace.root.root),
+    workingDirectory: VfsPath = root,
+) {
+    private val lock = IrqSpinLock()
+    private var currentWorkingDirectory: VfsPath? = workingDirectory
 
-    internal fun fork(): FileSystemContext = FileSystemContext(namespace).also {
-        it.root = root
-        it.workingDirectory = workingDirectory
+    init {
+        check(namespace.retain())
+        check(root.mount.retain())
+        check(workingDirectory.mount.retain())
+    }
+
+    val workingDirectory: VfsPath
+        get() = lock.withLock { checkNotNull(currentWorkingDirectory) }
+
+    internal fun changeWorkingDirectory(path: VfsPath): Boolean {
+        if (!path.mount.retain()) return false
+        val previous = lock.withLock {
+            currentWorkingDirectory?.also { currentWorkingDirectory = path }
+        }
+        if (previous == null) {
+            path.mount.release()
+            return false
+        }
+        previous.mount.release()
+        return true
+    }
+
+    internal fun fork(): FileSystemContext = lock.withLock {
+        FileSystemContext(namespace, root, checkNotNull(currentWorkingDirectory))
+    }
+
+    internal fun release() {
+        val workingDirectory = lock.withLock {
+            currentWorkingDirectory?.also { currentWorkingDirectory = null } ?: return
+        }
+        workingDirectory.mount.release()
+        root.mount.release()
+        namespace.release()
     }
 }
 
@@ -925,7 +1136,7 @@ enum class SeekOrigin {
     END,
 }
 
-class OpenFileDescription internal constructor(
+class OpenFileDescription private constructor(
     val path: VfsPath,
     val inode: Inode,
     val access: AccessMode,
@@ -937,6 +1148,46 @@ class OpenFileDescription internal constructor(
     private val position = FilePosition()
     private val positionlessBackend = backend as? PositionlessOpenFileBackend
     private val statusFlags = AtomicInt(if (append) OpenFlags.O_APPEND else 0)
+
+    companion object {
+        internal fun open(
+            path: VfsPath,
+            inode: Inode,
+            options: OpenOptions,
+        ): VfsResult<OpenFileDescription> {
+            if (!path.mount.retain()) return VfsResult.Err(VfsError.NOT_FOUND)
+            if (!inode.acquireOpenReference()) {
+                path.mount.release()
+                return VfsResult.Err(VfsError.NOT_FOUND)
+            }
+
+            val backend = if (options.access == AccessMode.PATH) {
+                PathOnlyHandle
+            } else {
+                when (val result = inode.backend.open(inode, options)) {
+                    is VfsResult.Ok -> result.value
+                    is VfsResult.Err -> {
+                        inode.releaseOpenReference()
+                        path.mount.release()
+                        return result
+                    }
+                }
+            }
+            if (options.truncate && inode.type == InodeType.REGULAR) {
+                val result = (inode.backend as? RegularFileBackend)?.resize(inode, 0uL)
+                    ?: VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                if (result is VfsResult.Err) {
+                    backend.release()
+                    inode.releaseOpenReference()
+                    path.mount.release()
+                    return result
+                }
+            }
+            return VfsResult.Ok(
+                OpenFileDescription(path, inode, options.access, options.append, backend),
+            )
+        }
+    }
 
     val offset: Long
         get() = positionLock.withLock { position.value }
@@ -972,6 +1223,7 @@ class OpenFileDescription internal constructor(
         } else if (previous == 1) {
             backend.release()
             inode.releaseOpenReference()
+            path.mount.release()
         }
     }
 
@@ -1173,7 +1425,8 @@ class OpenFileDescription internal constructor(
     private fun writeError(offset: Int, count: Int): VfsError? = when {
         offset < 0 || count < 0 -> VfsError.INVALID_ARGUMENT
         references.load() == 0 || !access.canWrite -> VfsError.BAD_DESCRIPTOR
-        MountFlags.READ_ONLY in path.mount.flags -> VfsError.READ_ONLY
+        inode.type == InodeType.REGULAR && MountFlag.READ_ONLY in path.mount.flags ->
+            VfsError.READ_ONLY
         inode.type == InodeType.DIRECTORY -> VfsError.IS_DIRECTORY
         else -> null
     }
@@ -1200,7 +1453,6 @@ class Vfs(
             fileSystems.values.toList()
         }
 
-
     fun register(fileSystem: FileSystemType): VfsResult<Unit> = registryLock.withLock {
         if (fileSystems.containsKey(fileSystem.name)) {
             return@withLock VfsResult.Err(VfsError.ALREADY_EXISTS)
@@ -1211,43 +1463,51 @@ class Vfs(
 
     fun createContext(
         fileSystemName: String,
-        options: MountOptions = MountOptions(),
+        options: RootMountOptions = RootMountOptions(),
     ): VfsResult<FileSystemContext> {
-        val superBlock = when (val result = createSuperBlock(fileSystemName, options.fileSystem)) {
+        val fileSystem = registryLock.withLock { fileSystems[fileSystemName] }
+            ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val superBlock = when (
+            val result = fileSystem.createSuperBlock(options.source, options.fileSystemOptions)
+        ) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
         val rootMount = Mount(
             superBlock = superBlock,
-            source = options.source ?: fileSystemName,
+            source = options.source ?: fileSystem.name,
             flags = options.flags,
         )
         return VfsResult.Ok(FileSystemContext(MountNamespace(rootMount)))
     }
 
     fun createPipe(context: FileSystemContext): VfsResult<Pair<OpenFileDescription, OpenFileDescription>> {
-        val superBlock = context.workingDirectory.mount.superBlock
+        val path = context.root
+        val superBlock = path.mount.superBlock
         val state = PipeState(readers = 1, writers = 1)
         val readInode = pipeInode(superBlock, state, AccessMode.READ)
         val writeInode = pipeInode(superBlock, state, AccessMode.WRITE)
-        if (!readInode.acquireOpenReference() || !writeInode.acquireOpenReference()) {
-            return VfsResult.Err(VfsError.IO)
+        val readFile = when (val result = OpenFileDescription.open(
+            path,
+            readInode,
+            OpenOptions(access = AccessMode.READ),
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return VfsResult.Err(VfsError.IO)
         }
-        return VfsResult.Ok(
-            OpenFileDescription(
-                path = context.workingDirectory,
-                inode = readInode,
-                access = AccessMode.READ,
-                append = false,
-                backend = PipeEndpoint(state, AccessMode.READ),
-            ) to OpenFileDescription(
-                path = context.workingDirectory,
-                inode = writeInode,
-                access = AccessMode.WRITE,
-                append = false,
-                backend = PipeEndpoint(state, AccessMode.WRITE),
-            ),
-        )
+        val writeFile = when (val result = OpenFileDescription.open(
+            path,
+            writeInode,
+            OpenOptions(access = AccessMode.WRITE),
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> {
+                state.close(AccessMode.WRITE)
+                readFile.release()
+                return VfsResult.Err(VfsError.IO)
+            }
+        }
+        return VfsResult.Ok(readFile to writeFile)
     }
 
     private fun pipeInode(
@@ -1264,9 +1524,16 @@ class Vfs(
     fun mount(
         context: FileSystemContext,
         target: VfsPathname,
-        fileSystemName: String,
-        options: MountOptions = MountOptions(),
-    ): VfsResult<Mount> {
+        request: MountRequest,
+    ): VfsResult<Unit> {
+        val fileSystem = registryLock.withLock { fileSystems[request.fileSystemName] }
+            ?: return VfsResult.Err(VfsError.NO_DEVICE)
+        val fileSystemOptions = when (
+            val result = fileSystem.parseOptions(request.source, request.data)
+        ) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
         val path = when (val result = resolve(context, target)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
@@ -1275,22 +1542,44 @@ class Vfs(
             return VfsResult.Err(VfsError.NOT_DIRECTORY)
         }
 
-        val superBlock = when (val result = createSuperBlock(fileSystemName, options.fileSystem)) {
+        val superBlock = when (
+            val result = fileSystem.createSuperBlock(request.source, fileSystemOptions)
+        ) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        val mount = Mount(
+        return when (val attached = context.namespace.attach(
+            target = path,
             superBlock = superBlock,
-            source = options.source ?: fileSystemName,
-            flags = options.flags,
-        )
-        return when (val attached = context.namespace.attach(path, mount)) {
-            is VfsResult.Ok -> VfsResult.Ok(mount)
+            source = request.source ?: fileSystem.name,
+            flags = request.flags,
+        )) {
+            is VfsResult.Ok -> attached
             is VfsResult.Err -> {
                 superBlock.backend.release()
                 attached
             }
         }
+    }
+
+    fun unmount(
+        context: FileSystemContext,
+        target: VfsPathname,
+        mode: UnmountMode = UnmountMode.REGULAR,
+        followFinalSymlink: Boolean = true,
+    ): VfsResult<Unit> {
+        val path = when (val result = resolve(context, target, followFinalSymlink)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        val mount = path.mount
+        if (path.dentry !== mount.root) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        if (mount === context.namespace.root) return VfsResult.Err(VfsError.BUSY)
+        if (!mount.retain()) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+
+        val result = mode.unmount(context.namespace, mount)
+        if (result is VfsResult.Err) mount.release()
+        return result
     }
 
     fun resolve(
@@ -1390,52 +1679,21 @@ class Vfs(
         if (options.access.canWrite && inode.type == InodeType.DIRECTORY) {
             return VfsResult.Err(VfsError.IS_DIRECTORY)
         }
-        if (options.access.canWrite && MountFlags.READ_ONLY in path.mount.flags) {
+        if (options.access.canWrite && inode.type == InodeType.REGULAR &&
+            MountFlag.READ_ONLY in path.mount.flags
+        ) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        if (MountFlags.NO_DEVICE in path.mount.flags &&
+        if (MountFlag.NO_DEVICE in path.mount.flags &&
             (inode.type == InodeType.CHARACTER_DEVICE || inode.type == InodeType.BLOCK_DEVICE)
         ) {
             return VfsResult.Err(VfsError.PERMISSION_DENIED)
         }
-        if (!inode.acquireOpenReference()) {
-            return VfsResult.Err(VfsError.NOT_FOUND)
-        }
-
-        val backend = if (options.access == AccessMode.PATH) {
-            PathOnlyHandle
-        } else {
-            when (val result = inode.backend.open(inode, options)) {
-                is VfsResult.Ok -> result.value
-                is VfsResult.Err -> {
-                    inode.releaseOpenReference()
-                    return result
-                }
-            }
-        }
-
-        if (options.truncate && inode.type == InodeType.REGULAR) {
-            val result = resize(path, 0uL)
-            if (result is VfsResult.Err) {
-                backend.release()
-                inode.releaseOpenReference()
-                return result
-            }
-        }
-
-        return VfsResult.Ok(
-            OpenFileDescription(
-                path = path,
-                inode = inode,
-                access = options.access,
-                append = options.append,
-                backend = backend,
-            )
-        )
+        return OpenFileDescription.open(path, inode, options)
     }
 
     fun resize(path: VfsPath, size: ULong): VfsResult<Unit> {
-        if (MountFlags.READ_ONLY in path.mount.flags) {
+        if (MountFlag.READ_ONLY in path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
@@ -1453,7 +1711,7 @@ class Vfs(
         if (length == 0uL || offset > ULong.MAX_VALUE - length) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
-        if (MountFlags.READ_ONLY in path.mount.flags) {
+        if (MountFlag.READ_ONLY in path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
@@ -1463,7 +1721,7 @@ class Vfs(
     }
 
     fun setMode(path: VfsPath, mode: FileMode): VfsResult<Unit> {
-        if (MountFlags.READ_ONLY in path.mount.flags) {
+        if (MountFlag.READ_ONLY in path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
@@ -1485,7 +1743,7 @@ class Vfs(
         value: ByteArray,
         mode: ExtendedAttributeMode,
     ): VfsResult<Unit> {
-        if (MountFlags.READ_ONLY in mount.flags) {
+        if (MountFlag.READ_ONLY in mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         return inode.backend.setExtendedAttribute(inode, name, value, mode)
@@ -1496,7 +1754,7 @@ class Vfs(
         inode: Inode,
         name: ExtendedAttributeName,
     ): VfsResult<Unit> {
-        if (MountFlags.READ_ONLY in mount.flags) {
+        if (MountFlag.READ_ONLY in mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         return inode.backend.removeExtendedAttribute(inode, name)
@@ -1582,7 +1840,7 @@ class Vfs(
                 },
             )
         }
-        if (MountFlags.READ_ONLY in parent.path.mount.flags) {
+        if (MountFlag.READ_ONLY in parent.path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val target = when (
@@ -1641,7 +1899,7 @@ class Vfs(
         if (sourceMount !== parent.path.mount) {
             return VfsResult.Err(VfsError.CROSS_DEVICE)
         }
-        if (MountFlags.READ_ONLY in parent.path.mount.flags) {
+        if (MountFlag.READ_ONLY in parent.path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val directory = parent.path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
@@ -1679,7 +1937,7 @@ class Vfs(
         if (sourceParent.path.mount !== targetParent.path.mount) {
             return VfsResult.Err(VfsError.CROSS_DEVICE)
         }
-        if (MountFlags.READ_ONLY in sourceParent.path.mount.flags) {
+        if (MountFlag.READ_ONLY in sourceParent.path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val sourcePath = when (
@@ -1765,8 +2023,8 @@ class Vfs(
         if (inode.type != InodeType.DIRECTORY) {
             return VfsResult.Err(VfsError.NOT_DIRECTORY)
         }
-        context.workingDirectory = path
-        return VfsResult.Ok(Unit)
+        return if (context.changeWorkingDirectory(path)) VfsResult.Ok(Unit)
+        else VfsResult.Err(VfsError.NOT_FOUND)
     }
 
     fun absolutePath(
@@ -1781,11 +2039,8 @@ class Vfs(
         var current = initial
         while (current != context.root) {
             if (current.dentry === current.mount.root) {
-                val parentMount = current.mount.parent
+                current = current.mount.attachment
                     ?: return VfsResult.Err(VfsError.NOT_FOUND)
-                val mountPoint = current.mount.mountPoint
-                    ?: return VfsResult.Err(VfsError.NOT_FOUND)
-                current = VfsPath(parentMount, mountPoint)
                 if (current == context.root) {
                     break
                 }
@@ -1819,12 +2074,6 @@ class Vfs(
             offset += component.size
         }
         return VfsResult.Ok(result)
-    }
-
-    private fun createSuperBlock(name: String, options: FileSystemOptions): VfsResult<SuperBlock> {
-        val fileSystem = registryLock.withLock { fileSystems[name] }
-            ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        return fileSystem.createSuperBlock(options)
     }
 
     private fun openOrCreate(
@@ -1867,7 +2116,7 @@ class Vfs(
 
         if (pathname.requiresDirectory) return VfsResult.Err(VfsError.NOT_FOUND)
 
-        if (MountFlags.READ_ONLY in parent.path.mount.flags) {
+        if (MountFlag.READ_ONLY in parent.path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val directory = parent.path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
@@ -1903,7 +2152,7 @@ class Vfs(
         if (name.isDot || name.isDotDot) {
             return VfsResult.Err(VfsError.ALREADY_EXISTS)
         }
-        if (MountFlags.READ_ONLY in directory.mount.flags) {
+        if (MountFlag.READ_ONLY in directory.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val parent = directory.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
@@ -1976,6 +2225,9 @@ class Vfs(
             if (!shouldFollow) {
                 current = next
                 continue
+            }
+            if (MountFlag.NO_SYMLINK_FOLLOW in next.mount.flags) {
+                return VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
             }
 
             if (++symlinkDepth > maxSymlinkDepth) {
@@ -2060,9 +2312,7 @@ class Vfs(
         }
 
         while (current.dentry === current.mount.root) {
-            val parentMount = current.mount.parent ?: return current
-            val mountPoint = current.mount.mountPoint ?: return current
-            current = VfsPath(parentMount, mountPoint)
+            current = current.mount.attachment ?: return current
             if (current == context.root) {
                 return current
             }
@@ -2182,8 +2432,8 @@ private class PipeWaitQueue {
 }
 
 private class PipeState(
-    readers: Int,
-    writers: Int,
+    private var readers: Int,
+    private var writers: Int,
 ) {
     private companion object {
         const val CAPACITY_PAGES = 16
@@ -2200,8 +2450,6 @@ private class PipeState(
     private var head = 0
     private var tail = 0
     private var size = 0
-    private var readers = readers
-    private var writers = writers
 
     fun open(access: AccessMode, nonBlocking: Boolean): VfsResult<OpenFileBackend> {
         val thread = ProcessManager.currentThread()

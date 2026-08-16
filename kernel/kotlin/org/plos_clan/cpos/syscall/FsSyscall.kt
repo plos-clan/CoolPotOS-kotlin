@@ -23,7 +23,9 @@ import org.plos_clan.cpos.fs.Inode
 import org.plos_clan.cpos.fs.InodeMetadata
 import org.plos_clan.cpos.fs.InodeType
 import org.plos_clan.cpos.fs.IoResult
+import org.plos_clan.cpos.fs.MountFlag
 import org.plos_clan.cpos.fs.MountFlags
+import org.plos_clan.cpos.fs.MountRequest
 import org.plos_clan.cpos.fs.NodeCreation
 import org.plos_clan.cpos.fs.NodeKind
 import org.plos_clan.cpos.fs.OpenFlags
@@ -33,6 +35,7 @@ import org.plos_clan.cpos.fs.SeekOrigin
 import org.plos_clan.cpos.fs.RemoveMode
 import org.plos_clan.cpos.fs.RenameMode
 import org.plos_clan.cpos.fs.SymlinkBackend
+import org.plos_clan.cpos.fs.UnmountMode
 import org.plos_clan.cpos.fs.VfsError
 import org.plos_clan.cpos.fs.VfsPath
 import org.plos_clan.cpos.fs.VfsPathname
@@ -50,6 +53,7 @@ import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PollEvents
 import org.plos_clan.cpos.utils.PtraceRegisters
 
@@ -124,6 +128,18 @@ private const val ST_RDONLY = 0x1uL
 private const val ST_NOSUID = 0x2uL
 private const val ST_NODEV = 0x4uL
 private const val ST_NOEXEC = 0x8uL
+private const val ST_SYNCHRONOUS = 0x10uL
+private const val ST_NOATIME = 0x400uL
+private const val ST_NODIRATIME = 0x800uL
+private const val ST_RELATIME = 0x1000uL
+private const val ST_NOSYMFOLLOW = 0x2000uL
+private const val MS_SILENT = 0x8000uL
+private const val MNT_FORCE = 0x1u
+private const val MNT_DETACH = 0x2u
+private const val MNT_EXPIRE = 0x4u
+private const val UMOUNT_NOFOLLOW = 0x8u
+private val SUPPORTED_UMOUNT_FLAGS = MNT_FORCE or MNT_DETACH or UMOUNT_NOFOLLOW
+private val MOUNT_DATA_MAX = PAGE_SIZE_BYTES.toInt()
 
 private data class LinuxFileStatus(
     val inodeId: ULong,
@@ -206,13 +222,20 @@ private class LinuxStatFs(private val path: VfsPath) : NativeStruct {
         }
     }
 
-    private fun MountFlags.toStatFsFlags(): ULong {
-        var result = 0uL
-        if (MountFlags.READ_ONLY in this) result = result or ST_RDONLY
-        if (MountFlags.NO_SUID in this) result = result or ST_NOSUID
-        if (MountFlags.NO_DEVICE in this) result = result or ST_NODEV
-        if (MountFlags.NO_EXEC in this) result = result or ST_NOEXEC
-        return result
+    private fun MountFlags.toStatFsFlags(): ULong = StatFlag.entries.fold(0uL) { bits, flag ->
+        if (flag.mountFlag in this) bits or flag.bits else bits
+    }
+
+    private enum class StatFlag(val mountFlag: MountFlag, val bits: ULong) {
+        READ_ONLY(MountFlag.READ_ONLY, ST_RDONLY),
+        NO_SUID(MountFlag.NO_SUID, ST_NOSUID),
+        NO_DEVICE(MountFlag.NO_DEVICE, ST_NODEV),
+        NO_EXEC(MountFlag.NO_EXEC, ST_NOEXEC),
+        SYNCHRONOUS(MountFlag.SYNCHRONOUS, ST_SYNCHRONOUS),
+        NO_ATIME(MountFlag.NO_ATIME, ST_NOATIME),
+        NO_DIRECTORY_ATIME(MountFlag.NO_DIRECTORY_ATIME, ST_NODIRATIME),
+        RELATIVE_ATIME(MountFlag.RELATIVE_ATIME, ST_RELATIME),
+        NO_SYMLINK_FOLLOW(MountFlag.NO_SYMLINK_FOLLOW, ST_NOSYMFOLLOW),
     }
 }
 
@@ -354,6 +377,72 @@ internal fun close(regs: PtraceRegisters, process: Process): Long {
     return if (process.fdTable.close(fd)) 0L else errno(Errno.EBADF)
 }
 
+internal fun mount(regs: PtraceRegisters, process: Process): Long {
+    if (process.euid != 0) return errno(Errno.EPERM)
+
+    val target = copyPath(process, regs[PtraceRegisters.IDX_RSI])
+        ?: return errno(Errno.EFAULT)
+    if (target.isEmpty()) return errno(Errno.ENOENT)
+    val fileSystemName = copyPath(process, regs[PtraceRegisters.IDX_RDX])
+        ?: return errno(Errno.EFAULT)
+    val sourceAddress = regs[PtraceRegisters.IDX_RDI]
+    val source = if (sourceAddress == 0uL) null else {
+        copyPath(process, sourceAddress)?.decodeToString()
+            ?: return errno(Errno.EFAULT)
+    }
+    val dataAddress = regs[PtraceRegisters.IDX_R8]
+    val data = if (dataAddress == 0uL) null else {
+        UserMemory(process.addressSpace, dataAddress).copyCStringFromUser(MOUNT_DATA_MAX)
+            ?: return errno(Errno.EFAULT)
+    }
+
+    val flags = MountFlags.fromBits(regs[PtraceRegisters.IDX_R10] and MS_SILENT.inv())
+        ?: return errno(Errno.EOPNOTSUPP)
+    val context = process.context ?: return errno(Errno.ENOENT)
+    return when (val result = FileSystemManager.vfs.mount(
+        context = context,
+        target = VfsPathname.fromBytes(target),
+        request = MountRequest(
+            fileSystemName = fileSystemName.decodeToString(),
+            source = source,
+            flags = flags,
+            data = data,
+        ),
+    )) {
+        is VfsResult.Ok -> 0L
+        is VfsResult.Err -> errno(result.error.errno)
+    }
+}
+
+internal fun umount2(regs: PtraceRegisters, process: Process): Long {
+    if (process.euid != 0) return errno(Errno.EPERM)
+
+    val rawFlags = regs[PtraceRegisters.IDX_RSI]
+    if (rawFlags > UInt.MAX_VALUE.toULong()) return errno(Errno.EINVAL)
+    val flags = rawFlags.toUInt()
+    if (flags and MNT_EXPIRE != 0u) return errno(Errno.EOPNOTSUPP)
+    if (flags and SUPPORTED_UMOUNT_FLAGS.inv() != 0u) return errno(Errno.EINVAL)
+
+    val target = copyPath(process, regs[PtraceRegisters.IDX_RDI])
+        ?: return errno(Errno.EFAULT)
+    if (target.isEmpty()) return errno(Errno.ENOENT)
+    val context = process.context ?: return errno(Errno.ENOENT)
+    val mode = when {
+        flags and MNT_DETACH != 0u -> UnmountMode.DETACH
+        flags and MNT_FORCE != 0u -> UnmountMode.FORCE
+        else -> UnmountMode.REGULAR
+    }
+    return when (val result = FileSystemManager.vfs.unmount(
+        context = context,
+        target = VfsPathname.fromBytes(target),
+        mode = mode,
+        followFinalSymlink = flags and UMOUNT_NOFOLLOW == 0u,
+    )) {
+        is VfsResult.Ok -> 0L
+        is VfsResult.Err -> errno(result.error.errno)
+    }
+}
+
 internal fun fsync(regs: PtraceRegisters, process: Process): Long =
     syncFile(process, regs[PtraceRegisters.IDX_RDI], dataOnly = false)
 
@@ -389,7 +478,7 @@ internal fun truncate(regs: PtraceRegisters, process: Process): Long {
     }
     val inode = path.inode ?: return errno(Errno.ENOENT)
     if (inode.type == InodeType.DIRECTORY) return errno(Errno.EISDIR)
-    if (MountFlags.READ_ONLY in path.mount.flags) return errno(Errno.EROFS)
+    if (MountFlag.READ_ONLY in path.mount.flags) return errno(Errno.EROFS)
     if (!process.mayWrite(inode.metadata())) return errno(Errno.EACCES)
     return when (val result = FileSystemManager.vfs.resize(path, size)) {
         is VfsResult.Ok -> 0L
@@ -919,7 +1008,7 @@ private fun chownPath(
 
 private fun changeOwner(process: Process, path: VfsPath, uid: ULong, gid: ULong): Long {
     if (process.euid != 0) return errno(Errno.EPERM)
-    if (MountFlags.READ_ONLY in path.mount.flags) return errno(Errno.EROFS)
+    if (MountFlag.READ_ONLY in path.mount.flags) return errno(Errno.EROFS)
     if (uid > UInt.MAX_VALUE.toULong() || gid > UInt.MAX_VALUE.toULong()) {
         return errno(Errno.EINVAL)
     }
@@ -995,7 +1084,7 @@ private fun changeModeAt(
 }
 
 private fun changeMode(process: Process, path: VfsPath, rawMode: ULong): Long {
-    if (MountFlags.READ_ONLY in path.mount.flags) return errno(Errno.EROFS)
+    if (MountFlag.READ_ONLY in path.mount.flags) return errno(Errno.EROFS)
     val inode = path.inode ?: return errno(Errno.ENOENT)
     val metadata = inode.metadata()
     if (process.euid != 0 && process.fsuid.toUInt() != metadata.uid) {
@@ -1909,55 +1998,36 @@ private fun scanPollDescriptors(
 }
 
 internal fun read(regs: PtraceRegisters, process: Process): Long =
-    FileIo.read(regs, process)
+    FileIo.scalar(FileIo.Direction.READ, null, regs, process)
 
 internal fun write(regs: PtraceRegisters, process: Process): Long =
-    FileIo.write(regs, process)
+    FileIo.scalar(FileIo.Direction.WRITE, null, regs, process)
 
 internal fun pread64(regs: PtraceRegisters, process: Process): Long =
-    FileIo.pread64(regs, process)
+    FileIo.scalar(FileIo.Direction.READ, regs[PtraceRegisters.IDX_R10], regs, process)
 
 internal fun pwrite64(regs: PtraceRegisters, process: Process): Long =
-    FileIo.pwrite64(regs, process)
+    FileIo.scalar(FileIo.Direction.WRITE, regs[PtraceRegisters.IDX_R10], regs, process)
 
 internal fun readv(regs: PtraceRegisters, process: Process): Long =
-    FileIo.readv(regs, process)
+    FileIo.vector(FileIo.Direction.READ, regs, process)
 
 internal fun writev(regs: PtraceRegisters, process: Process): Long =
-    FileIo.writev(regs, process)
+    FileIo.vector(FileIo.Direction.WRITE, regs, process)
 
 private object FileIo {
-    fun read(regs: PtraceRegisters, process: Process): Long =
-        scalar(Direction.READ, positioned = false, regs, process)
-
-    fun write(regs: PtraceRegisters, process: Process): Long =
-        scalar(Direction.WRITE, positioned = false, regs, process)
-
-    fun pread64(regs: PtraceRegisters, process: Process): Long =
-        scalar(Direction.READ, positioned = true, regs, process)
-
-    fun pwrite64(regs: PtraceRegisters, process: Process): Long =
-        scalar(Direction.WRITE, positioned = true, regs, process)
-
-    fun readv(regs: PtraceRegisters, process: Process): Long =
-        vector(Direction.READ, regs, process)
-
-    fun writev(regs: PtraceRegisters, process: Process): Long =
-        vector(Direction.WRITE, regs, process)
-
-    private fun scalar(
+    fun scalar(
         direction: Direction,
-        positioned: Boolean,
+        position: ULong?,
         regs: PtraceRegisters,
         process: Process,
     ): Long = withFile(regs, process) { file ->
         val count = minOf(regs[PtraceRegisters.IDX_RDX], MAX_RW_COUNT).toInt()
-        val position = regs[PtraceRegisters.IDX_R10].takeIf { positioned }
         val buffer = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
         direction.transfer(file, buffer, count, position).raw
     }
 
-    private fun vector(
+    fun vector(
         direction: Direction,
         regs: PtraceRegisters,
         process: Process,
@@ -1987,7 +2057,7 @@ private object FileIo {
         }
     }
 
-    private enum class Direction {
+    enum class Direction {
         READ,
         WRITE;
 

@@ -4,6 +4,7 @@ package org.plos_clan.cpos.syscall
 
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.InodeType
+import org.plos_clan.cpos.fs.MountFlag
 import org.plos_clan.cpos.fs.OpenFileDescription
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.FileRegionBacking
@@ -157,11 +158,16 @@ internal fun mmap(regs: PtraceRegisters, process: Process): Long {
         if (!file.access.canRead) {
             return errno(Errno.EACCES)
         }
-        if (shared && (protection and PROT_WRITE) != 0uL && !file.access.canWrite) {
-            return errno(Errno.EACCES)
-        }
-        if (shared && (protection and PROT_WRITE) != 0uL) {
+        if (shared && access and PROT_WRITE != 0uL) {
+            if (!file.access.canWrite) return errno(Errno.EACCES)
             return errno(Errno.ENOTSUP)
+        }
+        val prohibitedAccess =
+            (if (MountFlag.NO_EXEC in file.path.mount.flags) PROT_EXEC else 0uL) or
+                (if (shared) PROT_WRITE else 0uL)
+        val maximumAccess = SUPPORTED_PROT and prohibitedAccess.inv()
+        if (access and maximumAccess.inv() != 0uL) {
+            return errno(Errno.EACCES)
         }
 
         val backing = MappedFile(file)
@@ -172,6 +178,7 @@ internal fun mmap(regs: PtraceRegisters, process: Process): Long {
                         hint = hint,
                         length = length,
                         access = access,
+                        maximumAccess = maximumAccess,
                         fixed = fixed,
                         noReplace = noReplace,
                         shared = shared,

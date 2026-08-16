@@ -21,6 +21,8 @@ packages=(
     libgcrypt
     libgpg-error
     lz4
+    util-linux
+    util-linux-libs
     xz
     zlib
     zstd

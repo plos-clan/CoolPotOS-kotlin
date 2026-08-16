@@ -29,37 +29,21 @@ import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 
-object Procfs : FileSystemType {
-    override val name: String = "proc"
-    override val magic: ULong = 0x9fa0uL
-    override val requiresDevice: Boolean = false
-
-    private var procInstance: ProcfsInstance? = null
-
-    val getInstance get() = procInstance!!
-
-    override fun createSuperBlock(options: FileSystemOptions): VfsResult<SuperBlock> {
-        if (options != EmptyFileSystemOptions) {
-            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+object Procfs : FileSystemType("proc", 0x9fa0uL) {
+    override fun createBackend(options: FileSystemOptions): VfsResult<SuperBlockBackend> =
+        if (options === EmptyFileSystemOptions) {
+            VfsResult.Ok(ProcfsInstance())
+        } else {
+            VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
-        val instance = ProcfsInstance()
-        procInstance = instance
-        return VfsResult.Ok(
-            SuperBlock(
-                this,
-                instance,
-                instance::root
-            )
-        )
-    }
 }
 
 interface ProcFSRender {
-    fun render() : ByteArray
+    fun render(): ByteArray
 }
 
-class ProcfsInstance : SuperBlockBackend {
-    fun root(superBlock: SuperBlock): Inode = directory(
+internal class ProcfsInstance : SuperBlockBackend {
+    override fun createRoot(superBlock: SuperBlock): Inode = directory(
         superBlock = superBlock,
         id = ROOT_INODE,
         backend = ProcRootDirectory(this),
@@ -85,7 +69,7 @@ class ProcfsInstance : SuperBlockBackend {
             return directory(
                 superBlock,
                 COROUTINES_INODE,
-                ProcCoroutineDirectory(),
+                ProcCoroutineDirectory(this),
             )
         }
         return name.pid()?.let { processDirectory(superBlock, it) }

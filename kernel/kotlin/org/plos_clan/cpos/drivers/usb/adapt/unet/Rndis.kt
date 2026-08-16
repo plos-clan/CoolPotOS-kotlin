@@ -1,4 +1,4 @@
-package org.plos_clan.cpos.drivers.usb.unet
+package org.plos_clan.cpos.drivers.usb.adapt.unet
 
 import org.plos_clan.cpos.drivers.usb.bus.CompletionEvent
 import org.plos_clan.cpos.drivers.usb.bus.UsbDriver

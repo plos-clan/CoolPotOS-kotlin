@@ -2,6 +2,7 @@ package org.plos_clan.cpos.drivers.usb
 
 import org.plos_clan.cpos.drivers.pcie.PciDeviceType
 import org.plos_clan.cpos.drivers.pcie.Pcie
+import org.plos_clan.cpos.drivers.usb.adapt.ClassDrivers
 import org.plos_clan.cpos.drivers.usb.xhci.Xhci
 
 object Usb {
