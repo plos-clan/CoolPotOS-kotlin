@@ -1,3 +1,2 @@
 headers = bridge.h
 package = bridge
-compilerOpts = -Ikernel/c

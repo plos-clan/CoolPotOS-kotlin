@@ -68,8 +68,8 @@ jobs:
         with:
           name: CoolPotOS-build-diagnostics-${{ github.sha }}
           path: |
-            build/mlibc-x86_64/meson-logs/
-            build/reports/
+            kernel/build/mlibc-x86_64/meson-logs/
+            kernel/build/reports/
           if-no-files-found: ignore
           retention-days: 7
 
@@ -77,6 +77,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: CoolPotOS-kernel-${{ github.sha }}
-          path: build/kernel.elf
+          path: kernel/build/kernel.elf
           if-no-files-found: error
           retention-days: 7

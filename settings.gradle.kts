@@ -12,3 +12,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "CoolPotOS"
+include(":kernel")

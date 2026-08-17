@@ -4,7 +4,7 @@ set -ex
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 BUILD_DIR="$ROOT_DIR/build/mlibc-$ARCH"
-MLIBC_DIR="$ROOT_DIR/mlibc"
+MLIBC_DIR="$ROOT_DIR/vendor/mlibc"
 MLIBC_PATCH="$ROOT_DIR/assets/mlibc.patch"
 
 rm -rf "$BUILD_DIR"

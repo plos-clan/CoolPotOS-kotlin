@@ -32,6 +32,7 @@ This project uses Gradle for kernel build, ISO packaging, and QEMU run.
 - `./gradlew prepareUserland`: Build the CachyOS EROFS root filesystem
 - `./gradlew buildIso`: Build the UEFI ISO image
 - `./gradlew run`: Run the ISO image in QEMU
+- `./gradlew nativeTest`: Run host-side Kotlin/Native unit tests
 - `./gradlew clean`: Clean kernel build outputs
 - `./gradlew cleanAll`: Remove entire build directory
 - `./gradlew buildMlibc`: Build bundled mlibc
@@ -79,7 +80,7 @@ override its value for a build.
 | `XORRISO=xorriso`                                 | ISO creation executable.               |
 | `QEMU=qemu-system-x86_64`                         | QEMU executable.                       |
 | `KONAN_TOOLROOT=~/.konan/dependencies/xxx`        | Kotlin/Native GNU toolchain root.      |
-| `MLIBC_PREFIX=build/mlibc-x86_64/prefix`          | mlibc installation prefix.             |
+| `MLIBC_PREFIX=kernel/build/mlibc-x86_64/prefix`   | mlibc installation prefix.             |
 | `USERLAND_IMAGE=docker.io/cachyos/cachyos:latest` | OCI image used to build the rootfs.    |
 | `QEMU_CPU_SET=0-7`                                | Host CPU set passed to `taskset`.      |
 | `QEMU_MEMORY=2g`                                  | Guest memory passed to QEMU.           |
