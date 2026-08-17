@@ -49,6 +49,7 @@ abstract class DownloadFileTask : DefaultTask() {
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
+    alias(libs.plugins.kotlinxBenchmark)
 }
 
 private data class ToolSettings(
@@ -361,6 +362,24 @@ kotlin {
         }
     }
 
+    with(nativeTarget.compilations) {
+        val main = getByName("main")
+        val benchmark = create("benchmark") { associateWith(main) }
+
+        main.cinterops {
+            create("bridge") {
+                defFile(config.paths.bridgeDef)
+                packageName("bridge")
+                includeDirs(
+                    config.paths.kernelC,
+                    config.paths.limineInclude,
+                    config.paths.freestandingInclude,
+                )
+            }
+        }
+        benchmark.compileDependencyFiles += main.compileDependencyFiles
+    }
+
     sourceSets.named("nativeMain") {
         dependencies {
             implementation(libs.kotlinx.coroutines.core)
@@ -373,16 +392,23 @@ kotlin {
         }
     }
 
-    nativeTarget.compilations.getByName("main").cinterops {
-        create("bridge") {
-            defFile(config.paths.bridgeDef)
-            packageName("bridge")
-            includeDirs(
-                config.paths.kernelC,
-                config.paths.limineInclude,
-                config.paths.freestandingInclude,
-            )
+    sourceSets.named("nativeBenchmark") {
+        dependencies {
+            implementation(libs.kotlinx.benchmark.runtime)
         }
+    }
+}
+
+benchmark {
+    targets.register("nativeBenchmark")
+
+    configurations.named("main") {
+        warmups = 5
+        iterations = 10
+        iterationTime = 500
+        iterationTimeUnit = "ms"
+        mode = "avgt"
+        outputTimeUnit = "ns"
     }
 }
 

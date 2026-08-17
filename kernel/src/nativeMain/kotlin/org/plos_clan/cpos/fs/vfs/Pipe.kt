@@ -120,6 +120,51 @@ private class PipeWaitQueue {
     }
 }
 
+internal class PipeBuffer(capacity: Int) {
+    private val bytes = ByteArray(capacity)
+    private var readOffset = 0
+    private var writeOffset = 0
+
+    val capacity: Int
+        get() = bytes.size
+
+    var size = 0
+        private set
+
+    val remaining: Int
+        get() = capacity - size
+
+    init {
+        require(capacity > 0)
+    }
+
+    fun read(destination: PreparedBufferDestination, offset: Int, count: Int): Int {
+        val requested = minOf(count, size)
+        val firstChunk = minOf(requested, capacity - readOffset)
+        var transferred = destination.copyFrom(offset, bytes, readOffset, firstChunk)
+        val remainingChunk = requested - firstChunk
+        if (transferred == firstChunk && remainingChunk != 0) {
+            transferred += destination.copyFrom(offset + firstChunk, bytes, 0, remainingChunk)
+        }
+        readOffset = (readOffset + transferred) % capacity
+        size -= transferred
+        return transferred
+    }
+
+    fun write(source: PreparedBufferSource, offset: Int, count: Int): Int {
+        val requested = minOf(count, remaining)
+        val firstChunk = minOf(requested, capacity - writeOffset)
+        var transferred = source.copyTo(offset, bytes, writeOffset, firstChunk)
+        val remainingChunk = requested - firstChunk
+        if (transferred == firstChunk && remainingChunk != 0) {
+            transferred += source.copyTo(offset + firstChunk, bytes, 0, remainingChunk)
+        }
+        writeOffset = (writeOffset + transferred) % capacity
+        size += transferred
+        return transferred
+    }
+}
+
 private class PipeState(
     private var readers: Int,
     private var writers: Int,
@@ -131,14 +176,11 @@ private class PipeState(
     }
 
     private val lock = IrqSpinLock()
-    private val buffer = ByteArray(CAPACITY_BYTES)
+    private val buffer = PipeBuffer(CAPACITY_BYTES)
     private val readWaiters = PipeWaitQueue()
     private val writeWaiters = PipeWaitQueue()
     private val readerOpenWaiters = PipeWaitQueue()
     private val writerOpenWaiters = PipeWaitQueue()
-    private var head = 0
-    private var tail = 0
-    private var size = 0
 
     fun open(access: AccessMode, nonBlocking: Boolean): VfsResult<OpenFileBackend> {
         val thread = ProcessManager.currentThread()
@@ -186,23 +228,13 @@ private class PipeState(
 
     fun read(destination: PreparedBufferDestination, offset: Int, count: Int): IoResult = lock.withLock {
         if (count == 0) return@withLock IoResult.success(0)
-        if (size == 0) {
+        if (buffer.size == 0) {
             return@withLock if (writers == 0) IoResult.success(0)
             else IoResult.failure(VfsError.WOULD_BLOCK)
         }
-        val requestedTransfer = minOf(count, size)
-        val firstChunk = minOf(requestedTransfer, buffer.size - tail)
-        var transferred = destination.copyFrom(offset, buffer, tail, firstChunk)
-        if (transferred == firstChunk) {
-            val remaining = requestedTransfer - firstChunk
-            if (remaining != 0) {
-                transferred += destination.copyFrom(offset + firstChunk, buffer, 0, remaining)
-            }
-        }
+        val transferred = buffer.read(destination, offset, count)
         if (transferred == 0) return@withLock IoResult.failure(VfsError.FAULT)
-        tail = (tail + transferred) % buffer.size
-        size -= transferred
-        writeWaiters.notifyReady(buffer.size - size)
+        writeWaiters.notifyReady(buffer.remaining)
         IoResult.success(transferred)
     }
 
@@ -214,28 +246,18 @@ private class PipeState(
     ): IoResult = lock.withLock {
         if (readers == 0) return@withLock IoResult.failure(VfsError.BROKEN_PIPE)
         if (count == 0) return@withLock IoResult.success(0)
-        val available = buffer.size - size
+        val available = buffer.remaining
         val minimumWriteSize = when {
-            mode == IoMode.BLOCKING -> minOf(count, buffer.size)
+            mode == IoMode.BLOCKING -> minOf(count, buffer.capacity)
             count <= ATOMIC_WRITE_BYTES -> count
             else -> 1
         }
         if (available < minimumWriteSize) {
             return@withLock IoResult.failure(VfsError.WOULD_BLOCK)
         }
-        val requestedTransfer = minOf(count, available)
-        val firstChunk = minOf(requestedTransfer, buffer.size - head)
-        var transferred = source.copyTo(offset, buffer, head, firstChunk)
-        if (transferred == firstChunk) {
-            val remaining = requestedTransfer - firstChunk
-            if (remaining != 0) {
-                transferred += source.copyTo(offset + firstChunk, buffer, 0, remaining)
-            }
-        }
+        val transferred = buffer.write(source, offset, count)
         if (transferred == 0) return@withLock IoResult.failure(VfsError.FAULT)
-        head = (head + transferred) % buffer.size
-        size += transferred
-        readWaiters.notifyReady(size)
+        readWaiters.notifyReady(buffer.size)
         IoResult.success(transferred)
     }
 
@@ -244,14 +266,14 @@ private class PipeState(
         val minimumBytes = if (event == IoEvent.READABLE) {
             1
         } else {
-            minOf(count, buffer.size)
+            minOf(count, buffer.capacity)
         }
         val queue = if (event == IoEvent.READABLE) readWaiters else writeWaiters
         var waiter: PipeWaitQueue.Waiter? = null
         lock.withLock {
             val availableBytes = when (event) {
-                IoEvent.READABLE -> size
-                IoEvent.WRITABLE -> buffer.size - size
+                IoEvent.READABLE -> buffer.size
+                IoEvent.WRITABLE -> buffer.remaining
             }
             val becameReady = availableBytes >= minimumBytes || when (event) {
                 IoEvent.READABLE -> writers == 0
@@ -273,11 +295,11 @@ private class PipeState(
         var available = 0
         if (access.canWrite) {
             if (readers == 0) available = PollEvents.POLLERR
-            else if (buffer.size - size >= ATOMIC_WRITE_BYTES) {
+            else if (buffer.remaining >= ATOMIC_WRITE_BYTES) {
                 available = PollEvents.NORMAL_OUTPUT
             }
         }
-        if (access.canRead && (size != 0 || writers == 0)) {
+        if (access.canRead && (buffer.size != 0 || writers == 0)) {
             available = available or PollEvents.NORMAL_INPUT
         }
         (available and events).toLong()
