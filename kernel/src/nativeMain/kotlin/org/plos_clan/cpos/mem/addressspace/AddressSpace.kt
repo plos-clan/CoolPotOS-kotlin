@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class, ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.mem.addressspace
 
@@ -18,6 +18,8 @@ import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.alignUp
 import org.plos_clan.cpos.utils.isPageAligned
 import platform.posix.memset
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 private const val MMIO_VIRTUAL_BASE = 0xffff_ff00_0000_0000uL
 private const val MMIO_VIRTUAL_END = 0xffff_ff80_0000_0000uL
@@ -34,6 +36,7 @@ class AddressSpace internal constructor(
     private val end: ULong,
     private val user: Boolean,
 ) {
+    private val references = AtomicInt(1)
     private val limit = if (user) USER_VIRTUAL_ADDRESS_LIMIT else end
 
     private val regions = MemoryRegionMap(start, end, limit)
@@ -62,6 +65,15 @@ class AddressSpace internal constructor(
         }
     }
 
+    internal fun share(): AddressSpace {
+        var observed = references.load()
+        while (observed in 1 until Int.MAX_VALUE) {
+            if (references.compareAndSet(observed, observed + 1)) return this
+            observed = references.load()
+        }
+        error("Cannot share a released address space")
+    }
+
     fun clear() {
         lock.withLock {
             regions.releaseAll()
@@ -69,7 +81,21 @@ class AddressSpace internal constructor(
         }
     }
 
-    fun destroy() {
+    internal fun release() {
+        var observed = references.load()
+        while (observed > 0) {
+            if (!references.compareAndSet(observed, observed - 1)) {
+                observed = references.load()
+                continue
+            }
+            if (observed != 1) return
+            destroyResources()
+            return
+        }
+        error("Address space released more than once")
+    }
+
+    private fun destroyResources() {
         lock.withLock {
             regions.releaseAll()
         }

@@ -74,6 +74,7 @@ fun Process.stat(): String {
 
 fun Process.status(): String {
     val (stateCode, stateName) = stateDescription()
+    val blockedSignals = threads.firstOrNull { it.state != TaskState.ZOMBIE }?.signalMask ?: 0uL
     return buildString {
         append("Name:\t").append(comm).append('\n')
         append("State:\t").append(stateCode).append(" (").append(stateName).append(")\n")
@@ -91,7 +92,7 @@ fun Process.status(): String {
         append("VmRSS:\t0 kB\n")
         append("Threads:\t").append(threads.count { it.state != TaskState.ZOMBIE }).append('\n')
         append("SigPnd:\t0000000000000000\n")
-        append("SigBlk:\t").append(signalMask.toString(16).padStart(16, '0')).append('\n')
+        append("SigBlk:\t").append(blockedSignals.toString(16).padStart(16, '0')).append('\n')
         append("SigIgn:\t0000000000000000\n")
         append("SigCgt:\t0000000000000000\n")
     }

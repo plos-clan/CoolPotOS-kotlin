@@ -25,6 +25,7 @@ import org.plos_clan.cpos.syscall.FsConstants.POLL_FD_SIZE
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.tasks.Process
+import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
@@ -195,6 +196,7 @@ internal fun poll(regs: PtraceRegisters, process: Process): Long {
 }
 
 internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
+    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
     val nfdsValue = regs[PtraceRegisters.IDX_RDI]
     if (nfdsValue > MAX_POLL_FDS.toULong()) return errno(Errno.EINVAL)
     val nfds = nfdsValue.toInt()
@@ -218,7 +220,7 @@ internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
     val signalMask = if (signalMaskAddress == 0uL) {
         null
     } else {
-        when (val result = readPselectSignalMask(process, signalMaskAddress)) {
+        when (val result = readPselectSignalMask(process, signalMaskAddress, thread.signalMask)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return errno(result.error.errno)
         }
@@ -226,8 +228,8 @@ internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
     val readyRead = ByteArray(setSize)
     val readyWrite = ByteArray(setSize)
     val readyExcept = ByteArray(setSize)
-    val previousMask = process.signalMask
-    signalMask?.let { process.signalMask = it }
+    val previousMask = thread.signalMask
+    signalMask?.let { thread.signalMask = it }
     try {
         val deadline = timeout?.let(::timeoutDeadline)
         while (true) {
@@ -248,9 +250,12 @@ internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
             bridge.wait_for_interrupt()
         }
     } finally {
-        process.signalMask = previousMask
+        thread.signalMask = previousMask
     }
 }
+
+//TODO implement fadvise64
+internal fun fadvise64(regs: PtraceRegisters, process: Process): Long = errno(Errno.EOK)
 
 private fun copyFdSet(process: Process, address: ULong, size: Int): ByteArray? =
     if (address == 0uL || size == 0) ByteArray(size)
@@ -274,13 +279,17 @@ private fun readPselectTimeout(process: Process, address: ULong): VfsResult<Sele
     return VfsResult.Ok(SelectTimeout(value.sec, value.nsec))
 }
 
-private fun readPselectSignalMask(process: Process, address: ULong): VfsResult<ULong> {
+private fun readPselectSignalMask(
+    process: Process,
+    address: ULong,
+    currentMask: ULong,
+): VfsResult<ULong> {
     val descriptor = UserMemory(process.addressSpace, address).copyFromUser(ULong.SIZE_BYTES * 2)
         ?: return VfsResult.Err(VfsError.FAULT)
     val input = LittleEndianBuffer(descriptor)
     val signalSet = input.readU64(0)
     val size = input.readU64(ULong.SIZE_BYTES)
-    if (signalSet == 0uL) return VfsResult.Ok(process.signalMask)
+    if (signalSet == 0uL) return VfsResult.Ok(currentMask)
     if (size != ULong.SIZE_BYTES.toULong()) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
     val mask = UserMemory(process.addressSpace, signalSet).copyFromUser(ULong.SIZE_BYTES)
         ?: return VfsResult.Err(VfsError.FAULT)

@@ -72,6 +72,11 @@ object Futex {
     private val lock = IrqSpinLock()
     private val queues = mutableMapOf<FutexKey, ArrayDeque<FutexWaiter>>()
 
+    fun wakePrivate(process: Process, address: ULong): Long {
+        val futex = resolveAddress(process, address, true) ?: return error(Errno.EFAULT)
+        return wake(futex.key, 1, FUTEX_MATCH_ANY)
+    }
+
     fun handle(regs: PtraceRegisters, process: Process): Long {
         val rawOperation = regs[PtraceRegisters.IDX_RSI]
         if (rawOperation > Int.MAX_VALUE.toULong()) return error(Errno.EINVAL)

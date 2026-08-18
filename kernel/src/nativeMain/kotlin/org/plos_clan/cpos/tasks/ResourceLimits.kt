@@ -53,4 +53,9 @@ class ProcessLimits {
     fun replace(resource: ProcessResource, limit: ResourceLimit) = lock.withLock {
         values[resource.ordinal].also { values[resource.ordinal] = limit }
     }
+
+    internal fun inherit(source: ProcessLimits) {
+        val inherited = source.lock.withLock { source.values.copyOf() }
+        lock.withLock { inherited.copyInto(values) }
+    }
 }

@@ -9,6 +9,7 @@ import org.plos_clan.cpos.fs.VfsResult
 import org.plos_clan.cpos.module.elf.ElfLoader
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.Cmdline
 
 object Init {
@@ -84,6 +85,7 @@ object Init {
             println("Init: cannot create user thread")
             return
         }
+        Scheduler.enqueueThread(thread)
 
         println("Init: created process=${process.id} thread=${thread.id} rip=0x${image.entryPoint.toString(16)}")
     }

@@ -6,11 +6,13 @@ import KERNEL_NAME
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.acpi.Fadt
+import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.partialOrError
 import org.plos_clan.cpos.syscall.Syscall.userMemory
 import org.plos_clan.cpos.tasks.Process
+import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.KernelRandom
@@ -49,6 +51,61 @@ private class LinuxTimeval(val seconds: Long, val microseconds: Long) : NativeSt
             writeU64(0, seconds.toULong())
             writeU64(Long.SIZE_BYTES, microseconds.toULong())
         }
+    }
+}
+
+private data class SysInfo(
+    val uptime: Long,
+    val loads: ULongArray,
+    val totalRam: ULong,
+    val freeRam: ULong,
+    val sharedRam: ULong,
+    val bufferRam: ULong,
+    val totalSwap: ULong,
+    val freeSwap: ULong,
+    val processes: UShort,
+    val totalHigh: ULong,
+    val freeHigh: ULong,
+    val memoryUnit: UInt,
+) : NativeStruct {
+    init {
+        require(loads.size == LOAD_COUNT) { "sysinfo requires exactly $LOAD_COUNT load averages" }
+    }
+
+    override fun toNativeBytes(): ByteArray = ByteArray(NATIVE_SIZE).also { buffer ->
+        LittleEndianBuffer(buffer).apply {
+            writeU64(UPTIME_OFFSET, uptime.toULong())
+            loads.forEachIndexed { index, load ->
+                writeU64(LOADS_OFFSET + index * ULong.SIZE_BYTES, load)
+            }
+            writeU64(TOTAL_RAM_OFFSET, totalRam)
+            writeU64(FREE_RAM_OFFSET, freeRam)
+            writeU64(SHARED_RAM_OFFSET, sharedRam)
+            writeU64(BUFFER_RAM_OFFSET, bufferRam)
+            writeU64(TOTAL_SWAP_OFFSET, totalSwap)
+            writeU64(FREE_SWAP_OFFSET, freeSwap)
+            writeU16(PROCESSES_OFFSET, processes)
+            writeU64(TOTAL_HIGH_OFFSET, totalHigh)
+            writeU64(FREE_HIGH_OFFSET, freeHigh)
+            writeU32(MEMORY_UNIT_OFFSET, memoryUnit)
+        }
+    }
+
+    companion object {
+        const val LOAD_COUNT = 3
+        private const val UPTIME_OFFSET = 0
+        private const val LOADS_OFFSET = UPTIME_OFFSET + Long.SIZE_BYTES
+        private const val TOTAL_RAM_OFFSET = LOADS_OFFSET + LOAD_COUNT * ULong.SIZE_BYTES
+        private const val FREE_RAM_OFFSET = TOTAL_RAM_OFFSET + ULong.SIZE_BYTES
+        private const val SHARED_RAM_OFFSET = FREE_RAM_OFFSET + ULong.SIZE_BYTES
+        private const val BUFFER_RAM_OFFSET = SHARED_RAM_OFFSET + ULong.SIZE_BYTES
+        private const val TOTAL_SWAP_OFFSET = BUFFER_RAM_OFFSET + ULong.SIZE_BYTES
+        private const val FREE_SWAP_OFFSET = TOTAL_SWAP_OFFSET + ULong.SIZE_BYTES
+        private const val PROCESSES_OFFSET = FREE_SWAP_OFFSET + ULong.SIZE_BYTES
+        private const val TOTAL_HIGH_OFFSET = PROCESSES_OFFSET + ULong.SIZE_BYTES
+        private const val FREE_HIGH_OFFSET = TOTAL_HIGH_OFFSET + ULong.SIZE_BYTES
+        private const val MEMORY_UNIT_OFFSET = FREE_HIGH_OFFSET + ULong.SIZE_BYTES
+        const val NATIVE_SIZE = MEMORY_UNIT_OFFSET + ULong.SIZE_BYTES
     }
 }
 
@@ -269,4 +326,28 @@ internal fun getRandom(regs: PtraceRegisters, process: Process): Long {
         transferred += count.toULong()
     }
     return transferred.toLong()
+}
+
+internal fun sysInfo(regs: PtraceRegisters, process: Process): Long {
+    val userBuffer = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI])
+    val physical = BuddyFrameAllocator.statistics()
+    val info = SysInfo(
+        uptime = if (TscClock.isReady) {
+            (TscClock.nanoTime() / NANOSECONDS_PER_SECOND).toLong()
+        } else {
+            0L
+        },
+        loads = ULongArray(SysInfo.LOAD_COUNT),
+        totalRam = physical.totalBytes,
+        freeRam = physical.freeBytes,
+        sharedRam = 0uL,
+        bufferRam = 0uL,
+        totalSwap = 0uL,
+        freeSwap = 0uL,
+        processes = ProcessManager.snapshotProcesses().size.toUShort(),
+        totalHigh = 0uL,
+        freeHigh = 0uL,
+        memoryUnit = 1u,
+    ).toNativeBytes()
+    return if (userBuffer.copyToUser(info)) errno(Errno.EOK) else errno(Errno.EFAULT)
 }

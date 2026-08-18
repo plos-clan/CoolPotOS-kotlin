@@ -41,6 +41,7 @@ private enum class LinuxSyscall(
     MMAP(9, ::mmap),
     MPROTECT(10, ::mprotect),
     MUNMAP(11, ::munmap),
+    // 12 brk 系统调用不实现
     RT_SIGACTION(13, ::rtSigaction),
     RT_SIGPROCMASK(14, ::rtSigprocmask),
     IOCTL(16, ::ioctl),
@@ -81,6 +82,7 @@ private enum class LinuxSyscall(
     LCHOWN(94, ::lchown),
     UMASK(95, ::umask),
     GETTIMEOFDAY(96, ::getTimeOfDay),
+    SYSINFO(99, ::sysInfo),
     GETUID(102, ::getUid),
     GETGID(104, ::getGid),
     GETEUID(107, ::getEuid),
@@ -97,6 +99,7 @@ private enum class LinuxSyscall(
     MKNOD(133, ::mknod),
     STATFS(137, ::statfs),
     FSTATFS(138, ::fstatfs),
+    PRCTL(157, ::prctl),
     ARCH_PRCTL(158, ::archPrctl),
     MOUNT(165, ::mount),
     UMOUNT2(166, ::umount2),
@@ -118,6 +121,7 @@ private enum class LinuxSyscall(
     FUTEX(202, Futex::handle),
     GETDENTS64(217, ::getdents64),
     SET_TID_ADDRESS(218, ::setTidAddress),
+    FADVISE64(221, ::fadvise64),
     CLOCK_GETTIME(228, ::clockGetTime),
     EXIT_GROUP(231, ::exitGroup),
     OPENAT(257, ::openAt),
@@ -142,6 +146,7 @@ private enum class LinuxSyscall(
     GETRANDOM(318, ::getRandom),
     STATX(332, ::statx),
     RSEQ(334, ::rseq),
+    CLONE3(435, ::clone3),
     FACCESSAT2(439, ::faccessAt2),
     FCHMODAT2(452, ::fchmodAt2),
 }
@@ -172,6 +177,7 @@ object Syscall {
             null
         }
         val result = if (handler == null) {
+            println("SYSCALL: no implement $number")
             errno(Errno.ENOSYS)
         } else {
             val process = ProcessManager.currentProcess()

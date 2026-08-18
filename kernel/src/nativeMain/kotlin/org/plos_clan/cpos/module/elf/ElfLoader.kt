@@ -149,7 +149,7 @@ object ElfLoader {
                 ),
             )
         } finally {
-            if (!installed) addressSpace.destroy()
+            if (!installed) addressSpace.release()
         }
     }
 

@@ -27,12 +27,6 @@ private const val ARCH_SET_FS = 0x1002uL
 private const val ARCH_GET_FS = 0x1003uL
 private const val ARCH_GET_GS = 0x1004uL
 private const val MSR_KERNEL_GS_BASE = 0xC0000102U
-private const val SIGCHLD = 17uL
-private const val CLONE_SETTLS = 0x0008_0000uL
-private const val CLONE_PARENT_SETTID = 0x0010_0000uL
-private const val CLONE_CHILD_CLEARTID = 0x0020_0000uL
-private const val CLONE_CHILD_SETTID = 0x0100_0000uL
-private const val CLONE_SUPPORTED = 0x0138_0000uL
 private const val WAIT_WNOHANG = 1uL
 private const val WAIT_SUPPORTED = 0x0buL // WNOHANG | WUNTRACED | WCONTINUED
 private const val SIGNAL_COUNT = 64
@@ -42,6 +36,40 @@ private const val SIGKILL = 9
 private const val SIGSTOP = 19
 private const val ROBUST_LIST_SIZE = 24uL
 private const val BLOCKABLE_SIGNAL_MASK = 0xffff_ffff_fffb_feffuL
+private const val PR_SET_PDEATHSIG = 1UL
+private const val PR_GET_PDEATHSIG = 2UL
+private const val PR_GET_DUMPABLE = 3UL
+private const val PR_SET_DUMPABLE = 4UL
+private const val PR_GET_UNALIGN = 5UL
+private const val PR_SET_UNALIGN = 6UL
+private const val PR_GET_KEEPCAPS = 7UL
+private const val PR_SET_KEEPCAPS = 8UL
+private const val PR_GET_FPEMU = 9UL
+private const val PR_SET_FPEMU = 10UL
+private const val PR_GET_FPEXC = 11UL
+private const val PR_SET_FPEXC = 12UL
+private const val PR_GET_TIMING = 13UL
+private const val PR_SET_TIMING = 14UL
+private const val PR_SET_NAME = 15UL
+private const val PR_GET_NAME = 16UL
+private const val PR_GET_ENDIAN = 19UL
+private const val PR_SET_ENDIAN = 20UL
+private const val PR_GET_SECCOMP = 21UL
+private const val PR_SET_SECCOMP = 22UL
+private const val PR_CAPBSET_READ = 23UL
+private const val PR_CAPBSET_DROP = 24UL
+private const val PR_SET_NO_NEW_PRIVS = 38UL
+private const val PR_GET_NO_NEW_PRIVS = 39UL
+private const val PR_MCE_KILL = 33UL
+private const val PR_MCE_KILL_GET = 34UL
+private const val PR_SET_MM = 35UL
+private const val PR_SET_PTRACER = 0x59616d61UL // 'Yama' magic value
+private const val PR_SET_THP_DISABLE = 41UL
+private const val PR_GET_THP_DISABLE = 42UL
+private const val PR_TASK_PERF_EVENTS_DISABLE = 31UL
+private const val PR_TASK_PERF_EVENTS_ENABLE = 32UL
+private const val PR_GET_SPECULATION_CTRL = 52UL
+private const val PR_SET_SPECULATION_CTRL = 53UL
 
 private enum class SignalMaskOperation(val value: ULong) {
     BLOCK(0uL),
@@ -140,7 +168,8 @@ internal fun getEgid(regs: PtraceRegisters, process: Process): Long = process.eg
 
 internal fun getPpid(regs: PtraceRegisters, process: Process): Long = process.parentId.toLong()
 
-internal fun getPgrp(regs: PtraceRegisters, process: Process): Long = process.processGroupId.toLong()
+internal fun getPgrp(regs: PtraceRegisters, process: Process): Long =
+    process.processGroupId.toLong()
 
 internal fun setPgid(regs: PtraceRegisters, process: Process): Long {
     val pid = regs[PtraceRegisters.IDX_RDI].toInt()
@@ -178,48 +207,6 @@ internal fun getSid(regs: PtraceRegisters, process: Process): Long {
     return process.sessionId.toLong()
 }
 
-internal fun clone(regs: PtraceRegisters, process: Process): Long {
-    val flags = regs[PtraceRegisters.IDX_RDI]
-    val unsupported = flags and 0xffff_ffff_ffff_ff00uL and CLONE_SUPPORTED.inv()
-    if (flags and 0xffuL != SIGCHLD || unsupported != 0uL) {
-        return errno(Errno.ENOSYS)
-    }
-    val parentTid = regs[PtraceRegisters.IDX_RDX]
-    val childTid = regs[PtraceRegisters.IDX_R10]
-    if (flags and CLONE_PARENT_SETTID != 0uL &&
-        !UserMemory(process.addressSpace, parentTid).isWritable(Int.SIZE_BYTES)
-    ) return errno(Errno.EFAULT)
-
-    val stack = regs[PtraceRegisters.IDX_RSI].takeUnless { it == 0uL } ?: regs[PtraceRegisters.IDX_RSP]
-    if (stack == 0uL || stack >= USER_VIRTUAL_ADDRESS_LIMIT) return errno(Errno.EFAULT)
-
-    val child = ProcessManager.createUserProcess(
-        name = process.name,
-        parent = process,
-    )
-    val registers = ULongArray(PtraceRegisters.REGISTER_COUNT).also(regs::copyInto)
-    val fsBase = if (flags and CLONE_SETTLS != 0uL) {
-        regs[PtraceRegisters.IDX_R8]
-    } else {
-        regs[PtraceRegisters.IDX_FS_BASE]
-    }
-    val childThread = ProcessManager.createUserThread(
-        process = child,
-        entryPoint = regs[PtraceRegisters.IDX_RIP],
-        stackPointer = stack,
-        fsBase = fsBase,
-        registers = registers,
-    ) ?: return errno(Errno.ENOMEM)
-    if (flags and CLONE_PARENT_SETTID != 0uL &&
-        Syscall.copyWordToUser(process, parentTid, child.id.toULong()) != 0L
-    ) return errno(Errno.EFAULT)
-    if (flags and CLONE_CHILD_SETTID != 0uL &&
-        Syscall.copyWordToUser(child, childTid, child.id.toULong()) != 0L
-    ) return errno(Errno.EFAULT)
-    if (flags and CLONE_CHILD_CLEARTID != 0uL) childThread.clearChildTid = childTid
-    return child.id.toLong()
-}
-
 internal fun getResUid(regs: PtraceRegisters, process: Process): Long = copyIds(
     process,
     regs[PtraceRegisters.IDX_RDI],
@@ -231,6 +218,30 @@ internal fun getResGid(regs: PtraceRegisters, process: Process): Long = copyIds(
     regs[PtraceRegisters.IDX_RDI],
     IdTriplet(process.rgid, process.egid, process.sgid),
 )
+
+internal fun prctl(regs: PtraceRegisters, process: Process): Long {
+    val option = regs[PtraceRegisters.IDX_RDI]
+    val thread = ProcessManager.currentThread() ?: run {
+        println("ERROR: sys_prctl cannot get current thread")
+        return errno(Errno.EINVAL)
+    }
+    return when(option) {
+        PR_GET_NAME -> {
+            val userName = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
+            val raw = thread.name.encodeToByteArray()
+            if(!userName.copyToUser(raw)) return errno(Errno.EFAULT)
+            errno(Errno.EOK)
+        }
+        PR_SET_NAME -> {
+            val userName = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
+            val raw = userName.copyCStringFromUser(4096) ?: return errno(Errno.EFAULT)
+            val str = raw.decodeToString()
+            thread.name = str
+            errno(Errno.EOK)
+        }
+        else -> errno(Errno.ENOSYS)
+    }
+}
 
 internal fun prlimit64(regs: PtraceRegisters, process: Process): Long {
     val pid = regs[PtraceRegisters.IDX_RDI].toLong()
@@ -304,15 +315,16 @@ internal fun rtSigprocmask(regs: PtraceRegisters, process: Process): Long {
     if (regs[PtraceRegisters.IDX_R10] != SIGNAL_SET_SIZE.toULong()) {
         return errno(Errno.EINVAL)
     }
+    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
     val setAddress = regs[PtraceRegisters.IDX_RSI]
-    val previous = process.signalMask
+    val previous = thread.signalMask
     if (setAddress != 0uL) {
         val operation = SignalMaskOperation.from(regs[PtraceRegisters.IDX_RDI])
             ?: return errno(Errno.EINVAL)
         val bytes = UserMemory(process.addressSpace, setAddress).copyFromUser(SIGNAL_SET_SIZE)
             ?: return errno(Errno.EFAULT)
         val mask = LittleEndianBuffer(bytes).readU64(0) and BLOCKABLE_SIGNAL_MASK
-        process.signalMask = when (operation) {
+        thread.signalMask = when (operation) {
             SignalMaskOperation.BLOCK -> previous or mask
             SignalMaskOperation.UNBLOCK -> previous and mask.inv()
             SignalMaskOperation.SET -> mask
@@ -356,8 +368,17 @@ private fun terminate(process: Process, group: Boolean, status: Int): Nothing {
     } else {
         current.state = TaskState.ZOMBIE
     }
-    ProcessManager.markExited(process, status)
+
+    val clearChildTid = current.clearChildTid
     current.clearChildTid = 0uL
+    if (clearChildTid != 0uL &&
+        UserMemory(process.addressSpace, clearChildTid).copyToUser(ByteArray(Int.SIZE_BYTES))
+    ) {
+        Futex.wakePrivate(process, clearChildTid)
+    }
+    if (group || process.threads.none { it.state != TaskState.ZOMBIE }) {
+        ProcessManager.markExited(process, status)
+    }
     Scheduler.yieldCurrent()
     while (true) {
         bridge.wait_for_interrupt()

@@ -42,6 +42,11 @@ internal enum class ProcessGroupResult {
     NOT_PERMITTED,
 }
 
+internal enum class MemoryCloneMode {
+    COPY,
+    SHARE,
+}
+
 internal data class ProcessMembership(
     val sessionId: Int,
     val processGroupId: Int,
@@ -54,6 +59,8 @@ class Thread(
     val kernelStackPhysicalBase: ULong = 0uL,
     val kernelStackPages: ULong = 0uL,
     val kernelFsBase: ULong = 0uL,
+    var signalMask: ULong = 0uL,
+    var name: String = "",
 ) {
     var clearChildTid: ULong = 0uL
 
@@ -130,6 +137,20 @@ class Thread(
         )
 }
 
+private class VforkCompletion(parent: Thread) {
+    private val waiter = AtomicReference<Thread?>(parent)
+
+    fun await() {
+        while (waiter.load() != null) {
+            check(Scheduler.parkCurrent()) { "Cannot suspend a vfork parent" }
+        }
+    }
+
+    fun complete() {
+        waiter.exchange(null)?.let(Scheduler::wake)
+    }
+}
+
 class Process internal constructor(
     val id: Int,
     name: String,
@@ -147,7 +168,9 @@ class Process internal constructor(
     var fileCreationMask: UInt = 0x12u,
     val parentId: Int = 0,
     val startTimeTicks: ULong,
+    vforkParent: Thread? = null,
 ) {
+    private val vforkCompletion = vforkParent?.let(::VforkCompletion)
     var name = name
         internal set
     var addressSpace = addressSpace
@@ -166,7 +189,6 @@ class Process internal constructor(
     var commandLine: ByteArray = name.encodeToByteArray() + byteArrayOf(0)
         internal set
     internal var state = ProcessState.READY
-    var signalMask: ULong = 0uL
     val signalActions = arrayOfNulls<ByteArray>(64)
     val resourceLimits = ProcessLimits()
     var exitCode: Int = 0
@@ -226,10 +248,10 @@ class Process internal constructor(
         fsgid = parent.fsgid
         fileCreationMask = parent.fileCreationMask
         membershipState.store(parent.membership)
-        signalMask = parent.signalMask
         parent.signalActions.forEachIndexed { index, action ->
             signalActions[index] = action?.copyOf()
         }
+        resourceLimits.inherit(parent.resourceLimits)
         commandLine = parent.commandLine.copyOf()
     }
 
@@ -238,11 +260,14 @@ class Process internal constructor(
         commandLine = arguments.joinToString(separator = "\u0000", postfix = "\u0000")
             .encodeToByteArray()
     }
+
+    internal fun awaitVfork() = vforkCompletion?.await()
+
+    internal fun completeVfork() = vforkCompletion?.complete()
 }
 
 object ProcessManager {
-    private val nextThreadId = AtomicInt(0)
-    private val nextProcessId = AtomicInt(0)
+    private val nextTaskId = AtomicInt(0)
     private val processes = mutableListOf<Process>()
     private val processLock = IrqSpinLock()
     private val threadTable = mutableMapOf<Int, Thread>()
@@ -306,12 +331,18 @@ object ProcessManager {
         thread.state = TaskState.READY
     }
 
-    fun createUserProcess(
+    internal fun createUserProcess(
         name: String,
         parent: Process? = null,
+        memory: MemoryCloneMode = MemoryCloneMode.COPY,
+        vforkParent: Thread? = null,
     ): Process {
-        val addressSpace = parent?.addressSpace?.fork()
-            ?: AddressSpace.user(KernelPageDirectory.getDirectory().createUserDirectory())
+        val addressSpace = when {
+            parent == null ->
+                AddressSpace.user(KernelPageDirectory.getDirectory().createUserDirectory())
+            memory == MemoryCloneMode.SHARE -> parent.addressSpace.share()
+            else -> parent.addressSpace.fork()
+        }
         val context = parent?.context?.fork() ?: FileSystemManager.kernelContext?.fork()
         val child = newProcess(
             name = name,
@@ -320,6 +351,7 @@ object ProcessManager {
             context = context,
             parentId = parent?.id ?: 0,
             inherit = parent,
+            vforkParent = vforkParent,
         )
         if (parent == null) return child
 
@@ -334,6 +366,7 @@ object ProcessManager {
         fsBase: ULong = 0uL,
         kernelStackPages: ULong = DEFAULT_THREAD_STACK_PAGES,
         registers: ULongArray? = null,
+        signalMask: ULong = 0uL,
     ): Thread? {
         if (process.isKernelProcess || entryPoint == 0uL || stackPointer == 0uL) {
             return null
@@ -353,13 +386,26 @@ object ProcessManager {
             kernelStackPhysicalBase = stack.physicalBase,
             kernelStackPages = stack.pages,
             kernelFsBase = kernelFsBase,
+            signalMask = signalMask,
         ).also { thread ->
             if (registers == null) {
                 thread.initializeUserContext(entryPoint, stackPointer, fsBase)
             } else {
                 thread.initializeUserContext(registers, stackPointer, fsBase)
             }
-        }.also(Scheduler::enqueueThread)
+        }
+    }
+
+    fun discardUserProcess(process: Process): Boolean {
+        if (process.isKernelProcess || process.threads.isNotEmpty()) return false
+        val removed = processLock.withLock { processes.remove(process) }
+        if (!removed) return false
+
+        process.fdTable.closeAll()
+        process.context?.release()
+        process.context = null
+        process.addressSpace.release()
+        return true
     }
 
     fun installUserAddressSpace(process: Process, replacement: AddressSpace): Boolean {
@@ -376,7 +422,8 @@ object ProcessManager {
 
         val previous = process.addressSpace
         process.addressSpace = replacement
-        previous.destroy()
+        previous.release()
+        process.completeVfork()
         return true
     }
 
@@ -435,6 +482,7 @@ object ProcessManager {
             process.exitCode = status and 0xff
             process.state = ProcessState.ZOMBIE
         }
+        process.completeVfork()
     }
 
     fun reapChild(parentId: Int, child: Process): Boolean {
@@ -444,7 +492,7 @@ object ProcessManager {
                     processes.remove(child)
         }
         if (reaped) {
-            child.addressSpace.destroy()
+            child.addressSpace.release()
         }
         return reaped
     }
@@ -476,14 +524,16 @@ object ProcessManager {
         context: FileSystemContext?,
         parentId: Int = 0,
         inherit: Process? = null,
+        vforkParent: Thread? = null,
     ): Process = Process(
-        id = nextProcessId.fetchAndAdd(1),
+        id = nextTaskId.fetchAndAdd(1),
         name = name,
         isKernelProcess = isKernelProcess,
         addressSpace = addressSpace,
         context,
         parentId = parentId,
         startTimeTicks = TscClock.nanoTime() / NANOSECONDS_PER_USER_TICK,
+        vforkParent = vforkParent,
     ).also { created ->
         inherit?.let(created::inherit)
         processLock.withLock { processes += created }
@@ -495,14 +545,16 @@ object ProcessManager {
         kernelStackPhysicalBase: ULong = 0uL,
         kernelStackPages: ULong = 0uL,
         kernelFsBase: ULong = 0uL,
+        signalMask: ULong = 0uL,
     ): Thread =
         Thread(
-            id = nextThreadId.fetchAndAdd(1),
+            id = if (process.threads.isEmpty()) process.id else nextTaskId.fetchAndAdd(1),
             process = process,
             kernelStackTop = kernelStackTop,
             kernelStackPhysicalBase = kernelStackPhysicalBase,
             kernelStackPages = kernelStackPages,
             kernelFsBase = kernelFsBase,
+            signalMask = signalMask,
         ).also { thread ->
             process.addThread(thread)
             threadTableLock.withLock { threadTable[thread.id] = thread }
