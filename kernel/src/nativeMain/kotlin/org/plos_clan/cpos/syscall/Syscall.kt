@@ -119,6 +119,7 @@ private enum class LinuxSyscall(
     FREMOVEXATTR(199, ::fremovexattr),
     TIME(201, ::time),
     FUTEX(202, Futex::handle),
+    G_AFFINITY(204, ::schedGetAffinity),
     GETDENTS64(217, ::getdents64),
     SET_TID_ADDRESS(218, ::setTidAddress),
     FADVISE64(221, ::fadvise64),

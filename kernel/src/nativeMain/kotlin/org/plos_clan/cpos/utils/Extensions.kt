@@ -97,6 +97,18 @@ fun CPointer<ULongVar>.clear() {
     }
 }
 
+fun ByteArray.readULongLE(offset: Int): ULong {
+    var result = 0uL
+
+    for (i in 0 until 8) {
+        result = result or (
+                (this[offset + i].toULong() and 0xffuL) shl (i * 8)
+                )
+    }
+
+    return result
+}
+
 value class LittleEndianBuffer(private val bytes: ByteArray) {
     fun readU8(offset: Int): UByte {
         requireRange(offset, UByte.SIZE_BYTES)

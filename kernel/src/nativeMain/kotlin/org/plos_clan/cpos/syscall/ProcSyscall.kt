@@ -15,12 +15,15 @@ import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.tasks.ProcessState
 import org.plos_clan.cpos.tasks.ResourceLimit
+import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.TaskState
+import org.plos_clan.cpos.tasks.Thread
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.PtraceRegisters
+import org.plos_clan.cpos.utils.readULongLE
 
 private const val ARCH_SET_GS = 0x1001uL
 private const val ARCH_SET_FS = 0x1002uL
@@ -36,6 +39,7 @@ private const val SIGKILL = 9
 private const val SIGSTOP = 19
 private const val ROBUST_LIST_SIZE = 24uL
 private const val BLOCKABLE_SIGNAL_MASK = 0xffff_ffff_fffb_feffuL
+private const val SIG_IGN_HANDLER = 1uL
 private const val PR_SET_PDEATHSIG = 1UL
 private const val PR_GET_PDEATHSIG = 2UL
 private const val PR_GET_DUMPABLE = 3UL
@@ -70,6 +74,22 @@ private const val PR_TASK_PERF_EVENTS_DISABLE = 31UL
 private const val PR_TASK_PERF_EVENTS_ENABLE = 32UL
 private const val PR_GET_SPECULATION_CTRL = 52UL
 private const val PR_SET_SPECULATION_CTRL = 53UL
+
+fun resetSignalActionsForExec(process: Process) =
+    process.signalActions.forEachIndexed { index, action ->
+        if (action == null) {
+            return@forEachIndexed
+        }
+        val handler = action.readULongLE(0)
+        if (handler == 1uL) {
+            process.signalActions[index] =
+                ByteArray(SIGACTION_SIZE).apply {
+                    this[0] = 1
+                }
+        } else {
+            process.signalActions[index] = null
+        }
+    }
 
 private enum class SignalMaskOperation(val value: ULong) {
     BLOCK(0uL),
@@ -225,13 +245,14 @@ internal fun prctl(regs: PtraceRegisters, process: Process): Long {
         println("ERROR: sys_prctl cannot get current thread")
         return errno(Errno.EINVAL)
     }
-    return when(option) {
+    return when (option) {
         PR_GET_NAME -> {
             val userName = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
             val raw = thread.name.encodeToByteArray()
-            if(!userName.copyToUser(raw)) return errno(Errno.EFAULT)
+            if (!userName.copyToUser(raw)) return errno(Errno.EFAULT)
             errno(Errno.EOK)
         }
+
         PR_SET_NAME -> {
             val userName = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
             val raw = userName.copyCStringFromUser(4096) ?: return errno(Errno.EFAULT)
@@ -239,6 +260,7 @@ internal fun prctl(regs: PtraceRegisters, process: Process): Long {
             thread.name = str
             errno(Errno.EOK)
         }
+
         else -> errno(Errno.ENOSYS)
     }
 }
@@ -337,12 +359,50 @@ internal fun rtSigprocmask(regs: PtraceRegisters, process: Process): Long {
     return 0L
 }
 
+internal fun schedGetAffinity(regs: PtraceRegisters, process: Process): Long {
+    val pid = regs[PtraceRegisters.IDX_RDI].toInt()
+    val cpusetsize = regs[PtraceRegisters.IDX_RSI]
+    val maskAddress = regs[PtraceRegisters.IDX_RDX]
+    if (maskAddress == 0uL) return errno(Errno.EFAULT)
+    if (cpusetsize == 0uL || cpusetsize > Int.MAX_VALUE.toULong()) {
+        return errno(Errno.EINVAL)
+    }
+
+    val thread: Thread? =
+        if (pid == 0) ProcessManager.currentThread() else ProcessManager.snapshotProcesses()
+            .firstNotNullOfOrNull { process ->
+                if (process.id == pid) return@firstNotNullOfOrNull process.threads.first()
+                for (thread in process.threads)
+                    if (thread.id == pid) return@firstNotNullOfOrNull thread
+                null
+            }
+    if (thread == null) return errno(Errno.ESRCH)
+    val affinity = if (thread.affinityMask == 0UL) defaultAffinityMask() else thread.affinityMask
+    val mask = UserMemory(process.addressSpace, maskAddress)
+    val size = cpusetsize.toInt()
+    if (mask.fill(0, size, 0) != size) return errno(Errno.EFAULT)
+
+    val copySize = minOf(size, ULong.SIZE_BYTES)
+    val affinityBytes = ByteArray(ULong.SIZE_BYTES) { index ->
+        (affinity shr (index * Byte.SIZE_BITS)).toByte()
+    }
+    if (!mask.copyToUser(affinityBytes, size = copySize)) return errno(Errno.EFAULT)
+    return copySize.toLong()
+}
+
 private fun copyIds(process: Process, address: ULong, ids: IdTriplet): Long =
     if (UserMemory(process.addressSpace, address).copyToUser(ids.toNativeBytes())) {
         0L
     } else {
         errno(Errno.EFAULT)
     }
+
+private fun defaultAffinityMask(): ULong {
+    val count = SMProcessor.cpu_count
+    if (count == 0UL) return 1UL
+    if (count >= 64UL) return ULong.MAX_VALUE
+    return (1UL shl count.toInt()) - 1UL
+}
 
 internal fun getTid(regs: PtraceRegisters, process: Process): Long {
     val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
@@ -419,6 +479,8 @@ internal fun execve(regs: PtraceRegisters, process: Process): Long {
     }
     process.installExecutable(executablePath, arguments.ifEmpty { listOf(executablePath) })
     process.fdTable.closeOnExec()
+    resetSignalActionsForExec(process)
+
     regs[PtraceRegisters.IDX_RIP] = image.entryPoint
     regs[PtraceRegisters.IDX_RSP] = image.stackPointer
     regs[PtraceRegisters.IDX_RAX] = 0uL

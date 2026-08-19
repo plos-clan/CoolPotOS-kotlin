@@ -61,6 +61,7 @@ class Thread(
     val kernelFsBase: ULong = 0uL,
     var signalMask: ULong = 0uL,
     var name: String = "",
+    val affinityMask: ULong = 0UL,
 ) {
     var clearChildTid: ULong = 0uL
 
