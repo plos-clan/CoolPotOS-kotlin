@@ -1,4 +1,8 @@
-@file:OptIn(ExperimentalForeignApi::class,ExperimentalNativeApi::class, ExperimentalAtomicApi::class)
+@file:OptIn(
+    ExperimentalForeignApi::class,
+    ExperimentalNativeApi::class,
+    ExperimentalAtomicApi::class
+)
 
 package org.plos_clan.cpos.tasks
 
@@ -10,12 +14,21 @@ import org.plos_clan.cpos.drivers.acpi.apic.LAPIC_TIMER_FREQUENCY_HZ
 import org.plos_clan.cpos.drivers.acpi.apic.LAPIC_TIMER_INTERRUPT_VECTOR
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.syscall.Syscall
+import org.plos_clan.cpos.utils.CpuID
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.concurrent.atomics.incrementAndFetch
 import kotlin.experimental.ExperimentalNativeApi
 
-class CpuLocal(val lapicId: Long, val isBsp: Boolean) {
+data class CpuLocal(
+    val lapicId: Long,
+    val isBsp: Boolean,
+    var vendor: String = "",
+    var modelName: String = "",
+    var features: String = "",
+    var physical: UInt = 0u,
+    var virtual: UInt = 0u,
+) {
     var scheduler = PerCpuScheduler()
 }
 
@@ -29,15 +42,16 @@ fun apStart() {
     Syscall.initialize(lapicId.toULong(), false)
     LocalApic.enableController()
     val timerReady = LAPIC_TIMER_INTERRUPT_VECTOR <= UByte.MAX_VALUE.toUInt() &&
-        LocalApic.configureDeadlineTimer(
-            vector = LAPIC_TIMER_INTERRUPT_VECTOR.toUByte(),
-            frequencyHz = LAPIC_TIMER_FREQUENCY_HZ,
-        )
+            LocalApic.configureDeadlineTimer(
+                vector = LAPIC_TIMER_INTERRUPT_VECTOR.toUByte(),
+                frequencyHz = LAPIC_TIMER_FREQUENCY_HZ,
+            )
     SMProcessor.load_done.incrementAndFetch()
     if (!timerReady) {
         println("APIC: failed to configure AP $lapicId TSC-deadline timer")
         return
     }
+    CpuID.apInit(SMProcessor.currentLocal())
     SMProcessor.currentLocal().scheduler.waitUntilEnabled()
     if (!Scheduler.apInitialize()) {
         return
@@ -50,9 +64,13 @@ object SMProcessor {
     var cpu_count: ULong = 0U
     var load_done = AtomicInt(1)
 
-    var locals = mutableMapOf<UInt,CpuLocal>() // <lapic_id, local_info>
+    var locals = mutableMapOf<UInt, CpuLocal>() // <lapic_id, local_info>
 
-    fun currentLocal() : CpuLocal {
+    fun getAllLocalInfo(): List<CpuLocal> = locals.entries
+        .sortedBy { it.key }
+        .map { it.value }
+
+    fun currentLocal(): CpuLocal {
         val local: CpuLocal = locals[LocalApic.localApicId] ?: run {
             println("error: cannot get cpu${LocalApic.localApicId} local info.")
             while (true) bridge.wait_for_interrupt()
@@ -80,7 +98,8 @@ object SMProcessor {
 
         for (index in 0 until cpu_count.toLong()) {
             val entry = (cpus[index] ?: continue).pointed
-            if(entry.lapic_id == smp.bsp_lapic_id) {
+            if (entry.lapic_id == smp.bsp_lapic_id) {
+                CpuID.apInit(currentLocal(), true)
                 continue
             }
 
@@ -103,8 +122,13 @@ object SMProcessor {
 
     fun setKernelStack(stack: ULong) {
         val local = currentLocal()
-        bridge.set_kernel_stack(local.lapicId.toULong(), stack,
-            (if (local.isBsp) {1} else {0}).toUByte()
+        bridge.set_kernel_stack(
+            local.lapicId.toULong(), stack,
+            (if (local.isBsp) {
+                1
+            } else {
+                0
+            }).toUByte()
         )
     }
 }

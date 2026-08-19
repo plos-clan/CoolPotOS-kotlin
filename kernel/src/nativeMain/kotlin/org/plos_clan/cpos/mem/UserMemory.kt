@@ -67,11 +67,13 @@ class UserMemory private constructor(
         if (!isValidRange(destination, destinationOffset, count) || sourceOffset < 0) return 0
         return destination.usePinned { target ->
             transfer(sourceOffset, count, false) { source, copied, chunk ->
+                bridge.close_smap()
                 memcpy(
                     target.addressOf(destinationOffset + copied),
                     source,
                     chunk.toULong(),
                 )
+                bridge.open_smap()
             }
         }
     }
@@ -85,11 +87,13 @@ class UserMemory private constructor(
         if (!isValidRange(source, sourceOffset, count) || destinationOffset < 0) return 0
         return source.usePinned { input ->
             transfer(destinationOffset, count, true) { destination, copied, chunk ->
+                bridge.close_smap()
                 memcpy(
                     destination,
                     input.addressOf(sourceOffset + copied),
                     chunk.toULong(),
                 )
+                bridge.open_smap()
             }
         }
     }
@@ -97,7 +101,9 @@ class UserMemory private constructor(
     override fun fill(destinationOffset: Int, count: Int, value: Byte): Int {
         if (destinationOffset < 0 || count < 0) return 0
         return transfer(destinationOffset, count, true) { destination, _, chunk ->
+            bridge.close_smap()
             memset(destination, value.toInt(), chunk.toULong())
+            bridge.open_smap()
         }
     }
 
@@ -106,7 +112,9 @@ class UserMemory private constructor(
         source: CPointer<UByteVar>,
         count: Int,
     ): Int = transfer(destinationOffset, count, true) { destination, copied, chunk ->
+        bridge.close_smap()
         memcpy(destination, requireNotNull(source + copied), chunk.toULong())
+        bridge.open_smap()
     }
 
     private fun prepare(offset: Int, count: Int, writable: Boolean): Boolean {
@@ -160,6 +168,7 @@ class UserMemory private constructor(
         if (maxLength <= 0 || address >= USER_VIRTUAL_ADDRESS_LIMIT) {
             return null
         }
+        bridge.close_smap()
 
         val result = ByteArray(maxLength)
         var copied = 0
@@ -169,7 +178,10 @@ class UserMemory private constructor(
                 virtualAddress = currentAddress,
                 requireWritable = false,
             ) ?: return null
-            val source = physicalAddress.toVirtualPointer<UByteVar>() ?: return null
+            val source = physicalAddress.toVirtualPointer<UByteVar>() ?: run {
+                bridge.open_smap()
+                return null
+            }
             val pageOffset = currentAddress - currentAddress.alignDown(PAGE_SIZE_BYTES)
             val chunkLength = minOf(
                 maxLength - copied,
@@ -179,6 +191,7 @@ class UserMemory private constructor(
             repeat(chunkLength) { index ->
                 val byte = source[index].toByte()
                 if (byte == 0.toByte()) {
+                    bridge.open_smap()
                     return result.copyOf(copied + index)
                 }
                 result[copied + index] = byte
@@ -186,6 +199,7 @@ class UserMemory private constructor(
             copied += chunkLength
             currentAddress += chunkLength.toULong()
         }
+        bridge.open_smap()
         return null
     }
 
@@ -223,7 +237,7 @@ class UserMemory private constructor(
         offset: Int,
         count: Int,
         requireWritable: Boolean,
-        operation: (kotlinx.cinterop.CPointer<UByteVar>, Int, Int) -> Unit,
+        operation: (CPointer<UByteVar>, Int, Int) -> Unit,
     ): Int {
         if (!validUserRange(offset, count)) return 0
         var copied = 0

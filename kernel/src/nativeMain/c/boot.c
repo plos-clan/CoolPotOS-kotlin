@@ -104,6 +104,28 @@ void setup_xstate(void) {
     restore_xstate(&initial_xstate);
 }
 
+void setup_smep() {
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0": "=r"(cr4):: "memory");
+    cr4 |= (1ULL << 20);
+    __asm__ volatile("mov %0, %%cr4":: "r"(cr4): "memory");
+}
+
+void setup_smap() {
+    uint64_t cr4;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= (1ULL << 21);
+    __asm__ volatile("mov %0, %%cr4" :: "r"(cr4) : "memory");
+}
+
+void open_smap() {
+    __asm__ volatile("clac" ::: "cc", "memory");
+}
+
+void close_smap() {
+    __asm__ volatile("stac" ::: "cc", "memory");
+}
+
 static __attribute__((noreturn)) void halt_forever(void) {
     for (;;) __asm__ volatile("hlt");
 }

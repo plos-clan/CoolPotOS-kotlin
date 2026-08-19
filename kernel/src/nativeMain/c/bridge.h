@@ -28,6 +28,10 @@ void write_cr3(uint64_t value);
 void invlpg(uint64_t address);
 uint64_t rdmsr(uint32_t msr);
 void wrmsr(uint32_t msr, uint64_t value);
+void setup_smep();
+void setup_smap();
+void open_smap();
+void close_smap();
 uint8_t io_in8(uint16_t port);
 uint16_t io_in16(uint16_t port);
 uint32_t io_in32(uint16_t port);
@@ -118,6 +122,15 @@ void register_interrupt_handler(
     uint8_t ist,
     uint8_t flags
 );
+
+typedef struct {
+    uint32_t eax;
+    uint32_t ebx;
+    uint32_t ecx;
+    uint32_t edx;
+} cpuid_result_t;
+
+void x86_cpuid(uint32_t leaf,uint32_t subleaf,cpuid_result_t *result);
 
 #ifdef __cplusplus
 }

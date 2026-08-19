@@ -83,6 +83,10 @@ fun ULong.isAligned(alignment: ULong): Boolean =
         else -> this % alignment == 0uL
     }
 
+fun UInt.hasBit(bit: Int): Boolean {
+    return (this and (1u shl bit)) != 0u
+}
+
 fun ULong.isPageAligned(): Boolean = isAligned(PAGE_SIZE_BYTES)
 
 fun <T : CPointed> ULong.toVirtualPointer(): CPointer<T>? = Hhdm.toVirtualPointer(this)

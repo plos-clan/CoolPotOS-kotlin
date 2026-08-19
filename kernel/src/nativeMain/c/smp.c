@@ -11,13 +11,26 @@ struct tcb_layout {
     int did_exit;
 };
 
+void x86_cpuid(uint32_t leaf, uint32_t subleaf, cpuid_result_t *result) {
+    __asm__ volatile(
+            "cpuid"
+            : "=a"(result->eax),
+    "=b"(result->ebx),
+    "=c"(result->ecx),
+    "=d"(result->edx)
+            : "a"(leaf),
+    "c"(subleaf)
+            : "memory"
+            );
+}
+
 static __attribute__((noreturn)) void ap_start(struct limine_mp_info *info) {
     disable_interrupt();
     idt_load();
     setup_xstate();
     wrmsr(ia32_fs_base_msr, info->extra_argument);
     kernel_runtime_fs_bases[info->lapic_id % cpu_slot_count] = info->extra_argument;
-    ((struct tcb_layout *)info->extra_argument)->tid = (int)allocate_runtime_tid();
+    ((struct tcb_layout *) info->extra_argument)->tid = (int) allocate_runtime_tid();
 
     kt_ap_start();
     for (;;) __asm__ volatile("hlt");

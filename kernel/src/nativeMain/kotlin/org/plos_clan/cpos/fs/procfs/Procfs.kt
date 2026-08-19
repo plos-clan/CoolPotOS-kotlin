@@ -426,6 +426,7 @@ private enum class RootFile(
     VERSION("version", 6uL),
     INTERRUPTS("interrupts", 7UL),
     FILESYSTEMS("filesystems", 8UL),
+    CPUINFO("cpuinfo", 9UL),
     ;
 
     override val type: InodeType
@@ -441,7 +442,6 @@ private enum class RootFile(
             val lastPid = processes.maxOfOrNull(Process::id) ?: 0
             "0.00 0.00 0.00 $runnable/${processes.size} $lastPid\n".encodeToByteArray()
         }
-
         MEMORY_INFO -> MemoryInfoFile.render()
         STATISTICS -> "cpu  0 0 0 0 0 0 0 0 0 0\n".encodeToByteArray()
         UPTIME -> {
@@ -453,6 +453,7 @@ private enum class RootFile(
         VERSION -> "CoolPotOS version $KERNEL_NAME\n".encodeToByteArray()
         INTERRUPTS -> InterruptsFile.render()
         FILESYSTEMS -> FilesystemsFile.render()
+        CPUINFO -> CpuInfo.render()
     }
 }
 

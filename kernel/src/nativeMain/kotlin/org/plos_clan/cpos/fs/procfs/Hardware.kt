@@ -91,3 +91,26 @@ object InterruptsFile : ProcFSRender {
         }.encodeToByteArray()
     }
 }
+
+object CpuInfo : ProcFSRender {
+    override fun render(): ByteArray {
+        return buildString {
+            SMProcessor.getAllLocalInfo().forEachIndexed { processor, local ->
+                appendLine("processor\t: $processor")
+                appendLine("vendor_id\t: ${local.vendor}")
+                appendLine("model name\t: ${local.modelName}")
+
+                append("address sizes\t: ")
+                append(local.physical)
+                append(" bits physical, ")
+                append(local.virtual)
+                appendLine(" bits virtual")
+
+                append("flags\t\t: ")
+                appendLine(local.features)
+
+                appendLine()
+            }
+        }.encodeToByteArray()
+    }
+}
