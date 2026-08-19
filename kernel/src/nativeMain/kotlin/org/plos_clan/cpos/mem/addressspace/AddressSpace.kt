@@ -204,7 +204,7 @@ class AddressSpace internal constructor(
         var address = start
         var failureErrno = ENOMEM
         while (address < start + alignedLength) {
-            when (materializePage(region, address, populateScratch)) {
+            when (materializePage(region, address, write = false, scratch = populateScratch)) {
                 PageFaultResult.RESOLVED -> Unit
                 PageFaultResult.OUT_OF_MEMORY -> break
                 PageFaultResult.IO_ERROR -> {
@@ -269,12 +269,13 @@ class AddressSpace internal constructor(
                 PageFaultResult.MAPPING_FAILED
             }
         }
-        materializePage(region, page, faultScratch)
+        materializePage(region, page, write = write, scratch = faultScratch)
     }
 
     private fun materializePage(
         region: MemoryRegion,
         page: ULong,
+        write: Boolean,
         scratch: ByteArray? = null,
     ): PageFaultResult {
         if (region.type == MemoryRegionType.MMIO) {
@@ -324,6 +325,13 @@ class AddressSpace internal constructor(
             writable = writable,
             executable = executable,
         )
+        if (mapped && write && backing != null &&
+            !pageDirectory.makeUserPageWritable(page, privateMapping = !region.shared)
+        ) {
+            pageDirectory.releaseUserPage(page)
+            PageCache.release(physicalAddress)
+            return PageFaultResult.MAPPING_FAILED
+        }
         if (backing != null) {
             PageCache.release(physicalAddress)
         } else if (!mapped) {
