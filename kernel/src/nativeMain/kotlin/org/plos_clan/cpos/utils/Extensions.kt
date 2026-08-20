@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class, ExperimentalNativeApi::class)
 
 package org.plos_clan.cpos.utils
 
@@ -11,6 +11,7 @@ import kotlinx.cinterop.get
 import kotlinx.cinterop.set
 import kotlinx.cinterop.toCPointer
 import org.plos_clan.cpos.mem.Hhdm
+import kotlin.experimental.ExperimentalNativeApi
 
 const val PTE_COUNT = 512
 const val PAGE_SIZE_BYTES = 4096uL
@@ -107,6 +108,12 @@ fun ByteArray.readULongLE(offset: Int): ULong {
     }
 
     return result
+}
+
+fun Long.toByteArray(): ByteArray {
+    return ByteArray(8).also {
+        it.setLongAt(0, this)
+    }
 }
 
 value class LittleEndianBuffer(private val bytes: ByteArray) {

@@ -24,6 +24,7 @@ import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.PtraceRegisters
 import org.plos_clan.cpos.utils.readULongLE
+import org.plos_clan.cpos.utils.toByteArray
 
 private const val ARCH_SET_GS = 0x1001uL
 private const val ARCH_SET_FS = 0x1002uL
@@ -524,6 +525,24 @@ internal fun wait4(regs: PtraceRegisters, process: Process): Long {
         Scheduler.yieldCurrent()
         bridge.wait_for_interrupt()
     }
+}
+
+internal fun getCPU(regs: PtraceRegisters, process: Process): Long {
+    val cpup = regs[PtraceRegisters.IDX_RDI]
+    val nodep = regs[PtraceRegisters.IDX_RSI]
+
+    if(cpup != 0UL) {
+        val userCpup = UserMemory(process.addressSpace, cpup)
+        val local = SMProcessor.currentLocal()
+        if(!userCpup.copyToUser(local.cpuid.toByteArray())) return errno(Errno.EFAULT)
+    }
+
+    if(nodep != 0UL) {
+        val userNodep = UserMemory(process.addressSpace, nodep)
+        if(!userNodep.copyToUser(0L.toByteArray())) return errno(Errno.EFAULT)
+    }
+
+    return errno(Errno.EOK)
 }
 
 private fun readStringVector(process: Process, address: ULong): List<String>? {

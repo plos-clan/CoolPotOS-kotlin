@@ -21,6 +21,7 @@ import kotlin.concurrent.atomics.incrementAndFetch
 import kotlin.experimental.ExperimentalNativeApi
 
 data class CpuLocal(
+    val cpuid: Long,
     val lapicId: Long,
     val isBsp: Boolean,
     var vendor: String = "",
@@ -62,6 +63,7 @@ fun apStart() {
 
 object SMProcessor {
     var cpu_count: ULong = 0U
+    var nextCpuId: Long = 0
     var load_done = AtomicInt(1)
 
     var locals = mutableMapOf<UInt, CpuLocal>() // <lapic_id, local_info>
@@ -93,7 +95,7 @@ object SMProcessor {
         for (index in 0 until cpu_count.toLong()) {
             val entry = (cpus[index] ?: continue).pointed
             locals[entry.lapic_id] =
-                CpuLocal(entry.lapic_id.toLong(), entry.lapic_id == smp.bsp_lapic_id)
+                CpuLocal(nextCpuId++, entry.lapic_id.toLong(), entry.lapic_id == smp.bsp_lapic_id)
         }
 
         for (index in 0 until cpu_count.toLong()) {

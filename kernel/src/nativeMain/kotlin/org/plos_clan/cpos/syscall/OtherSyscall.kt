@@ -45,6 +45,19 @@ private const val RANDOM_CHUNK_SIZE = 4096
 private const val NANOSECONDS_PER_SECOND = 1_000_000_000uL
 private const val NANOSECONDS_PER_MICROSECOND = 1_000uL
 
+private const val CLOCK_REALTIME = 0UL
+private const val CLOCK_MONOTONIC = 1UL
+private const val CLOCK_PROCESS_CPUTIME_ID = 2UL
+private const val CLOCK_THREAD_CPUTIME_ID = 3UL
+private const val CLOCK_MONOTONIC_RAW = 4UL
+private const val CLOCK_REALTIME_COARSE = 5UL
+private const val CLOCK_MONOTONIC_COARSE = 6UL
+private const val CLOCK_BOOTTIME = 7UL
+private const val CLOCK_REALTIME_ALARM = 8UL
+private const val CLOCK_BOOTTIME_ALARM = 9UL
+private const val CLOCK_SGI_CYCLE = 10UL
+private const val CLOCK_TAI = 11UL
+
 private class LinuxTimeval(val seconds: Long, val microseconds: Long) : NativeStruct {
     override fun toNativeBytes(): ByteArray = ByteArray(Long.SIZE_BYTES * 2).also { buffer ->
         LittleEndianBuffer(buffer).apply {
@@ -350,4 +363,17 @@ internal fun sysInfo(regs: PtraceRegisters, process: Process): Long {
         memoryUnit = 1u,
     ).toNativeBytes()
     return if (userBuffer.copyToUser(info)) errno(Errno.EOK) else errno(Errno.EFAULT)
+}
+
+internal fun clockGetRes(regs: PtraceRegisters, process: Process): Long {
+    val clockID = regs[PtraceRegisters.IDX_RDI]
+    val userSpec = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
+    return when(clockID) {
+        CLOCK_MONOTONIC or CLOCK_REALTIME or CLOCK_BOOTTIME -> {
+            val spec = TimeSpec(sec = 0, nsec = 1)
+            if(!userSpec.copyToUser(spec.toNativeBytes())) return errno(Errno.EFAULT)
+            errno(Errno.EOK)
+        }
+        else -> errno(Errno.ENOSYS)
+    }
 }
