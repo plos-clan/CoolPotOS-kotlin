@@ -5,6 +5,12 @@
 #include <stdint.h>
 #include "vdso.h"
 
+#define XSTATE_MASK_VALUE 7
+#define XSTATE_SIZE_VALUE 832
+#define KERNEL_ENTRY_FRAME_SIZE_VALUE 1088
+#define CPOS_ASM_STRINGIFY_IMPL(value) #value
+#define CPOS_ASM_STRINGIFY(value) CPOS_ASM_STRINGIFY_IMPL(value)
+
 enum {
     cpu_slot_count = 256,
     ia32_fs_base_msr = 0xc0000100u,
@@ -14,11 +20,14 @@ enum {
     syscall_stack_size = 32 * 1024,
     xstate_x87 = 1u << 0,
     xstate_sse = 1u << 1,
-    xstate_mask = xstate_x87 | xstate_sse,
+    xstate_avx = 1u << 2,
+    xstate_mask = xstate_x87 | xstate_sse | xstate_avx,
     xstate_legacy_size = 512,
     xstate_header_size = 64,
     xstate_header_offset = xstate_legacy_size,
-    xstate_size = xstate_legacy_size + xstate_header_size,
+    xstate_ymm_offset = xstate_header_offset + xstate_header_size,
+    xstate_ymm_size = 256,
+    xstate_size = XSTATE_SIZE_VALUE,
 };
 typedef uint64_t gdt_entries_t[7];
 typedef uint8_t tss_stack_t[4096];
@@ -101,11 +110,16 @@ _Static_assert(
 typedef struct xstate {
     xstate_legacy_t legacy;
     xstate_header_t header;
+    uint8_t ymm_high[xstate_ymm_size];
 } __attribute__((aligned(64))) xstate_t;
 _Static_assert(sizeof(xstate_t) == xstate_size, "invalid XSAVE area size");
 _Static_assert(
     offsetof(xstate_t, header) == xstate_header_offset,
     "invalid XSAVE header offset"
+);
+_Static_assert(
+    offsetof(xstate_t, ymm_high) == xstate_ymm_offset,
+    "invalid XSAVE YMM offset"
 );
 
 typedef struct kernel_entry_frame {
@@ -118,7 +132,7 @@ _Static_assert(
     "invalid XSAVE area offset"
 );
 _Static_assert(
-    sizeof(kernel_entry_frame_t) == 832,
+    sizeof(kernel_entry_frame_t) == KERNEL_ENTRY_FRAME_SIZE_VALUE,
     "invalid kernel entry frame size"
 );
 

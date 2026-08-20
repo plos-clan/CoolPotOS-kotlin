@@ -271,7 +271,7 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "movq %rax, %gs:16\n"
         "movq %gs:0, %rsp\n"
 
-        "subq $832, %rsp\n"
+        "subq $" CPOS_ASM_STRINGIFY(KERNEL_ENTRY_FRAME_SIZE_VALUE) ", %rsp\n"
         "movq %r15, 0(%rsp)\n"
         "movq %r14, 8(%rsp)\n"
         "movq %r13, 16(%rsp)\n"
@@ -291,7 +291,7 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "xorl %eax, %eax\n"
         "movl $8, %ecx\n"
         "rep stosq\n"
-        "movl $3, %eax\n"
+        "movl $" CPOS_ASM_STRINGIFY(XSTATE_MASK_VALUE) ", %eax\n"
         "xorl %edx, %edx\n"
         "xsaveopt64 256(%rsp)\n"
         "xrstor64 initial_xstate(%rip)\n"
@@ -374,7 +374,7 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "pushq 160(%r13)\n"
 
         "2:\n"
-        "movl $3, %eax\n"
+        "movl $" CPOS_ASM_STRINGIFY(XSTATE_MASK_VALUE) ", %eax\n"
         "xorl %edx, %edx\n"
         "xrstor64 256(%r13)\n"
         "movq 0(%r13), %r15\n"

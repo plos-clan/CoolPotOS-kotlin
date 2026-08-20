@@ -133,7 +133,7 @@ __attribute__((naked, noreturn))
 static void fast_user_task_entry(void) {
     __asm__ volatile(
         "movq %rsp, %r13\n"
-        "movl $3, %eax\n"
+        "movl $" CPOS_ASM_STRINGIFY(XSTATE_MASK_VALUE) ", %eax\n"
         "xorl %edx, %edx\n"
         "xrstor64 256(%r13)\n"
         "movq 128(%r13), %rax\n"
