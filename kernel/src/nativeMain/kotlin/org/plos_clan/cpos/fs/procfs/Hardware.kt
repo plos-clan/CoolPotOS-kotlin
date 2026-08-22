@@ -61,10 +61,10 @@ object InterruptsFile : ProcFSRender {
         append('\n')
     }
 
-    private fun StringBuilder.renderInterrupts(cpuCount: Int,actions: Array<IrqAction?>) {
-        for (irq in actions.indices) {
-            val action = actions[irq] ?: continue
-            append("$irq:".padStart(4))
+    private fun StringBuilder.renderInterrupts(cpuCount: Int, actions: Array<IrqAction?>) {
+        for (action in actions) {
+            action ?: continue
+            append("${action.irq}:".padStart(4))
             for (cpu in 0 until cpuCount) {
                 append(
                     action.cpuCount[cpu]
@@ -75,9 +75,8 @@ object InterruptsFile : ProcFSRender {
             append("   ")
             append(action.type.displayName.padEnd(10))
             append(' ')
-            append("${irq}-${
-                if(action.levelTriggered) "level" else "edge"
-            }")
+            append(action.irq)
+            append(if (action.levelTriggered) "-level" else "-edge")
             append(' ')
             append(action.name)
             append('\n')
@@ -87,7 +86,7 @@ object InterruptsFile : ProcFSRender {
     override fun render() : ByteArray {
         return buildString {
             appendCpuHeader(SMProcessor.cpu_count.toInt())
-            renderInterrupts(SMProcessor.cpu_count.toInt(), IrqController.getActions())
+            renderInterrupts(SMProcessor.cpu_count.toInt(), IrqController.snapshotActions())
         }.encodeToByteArray()
     }
 }

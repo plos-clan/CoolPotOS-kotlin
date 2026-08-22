@@ -16,9 +16,7 @@ import org.plos_clan.cpos.drivers.input.KeyCode
 import org.plos_clan.cpos.drivers.input.KeyboardInputDevice
 import org.plos_clan.cpos.fault.IRQ_BASE_VECTOR
 import org.plos_clan.cpos.fault.IrqController
-import org.plos_clan.cpos.fault.IrqControllerType
 import org.plos_clan.cpos.utils.ByteRingBuffer
-import org.plos_clan.cpos.utils.PtraceRegisters
 
 private data class Ps2KeyboardConfiguration(
     val dataPort: UInt,
@@ -79,10 +77,7 @@ object Ps2Keyboard {
 
     private var configuration: Ps2KeyboardConfiguration? = null
 
-    fun keyboardHandle(
-        @Suppress("UNUSED_PARAMETER") registers: PtraceRegisters,
-        @Suppress("UNUSED_PARAMETER") irqNumber: ULong,
-    ) {
+    fun keyboardHandle() {
         val config = configuration ?: return
         if (io_in8(config.commandPort.toUShort()).toInt() and STATUS_OUTPUT_FULL == 0) return
         if (scanCodes.offer(io_in8(config.dataPort.toUShort()).toByte())) {
@@ -120,15 +115,14 @@ object Ps2Keyboard {
         configuration = config
         startEventWorker(Ps2Set1Decoder(keyboard))
         val vector = irq + IRQ_BASE_VECTOR
-        IrqController.registerAction(
+        IrqController.registerIoApic(
             irq = irq,
             vector = vector,
             masked = false,
             levelTriggered = config.levelTriggered,
             activeLow = config.activeLow,
             name = "ps/2-keyboard",
-            type = IrqControllerType.IO_APIC,
-            handle = ::keyboardHandle,
+            handler = ::keyboardHandle,
         )
         println(
             "PS/2: keyboard ${device.path} data=0x${dataPort.toString(16)} " +

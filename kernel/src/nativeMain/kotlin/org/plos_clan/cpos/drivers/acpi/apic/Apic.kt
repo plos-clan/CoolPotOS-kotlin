@@ -9,7 +9,7 @@ private const val PIC_MASTER_DATA_PORT: UShort = 0x21u
 private const val PIC_SLAVE_DATA_PORT: UShort = 0xA1u
 private const val PIC_MASK_ALL: UByte = 0xFFu
 
-const val LAPIC_TIMER_INTERRUPT_VECTOR = 32u
+const val LAPIC_TIMER_INTERRUPT_VECTOR = 0xFEu
 const val LAPIC_TIMER_FREQUENCY_HZ = 1_000u
 
 object Apic {

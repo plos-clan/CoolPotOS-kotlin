@@ -8,8 +8,8 @@ import org.plos_clan.cpos.drivers.acpi.apic.IoApic
 import org.plos_clan.cpos.drivers.acpi.readByte
 import org.plos_clan.cpos.drivers.acpi.writeByte
 import org.plos_clan.cpos.fault.IRQ_BASE_VECTOR
+import org.plos_clan.cpos.fault.IRQ_LAST_DEVICE_VECTOR
 import org.plos_clan.cpos.fault.IrqController
-import org.plos_clan.cpos.fault.IrqControllerType
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 private const val EVENT_QUEUE_CAPACITY = 256
@@ -90,20 +90,19 @@ object AmlEvents {
         }
         val gsi = info.sciInterrupt
         val vector = IRQ_BASE_VECTOR + gsi
-        if (vector > UByte.MAX_VALUE.toUInt()) {
-            println("AML: SCI GSI $gsi cannot be represented by an IDT vector")
+        if (vector > IRQ_LAST_DEVICE_VECTOR) {
+            println("AML: SCI GSI $gsi exceeds the device interrupt vector range")
             return false
         }
 
-        if (!IrqController.registerAction(
+        if (!IrqController.registerIoApic(
                 irq = gsi,
                 vector = vector,
                 masked = true,
                 levelTriggered = true,
                 activeLow = true,
-                "aml-sci",
-                type = IrqControllerType.IO_APIC,
-            ) { _, _ ->
+                name = "aml-sci",
+            ) {
                 IoApic.setMasked(gsi, true)
                 signalSci()
             }

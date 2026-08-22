@@ -50,7 +50,7 @@ object Xhci {
             return
         }
 
-        interrupt.register({ _, _ -> xhci.handleIrq() }, device.bars, 0u) ?: run {
+        interrupt.register(xhci::handleIrq, device.bars, 0u) ?: run {
             println("Failed to register xHCI interrupt")
             return
         }

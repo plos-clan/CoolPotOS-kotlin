@@ -58,7 +58,7 @@ sealed interface PciInterrupt {
                 println("PCIe: INTx does not support multiple vectors")
                 return null
             }
-            val vector = IrqController.registerPciAction(
+            val vector = IrqController.registerPci(
                 irq = line.toUInt(),
                 name = "pci-intx-${line}",
                 type = IrqControllerType.PCI_INTX,
@@ -80,7 +80,7 @@ sealed interface PciInterrupt {
         }
 
         override fun register(handler: IrqHandler, bars: Array<PciBar?>, index: UInt): UByte? {
-            val vector = IrqController.registerPciAction(
+            val vector = IrqController.registerPci(
                 irq = null,
                 name = "pci-msi",
                 type = IrqControllerType.PCI_MSI,
@@ -106,7 +106,7 @@ sealed interface PciInterrupt {
             val bar = bars.getOrNull(capability.tableBar.toInt()) ?: return null
             val table = MsiXTable.create(bar, capability.tableOffset, capability.tableSize) ?: return null
             val entry = table.entry(index) ?: return null
-            val vector = IrqController.registerPciAction(
+            val vector = IrqController.registerPci(
                 irq = null,
                 name = "pci-msix",
                 type = IrqControllerType.PCI_MSIX,

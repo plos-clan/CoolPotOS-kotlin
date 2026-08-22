@@ -1,32 +1,24 @@
-@file:OptIn(ExperimentalForeignApi::class)
-
 package org.plos_clan.cpos.fault
 
-import kotlinx.cinterop.*
 import org.plos_clan.cpos.drivers.acpi.apic.IoApic
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.utils.IrqSpinLock
-import org.plos_clan.cpos.utils.PtraceRegisters
 import kotlin.experimental.ExperimentalNativeApi
 
-const val ARCH_MAX_IRQ_NUM = 256
-const val IRQ_BASE_VECTOR = 32u
+internal const val IRQ_BASE_VECTOR = 0x20u
+internal const val IRQ_LAST_DEVICE_VECTOR = 0xEFu
 
 @ExperimentalNativeApi
-@ExperimentalForeignApi
 @Suppress("unused")
 @CName("do_irq")
-fun doIrqHandler(frame: COpaquePointer?, irqNum: ULong) {
-    IrqController.doIrq(PtraceRegisters(requireNotNull(frame).reinterpret()), irqNum)
-}
+fun doIrqHandler(irqNum: ULong) = IrqController.doIrq(irqNum)
 
-typealias IrqHandler = (regs: PtraceRegisters, irqNum: ULong) -> Unit
+typealias IrqHandler = () -> Unit
 
-data class IrqAction(
+internal class IrqAction(
     val irq: UInt,
-    val vector: UInt,
-    val destinationApicId: UInt,
+    val cpuIndex: Int,
     val name: String,
     val type: IrqControllerType,
     val levelTriggered: Boolean
@@ -34,7 +26,7 @@ data class IrqAction(
     val cpuCount = ULongArray(SMProcessor.cpu_count.toInt())
 }
 
-enum class IrqControllerType(val displayName: String) {
+internal enum class IrqControllerType(val displayName: String) {
     IO_APIC("IO-APIC"),
     PCI_INTX("PCI-INTx"),
     PCI_MSI("PCI-MSI"),
@@ -42,67 +34,57 @@ enum class IrqControllerType(val displayName: String) {
     ;
 }
 
-object IrqController {
-    private const val FIRST_DYNAMIC_VECTOR = 128u
-    private const val LAST_DYNAMIC_VECTOR = 254u
+internal object IrqController {
+    private const val FIRST_DYNAMIC_VECTOR = 0x80u
 
     private val lock = IrqSpinLock()
-    private val irqHandlers = arrayOfNulls<IrqHandler>(ARCH_MAX_IRQ_NUM)
-    private val actions = arrayOfNulls<IrqAction>(ARCH_MAX_IRQ_NUM)
+    private val descriptors = arrayOfNulls<IrqDescriptor>(
+        (IRQ_LAST_DEVICE_VECTOR - IRQ_BASE_VECTOR + 1u).toInt(),
+    )
 
-
-    fun doIrq(regs: PtraceRegisters, irqNum: ULong) {
-        val irqIndex = irqIndexOf(irqNum) ?: run {
+    fun doIrq(irqNum: ULong) {
+        if (irqNum == 0uL || irqNum > descriptors.size.toULong()) {
             println("IrqController: out-of-range irq_num=$irqNum")
-            LocalApic.endOfInterrupt()
             return
         }
-
-        val handler = irqHandlers[irqIndex] ?: run {
-            LocalApic.endOfInterrupt()
-            return
+        val descriptor = descriptors[(irqNum - 1uL).toInt()] ?: return
+        descriptor.handler()
+        with(descriptor.action) {
+            if (cpuIndex in cpuCount.indices) cpuCount[cpuIndex]++
         }
-        handler(regs, irqNum)
-
-        val action = actions[irqIndex] ?: run {
-            LocalApic.endOfInterrupt()
-            return
-        }
-        val cpu = LocalApic.destinationApicId.toInt()
-        if (cpu in action.cpuCount.indices) {
-            action.cpuCount[cpu]++
-        }
-
-        LocalApic.endOfInterrupt()
     }
 
-    fun registerAction(
+    fun registerIoApic(
         irq: UInt,
         vector: UInt,
         masked: Boolean = false,
         levelTriggered: Boolean = false,
         activeLow: Boolean = false,
         name: String,
-        type: IrqControllerType,
-        handle: IrqHandler
+        handler: IrqHandler,
     ): Boolean {
-        val irqIndex = vectorIndexOf(vector) ?: run {
-            println("IrqController: Invalid interrupt vector: $vector")
+        if (vector !in IRQ_BASE_VECTOR..IRQ_LAST_DEVICE_VECTOR) {
+            println("IrqController: invalid device interrupt vector: $vector")
             return false
         }
+
+        val index = (vector - IRQ_BASE_VECTOR).toInt()
+        val target = currentTarget()
+        val descriptor = IrqDescriptor(
+            IrqAction(
+                irq,
+                target.cpuIndex,
+                name,
+                IrqControllerType.IO_APIC,
+                levelTriggered,
+            ),
+            handler,
+        )
         val installed = lock.withLock {
-            if (irqHandlers[irqIndex] != null || actions[irqIndex] != null) {
+            if (descriptors[index] != null) {
                 false
             } else {
-                irqHandlers[irqIndex] = handle
-                actions[irqIndex] = IrqAction(
-                    irq = irq,
-                    vector = vector,
-                    destinationApicId = LocalApic.destinationApicId,
-                    name = name,
-                    type = type,
-                    levelTriggered = levelTriggered,
-                )
+                descriptors[index] = descriptor
                 true
             }
         }
@@ -110,10 +92,11 @@ object IrqController {
             println("IrqController: interrupt vector already registered: $vector")
             return false
         }
+
         IoApic.routeIrq(
             irq,
             vector,
-            LocalApic.destinationApicId,
+            target.apicId,
             masked = masked,
             levelTriggered = levelTriggered,
             activeLow = activeLow
@@ -121,61 +104,64 @@ object IrqController {
         return true
     }
 
-    fun registerPciAction(
+    fun registerPci(
         irq: UInt?,
         name: String,
         type: IrqControllerType,
         handler: IrqHandler,
     ): UByte? {
-        var vector: UInt? = null
-        val installed = lock.withLock {
-            val candidate = (FIRST_DYNAMIC_VECTOR..LAST_DYNAMIC_VECTOR)
-                .firstOrNull {
-                    val index = vectorIndexOf(it)!!
-                    actions[index] == null && irqHandlers[index] == null
-                }
-                ?: return@withLock false
-            val index = vectorIndexOf(candidate) ?: return@withLock false
-            vector = candidate
-            irqHandlers[index] = handler
-            actions[index] = IrqAction(
-                irq = irq ?: irqNumberFor(candidate),
-                vector = candidate,
-                destinationApicId = LocalApic.destinationApicId,
-                name = name,
-                type = type,
-                levelTriggered = false,
+        val target = currentTarget()
+        val levelTriggered = type == IrqControllerType.PCI_INTX
+        val vector = lock.withLock {
+            var index = (FIRST_DYNAMIC_VECTOR - IRQ_BASE_VECTOR).toInt()
+            while (index < descriptors.size && descriptors[index] != null) index++
+            if (index == descriptors.size) return@withLock null
+
+            val candidate = IRQ_BASE_VECTOR + index.toUInt()
+            descriptors[index] = IrqDescriptor(
+                IrqAction(
+                    irq ?: (candidate - IRQ_BASE_VECTOR + 1u),
+                    target.cpuIndex,
+                    name,
+                    type,
+                    levelTriggered,
+                ),
+                handler,
             )
-            true
-        }
-        if (!installed) {
+            candidate
+        } ?: run {
             println("IrqController: no free PCI interrupt vector")
             return null
         }
 
-        val allocatedVector = vector ?: return null
         if (irq != null) {
             IoApic.routeIrq(
                 irq = irq,
-                vector = allocatedVector,
-                destinationApicId = LocalApic.destinationApicId,
+                vector = vector,
+                destinationApicId = target.apicId,
+                levelTriggered = levelTriggered,
+                activeLow = levelTriggered,
             )
         }
-        return allocatedVector.toUByte()
+        return vector.toUByte()
     }
 
-    fun getActions(): Array<IrqAction?> = actions
+    fun snapshotActions(): Array<IrqAction?> {
+        val snapshot = arrayOfNulls<IrqAction>(descriptors.size)
+        lock.withLock {
+            descriptors.forEachIndexed { index, descriptor ->
+                snapshot[index] = descriptor?.action
+            }
+        }
+        return snapshot
+    }
 
-    private fun irqIndexOf(irq: Int): Int? =
-        (irq - 1).takeIf { it in irqHandlers.indices }
+    private fun currentTarget() = IrqTarget(
+        LocalApic.destinationApicId,
+        SMProcessor.currentLocal().cpuid.toInt(),
+    )
 
-    private fun irqIndexOf(irq: ULong): Int? =
-        irq.takeIf { it <= Int.MAX_VALUE.toULong() }?.toInt()?.let(::irqIndexOf)
+    private data class IrqTarget(val apicId: UInt, val cpuIndex: Int)
 
-    private fun vectorIndexOf(vector: UInt): Int? =
-        vector.takeIf { it in IRQ_BASE_VECTOR..UByte.MAX_VALUE.toUInt() }
-            ?.let { (it - IRQ_BASE_VECTOR).toInt() }
-            ?.takeIf { it in actions.indices }
-
-    private fun irqNumberFor(vector: UInt): UInt = vector - IRQ_BASE_VECTOR + 1u
+    private class IrqDescriptor(val action: IrqAction, val handler: IrqHandler)
 }

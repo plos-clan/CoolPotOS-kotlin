@@ -91,8 +91,8 @@ object KernelCoroutines {
     fun runEventLoop(): Nothing {
         val dispatcher = dispatcher
         while (true) {
+            val wakeSequence = bridge.fast_handoff_service()
             dispatcher.runReadyBatch()
-            val wakeSequence = bridge.fast_handoff_wake_sequence()
             if (dispatcher.hasReadyWork()) {
                 continue
             }

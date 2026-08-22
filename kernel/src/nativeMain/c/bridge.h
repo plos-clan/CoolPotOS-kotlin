@@ -56,7 +56,7 @@ void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base);
 bool fast_handoff_yield(void);
 bool fast_handoff_park_current(void);
 bool fast_handoff_unpark(uint64_t task);
-uint64_t fast_handoff_wake_sequence(void);
+uint64_t fast_handoff_service(void);
 void fast_handoff_wake_bsp(void);
 void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence);
 _Noreturn void fast_handoff_idle(void);

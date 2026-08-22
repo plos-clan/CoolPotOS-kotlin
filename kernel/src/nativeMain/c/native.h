@@ -186,12 +186,12 @@ static inline void restore_xstate(const xstate_t *state) {
 void setup_xstate(void);
 void idt_load(void);
 void kt_ap_start(void);
-void do_irq(void *regs, uint64_t irq_num);
+void do_irq(uint64_t irq_num);
 bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num);
 bool fast_handoff_yield(void);
 bool fast_handoff_park_current(void);
 bool fast_handoff_unpark(uint64_t task);
-uint64_t fast_handoff_wake_sequence(void);
+uint64_t fast_handoff_service(void);
 void fast_handoff_wake_bsp(void);
 void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence);
 _Noreturn void fast_handoff_idle(void);

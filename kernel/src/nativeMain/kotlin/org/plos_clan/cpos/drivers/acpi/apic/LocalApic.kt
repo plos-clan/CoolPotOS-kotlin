@@ -16,7 +16,6 @@ private const val LAPIC_MMIO_SIZE = 0x1000uL
 private const val X2APIC_MSR_BASE = 0x800u
 
 private const val LAPIC_REG_ID = 0x20u
-private const val LAPIC_REG_EOI = 0xB0u
 private const val LAPIC_REG_SPURIOUS = 0xF0u
 private const val LAPIC_SPURIOUS_VECTOR = 0xFFu
 private const val LAPIC_SPURIOUS_ENABLE_BIT = 0x100uL
@@ -78,10 +77,6 @@ object LocalApic {
         }
         bspDeadlineTimerReady = true
         return true
-    }
-
-    fun endOfInterrupt() {
-        write(LAPIC_REG_EOI, 0uL)
     }
 
     fun configureDeadlineTimer(

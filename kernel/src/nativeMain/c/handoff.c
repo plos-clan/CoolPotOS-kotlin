@@ -1,14 +1,19 @@
 #include "bridge.h"
 #include "native.h"
 
-extern void do_irq(void *regs, uint64_t irq_num);
+extern void do_irq(uint64_t irq_num);
 
 enum {
-    timer_irq = 1,
-    scheduler_vector = 32,
-    spurious_irq = 224,
+    irq_vector_base = 0x20,
+    device_vector_limit = 0xef,
+    scheduler_vector = 0xfe,
+    device_irq_limit = device_vector_limit - irq_vector_base + 1,
+    timer_irq = scheduler_vector - irq_vector_base + 1,
+    spurious_irq = 0xff - irq_vector_base + 1,
     lapic_id_register = 0x20,
     lapic_eoi_register = 0xb0,
+    lapic_isr_base_register = 0x100,
+    lapic_register_stride = 0x10,
     lapic_icr_register = 0x300,
     lapic_icr_high_register = 0x310,
     lapic_timer_register = 0x320,
@@ -236,9 +241,28 @@ static void lapic_write(uint32_t reg, uint64_t value) {
     }
 }
 
-static void lapic_eoi(uint64_t irq_num) {
-    if (irq_num == spurious_irq) return;
+static void lapic_eoi(void) {
     lapic_write(lapic_eoi_register, 0);
+}
+
+static void dispatch_device_irqs(void) {
+    const uint32_t last_register = device_vector_limit / 32;
+    const uint32_t last_mask = UINT32_MAX >>
+        (31 - device_vector_limit % 32);
+
+    for (uint32_t index = last_register; index > 0; index--) {
+        const uint32_t register_address =
+            lapic_isr_base_register + index * lapic_register_stride;
+        const uint32_t mask = index == last_register
+            ? last_mask : UINT32_MAX;
+        for (uint32_t pending = lapic_read(register_address) & mask;
+             pending;
+             pending = lapic_read(register_address) & mask) {
+            const uint32_t vector = index * 32 + 31 - __builtin_clz(pending);
+            do_irq(vector - irq_vector_base + 1);
+            lapic_eoi();
+        }
+    }
 }
 
 static void lapic_send_reschedule(uint64_t lapic_id) {
@@ -465,9 +489,16 @@ bool fast_handoff_unpark(uint64_t handle) {
     return success;
 }
 
-uint64_t fast_handoff_wake_sequence(void) {
+uint64_t fast_handoff_service(void) {
+    const uint64_t flags = interrupt_save();
+    dispatch_device_irqs();
     fast_cpu_t *cpu = current_cpu();
-    return __atomic_load_n(&cpu->wake_sequence, __ATOMIC_ACQUIRE);
+    const uint64_t sequence = __atomic_load_n(
+        &cpu->wake_sequence,
+        __ATOMIC_ACQUIRE
+    );
+    interrupt_restore(flags);
+    return sequence;
 }
 
 void fast_handoff_wake_bsp(void) {
@@ -501,7 +532,7 @@ void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence) {
 
 _Noreturn void fast_handoff_idle(void) {
     for (;;) {
-        const uint64_t sequence = fast_handoff_wake_sequence();
+        const uint64_t sequence = fast_handoff_service();
         fast_handoff_park_kotlin(0, sequence);
     }
 }
@@ -768,23 +799,16 @@ void fast_handoff_reset_user_xstate(void) {
 __attribute__((used)) bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
     fast_cpu_t *cpu = current_cpu();
 
-    if (irq_num != timer_irq) {
+    if (irq_num <= device_irq_limit) {
         __atomic_add_fetch(&cpu->wake_sequence, 1, __ATOMIC_RELEASE);
-        if (irq_num == spurious_irq) {
-            lapic_eoi(irq_num);
-        } else {
-            xstate_t *xstate = &((kernel_entry_frame_t *)regs)->xstate;
-            initialize_xstate_header(xstate);
-            save_xstate(xstate);
-            restore_xstate(&initial_xstate);
-            do_irq(regs, irq_num);
-            restore_xstate(xstate);
-        }
         return false;
     }
+    if (irq_num == spurious_irq) return false;
+
+    lapic_eoi();
+    if (irq_num != timer_irq) return false;
 
     cpu->timer_deadline = 0;
-    lapic_eoi(irq_num);
     if (__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) &&
         cpu->state != cpu_offline) {
         return fast_handoff_schedule(
