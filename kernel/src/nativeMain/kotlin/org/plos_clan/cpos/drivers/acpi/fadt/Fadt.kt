@@ -13,9 +13,6 @@ import org.plos_clan.cpos.drivers.acpi.aml.Aml
 import org.plos_clan.cpos.drivers.acpi.aml.AmlInteger
 import org.plos_clan.cpos.drivers.acpi.aml.AmlPackage
 import org.plos_clan.cpos.mem.CachedMmioRegion
-import org.plos_clan.cpos.utils.readU16
-import org.plos_clan.cpos.utils.readU32
-import org.plos_clan.cpos.utils.readU64
 
 private const val GAS_ACCESS_UNDEFINED = 0u
 private const val GAS_ACCESS_BYTE = 1u

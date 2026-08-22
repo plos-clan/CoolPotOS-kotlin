@@ -1,6 +1,11 @@
-package org.plos_clan.cpos.drivers.acpi.aml
+package org.plos_clan.cpos.drivers.acpi.aml.evaluator
 
 import org.plos_clan.cpos.drivers.TscClock
+import org.plos_clan.cpos.drivers.acpi.aml.AmlByteReader
+import org.plos_clan.cpos.drivers.acpi.aml.AmlInteger
+import org.plos_clan.cpos.drivers.acpi.aml.AmlObject
+import org.plos_clan.cpos.drivers.acpi.aml.AmlReference
+import org.plos_clan.cpos.drivers.acpi.aml.AmlUninitialized
 
 internal object AmlExtendedTerm {
     fun evaluate(frame: AmlMethodFrame, reader: AmlByteReader): AmlObject? {

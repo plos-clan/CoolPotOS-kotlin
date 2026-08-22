@@ -1,4 +1,45 @@
-package org.plos_clan.cpos.drivers.acpi.aml
+package org.plos_clan.cpos.drivers.acpi.aml.evaluator
+
+internal const val AML_ALIAS_OP = 0x06u
+internal const val AML_NAME_OP = 0x08u
+internal const val AML_BYTE_PREFIX = 0x0Au
+internal const val AML_WORD_PREFIX = 0x0Bu
+internal const val AML_DWORD_PREFIX = 0x0Cu
+internal const val AML_STRING_PREFIX = 0x0Du
+internal const val AML_QWORD_PREFIX = 0x0Eu
+internal const val AML_SCOPE_OP = 0x10u
+internal const val AML_BUFFER_OP = 0x11u
+internal const val AML_PACKAGE_OP = 0x12u
+internal const val AML_VAR_PACKAGE_OP = 0x13u
+internal const val AML_METHOD_OP = 0x14u
+internal const val AML_EXTERNAL_OP = 0x15u
+internal const val AML_EXT_OP_PREFIX = 0x5Bu
+
+internal const val AML_EXT_MUTEX_OP = 0x01u
+internal const val AML_EXT_EVENT_OP = 0x02u
+internal const val AML_EXT_COND_REF_OF_OP = 0x12u
+internal const val AML_EXT_STALL_OP = 0x21u
+internal const val AML_EXT_SLEEP_OP = 0x22u
+internal const val AML_EXT_ACQUIRE_OP = 0x23u
+internal const val AML_EXT_RELEASE_OP = 0x27u
+internal const val AML_EXT_REVISION_OP = 0x30u
+internal const val AML_EXT_DEBUG_OP = 0x31u
+internal const val AML_EXT_TIMER_OP = 0x33u
+internal const val AML_EXT_OPERATION_REGION_OP = 0x80u
+internal const val AML_EXT_FIELD_OP = 0x81u
+internal const val AML_EXT_DEVICE_OP = 0x82u
+internal const val AML_EXT_PROCESSOR_OP = 0x83u
+internal const val AML_EXT_POWER_RESOURCE_OP = 0x84u
+internal const val AML_EXT_THERMAL_ZONE_OP = 0x85u
+internal const val AML_EXT_INDEX_FIELD_OP = 0x86u
+internal const val AML_EXT_BANK_FIELD_OP = 0x87u
+
+internal const val AML_CREATE_BYTE_FIELD_OP = 0x8Au
+internal const val AML_CREATE_BIT_FIELD_OP = 0x8Bu
+internal const val AML_CREATE_DWORD_FIELD_OP = 0x8Cu
+internal const val AML_CREATE_WORD_FIELD_OP = 0x8Du
+internal const val AML_CREATE_QWORD_FIELD_OP = 0x8Eu
+internal const val AML_CREATE_FIELD_OP = 0x8Fu
 
 internal const val AML_LOCAL0_OP = 0x60u
 internal const val AML_LOCAL7_OP = 0x67u
@@ -45,15 +86,6 @@ internal const val AML_WHILE_OP = 0xA2u
 internal const val AML_NOOP_OP = 0xA3u
 internal const val AML_RETURN_OP = 0xA4u
 internal const val AML_BREAK_OP = 0xA5u
-
-internal const val AML_EXT_COND_REF_OF_OP = 0x12u
-internal const val AML_EXT_STALL_OP = 0x21u
-internal const val AML_EXT_SLEEP_OP = 0x22u
-internal const val AML_EXT_ACQUIRE_OP = 0x23u
-internal const val AML_EXT_RELEASE_OP = 0x27u
-internal const val AML_EXT_REVISION_OP = 0x30u
-internal const val AML_EXT_DEBUG_OP = 0x31u
-internal const val AML_EXT_TIMER_OP = 0x33u
 
 internal const val MAX_METHOD_DEPTH = 32
 internal const val MAX_METHOD_OPERATIONS = 100_000

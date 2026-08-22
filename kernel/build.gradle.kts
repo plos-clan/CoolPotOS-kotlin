@@ -268,6 +268,8 @@ private data class QemuConfig(
     val flags: List<String>,
 )
 
+private val SSDT_FILE_PATTERN = Regex("ssdt\\d+\\.dat", RegexOption.IGNORE_CASE)
+
 private class BuildConfig(private val project: Project) {
     val arch = "x86_64"
     val debug = settingBoolean("debugMode", "DEBUG_MODE", false)
@@ -324,13 +326,70 @@ private class BuildConfig(private val project: Project) {
             "-device", "usb-kbd,bus=xhci.0", "-device", "usb-mouse,bus=xhci.0",
             "-drive",
             "if=pflash,format=raw,readonly=on,file=${paths.assets.resolve("ovmf-code.fd")}",
-        ) + if (debug) listOf("-s", "-S") else emptyList(),
+        ) + qemuAcpiTableFlags(optionalSetting("qemuAcpiTableDir", "QEMU_ACPI_TABLE_DIR")) +
+            if (debug) listOf("-s", "-S") else emptyList(),
     )
 
     private fun setting(prop: String, env: String, default: String): String = listOfNotNull(
         (project.findProperty(prop) as String?)?.takeIf(String::isNotBlank),
         System.getenv(env)?.takeIf(String::isNotBlank),
     ).firstOrNull() ?: default
+
+    private fun optionalSetting(prop: String, env: String): String? = listOfNotNull(
+        (project.findProperty(prop) as String?)?.takeIf(String::isNotBlank),
+        System.getenv(env)?.takeIf(String::isNotBlank),
+    ).firstOrNull()
+
+    private fun qemuAcpiTableFlags(directoryPath: String?): List<String> {
+        if (directoryPath == null) {
+            return emptyList()
+        }
+
+        val directory = File(directoryPath)
+        if (!directory.isDirectory) {
+            throw GradleException("QEMU ACPI table directory does not exist: ${directory.absolutePath}")
+        }
+
+        val requestedNames = optionalSetting("qemuAcpiTables", "QEMU_ACPI_TABLES")
+            ?.split(',')
+            ?.map(String::trim)
+            ?.filter(String::isNotEmpty)
+
+        val files = if (requestedNames == null) {
+            directory.listFiles { file -> file.isFile && SSDT_FILE_PATTERN.matches(file.name) }
+                ?.sortedWith(compareBy<File> {
+                    it.nameWithoutExtension.lowercase().removePrefix("ssdt").toInt()
+                }
+                    .thenBy { it.name })
+                .orEmpty()
+        } else {
+            requestedNames.map { name ->
+                if (!SSDT_FILE_PATTERN.matches(name)) {
+                    throw GradleException(
+                        "QEMU_ACPI_TABLES only accepts ssdtN.dat names; got '$name'",
+                    )
+                }
+                val file = directory.resolve(name)
+                if (!file.isFile) {
+                    throw GradleException("Requested QEMU ACPI table does not exist: ${file.absolutePath}")
+                }
+                file
+            }
+        }
+
+        if (files.isEmpty()) {
+            throw GradleException("No ssdtN.dat files found in ${directory.absolutePath}")
+        }
+
+        return files.flatMap { file ->
+            if (file.length() > 0xFFFF) {
+                throw GradleException(
+                    "QEMU -acpitable cannot load ${file.name}: ${file.length()} bytes exceeds 65535",
+                )
+            }
+            listOf("-acpitable", "file=${file.absolutePath}")
+        }
+    }
 
     private fun settingBoolean(prop: String, env: String, default: Boolean): Boolean =
         when (val value = setting(prop, env, default.toString()).lowercase()) {
@@ -397,6 +456,10 @@ kotlin {
             implementation(libs.kotlinx.benchmark.runtime)
         }
     }
+}
+
+tasks.named("nativeTest") {
+    inputs.property("acpiAmlTableDir", System.getenv("ACPI_AML_TABLE_DIR") ?: "")
 }
 
 benchmark {

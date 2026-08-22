@@ -7,6 +7,7 @@ import org.plos_clan.cpos.coroutines.KernelEvent
 import org.plos_clan.cpos.drivers.acpi.Acpi
 import org.plos_clan.cpos.drivers.acpi.AcpiTable
 import org.plos_clan.cpos.drivers.acpi.Fadt
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AmlEvaluator
 import org.plos_clan.cpos.drivers.char.Ps2Keyboard
 import org.plos_clan.cpos.utils.checksumOk
 
@@ -63,10 +64,11 @@ object Aml {
         val ssdts = Acpi.findTables("SSDT").filter { it.isValidAmlTable() }
 
         val loader = AmlLoader(namespace)
-        if (!loader.load(dsdt)) {
+        val dsdtResult = loader.load(dsdt)
+        if (!dsdtResult.success) {
             return false
         }
-        ssdts.forEach(loader::load)
+        ssdts.forEach { loader.load(it) }
 
         initialized = true
         println(

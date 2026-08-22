@@ -1,4 +1,18 @@
-package org.plos_clan.cpos.drivers.acpi.aml
+package org.plos_clan.cpos.drivers.acpi.aml.evaluator
+
+import org.plos_clan.cpos.drivers.acpi.aml.AmlAlias
+import org.plos_clan.cpos.drivers.acpi.aml.AmlBuffer
+import org.plos_clan.cpos.drivers.acpi.aml.AmlByteReader
+import org.plos_clan.cpos.drivers.acpi.aml.AmlFieldUnit
+import org.plos_clan.cpos.drivers.acpi.aml.AmlInteger
+import org.plos_clan.cpos.drivers.acpi.aml.AmlMethod
+import org.plos_clan.cpos.drivers.acpi.aml.AmlObject
+import org.plos_clan.cpos.drivers.acpi.aml.AmlPackage
+import org.plos_clan.cpos.drivers.acpi.aml.AmlReference
+import org.plos_clan.cpos.drivers.acpi.aml.AmlString
+import org.plos_clan.cpos.drivers.acpi.aml.AmlUninitialized
+import org.plos_clan.cpos.drivers.acpi.aml.isNameStringLead
+import org.plos_clan.cpos.drivers.acpi.aml.readNamePath
 
 internal class AmlMethodFrame(
     private val evaluator: AmlEvaluator,
@@ -8,7 +22,7 @@ internal class AmlMethodFrame(
     private val budget: AmlBudget,
 ) {
     private val scope = method.declarationScope
-    private val args = MutableList<AmlObject>(7) { arguments.getOrElse(it) { AmlUninitialized } }
+    private val args = MutableList(7) { arguments.getOrElse(it) { AmlUninitialized } }
     private val locals = MutableList<AmlObject>(8) { AmlUninitialized }
     private val reader = AmlByteReader(method.source, method.bodyStart, method.bodyEnd)
 
@@ -239,8 +253,9 @@ internal class AmlMethodFrame(
                 when (val target = node.value) {
                     is AmlFieldUnit -> evaluator.regions.write(target, value)
                     is AmlAlias -> {
-                        val aliasNode = evaluator.namespace.resolve(target.declarationScope, target.target)
-                            ?: return@AmlReference false
+                        val aliasNode =
+                            evaluator.namespace.resolve(target.declarationScope, target.target)
+                                ?: return@AmlReference false
                         when (val aliasValue = aliasNode.value) {
                             is AmlFieldUnit -> evaluator.regions.write(aliasValue, value)
                             else -> {
@@ -249,6 +264,7 @@ internal class AmlMethodFrame(
                             }
                         }
                     }
+
                     else -> {
                         node.value = value
                         true

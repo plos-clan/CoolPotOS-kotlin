@@ -123,7 +123,8 @@ internal class AmlRegionManager(
     }
 
     private fun resolveRegion(field: AmlFieldUnit): AmlOperationRegion? {
-        val node = namespace.resolve(field.declarationScope, field.regionName) ?: return null
+        val regionName = (field.binding as? AmlFieldBinding.Region)?.name ?: return null
+        val node = namespace.resolve(field.declarationScope, regionName) ?: return null
         return resolveAlias(node, mutableSetOf())?.value as? AmlOperationRegion
     }
 
@@ -140,13 +141,7 @@ internal class AmlRegionManager(
     }
 
     private fun readByte(region: AmlOperationRegion, relativeOffset: ULong): UInt? {
-        if (relativeOffset >= region.length) {
-            return null
-        }
-        if (relativeOffset > ULong.MAX_VALUE - region.offset) {
-            return null
-        }
-        val address = region.offset + relativeOffset
+        val address = region.addressAt(namespace, relativeOffset) ?: return null
         return when (region.spaceId) {
             REGION_SYSTEM_MEMORY -> {
                 memory.addressAt(address)?.readU8()?.toUInt()
@@ -174,13 +169,7 @@ internal class AmlRegionManager(
         relativeOffset: ULong,
         value: UByte,
     ): Boolean {
-        if (relativeOffset >= region.length) {
-            return false
-        }
-        if (relativeOffset > ULong.MAX_VALUE - region.offset) {
-            return false
-        }
-        val address = region.offset + relativeOffset
+        val address = region.addressAt(namespace, relativeOffset) ?: return false
         return when (region.spaceId) {
             REGION_SYSTEM_MEMORY -> {
                 memory.addressAt(address)?.writeU8(value) ?: return false
@@ -225,8 +214,7 @@ internal class AmlRegionManager(
     private fun findAncestorInteger(scope: AmlName, segment: String): ULong? {
         var current = scope
         while (true) {
-            val value = namespace.find(current.child(segment))?.value
-            when (value) {
+            when (val value = namespace.find(current.child(segment))?.value) {
                 is AmlInteger -> return value.value
                 is AmlAlias -> {
                     val node = namespace.resolve(current, value.target)

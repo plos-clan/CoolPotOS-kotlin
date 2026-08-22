@@ -209,10 +209,6 @@ object Acpi {
             )
         }
 
-        if (!Aml.initialize()) {
-            println("ACPI: AML namespace initialization failed")
-        }
-
         parseIfFound(MadtParser) { madt ->
             println("ACPI: LAPIC address=${madt.lapicAddress.hex()}")
             println("ACPI: IOAPIC address=${madt.ioapicAddress.hex()}")

@@ -3,191 +3,305 @@
 package org.plos_clan.cpos.drivers.acpi.aml
 
 import org.plos_clan.cpos.drivers.acpi.AcpiTable
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.*
 
 private const val ACPI_SDT_HEADER_LENGTH = 36
-
-private const val AML_ALIAS_OP = 0x06u
-private const val AML_NAME_OP = 0x08u
-private const val AML_BYTE_PREFIX = 0x0Au
-private const val AML_WORD_PREFIX = 0x0Bu
-private const val AML_DWORD_PREFIX = 0x0Cu
-private const val AML_STRING_PREFIX = 0x0Du
-private const val AML_QWORD_PREFIX = 0x0Eu
-private const val AML_SCOPE_OP = 0x10u
-private const val AML_BUFFER_OP = 0x11u
-private const val AML_PACKAGE_OP = 0x12u
-private const val AML_VAR_PACKAGE_OP = 0x13u
-private const val AML_METHOD_OP = 0x14u
-private const val AML_EXTERNAL_OP = 0x15u
-private const val AML_EXT_OP_PREFIX = 0x5Bu
-
-private const val AML_EXT_MUTEX_OP = 0x01u
-private const val AML_EXT_EVENT_OP = 0x02u
-private const val AML_EXT_OPERATION_REGION_OP = 0x80u
-private const val AML_EXT_FIELD_OP = 0x81u
-private const val AML_EXT_DEVICE_OP = 0x82u
-private const val AML_EXT_PROCESSOR_OP = 0x83u
-private const val AML_EXT_POWER_RESOURCE_OP = 0x84u
-private const val AML_EXT_THERMAL_ZONE_OP = 0x85u
-private const val AML_EXT_INDEX_FIELD_OP = 0x86u
-private const val AML_EXT_BANK_FIELD_OP = 0x87u
 private const val MAX_AML_STATIC_BUFFER_SIZE = 16 * 1024 * 1024
 private const val MAX_AML_STATIC_PACKAGE_ELEMENTS = 65_536
+private const val MAX_AML_LOADER_TERMS = 1_000_000
+private const val MAX_AML_TERM_DEPTH = 256
+
+internal enum class AmlLoadStatus {
+    LOADED,
+    LOADED_WITH_ERRORS,
+    INVALID_TABLE,
+    MALFORMED_TERM,
+    BUDGET_EXHAUSTED,
+}
+
+internal data class AmlLoadResult(
+    val signature: String,
+    val status: AmlLoadStatus,
+    val consumed: Int,
+    val length: Int,
+    val definitions: Int,
+    val errors: Int,
+    val maxDepth: Int,
+) {
+    val success: Boolean
+        get() = status == AmlLoadStatus.LOADED || status == AmlLoadStatus.LOADED_WITH_ERRORS
+}
 
 internal class AmlLoader(
     private val namespace: AmlNamespace,
 ) {
     private var definitions = 0
+    private var terms = 0
     private var errors = 0
-
-    fun load(table: AcpiTable): Boolean {
-        if (table.length < ACPI_SDT_HEADER_LENGTH) {
-            return false
-        }
-        val source = AmlPointerSource(table.pointer, table.length)
-        val reader = AmlByteReader(source, ACPI_SDT_HEADER_LENGTH, table.length)
-        loadTermList(reader, AmlName.ROOT)
-        if (errors != 0) {
-            println("AML: ${table.signature} loaded with $errors recoverable parse errors")
-        }
-        return true
-    }
+    private var budgetExhausted = false
+    private var maxDepth = 0
+    private lateinit var termParser: AmlTermParser
 
     val definitionCount: Int
         get() = definitions
 
-    private fun loadTermList(reader: AmlByteReader, scope: AmlName) {
+    fun load(table: AcpiTable): AmlLoadResult = load(
+        signature = table.signature,
+        source = AmlPointerSource(table.pointer, table.length),
+        length = table.length,
+    )
+
+    internal fun load(
+        signature: String,
+        source: AmlByteSource,
+        length: Int = source.size,
+        bodyStart: Int = ACPI_SDT_HEADER_LENGTH,
+    ): AmlLoadResult {
+        val initialDefinitions = definitions
+        if (length < ACPI_SDT_HEADER_LENGTH || length > source.size || bodyStart !in 0..length) {
+            return AmlLoadResult(signature, AmlLoadStatus.INVALID_TABLE, 0, length, 0, 1, 0)
+        }
+
+        terms = 0
+        errors = 0
+        budgetExhausted = false
+        maxDepth = 0
+        termParser = AmlTermParser(namespace)
+
+        val reader = AmlByteReader(source, bodyStart, length)
+        val completed = loadTermList(reader, AmlName.ROOT, 0)
+        maxDepth = maxOf(maxDepth, termParser.maxDepth)
+        if (termParser.budgetExhausted || terms > MAX_AML_LOADER_TERMS) {
+            budgetExhausted = true
+            reader.seek(reader.end)
+        }
+
+        val status = when {
+            budgetExhausted -> AmlLoadStatus.BUDGET_EXHAUSTED
+            !completed -> AmlLoadStatus.MALFORMED_TERM
+            errors != 0 -> AmlLoadStatus.LOADED_WITH_ERRORS
+            else -> AmlLoadStatus.LOADED
+        }
+        val result = AmlLoadResult(
+            signature = signature,
+            status = status,
+            consumed = reader.position,
+            length = length,
+            definitions = definitions - initialDefinitions,
+            errors = errors,
+            maxDepth = maxDepth,
+        )
+        return result
+    }
+
+    private fun loadTermList(reader: AmlByteReader, scope: AmlName, depth: Int): Boolean {
+        if (depth > maxDepth) maxDepth = depth
+        if (depth > MAX_AML_TERM_DEPTH) {
+            budgetExhausted = true
+            return false
+        }
+
         while (!reader.exhausted) {
+            if (++terms > MAX_AML_LOADER_TERMS) {
+                budgetExhausted = true
+                return false
+            }
+            if (terms % 100_000 == 0) {
+                println("AML: progress terms=$terms offset=${reader.position} depth=$depth")
+            }
             val before = reader.position
-            when (reader.peek()) {
+            val parsed = when (reader.peek()) {
                 AML_ALIAS_OP -> loadAlias(reader, scope)
                 AML_NAME_OP -> loadName(reader, scope)
-                AML_SCOPE_OP -> loadScope(reader, scope)
+                AML_SCOPE_OP -> loadScope(reader, scope, depth)
                 AML_METHOD_OP -> loadMethod(reader, scope)
-                AML_EXTERNAL_OP -> skipExternal(reader)
-                AML_EXT_OP_PREFIX -> loadExtended(reader, scope)
-                else -> skipUnknownTerm(reader)
+                AML_EXTERNAL_OP -> loadExternal(reader, scope)
+                AML_IF_OP -> loadConditional(reader, scope, depth, true)
+                AML_ELSE_OP -> loadConditional(reader, scope, depth, false)
+                AML_WHILE_OP -> loadConditional(reader, scope, depth, true)
+                AML_RETURN_OP -> consumeTerm(reader, scope, depth)
+                AML_BREAK_OP, AML_CONTINUE_OP, AML_NOOP_OP -> reader.readU8() != null
+                AML_EXT_OP_PREFIX -> loadExtended(reader, scope, depth)
+                else -> consumeTerm(reader, scope, depth)
             }
-            if (reader.position <= before) {
+            if (!parsed || reader.position <= before) {
                 errors++
-                reader.skip(1)
+                return false
             }
         }
+        return true
     }
 
-    private fun loadAlias(reader: AmlByteReader, scope: AmlName) {
-        reader.readU8()
-        val target = reader.readNamePath() ?: return parseError()
-        val alias = reader.readNamePath() ?: return parseError()
-        namespace.define(
-            namespace.declarationName(scope, alias),
-            AmlAlias(target, scope),
-        )
+    private fun loadAlias(reader: AmlByteReader, scope: AmlName): Boolean {
+        reader.readU8() ?: return false
+        val target = reader.readNamePath() ?: return false
+        val alias = reader.readNamePath() ?: return false
+        namespace.define(namespace.declarationName(scope, alias), AmlAlias(target, scope))
         definitions++
+        return true
     }
 
-    private fun loadName(reader: AmlByteReader, scope: AmlName) {
-        reader.readU8()
-        val path = reader.readNamePath() ?: return parseError()
-        val value = readDataObject(reader, scope) ?: AmlUninitialized
+    private fun loadName(reader: AmlByteReader, scope: AmlName): Boolean {
+        reader.readU8() ?: return false
+        val path = reader.readNamePath() ?: return false
+        val value = readDataObject(reader, scope) ?: return false
         namespace.define(namespace.declarationName(scope, path), value)
         definitions++
+        return true
     }
 
-    private fun loadScope(reader: AmlByteReader, scope: AmlName) {
-        reader.readU8()
-        val packageLength = reader.readPackageLength() ?: return parseError()
-        val bodyReader = reader.slice(packageLength.contentStart, packageLength.end)
-            ?: return parseError()
-        val path = bodyReader.readNamePath() ?: return parseError(packageLength.end, reader)
+    private fun loadScope(reader: AmlByteReader, scope: AmlName, depth: Int): Boolean {
+        reader.readU8() ?: return false
+        val length = reader.readPackageLength() ?: return false
+        val body = reader.slice(length.contentStart, length.end) ?: return false
+        val path = body.readNamePath() ?: return packageFailure(reader, length.end)
         val childScope = namespace.declarationName(scope, path)
         namespace.ensure(childScope)
-        loadTermList(bodyReader, childScope)
-        reader.seek(packageLength.end)
+        val loaded = loadTermList(body, childScope, depth + 1)
+        reader.seek(length.end)
+        if (!loaded) errors++
+        return true
     }
 
-    private fun loadMethod(reader: AmlByteReader, scope: AmlName) {
-        reader.readU8()
-        val packageLength = reader.readPackageLength() ?: return parseError()
-        val bodyReader = reader.slice(packageLength.contentStart, packageLength.end)
-            ?: return parseError()
-        val path = bodyReader.readNamePath() ?: return parseError(packageLength.end, reader)
-        val flags = bodyReader.readU8() ?: return parseError(packageLength.end, reader)
+    private fun loadMethod(reader: AmlByteReader, scope: AmlName): Boolean {
+        reader.readU8() ?: return false
+        val length = reader.readPackageLength() ?: return false
+        val body = reader.slice(length.contentStart, length.end) ?: return false
+        val path = body.readNamePath() ?: return packageFailure(reader, length.end)
+        val flags = body.readU8() ?: return packageFailure(reader, length.end)
         val name = namespace.declarationName(scope, path)
-        namespace.define(
-            name,
-            AmlMethod(
-                argumentCount = (flags and 0x07u).toInt(),
-                serialized = (flags and 0x08u) != 0u,
-                syncLevel = ((flags shr 4) and 0x0Fu).toInt(),
-                source = reader.source,
-                bodyStart = bodyReader.position,
-                bodyEnd = packageLength.end,
-                declarationScope = name.parent,
-            ),
+        val method = AmlMethod(
+            argumentCount = (flags and 0x07u).toInt(),
+            serialized = (flags and 0x08u) != 0u,
+            syncLevel = ((flags shr 4) and 0x0Fu).toInt(),
+            source = reader.source,
+            bodyStart = body.position,
+            bodyEnd = length.end,
+            declarationScope = name.parent,
         )
+        val node = namespace.ensure(name)
+        node.value = method
         definitions++
-        reader.seek(packageLength.end)
+        reader.seek(length.end)
+        return true
     }
 
-    private fun skipExternal(reader: AmlByteReader) {
-        reader.readU8()
-        reader.readNamePath() ?: return parseError()
-        reader.readU8() ?: return parseError()
-        reader.readU8() ?: return parseError()
+    private fun loadExternal(reader: AmlByteReader, scope: AmlName): Boolean {
+        reader.readU8() ?: return false
+        val path = reader.readNamePath() ?: return false
+        val objectType = reader.readU8() ?: return false
+        val argumentCount = reader.readU8() ?: return false
+        if (objectType == 0x08u) {
+            val name = namespace.declarationName(scope, path)
+            val existing = namespace.find(name)
+            if (existing == null || existing.value === AmlUninitialized) {
+                namespace.define(name, AmlExternalMethod(argumentCount.toInt(), name.parent))
+            }
+            definitions++
+        }
+        return true
     }
 
-    private fun loadExtended(reader: AmlByteReader, scope: AmlName) {
-        reader.readU8()
-        when (reader.readU8()) {
+    private fun loadConditional(
+        reader: AmlByteReader,
+        scope: AmlName,
+        depth: Int,
+        hasPredicate: Boolean,
+    ): Boolean {
+        reader.readU8() ?: return false
+        val length = reader.readPackageLength() ?: return false
+        val body = reader.slice(length.contentStart, length.end) ?: return false
+        if (hasPredicate) {
+            termParser.read(body, scope, depth + 1) ?: return packageFailure(reader, length.end)
+        }
+        val loaded = loadTermList(body, scope, depth + 1)
+        reader.seek(length.end)
+        if (!loaded) errors++
+        return true
+    }
+
+    private fun loadExtended(reader: AmlByteReader, scope: AmlName, depth: Int): Boolean {
+        reader.readU8() ?: return false
+        return when (reader.readU8()) {
             AML_EXT_MUTEX_OP -> loadMutex(reader, scope)
             AML_EXT_EVENT_OP -> loadEvent(reader, scope)
             AML_EXT_OPERATION_REGION_OP -> loadOperationRegion(reader, scope)
-            AML_EXT_FIELD_OP -> loadField(reader, scope)
-            AML_EXT_DEVICE_OP -> loadNamedScope(reader, scope, AmlDevice, 0)
-            AML_EXT_PROCESSOR_OP -> loadNamedScope(reader, scope, AmlProcessor, 6)
-            AML_EXT_POWER_RESOURCE_OP -> loadNamedScope(reader, scope, AmlUninitialized, 3)
-            AML_EXT_THERMAL_ZONE_OP -> loadNamedScope(reader, scope, AmlThermalZone, 0)
-            AML_EXT_INDEX_FIELD_OP, AML_EXT_BANK_FIELD_OP -> skipPackage(reader)
-            else -> parseError()
+            AML_EXT_FIELD_OP -> loadField(reader, scope, AmlFieldMode.Region)
+            AML_EXT_INDEX_FIELD_OP -> loadField(reader, scope, AmlFieldMode.Index)
+            AML_EXT_BANK_FIELD_OP -> loadField(reader, scope, AmlFieldMode.Bank)
+            AML_EXT_DEVICE_OP -> loadNamedScope(reader, scope, AmlDevice, 0, depth)
+            AML_EXT_PROCESSOR_OP -> loadNamedScope(reader, scope, AmlProcessor, 6, depth)
+            AML_EXT_POWER_RESOURCE_OP -> loadNamedScope(reader, scope, AmlUninitialized, 3, depth)
+            AML_EXT_THERMAL_ZONE_OP -> loadNamedScope(reader, scope, AmlThermalZone, 0, depth)
+            else -> false
         }
     }
 
-    private fun loadMutex(reader: AmlByteReader, scope: AmlName) {
-        val path = reader.readNamePath() ?: return parseError()
-        val syncFlags = reader.readU8() ?: return parseError()
-        namespace.define(
-            namespace.declarationName(scope, path),
-            AmlMutex(syncFlags and 0x0Fu),
-        )
+    private fun loadMutex(reader: AmlByteReader, scope: AmlName): Boolean {
+        val path = reader.readNamePath() ?: return false
+        val flags = reader.readU8() ?: return false
+        namespace.define(namespace.declarationName(scope, path), AmlMutex(flags and 0x0Fu))
         definitions++
+        return true
     }
 
-    private fun loadEvent(reader: AmlByteReader, scope: AmlName) {
-        val path = reader.readNamePath() ?: return parseError()
+    private fun loadEvent(reader: AmlByteReader, scope: AmlName): Boolean {
+        val path = reader.readNamePath() ?: return false
         namespace.define(namespace.declarationName(scope, path), AmlEvent())
         definitions++
+        return true
     }
 
-    private fun loadOperationRegion(reader: AmlByteReader, scope: AmlName) {
-        val path = reader.readNamePath() ?: return parseError()
-        val spaceId = reader.readU8() ?: return parseError()
-        val offset = readDataObject(reader, scope)?.staticInteger() ?: return parseError()
-        val length = readDataObject(reader, scope)?.staticInteger() ?: return parseError()
+    private fun loadOperationRegion(reader: AmlByteReader, scope: AmlName): Boolean {
+        val path = reader.readNamePath() ?: return false
+        val spaceId = reader.readU8() ?: return false
+        val offset = termParser.read(reader, scope) ?: return false
+        val length = termParser.read(reader, scope) ?: return false
         namespace.define(
             namespace.declarationName(scope, path),
             AmlOperationRegion(spaceId, offset, length, scope),
         )
         definitions++
+        return true
     }
 
-    private fun loadField(reader: AmlByteReader, scope: AmlName) {
-        val packageLength = reader.readPackageLength() ?: return parseError()
-        val fieldReader = reader.slice(packageLength.contentStart, packageLength.end)
-            ?: return parseError()
-        val regionPath = fieldReader.readNamePath()
-            ?: return parseError(packageLength.end, reader)
-        val flags = fieldReader.readU8() ?: return parseError(packageLength.end, reader)
+    private enum class AmlFieldMode { Region, Index, Bank }
+
+    private fun loadField(reader: AmlByteReader, scope: AmlName, mode: AmlFieldMode): Boolean {
+        val length = reader.readPackageLength() ?: return false
+        val body = reader.slice(length.contentStart, length.end) ?: return false
+        val binding = when (mode) {
+            AmlFieldMode.Region -> AmlFieldBinding.Region(
+                body.readNamePath() ?: return packageFailure(reader, length.end)
+            )
+
+            AmlFieldMode.Index -> {
+                val index = body.readNamePath() ?: return packageFailure(reader, length.end)
+                val data = body.readNamePath() ?: return packageFailure(reader, length.end)
+                AmlFieldBinding.Index(index, data)
+            }
+
+            AmlFieldMode.Bank -> {
+                val region = body.readNamePath() ?: return packageFailure(reader, length.end)
+                val bank = body.readNamePath() ?: return packageFailure(reader, length.end)
+                val value =
+                    termParser.read(body, scope) ?: return packageFailure(reader, length.end)
+                AmlFieldBinding.Bank(region, bank, value)
+            }
+        }
+        val flags = body.readU8() ?: return packageFailure(reader, length.end)
+        val loaded = loadFieldList(body, scope, binding, flags)
+        reader.seek(length.end)
+        if (!loaded) errors++
+        return true
+    }
+
+    private fun loadFieldList(
+        reader: AmlByteReader,
+        scope: AmlName,
+        binding: AmlFieldBinding,
+        flags: UInt,
+    ): Boolean {
         var accessType = flags and 0x0Fu
         val lockRule = (flags and 0x10u) != 0u
         val updateRule = when ((flags shr 5) and 0x03u) {
@@ -196,53 +310,59 @@ internal class AmlLoader(
             else -> AmlFieldUpdateRule.PRESERVE
         }
         var bitOffset = 0uL
-
-        while (!fieldReader.exhausted) {
-            when (fieldReader.peek()) {
+        while (!reader.exhausted) {
+            val before = reader.position
+            when (reader.peek()) {
                 0x00u -> {
-                    fieldReader.readU8()
-                    bitOffset += fieldReader.readFieldLength() ?: break
+                    reader.readU8() ?: return false
+                    val length = reader.readFieldLength() ?: return false
+                    bitOffset = bitOffset.checkedAdd(length) ?: return false
                 }
+
                 0x01u -> {
-                    fieldReader.readU8()
-                    accessType = fieldReader.readU8() ?: break
-                    fieldReader.readU8() ?: break
+                    reader.readU8() ?: return false
+                    accessType = reader.readU8() ?: return false
+                    reader.readU8() ?: return false
                 }
+
                 0x02u -> {
-                    fieldReader.readU8()
-                    if (fieldReader.peek()?.let(::isNameStringLead) == true) {
-                        fieldReader.readNamePath()
+                    reader.readU8() ?: return false
+                    if (reader.peek()?.let(::isNameStringLead) == true) {
+                        reader.readNamePath() ?: return false
                     } else {
-                        readDataObject(fieldReader, scope)
+                        readDataObject(reader, scope) ?: return false
                     }
                 }
+
                 0x03u -> {
-                    fieldReader.readU8()
-                    accessType = fieldReader.readU8() ?: break
-                    fieldReader.readU8() ?: break
-                    fieldReader.readU8() ?: break
+                    reader.readU8() ?: return false
+                    accessType = reader.readU8() ?: return false
+                    reader.readU8() ?: return false
+                    reader.readU8() ?: return false
                 }
+
                 else -> {
-                    val segment = fieldReader.readNameSegment() ?: break
-                    val bitLength = fieldReader.readFieldLength() ?: break
+                    val name = reader.readNameSegment() ?: return false
+                    val length = reader.readFieldLength() ?: return false
                     namespace.define(
-                        scope.child(segment),
+                        scope.child(name),
                         AmlFieldUnit(
-                            regionName = regionPath,
-                            declarationScope = scope,
-                            bitOffset = bitOffset,
-                            bitLength = bitLength,
-                            accessType = accessType,
-                            lockRule = lockRule,
-                            updateRule = updateRule,
+                            binding,
+                            scope,
+                            bitOffset,
+                            length,
+                            accessType,
+                            lockRule,
+                            updateRule
                         ),
                     )
-                    bitOffset += bitLength
                     definitions++
+                    bitOffset = bitOffset.checkedAdd(length) ?: return false
                 }
             }
+            if (reader.position <= before) return false
         }
-        reader.seek(packageLength.end)
+        return true
     }
 
     private fun loadNamedScope(
@@ -250,19 +370,19 @@ internal class AmlLoader(
         scope: AmlName,
         value: AmlObject,
         fixedHeaderBytes: Int,
-    ) {
-        val packageLength = reader.readPackageLength() ?: return parseError()
-        val bodyReader = reader.slice(packageLength.contentStart, packageLength.end)
-            ?: return parseError()
-        val path = bodyReader.readNamePath() ?: return parseError(packageLength.end, reader)
-        if (!bodyReader.skip(fixedHeaderBytes)) {
-            return parseError(packageLength.end, reader)
-        }
+        depth: Int,
+    ): Boolean {
+        val length = reader.readPackageLength() ?: return false
+        val body = reader.slice(length.contentStart, length.end) ?: return false
+        val path = body.readNamePath() ?: return packageFailure(reader, length.end)
+        if (!body.skip(fixedHeaderBytes)) return packageFailure(reader, length.end)
         val childScope = namespace.declarationName(scope, path)
         namespace.define(childScope, value)
         definitions++
-        loadTermList(bodyReader, childScope)
-        reader.seek(packageLength.end)
+        val loaded = loadTermList(body, childScope, depth + 1)
+        reader.seek(length.end)
+        if (!loaded) errors++
+        return true
     }
 
     private fun readDataObject(reader: AmlByteReader, scope: AmlName): AmlObject? =
@@ -270,119 +390,84 @@ internal class AmlLoader(
             0x00u -> reader.readU8()?.let { AmlInteger(0uL) }
             0x01u -> reader.readU8()?.let { AmlInteger(1uL) }
             0xFFu -> reader.readU8()?.let { AmlInteger(ULong.MAX_VALUE) }
-            AML_BYTE_PREFIX -> reader.readU8()?.let { reader.readU8()?.toULong()?.let(::AmlInteger) }
-            AML_WORD_PREFIX -> reader.readU8()?.let { reader.readU16()?.toULong()?.let(::AmlInteger) }
-            AML_DWORD_PREFIX -> reader.readU8()?.let { reader.readU32()?.toULong()?.let(::AmlInteger) }
-            AML_QWORD_PREFIX -> reader.readU8()?.let { reader.readU64()?.let(::AmlInteger) }
+            AML_BYTE_PREFIX -> prefixedInteger(reader, 1)
+            AML_WORD_PREFIX -> prefixedInteger(reader, 2)
+            AML_DWORD_PREFIX -> prefixedInteger(reader, 4)
+            AML_QWORD_PREFIX -> prefixedInteger(reader, 8)
             AML_STRING_PREFIX -> {
                 reader.readU8()
                 reader.readNullTerminatedAscii()?.let(::AmlString)
             }
+
             AML_BUFFER_OP -> readBuffer(reader, scope)
-            AML_PACKAGE_OP -> readPackage(reader, scope, variableCount = false)
-            AML_VAR_PACKAGE_OP -> readPackage(reader, scope, variableCount = true)
-            else -> if (reader.peek()?.let(::isNameStringLead) == true) {
-                reader.readNamePath()?.let { AmlAlias(it, scope) }
-            } else {
-                skipUnknownTerm(reader)
-                null
-            }
+            AML_PACKAGE_OP -> readPackage(reader, scope, false)
+            AML_VAR_PACKAGE_OP -> readPackage(reader, scope, true)
+            else -> termParser.read(reader, scope)?.asObject(namespace)
         }
 
+    private fun prefixedInteger(reader: AmlByteReader, byteCount: Int): AmlObject? {
+        reader.readU8() ?: return null
+        val value = when (byteCount) {
+            1 -> reader.readU8()?.toULong()
+            2 -> reader.readU16()?.toULong()
+            4 -> reader.readU32()?.toULong()
+            8 -> reader.readU64()
+            else -> null
+        } ?: return null
+        return AmlInteger(value)
+    }
+
     private fun readBuffer(reader: AmlByteReader, scope: AmlName): AmlObject? {
-        reader.readU8()
-        val packageLength = reader.readPackageLength() ?: return null
-        val body = reader.slice(packageLength.contentStart, packageLength.end) ?: return null
-        val requestedSizeValue = readDataObject(body, scope)?.staticInteger()
-        if (requestedSizeValue == null || requestedSizeValue > MAX_AML_STATIC_BUFFER_SIZE.toULong()) {
-            reader.seek(packageLength.end)
-            return null
+        reader.readU8() ?: return null
+        val length = reader.readPackageLength() ?: return null
+        val body = reader.slice(length.contentStart, length.end) ?: return null
+        val size = readDataObject(body, scope)?.integerValue()
+        if (size == null || size > MAX_AML_STATIC_BUFFER_SIZE.toULong()) {
+            reader.seek(length.end)
+            return AmlUninitialized
         }
-        val requestedSize = requestedSizeValue.toInt()
-        val availableSize = body.remaining
-        val data = body.readBytes(minOf(requestedSize.coerceAtLeast(0), availableSize)) ?: return null
-        reader.seek(packageLength.end)
-        return AmlBuffer(
-            if (requestedSize > data.size) data.copyOf(requestedSize) else data,
-        )
+        val requested = size.toInt()
+        val data = body.readBytes(minOf(requested, body.remaining)) ?: return null
+        reader.seek(length.end)
+        return AmlBuffer(if (data.size < requested) data.copyOf(requested) else data)
     }
 
     private fun readPackage(
         reader: AmlByteReader,
         scope: AmlName,
-        variableCount: Boolean,
+        variableCount: Boolean
     ): AmlObject? {
-        reader.readU8()
-        val packageLength = reader.readPackageLength() ?: return null
-        val body = reader.slice(packageLength.contentStart, packageLength.end) ?: return null
-        val countValue = if (variableCount) {
-            readDataObject(body, scope)?.staticInteger()
-        } else {
-            body.readU8()?.toULong()
+        reader.readU8() ?: return null
+        val length = reader.readPackageLength() ?: return null
+        val body = reader.slice(length.contentStart, length.end) ?: return null
+        val count =
+            if (variableCount) readDataObject(body, scope)?.integerValue() else body.readU8()
+                ?.toULong()
+        if (count == null || count > MAX_AML_STATIC_PACKAGE_ELEMENTS.toULong()) {
+            reader.seek(length.end)
+            return AmlUninitialized
         }
-        if (countValue == null || countValue > MAX_AML_STATIC_PACKAGE_ELEMENTS.toULong()) {
-            reader.seek(packageLength.end)
-            return null
-        }
-        val count = countValue.toInt()
-        val elements = mutableListOf<AmlObject>()
-        repeat(count.coerceAtLeast(0)) {
-            if (body.exhausted) {
-                elements += AmlUninitialized
-            } else {
-                elements += readDataObject(body, scope) ?: AmlUninitialized
+        val elements = MutableList(count.toInt()) { AmlUninitialized as AmlObject }
+        for (index in elements.indices) {
+            if (body.exhausted) break
+            elements[index] = readDataObject(body, scope) ?: run {
+                reader.seek(length.end)
+                return AmlUninitialized
             }
         }
-        reader.seek(packageLength.end)
+        reader.seek(length.end)
         return AmlPackage(elements)
     }
 
-    private fun skipPackage(reader: AmlByteReader) {
-        val length = reader.readPackageLength() ?: return parseError()
-        reader.seek(length.end)
-    }
+    private fun consumeTerm(reader: AmlByteReader, scope: AmlName, depth: Int): Boolean =
+        termParser.read(reader, scope, depth) != null
 
-    private fun skipUnknownTerm(reader: AmlByteReader) {
-        when (reader.peek()) {
-            AML_BUFFER_OP, AML_PACKAGE_OP, AML_VAR_PACKAGE_OP, AML_SCOPE_OP, AML_METHOD_OP -> {
-                reader.readU8()
-                skipPackage(reader)
-            }
-            AML_BYTE_PREFIX -> reader.skip(2)
-            AML_WORD_PREFIX -> reader.skip(3)
-            AML_DWORD_PREFIX -> reader.skip(5)
-            AML_QWORD_PREFIX -> reader.skip(9)
-            AML_STRING_PREFIX -> {
-                reader.readU8()
-                reader.readNullTerminatedAscii()
-            }
-            else -> if (reader.peek()?.let(::isNameStringLead) == true) {
-                reader.readNamePath()
-            } else {
-                reader.skip(1)
-            }
-        }
-    }
-
-    private fun AmlObject.staticInteger(visited: MutableSet<AmlName> = mutableSetOf()): ULong? =
-        when (this) {
-            is AmlInteger -> value
-            is AmlBuffer -> integerValue()
-            is AmlString -> integerValue()
-            is AmlAlias -> {
-                val target = namespace.resolve(declarationScope, target) ?: return null
-                if (!visited.add(target.name)) return null
-                target.value.staticInteger(visited)
-            }
-            else -> null
-        }
-
-    private fun parseError() {
-        errors++
-    }
-
-    private fun parseError(end: Int, reader: AmlByteReader) {
+    private fun packageFailure(reader: AmlByteReader, end: Int): Boolean {
         errors++
         reader.seek(end)
+        return true
     }
+
+    private fun ULong.checkedAdd(value: ULong): ULong? =
+        if (this > ULong.MAX_VALUE - value) null else this + value
 }

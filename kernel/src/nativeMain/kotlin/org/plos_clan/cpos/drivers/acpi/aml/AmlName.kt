@@ -48,44 +48,50 @@ data class AmlNamePath(
 }
 
 internal fun AmlByteReader.readNamePath(): AmlNamePath? {
+    val reader = copy()
     var absolute = false
     var parentPrefixes = 0
 
-    if (peek() == AML_ROOT_CHAR) {
-        readU8()
+    if (reader.peek() == AML_ROOT_CHAR) {
+        reader.readU8()
         absolute = true
     } else {
-        while (peek() == AML_PARENT_PREFIX_CHAR) {
-            readU8()
+        while (reader.peek() == AML_PARENT_PREFIX_CHAR) {
+            reader.readU8()
             parentPrefixes++
         }
     }
 
-    val segments = when (peek()) {
+    val segments = when (reader.peek()) {
         AML_NULL_NAME -> {
-            readU8()
+            reader.readU8()
             emptyList()
         }
         AML_DUAL_NAME_PREFIX -> {
-            readU8()
-            listOfNotNull(readNameSegment(), readNameSegment()).takeIf { it.size == 2 }
-                ?: return null
+            reader.readU8()
+            val first = reader.readNameSegment() ?: return null
+            val second = reader.readNameSegment() ?: return null
+            listOf(first, second)
         }
         AML_MULTI_NAME_PREFIX -> {
-            readU8()
-            val count = readU8()?.toInt() ?: return null
-            buildList {
-                repeat(count) { add(readNameSegment() ?: return null) }
+            reader.readU8()
+            val count = reader.readU8()?.toInt() ?: return null
+            val names = ArrayList<String>(count)
+            repeat(count) {
+                names += reader.readNameSegment() ?: return null
             }
+            names
         }
-        else -> listOf(readNameSegment() ?: return null)
+        else -> listOf(reader.readNameSegment() ?: return null)
     }
 
-    return AmlNamePath(
+    val path = AmlNamePath(
         absolute = absolute,
         parentPrefixCount = parentPrefixes,
         segments = segments,
     )
+    seek(reader.position)
+    return path
 }
 
 internal fun AmlByteReader.readNameSegment(): String? {

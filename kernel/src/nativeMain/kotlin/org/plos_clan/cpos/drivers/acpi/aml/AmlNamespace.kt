@@ -34,9 +34,11 @@ class AmlNamespace {
     internal fun ensure(name: AmlName): AmlNamespaceNode {
         var current = root
         name.segments.forEach { segment ->
-            current = current.children.getOrPut(segment) {
-                AmlNamespaceNode(current.name.child(segment), current)
-            }
+            val child = current.children[segment]
+                ?: AmlNamespaceNode(current.name.child(segment), current).also {
+                    current.children[segment] = it
+                }
+            current = child
         }
         return current
     }

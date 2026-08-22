@@ -1,8 +1,9 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.drivers.acpi.aml
+package org.plos_clan.cpos.drivers.acpi.aml.evaluator
 
 import bridge.asm_pause
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.TscClock
 
 internal object AmlDelay {

@@ -48,4 +48,38 @@ class AmlNameTest {
             }
         }
     }
+
+    @Test
+    fun consumesDualAndMultiNamePathsWithoutLosingSegments() {
+        val dual = AmlByteReader(
+            AmlArraySource(byteArrayOf(0x2E, *"_SB_".encodeToByteArray(), *"PCI0".encodeToByteArray())),
+        )
+        assertEquals(
+            listOf("_SB_", "PCI0"),
+            dual.readNamePath()?.segments,
+        )
+
+        val multi = AmlByteReader(
+            AmlArraySource(
+                byteArrayOf(
+                    0x2F, 0x03,
+                    *"_SB_".encodeToByteArray(),
+                    *"PCI0".encodeToByteArray(),
+                    *"XHC0".encodeToByteArray(),
+                ),
+            ),
+        )
+        assertEquals(
+            listOf("_SB_", "PCI0", "XHC0"),
+            multi.readNamePath()?.segments,
+        )
+    }
+
+    @Test
+    fun leavesReaderUntouchedWhenNamePathIsTruncated() {
+        val reader = AmlByteReader(AmlArraySource(byteArrayOf(0x2E, *"_SB_".encodeToByteArray())))
+
+        assertEquals(null, reader.readNamePath())
+        assertEquals(0, reader.position)
+    }
 }

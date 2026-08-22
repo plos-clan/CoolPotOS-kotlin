@@ -50,7 +50,7 @@ internal class AmlByteReader(
         get() = position >= end
 
     init {
-        require(start >= 0 && start <= end && end <= source.size)
+        require(start in 0..end && end <= source.size)
         require(position in start..end)
     }
 
@@ -113,24 +113,26 @@ internal class AmlByteReader(
     }
 
     fun slice(sliceStart: Int, sliceEnd: Int): AmlByteReader? =
-        if (sliceStart >= start && sliceStart <= sliceEnd && sliceEnd <= end) {
+        if (sliceStart in start..sliceEnd && sliceEnd <= end) {
             AmlByteReader(source, sliceStart, sliceEnd)
         } else {
             null
         }
 
     fun readPackageLength(): AmlPackageLength? {
-        val lengthOffset = position
-        val encoded = readEncodedLength() ?: return null
+        val probe = copy()
+        val lengthOffset = probe.position
+        val encoded = probe.readEncodedLength() ?: return null
         val totalLength = encoded.first
         val encodedSize = encoded.second
-        if (totalLength < encodedSize.toUInt()) {
+        if (totalLength < encodedSize.toULong()) {
             return null
         }
-        val packageEnd = lengthOffset.toLong() + totalLength.toLong()
-        if (packageEnd > end.toLong()) {
+        val packageEnd = lengthOffset.toULong() + totalLength
+        if (packageEnd > end.toULong() || packageEnd > Int.MAX_VALUE.toULong()) {
             return null
         }
+        position = probe.position
         return AmlPackageLength(
             encodedSize = encodedSize,
             totalLength = totalLength.toInt(),
@@ -139,22 +141,29 @@ internal class AmlByteReader(
         )
     }
 
-    fun readFieldLength(): ULong? = readEncodedLength()?.first?.toULong()
+    fun readFieldLength(): ULong? = readEncodedLength()?.first
 
-    private fun readEncodedLength(): Pair<UInt, Int>? {
+    private fun readEncodedLength(): Pair<ULong, Int>? {
+        val probe = copy()
+        val encoded = probe.decodeEncodedLength() ?: return null
+        position = probe.position
+        return encoded
+    }
+
+    private fun decodeEncodedLength(): Pair<ULong, Int>? {
         val lead = readU8() ?: return null
         val followingByteCount = (lead shr 6).toInt()
-        var value = if (followingByteCount == 0) lead and 0x3Fu else lead and 0x0Fu
+        var value = (if (followingByteCount == 0) lead and 0x3Fu else lead and 0x0Fu).toULong()
 
         repeat(followingByteCount) { index ->
             val next = readU8() ?: return null
-            value = value or (next shl (4 + index * 8))
+            value = value or (next.toULong() shl (4 + index * 8))
         }
         return value to followingByteCount + 1
     }
 
     private fun canRead(count: Int): Boolean =
-        count >= 0 && count <= remaining
+        count in 0..remaining
 
     private fun readLittleEndian(byteCount: Int): ULong? {
         if (!canRead(byteCount)) {

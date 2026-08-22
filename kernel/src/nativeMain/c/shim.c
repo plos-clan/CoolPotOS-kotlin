@@ -197,6 +197,7 @@ static __attribute__((naked, noreturn)) void kernel_clone_thread_entry(void) {
 uint64_t get_kernel_clone_thread_entry_address(void) { return (uintptr_t)&kernel_clone_thread_entry; }
 int __pthread_key_create(uint32_t *key, void (*destructor)(void *)) { return pthread_key_create(key, destructor); }
 
+// 波特率 38400
 static void serial_init(void) {
     io_out8(serial_com1 + 1, 0x00);
     io_out8(serial_com1 + 3, 0x80);

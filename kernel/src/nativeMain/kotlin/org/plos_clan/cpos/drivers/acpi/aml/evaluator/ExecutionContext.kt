@@ -1,4 +1,6 @@
-package org.plos_clan.cpos.drivers.acpi.aml
+package org.plos_clan.cpos.drivers.acpi.aml.evaluator
+
+import org.plos_clan.cpos.drivers.acpi.aml.AmlObject
 
 internal sealed class AmlFlow {
     data object Next : AmlFlow()

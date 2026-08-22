@@ -1,4 +1,13 @@
-package org.plos_clan.cpos.drivers.acpi.aml
+package org.plos_clan.cpos.drivers.acpi.aml.evaluator
+
+import org.plos_clan.cpos.drivers.acpi.aml.AmlAlias
+import org.plos_clan.cpos.drivers.acpi.aml.AmlFieldUnit
+import org.plos_clan.cpos.drivers.acpi.aml.AmlMethod
+import org.plos_clan.cpos.drivers.acpi.aml.AmlName
+import org.plos_clan.cpos.drivers.acpi.aml.AmlNamespace
+import org.plos_clan.cpos.drivers.acpi.aml.AmlNamespaceNode
+import org.plos_clan.cpos.drivers.acpi.aml.AmlObject
+import org.plos_clan.cpos.drivers.acpi.aml.AmlRegionManager
 
 internal class AmlEvaluator(
     internal val namespace: AmlNamespace,
