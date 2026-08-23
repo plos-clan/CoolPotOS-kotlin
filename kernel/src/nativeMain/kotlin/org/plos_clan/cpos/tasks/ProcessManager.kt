@@ -386,7 +386,7 @@ class Process internal constructor(
 }
 
 object ProcessManager {
-    private val nextTaskId = AtomicInt(0)
+    private val nextTaskId = AtomicInt(2)
     private val processes = mutableListOf<Process>()
     private val processLock = IrqSpinLock()
     private val threadTable = mutableMapOf<Int, Thread>()
@@ -404,7 +404,8 @@ object ProcessManager {
             name = "{system}",
             addressSpace = AddressSpace.user(KernelPageDirectory.getDirectory()),
             isKernelProcess = true,
-            null
+            context = null,
+            pid = 0,
         ).also { process ->
             process.state = ProcessState.RUNNING
         }
@@ -456,6 +457,7 @@ object ProcessManager {
         memory: MemoryCloneMode = MemoryCloneMode.COPY,
         vforkParent: Thread? = null,
         terminationSignal: Signal? = Signal.CHILD,
+        pid: Int = nextTaskId.fetchAndAdd(1),
     ): Process {
         val addressSpace = when {
             parent == null ->
@@ -473,6 +475,7 @@ object ProcessManager {
             inherit = parent,
             vforkParent = vforkParent,
             terminationSignal = terminationSignal,
+            pid = pid
         )
         if (parent == null) return child
 
@@ -738,8 +741,9 @@ object ProcessManager {
         inherit: Process? = null,
         vforkParent: Thread? = null,
         terminationSignal: Signal? = Signal.CHILD,
+        pid: Int = nextTaskId.fetchAndAdd(1),
     ): Process = Process(
-        id = nextTaskId.fetchAndAdd(1),
+        id = pid,
         name = name,
         isKernelProcess = isKernelProcess,
         addressSpace = addressSpace,

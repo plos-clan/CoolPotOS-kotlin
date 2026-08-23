@@ -521,7 +521,10 @@ internal fun statx(regs: PtraceRegisters, process: Process): Long {
             is VfsResult.Err -> return errno(result.error.errno)
         }
     }
-    val status = LinuxStatx(LinuxFileStatus.snapshot(inode)).toNativeBytes()
+    val status = LinuxStatx(
+        LinuxFileStatus.snapshot(inode),
+        isMountRoot = target.dentry === target.mount.root,
+    ).toNativeBytes()
     return if (UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_R8]).copyToUser(status)) {
         0L
     } else {

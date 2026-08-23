@@ -55,7 +55,7 @@ object Init {
 
     fun setupInitProgram() {
         val rdinit = Cmdline["rdinit"] ?: "/init"
-        val process = ProcessManager.createUserProcess(rdinit)
+        val process = ProcessManager.createUserProcess(rdinit, pid = 1)
         val image = when (val result = ElfLoader.loadProcess(
             path = rdinit,
             process = process,

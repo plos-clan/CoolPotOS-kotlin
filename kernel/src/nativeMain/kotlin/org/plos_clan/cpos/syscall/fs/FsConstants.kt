@@ -72,6 +72,7 @@ internal object FsConstants {
     const val STATX_SUPPORTED_FIELDS = 0x7ffu
     const val STATX_BTIME = 0x800u
     const val STATX_RESERVED = 0x8000_0000u
+    const val STATX_ATTR_MOUNT_ROOT = 0x2000uL
 
     const val ST_RDONLY = 0x1uL
     const val ST_NOSUID = 0x2uL

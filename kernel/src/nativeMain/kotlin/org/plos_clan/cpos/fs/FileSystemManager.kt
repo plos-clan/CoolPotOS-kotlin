@@ -88,11 +88,6 @@ object FileSystemManager {
             return false
         }
 
-        val procFlags = devFlags + MountFlag.NO_DEVICE
-        if (!mount(context, "/proc", Procfs, procFlags)) {
-            context.release()
-            return false
-        }
         kernelContext = context
         ProcessManager.getKernelProcess()!!.context = context
         println("VFS: mounted zstd EROFS with tmpfs overlay at '/'")
