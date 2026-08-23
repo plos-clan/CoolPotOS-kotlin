@@ -4,7 +4,10 @@ package org.plos_clan.cpos.drivers.char
 
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.mem.PreparedBufferDestination
+import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
+import org.plos_clan.cpos.tasks.Signal
+import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.ByteRingBuffer
 import org.plos_clan.cpos.utils.PollEvents
 import org.plos_clan.cpos.utils.TermiosConstants
@@ -25,10 +28,23 @@ internal class TerminalInput(
 
     fun receive(session: TtySession, data: CharArray) {
         if (data.isEmpty()) return
+        var generatedSignals = 0uL
         input.transaction {
-            data.forEach { character ->
-                receiveInput(session, character.code and 0xff)
+            for (character in data) {
+                val value = session.translateInput(character.code and 0xff) ?: continue
+                val signal = session.inputSignal(value)
+                if (signal == null) {
+                    receiveInput(session, value)
+                    continue
+                }
+                if (!session.hasLocalFlag(TermiosConstants.NOFLSH)) clearInput()
+                generatedSignals = generatedSignals or signal.bit
             }
+        }
+        while (generatedSignals != 0uL) {
+            val signal = Signal.from(generatedSignals.countTrailingZeroBits() + 1)!!
+            session.signalForeground(signal)
+            generatedSignals = generatedSignals and signal.bit.inv()
         }
     }
 
@@ -41,9 +57,9 @@ internal class TerminalInput(
         val limit = count.toInt()
         if (limit == 0) return 0L
         return if (session.hasLocalFlag(TermiosConstants.ICANON)) {
-            readCanonical(buffer, offset, limit).toLong()
+            readCanonical(buffer, offset, limit)
         } else {
-            readNonCanonical(session, buffer, offset, limit).toLong()
+            readNonCanonical(session, buffer, offset, limit)
         }
     }
 
@@ -63,31 +79,34 @@ internal class TerminalInput(
     }
 
     fun flush() {
-        input.transaction {
-            clear()
-            canonicalCount = 0
-            canonicalRecordHead = 0
-            canonicalRecordTail = 0
-            canonicalRecordCount = 0
-        }
+        input.transaction { clearInput() }
     }
 
-    private fun ByteRingBuffer.Transaction.receiveInput(session: TtySession, rawValue: Int) {
+    private fun ByteRingBuffer.Transaction.clearInput() {
+        clear()
+        canonicalCount = 0
+        canonicalRecordHead = 0
+        canonicalRecordTail = 0
+        canonicalRecordCount = 0
+    }
+
+    private fun TtySession.translateInput(rawValue: Int): Int? {
         var value = rawValue
-        if (session.hasInputFlag(TermiosConstants.ISTRIP)) {
+        if (hasInputFlag(TermiosConstants.ISTRIP)) {
             value = value and 0x7F
         }
         if (value == '\r'.code) {
-            if (session.hasInputFlag(TermiosConstants.IGNCR)) {
-                return
-            }
-            if (session.hasInputFlag(TermiosConstants.ICRNL)) {
+            if (hasInputFlag(TermiosConstants.IGNCR)) return null
+            if (hasInputFlag(TermiosConstants.ICRNL)) {
                 value = '\n'.code
             }
-        } else if (value == '\n'.code && session.hasInputFlag(TermiosConstants.INLCR)) {
+        } else if (value == '\n'.code && hasInputFlag(TermiosConstants.INLCR)) {
             value = '\r'.code
         }
+        return value
+    }
 
+    private fun ByteRingBuffer.Transaction.receiveInput(session: TtySession, value: Int) {
         if (!session.hasLocalFlag(TermiosConstants.ICANON)) {
             offer(value.toByte())
             echoCharacter(session, value)
@@ -151,7 +170,7 @@ internal class TerminalInput(
         canonicalCount = 0
     }
 
-    private fun readCanonical(buffer: PreparedBufferDestination, offset: Int, limit: Int): Int {
+    private fun readCanonical(buffer: PreparedBufferDestination, offset: Int, limit: Int): Long {
         while (true) {
             val result = input.transaction {
                 if (canonicalRecordCount == 0) {
@@ -171,8 +190,9 @@ internal class TerminalInput(
                 }
             }
             if (result != null) {
-                return result
+                return result.toLong()
             }
+            if (interrupted()) return -Errno.EINTR.toLong()
             waitForInterrupt()
         }
     }
@@ -182,29 +202,31 @@ internal class TerminalInput(
         buffer: PreparedBufferDestination,
         offset: Int,
         limit: Int,
-    ): Int {
+    ): Long {
         val minimum = minOf(session.controlCharacter(TermiosConstants.VMIN), limit)
         val timeout = session.controlCharacter(TermiosConstants.VTIME)
 
         if (minimum == 0 && timeout == 0) {
-            return drainAvailable(buffer, offset, limit)
+            return drainAvailable(buffer, offset, limit).toLong()
         }
 
         if (minimum == 0) {
             val deadline = timeoutDeadline(timeout)
             while (!hasInput()) {
                 if (deadlineReached(deadline)) {
-                    return 0
+                    return 0L
                 }
+                if (interrupted()) return -Errno.EINTR.toLong()
                 waitForInterrupt()
             }
-            return drainAvailable(buffer, offset, limit)
+            return drainAvailable(buffer, offset, limit).toLong()
         }
 
         var transferred = 0
         while (transferred == 0) {
             transferred += drainAvailable(buffer, offset + transferred, limit - transferred)
             if (transferred == 0) {
+                if (interrupted()) return -Errno.EINTR.toLong()
                 waitForInterrupt()
             }
         }
@@ -214,10 +236,12 @@ internal class TerminalInput(
                 val current = drainAvailable(buffer, offset + transferred, limit - transferred)
                 transferred += current
                 if (transferred < minimum) {
+                    if (interrupted()) return if (transferred == 0) -Errno.EINTR.toLong()
+                    else transferred.toLong()
                     waitForInterrupt()
                 }
             }
-            return transferred
+            return transferred.toLong()
         }
 
         var deadline = timeoutDeadline(timeout)
@@ -230,10 +254,12 @@ internal class TerminalInput(
                 if (deadlineReached(deadline)) {
                     break
                 }
+                if (interrupted()) return if (transferred == 0) -Errno.EINTR.toLong()
+                else transferred.toLong()
                 waitForInterrupt()
             }
         }
-        return transferred
+        return transferred.toLong()
     }
 
     private fun drainAvailable(buffer: PreparedBufferDestination, offset: Int, limit: Int): Int =
@@ -295,6 +321,20 @@ internal class TerminalInput(
         bridge.enable_interrupt()
         bridge.wait_for_interrupt()
         bridge.irq_restore(flags)
+    }
+
+    private fun interrupted(): Boolean =
+        ProcessManager.currentThread()?.hasPendingSignal() == true
+
+    private fun TtySession.inputSignal(value: Int): Signal? {
+        if (!hasLocalFlag(TermiosConstants.ISIG)) return null
+        return when {
+            value != 0 && value == controlCharacter(TermiosConstants.VINTR) -> Signal.INTERRUPT
+            value != 0 && value == controlCharacter(TermiosConstants.VQUIT) -> Signal.QUIT
+            value != 0 && value == controlCharacter(TermiosConstants.VSUSP) ->
+                Signal.TERMINAL_STOP
+            else -> null
+        }
     }
 
     private fun TtySession.hasInputFlag(flag: Int): Boolean =

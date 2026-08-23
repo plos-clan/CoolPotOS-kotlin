@@ -4,6 +4,9 @@ import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
+import org.plos_clan.cpos.tasks.Signal
+import org.plos_clan.cpos.tasks.SignalInfo
+import org.plos_clan.cpos.tasks.SignalRouter
 import org.plos_clan.cpos.tasks.Thread
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -66,9 +69,9 @@ private class PipeEndpoint(
         state.write(source, sourceOffset, count, mode)
     }
 
-    override fun await(event: IoEvent, count: Int) {
+    override fun await(event: IoEvent, count: Int): Boolean {
         check(if (event == IoEvent.WRITABLE) access.canWrite else access.canRead)
-        state.await(event, count)
+        return state.await(event, count)
     }
 
     override fun poll(inode: Inode, events: Int): Long = state.poll(events, access)
@@ -215,13 +218,21 @@ private class PipeState(
         if (error != null) return VfsResult.Err(error)
         val queued = waiter
         if (queued != null) {
-            do {
-                check(Scheduler.parkCurrent()) { "Cannot park a FIFO opener" }
-            } while (lock.withLock { !queued.ready })
+            var interrupted = false
+            while (!lock.withLock { queued.ready }) {
+                if (checkNotNull(thread).hasPendingSignal() || !Scheduler.parkCurrent()) {
+                    interrupted = true
+                    break
+                }
+            }
             lock.withLock {
                 if (access == AccessMode.READ) readerOpenWaiters.release(queued)
                 else writerOpenWaiters.release(queued)
+                if (interrupted) {
+                    if (access == AccessMode.READ) readers-- else writers--
+                }
             }
+            if (interrupted) return VfsResult.Err(VfsError.INTERRUPTED)
         }
         return VfsResult.Ok(PipeEndpoint(this, access))
     }
@@ -244,8 +255,17 @@ private class PipeState(
         count: Int,
         mode: IoMode,
     ): IoResult = lock.withLock {
-        if (readers == 0) return@withLock IoResult.failure(VfsError.BROKEN_PIPE)
         if (count == 0) return@withLock IoResult.success(0)
+        if (readers == 0) {
+            ProcessManager.currentThread()?.let { thread ->
+                SignalRouter.sendThread(
+                    sender = thread.process,
+                    target = thread,
+                    info = SignalInfo.fromSender(Signal.PIPE, thread.process),
+                )
+            }
+            return@withLock IoResult.failure(VfsError.BROKEN_PIPE)
+        }
         val available = buffer.remaining
         val minimumWriteSize = when {
             mode == IoMode.BLOCKING -> minOf(count, buffer.capacity)
@@ -261,7 +281,7 @@ private class PipeState(
         IoResult.success(transferred)
     }
 
-    fun await(event: IoEvent, count: Int) {
+    fun await(event: IoEvent, count: Int): Boolean {
         val thread = checkNotNull(ProcessManager.currentThread())
         val minimumBytes = if (event == IoEvent.READABLE) {
             1
@@ -283,12 +303,17 @@ private class PipeState(
                 waiter = queue.acquire(minimumBytes, thread)
             }
         }
-        val queued = waiter ?: return
+        val queued = waiter ?: return true
 
-        do {
-            check(Scheduler.parkCurrent()) { "Cannot park a pipe waiter" }
-        } while (lock.withLock { !queued.ready })
+        var interrupted = false
+        while (!lock.withLock { queued.ready }) {
+            if (thread.hasPendingSignal() || !Scheduler.parkCurrent()) {
+                interrupted = true
+                break
+            }
+        }
         lock.withLock { queue.release(queued) }
+        return !interrupted
     }
 
     fun poll(events: Int, access: AccessMode): Long = lock.withLock {

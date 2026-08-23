@@ -23,10 +23,12 @@ import org.plos_clan.cpos.syscall.FsConstants.MAX_POLL_FDS
 import org.plos_clan.cpos.syscall.FsConstants.NANOSECONDS_PER_MILLISECOND
 import org.plos_clan.cpos.syscall.FsConstants.POLL_FD_SIZE
 import org.plos_clan.cpos.syscall.Syscall.errno
+import org.plos_clan.cpos.syscall.SignalDelivery
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
+import org.plos_clan.cpos.tasks.Signal
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
@@ -157,41 +159,84 @@ internal fun fcntl(regs: PtraceRegisters, process: Process): Long {
 
 internal fun poll(regs: PtraceRegisters, process: Process): Long {
     val countValue = regs[PtraceRegisters.IDX_RSI]
-    if (countValue > MAX_POLL_FDS.toULong()) {
-        return errno(Errno.EINVAL)
-    }
-
-    val count = countValue.toInt()
-    val byteCount = count * POLL_FD_SIZE
-    val userFds = UserMemory(
-        process.addressSpace,
-        regs[PtraceRegisters.IDX_RDI],
-    )
-    val descriptors = userFds.copyFromUser(byteCount)
-        ?: return errno(Errno.EFAULT)
+    if (countValue > MAX_POLL_FDS.toULong()) return errno(Errno.EINVAL)
     val timeoutMilliseconds = regs[PtraceRegisters.IDX_RDX].toInt()
     if (timeoutMilliseconds > 0 && !TscClock.isReady) {
         return errno(Errno.EIO)
     }
-
-    val timeoutNanoseconds = if (timeoutMilliseconds > 0) {
-        timeoutMilliseconds.toULong() * NANOSECONDS_PER_MILLISECOND
-    } else {
-        0uL
+    val timeout = when {
+        timeoutMilliseconds < 0 -> PollTimeout.INFINITE
+        timeoutMilliseconds == 0 -> PollTimeout.IMMEDIATE
+        else -> PollTimeout(
+            TscClock.nanoTime() + timeoutMilliseconds.toULong() * NANOSECONDS_PER_MILLISECOND,
+            immediate = false,
+        )
     }
-    val startTime = if (timeoutMilliseconds > 0) TscClock.nanoTime() else 0uL
+    return waitForPoll(regs, process, countValue.toInt(), timeout, temporaryMask = null)
+}
 
-    while (true) {
-        val ready = scanPollDescriptors(process, descriptors, count)
-        val timedOut = timeoutMilliseconds == 0 ||
-            (timeoutMilliseconds > 0 && TscClock.nanoTime() - startTime >= timeoutNanoseconds)
-        if (ready != 0 || timedOut) {
-            return if (userFds.copyToUser(descriptors)) ready.toLong()
-            else errno(Errno.EFAULT)
+internal fun ppoll(regs: PtraceRegisters, process: Process): Long {
+    val countValue = regs[PtraceRegisters.IDX_RSI]
+    if (countValue > MAX_POLL_FDS.toULong()) return errno(Errno.EINVAL)
+    val timeoutAddress = regs[PtraceRegisters.IDX_RDX]
+    val timeout = if (timeoutAddress == 0uL) {
+        PollTimeout.INFINITE
+    } else {
+        when (val result = readPselectTimeout(process, timeoutAddress)) {
+            is VfsResult.Ok -> PollTimeout(
+                deadline = timeoutDeadline(result.value),
+                immediate = result.value.isZero,
+            )
+            is VfsResult.Err -> return errno(result.error.errno)
         }
+    }
+    val maskAddress = regs[PtraceRegisters.IDX_R10]
+    val mask = if (maskAddress == 0uL) {
+        null
+    } else {
+        if (regs[PtraceRegisters.IDX_R8] != ULong.SIZE_BYTES.toULong()) {
+            return errno(Errno.EINVAL)
+        }
+        UserMemory(process.addressSpace, maskAddress).copyFromUser(ULong.SIZE_BYTES)
+            ?.let { LittleEndianBuffer(it).readU64(0) and Signal.BLOCKABLE_MASK }
+            ?: return errno(Errno.EFAULT)
+    }
+    return waitForPoll(regs, process, countValue.toInt(), timeout, mask)
+}
 
-        Scheduler.yieldCurrent()
-        bridge.wait_for_interrupt()
+private fun waitForPoll(
+    regs: PtraceRegisters,
+    process: Process,
+    count: Int,
+    timeout: PollTimeout,
+    temporaryMask: ULong?,
+): Long {
+    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
+    val userFds = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI])
+    val descriptors = userFds.copyFromUser(count * POLL_FD_SIZE)
+        ?: return errno(Errno.EFAULT)
+    val previousMask = temporaryMask?.let { thread.signals.replaceMask(it) }
+    try {
+        while (true) {
+            val ready = scanPollDescriptors(process, descriptors, count)
+            if (ready != 0 || timeout.immediate || timeout.expired()) {
+                return if (userFds.copyToUser(descriptors)) ready.toLong()
+                else errno(Errno.EFAULT)
+            }
+            if (thread.hasPendingSignal()) {
+                val returnMask = previousMask ?: return errno(Errno.EINTR)
+                regs[PtraceRegisters.IDX_RAX] = errno(Errno.EINTR).toULong()
+                if (SignalDelivery.deliverPending(regs, thread, returnMask)) {
+                    return errno(Errno.EINTR)
+                }
+            }
+            Scheduler.yieldCurrent()
+            bridge.wait_for_interrupt()
+        }
+    } finally {
+        if (previousMask != null && !regs.signalFrameInstalled) {
+            thread.signals.mask = previousMask
+        }
     }
 }
 
@@ -220,7 +265,7 @@ internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
     val signalMask = if (signalMaskAddress == 0uL) {
         null
     } else {
-        when (val result = readPselectSignalMask(process, signalMaskAddress, thread.signalMask)) {
+        when (val result = readPselectSignalMask(process, signalMaskAddress, thread.signals.mask)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return errno(result.error.errno)
         }
@@ -228,8 +273,7 @@ internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
     val readyRead = ByteArray(setSize)
     val readyWrite = ByteArray(setSize)
     val readyExcept = ByteArray(setSize)
-    val previousMask = thread.signalMask
-    signalMask?.let { thread.signalMask = it }
+    val previousMask = signalMask?.let { thread.signals.replaceMask(it) }
     try {
         val deadline = timeout?.let(::timeoutDeadline)
         while (true) {
@@ -246,11 +290,20 @@ internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
                 ) return errno(Errno.EFAULT)
                 return ready.toLong()
             }
+            if (thread.hasPendingSignal()) {
+                val returnMask = previousMask ?: return errno(Errno.EINTR)
+                regs[PtraceRegisters.IDX_RAX] = errno(Errno.EINTR).toULong()
+                if (SignalDelivery.deliverPending(regs, thread, returnMask)) {
+                    return errno(Errno.EINTR)
+                }
+            }
             Scheduler.yieldCurrent()
             bridge.wait_for_interrupt()
         }
     } finally {
-        thread.signalMask = previousMask
+        if (previousMask != null && !regs.signalFrameInstalled) {
+            thread.signals.mask = previousMask
+        }
     }
 }
 
@@ -266,6 +319,15 @@ private fun copyFdSet(process: Process, address: ULong, value: ByteArray, size: 
 
 private data class SelectTimeout(val seconds: Long, val nanoseconds: Long) {
     val isZero: Boolean get() = seconds == 0L && nanoseconds == 0L
+}
+
+private data class PollTimeout(val deadline: ULong?, val immediate: Boolean) {
+    fun expired(): Boolean = deadline != null && TscClock.nanoTime() >= deadline
+
+    companion object {
+        val INFINITE = PollTimeout(null, immediate = false)
+        val IMMEDIATE = PollTimeout(null, immediate = true)
+    }
 }
 
 private fun readPselectTimeout(process: Process, address: ULong): VfsResult<SelectTimeout> {
@@ -293,7 +355,7 @@ private fun readPselectSignalMask(
     if (size != ULong.SIZE_BYTES.toULong()) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
     val mask = UserMemory(process.addressSpace, signalSet).copyFromUser(ULong.SIZE_BYTES)
         ?: return VfsResult.Err(VfsError.FAULT)
-    return VfsResult.Ok(LittleEndianBuffer(mask).readU64(0))
+    return VfsResult.Ok(LittleEndianBuffer(mask).readU64(0) and Signal.BLOCKABLE_MASK)
 }
 
 private fun timeoutDeadline(timeout: SelectTimeout): ULong {

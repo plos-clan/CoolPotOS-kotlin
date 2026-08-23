@@ -10,6 +10,7 @@ import kotlin.concurrent.atomics.ExperimentalAtomicApi
 class PerCpuScheduler {
     var bootstrapThread: Thread? = null
     val scheduled = AtomicBoolean(false)
+    val signalPasses = AtomicInt(0)
 
     fun waitUntilEnabled() {
         while (!scheduled.load()) {
@@ -45,10 +46,15 @@ object Scheduler {
             println("Scheduler: target core $targetLapicId is unavailable")
             return false
         }
-        return bridge.fast_handoff_enqueue(
+        val accepted = bridge.fast_handoff_enqueue(
             thread.nativeContext,
             targetLapicId.toULong(),
         )
+        if (accepted) {
+            thread.bindToCpu(targetLapicId)
+            SignalRouter.requestDelivery(thread)
+        }
+        return accepted
     }
 
     fun parkCurrent(): Boolean = bridge.fast_handoff_park_current()
@@ -56,6 +62,7 @@ object Scheduler {
     fun yieldCurrent(): Boolean = bridge.fast_handoff_yield()
 
     fun wake(thread: Thread): Boolean {
+        if (thread.process.signals.deferWake(thread.process, thread)) return true
         return bridge.fast_handoff_unpark(thread.nativeContext)
     }
 
@@ -89,6 +96,7 @@ object Scheduler {
             println("Scheduler: cannot bind bootstrap thread on core ${local.lapicId}")
             return false
         }
+        thread.bindToCpu(local.lapicId.toUInt())
 
         localScheduler.bootstrapThread = thread
 

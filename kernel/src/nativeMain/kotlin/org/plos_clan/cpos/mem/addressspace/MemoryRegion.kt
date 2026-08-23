@@ -14,12 +14,12 @@ internal const val MEMORY_REGION_ACCESS_MASK = 0x7uL
 const val USER_MMAP_START = 0x0000_0000_0001_0000uL
 const val USER_MMAP_END = 0x0000_7f00_0000_0000uL
 
-enum class MemoryRegionType {
+enum class MemoryRegionType(val userMutable: Boolean = true) {
     ANONYMOUS,
     FILE,
     IMAGE,
     STACK,
-    VDSO,
+    VDSO(userMutable = false),
     MMIO,
 }
 

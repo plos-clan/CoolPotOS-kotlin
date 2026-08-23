@@ -106,7 +106,7 @@ interface PositionlessDeviceBackend : DeviceBackend {
 }
 
 interface WaitablePositionlessDeviceBackend : PositionlessDeviceBackend {
-    fun await(device: Device, event: DeviceIoEvent, count: Int)
+    fun await(device: Device, event: DeviceIoEvent, count: Int): Boolean
 }
 
 interface DiscardingDeviceBackend : PositionlessDeviceBackend {

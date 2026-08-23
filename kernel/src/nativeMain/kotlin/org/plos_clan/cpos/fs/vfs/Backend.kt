@@ -376,5 +376,5 @@ interface WaitableOpenFileBackend : PositionlessOpenFileBackend {
         count: Int,
     ): IoResult = write(inode, source, sourceOffset, count, IoMode.BLOCKING)
 
-    fun await(event: IoEvent, count: Int)
+    fun await(event: IoEvent, count: Int): Boolean
 }

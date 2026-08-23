@@ -335,9 +335,10 @@ internal class EvdevDevice(
             size: ULong,
         ): Long = -Errno.EINVAL.toLong()
 
-        override fun await(device: Device, event: DeviceIoEvent, count: Int) {
-            if (event != DeviceIoEvent.READABLE) return
-            val waiter = Waiter(checkNotNull(ProcessManager.currentThread()))
+        override fun await(device: Device, event: DeviceIoEvent, count: Int): Boolean {
+            if (event != DeviceIoEvent.READABLE) return true
+            val thread = checkNotNull(ProcessManager.currentThread())
+            val waiter = Waiter(thread)
             val queued = lock.withLock {
                 if (committed != 0 || revoked) false
                 else {
@@ -345,10 +346,14 @@ internal class EvdevDevice(
                     true
                 }
             }
-            if (!queued) return
-            do {
-                check(Scheduler.parkCurrent()) { "Cannot park an evdev reader" }
-            } while (lock.withLock { !waiter.ready })
+            if (!queued) return true
+            while (!lock.withLock { waiter.ready }) {
+                if (thread.hasPendingSignal() || !Scheduler.parkCurrent()) {
+                    lock.withLock { waiters.remove(waiter) }
+                    return false
+                }
+            }
+            return true
         }
 
         override fun close(device: Device) {

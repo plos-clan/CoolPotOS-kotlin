@@ -399,7 +399,6 @@ long syscall(long number, ...) {
         ret = clock_gettime_call(clock_id, ARG(struct timespec_arg *));
         break;
     }
-    case SYS_rt_sigaction: ret = 0; break;
     }
 
     va_end(args);

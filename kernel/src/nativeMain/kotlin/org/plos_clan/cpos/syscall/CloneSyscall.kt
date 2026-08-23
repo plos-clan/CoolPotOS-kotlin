@@ -9,6 +9,8 @@ import org.plos_clan.cpos.tasks.MemoryCloneMode
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
+import org.plos_clan.cpos.tasks.Signal
+import org.plos_clan.cpos.tasks.SignalStack
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -74,8 +76,9 @@ private data class Request(
                 parent = parent,
                 memory = if (has(Flag.VM)) MemoryCloneMode.SHARE else MemoryCloneMode.COPY,
                 vforkParent = current.takeIf { has(Flag.VFORK) },
+                terminationSignal = Signal.from(exitSignal),
             ).also { process ->
-                if (has(Flag.CLEAR_SIGHAND)) process.signalActions.fill(null)
+                if (has(Flag.CLEAR_SIGHAND)) process.signals.resetAll()
             }
         }
         val childTidMemory = if (has(Flag.CHILD_SETTID)) {
@@ -90,13 +93,22 @@ private data class Request(
         }
 
         val snapshot = ULongArray(PtraceRegisters.REGISTER_COUNT).also(registers::copyInto)
+        val inheritStack = !threadClone && (!has(Flag.VM) || has(Flag.VFORK))
+        val threadSignals = if (threadClone) {
+            current.signals.fork(inheritStack = false)
+        } else {
+            child.signals.newThread(
+                mask = current.signals.mask,
+                stack = current.signals.stack.takeIf { inheritStack } ?: SignalStack.DISABLED,
+            )
+        }
         val childThread = ProcessManager.createUserThread(
             process = child,
             entryPoint = registers[PtraceRegisters.IDX_RIP],
             stackPointer = childStack,
             fsBase = fsBase,
             registers = snapshot,
-            signalMask = current.signalMask,
+            signals = threadSignals,
         ) ?: run {
             if (!threadClone) ProcessManager.discardUserProcess(child)
             return errno(Errno.ENOMEM)
@@ -214,4 +226,3 @@ fun clone3(registers: PtraceRegisters, process: Process): Long {
     val request = Arguments.decode(bytes).toRequest() ?: return errno(Errno.EINVAL)
     return request.execute(registers, process)
 }
-

@@ -6,8 +6,10 @@ import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.reinterpret
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.module.Vdso
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.TaskState
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
 import kotlin.experimental.ExperimentalNativeApi
@@ -24,14 +26,17 @@ private const val USER_DATA_SELECTOR = 0x1buL
 private const val PATH_MAX = 4096
 
 private typealias SyscallHandler = (PtraceRegisters, Process) -> Long
+// The syscall epilogue selects IRET for VM and clears it before constructing the user frame.
+private const val FORCE_IRET_FLAG = 0x0002_0000uL
 
 private enum class LinuxSyscall(
     val number: Int,
     val handler: SyscallHandler,
+    val restartable: Boolean = false,
 ) {
-    READ(0, ::read),
-    WRITE(1, ::write),
-    OPEN(2, ::open),
+    READ(0, ::read, restartable = true),
+    WRITE(1, ::write, restartable = true),
+    OPEN(2, ::open, restartable = true),
     CLOSE(3, ::close),
     STAT(4, ::stat),
     FSTAT(5, ::fstat),
@@ -42,23 +47,26 @@ private enum class LinuxSyscall(
     MPROTECT(10, ::mprotect),
     MUNMAP(11, ::munmap),
     // 12 brk 系统调用不实现
-    RT_SIGACTION(13, ::rtSigaction),
-    RT_SIGPROCMASK(14, ::rtSigprocmask),
+    RT_SIGACTION(13, SignalSyscalls::rtSigaction),
+    RT_SIGPROCMASK(14, SignalSyscalls::rtSigprocmask),
+    RT_SIGRETURN(15, SignalSyscalls::rtSigreturn),
     IOCTL(16, ::ioctl),
-    PREAD64(17, ::pread64),
-    PWRITE64(18, ::pwrite64),
-    READV(19, ::readv),
-    WRITEV(20, ::writev),
+    PREAD64(17, ::pread64, restartable = true),
+    PWRITE64(18, ::pwrite64, restartable = true),
+    READV(19, ::readv, restartable = true),
+    WRITEV(20, ::writev, restartable = true),
     ACCESS(21, ::access),
     PIPE(22, ::pipe),
     DUP(32, ::dup),
     DUP2(33, ::dup2),
+    PAUSE(34, SignalSyscalls::pause),
     NANO_SLEEP(35, ::nanoSleep),
     GETPID(39, ::getPid),
     CLONE(56, ::clone),
     EXECVE(59, ::execve),
     EXIT(60, ::exit),
-    WAIT4(61, ::wait4),
+    WAIT4(61, ::wait4, restartable = true),
+    KILL(62, SignalSyscalls::kill),
     UNAME(63, ::uname),
     FCNTL(72, ::fcntl),
     FSYNC(74, ::fsync),
@@ -96,6 +104,11 @@ private enum class LinuxSyscall(
     SETFSUID(122, ::setFsUid),
     SETFSGID(123, ::setFsGid),
     GETSID(124, ::getSid),
+    RT_SIGPENDING(127, SignalSyscalls::rtSigpending),
+    RT_SIGTIMEDWAIT(128, SignalSyscalls::rtSigtimedwait),
+    RT_SIGQUEUEINFO(129, SignalSyscalls::rtSigqueueinfo),
+    RT_SIGSUSPEND(130, SignalSyscalls::rtSigsuspend),
+    SIGALTSTACK(131, SignalSyscalls::sigaltstack),
     MKNOD(133, ::mknod),
     STATFS(137, ::statfs),
     FSTATFS(138, ::fstatfs),
@@ -117,8 +130,9 @@ private enum class LinuxSyscall(
     REMOVEXATTR(197, ::removexattr),
     LREMOVEXATTR(198, ::lremovexattr),
     FREMOVEXATTR(199, ::fremovexattr),
+    TKILL(200, SignalSyscalls::tkill),
     TIME(201, ::time),
-    FUTEX(202, Futex::handle),
+    FUTEX(202, Futex::handle, restartable = true),
     G_AFFINITY(204, ::schedGetAffinity),
     GETDENTS64(217, ::getdents64),
     SET_TID_ADDRESS(218, ::setTidAddress),
@@ -126,7 +140,8 @@ private enum class LinuxSyscall(
     CLOCK_GETTIME(228, ::clockGetTime),
     CLOCK_GETRES(229, ::clockGetRes),
     EXIT_GROUP(231, ::exitGroup),
-    OPENAT(257, ::openAt),
+    TGKILL(234, SignalSyscalls::tgkill),
+    OPENAT(257, ::openAt, restartable = true),
     MKDIRAT(258, ::mkdirAt),
     MKNODAT(259, ::mknodAt),
     FCHOWNAT(260, ::fchownAt),
@@ -139,14 +154,16 @@ private enum class LinuxSyscall(
     FCHMODAT(268, ::fchmodAt),
     FACCESSAT(269, ::faccessAt),
     PSELECT6(270, ::pselect6),
+    PPOLL(271, ::ppoll),
     SET_ROBUST_LIST(273, ::setRobustList),
     UTIMENSAT(280, ::utimensAt),
     FALLOCATE(285, ::fallocate),
     PIPE2(293, ::pipe2),
+    RT_TGSIGQUEUEINFO(297, SignalSyscalls::rtTgsigqueueinfo),
     PRLIMIT64(302, ::prlimit64),
     GETCPU(309, ::getCPU),
     RENAMEAT2(316, ::renameAt2),
-    GETRANDOM(318, ::getRandom),
+    GETRANDOM(318, ::getRandom, restartable = true),
     STATX(332, ::statx),
     RSEQ(334, ::rseq),
     CLONE3(435, ::clone3),
@@ -163,31 +180,51 @@ fun syscallHandler(frame: COpaquePointer?) {
 }
 
 object Syscall {
-    private val handlers = arrayOfNulls<SyscallHandler>(
+    private val definitions = arrayOfNulls<LinuxSyscall>(
         LinuxSyscall.entries.maxOf(LinuxSyscall::number) + 1,
     ).apply {
         LinuxSyscall.entries.forEach { syscall ->
             check(this[syscall.number] == null) { "duplicate syscall ${syscall.number}" }
-            this[syscall.number] = syscall.handler
+            this[syscall.number] = syscall
         }
     }
 
     fun syscallHandle(regs: PtraceRegisters) {
         val number = regs[PtraceRegisters.IDX_RAX]
-        val handler = if (number < handlers.size.toULong()) {
-            handlers[number.toInt()]
+        val thread = ProcessManager.currentThread()
+        if (number == Vdso.SIGNAL_GATEWAY_SYSCALL) {
+            if (thread != null && SignalDelivery.deliverGateway(regs, thread)) return
+            regs[PtraceRegisters.IDX_RAX] = errno(Errno.ENOSYS).toULong()
+            return
+        }
+        val definition = if (number < definitions.size.toULong()) {
+            definitions[number.toInt()]
         } else {
             null
         }
-        val result = if (handler == null) {
+        val result = if (definition == null) {
             println("SYSCALL: no implement $number")
             errno(Errno.ENOSYS)
         } else {
-            val process = ProcessManager.currentProcess()
-            if (process == null) errno(Errno.ESRCH) else handler(regs, process)
+            val process = thread?.process
+            if (process == null) errno(Errno.ESRCH) else definition.handler(regs, process)
         }
-        regs[PtraceRegisters.IDX_RAX] = result.toULong()
+        val frameInstalled = regs.signalFrameInstalled
+        if (!frameInstalled) regs[PtraceRegisters.IDX_RAX] = result.toULong()
+        if (thread != null && thread.state != TaskState.ZOMBIE &&
+            ProcessManager.currentThread() === thread &&
+            !frameInstalled
+        ) {
+            SignalDelivery.deliverPending(regs, thread)
+        }
+        if (regs[PtraceRegisters.IDX_FUNC] == PtraceRegisters.SIGNAL_RETURN) {
+            regs[PtraceRegisters.IDX_RFLAGS] =
+                regs[PtraceRegisters.IDX_RFLAGS] or FORCE_IRET_FLAG
+        }
     }
+
+    internal fun isRestartable(number: ULong): Boolean =
+        number < definitions.size.toULong() && definitions[number.toInt()]?.restartable == true
 
     fun copyWordToUser(process: Process, address: ULong, value: ULong): Long {
         val bytes = ByteArray(ULong.SIZE_BYTES) { index ->

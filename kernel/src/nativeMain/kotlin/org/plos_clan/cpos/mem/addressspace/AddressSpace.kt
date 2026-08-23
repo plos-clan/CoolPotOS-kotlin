@@ -346,10 +346,17 @@ class AddressSpace internal constructor(
             return MemoryMapResult.Err(EINVAL)
         }
         if (!validRange(address, alignedLength)) return MemoryMapResult.Err(EFAULT)
-        lock.withLock {
-            unmapRangeLocked(address, address + alignedLength)
+        return lock.withLock {
+            val end = address + alignedLength
+            val immutable = regions.any { region ->
+                !region.type.userMutable && region.start < end && region.end > address
+            }
+            if (immutable) {
+                return@withLock MemoryMapResult.Err(EACCES)
+            }
+            unmapRangeLocked(address, end)
+            MemoryMapResult.Ok(Unit)
         }
-        return MemoryMapResult.Ok(Unit)
     }
 
     fun protect(address: ULong, length: ULong, access: ULong): MemoryMapResult<Unit> {
@@ -363,6 +370,12 @@ class AddressSpace internal constructor(
 
         return lock.withLock {
             val end = address + alignedLength
+            val immutable = regions.any { region ->
+                !region.type.userMutable && region.start < end && region.end > address
+            }
+            if (immutable) {
+                return@withLock MemoryMapResult.Err(EACCES)
+            }
             if (!regions.fullyCovers(address, end)) {
                 return@withLock MemoryMapResult.Err(ENOMEM)
             }

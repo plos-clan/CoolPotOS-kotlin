@@ -74,7 +74,12 @@ fun Process.stat(): String {
 
 fun Process.status(): String {
     val (stateCode, stateName) = stateDescription()
-    val blockedSignals = threads.firstOrNull { it.state != TaskState.ZOMBIE }?.signalMask ?: 0uL
+    val thread = threads.firstOrNull { it.state != TaskState.ZOMBIE }
+    val blockedSignals = thread?.signals?.mask ?: 0uL
+    val pendingSignals = thread?.signals?.pending?.mask ?: 0uL
+    val sharedPendingSignals = signals.pending.mask
+    val (ignoredSignals, caughtSignals) = signals.actionMasks()
+    fun ULong.signalMask() = toString(16).padStart(16, '0')
     return buildString {
         append("Name:\t").append(comm).append('\n')
         append("State:\t").append(stateCode).append(" (").append(stateName).append(")\n")
@@ -91,10 +96,11 @@ fun Process.status(): String {
         append("VmSize:\t").append(addressSpace.used / KIBIBYTE).append(" kB\n")
         append("VmRSS:\t0 kB\n")
         append("Threads:\t").append(threads.count { it.state != TaskState.ZOMBIE }).append('\n')
-        append("SigPnd:\t0000000000000000\n")
-        append("SigBlk:\t").append(blockedSignals.toString(16).padStart(16, '0')).append('\n')
-        append("SigIgn:\t0000000000000000\n")
-        append("SigCgt:\t0000000000000000\n")
+        append("SigPnd:\t").append(pendingSignals.signalMask()).append('\n')
+        append("ShdPnd:\t").append(sharedPendingSignals.signalMask()).append('\n')
+        append("SigBlk:\t").append(blockedSignals.signalMask()).append('\n')
+        append("SigIgn:\t").append(ignoredSignals.signalMask()).append('\n')
+        append("SigCgt:\t").append(caughtSignals.signalMask()).append('\n')
     }
 }
 
@@ -102,6 +108,7 @@ private fun Process.stateCode(): Char = stateDescription().first
 
 private fun Process.stateDescription(): Pair<Char, String> = when {
     state == ProcessState.ZOMBIE -> 'Z' to "zombie"
+    state == ProcessState.STOPPED -> 'T' to "stopped"
     threads.any { it.state == TaskState.RUNNING } -> 'R' to "running"
     threads.any { it.state == TaskState.READY } -> 'R' to "runnable"
     else -> 'S' to "sleeping"

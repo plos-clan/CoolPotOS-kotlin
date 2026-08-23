@@ -2,9 +2,15 @@ package org.plos_clan.cpos.utils
 
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.ULongVar
+import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.get
+import kotlinx.cinterop.plus
+import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.set
+import kotlinx.cinterop.usePinned
+import platform.posix.memcpy
 
 @ExperimentalForeignApi
 class PtraceRegisters(private val registers: CPointer<ULongVar>) {
@@ -35,6 +41,11 @@ class PtraceRegisters(private val registers: CPointer<ULongVar>) {
         const val IDX_RSP = 23
         const val IDX_SS = 24
         const val REGISTER_COUNT = IDX_SS + 1
+        const val EXTENDED_STATE_SIZE = 832
+        const val NO_SYSCALL = ULong.MAX_VALUE
+        const val SIGNAL_RETURN = 0xffff_ffff_ffff_fffeuL
+        private const val SIGNAL_FRAME_INSTALLED = ULong.MAX_VALUE
+        private const val EXTENDED_STATE_OFFSET = 256
         private val VALID_REGISTER_INDEXES = 0 until REGISTER_COUNT
     }
 
@@ -51,6 +62,13 @@ class PtraceRegisters(private val registers: CPointer<ULongVar>) {
         }
     }
 
+    val signalFrameInstalled: Boolean
+        get() = registers[IDX_ERRCODE] == SIGNAL_FRAME_INSTALLED
+
+    fun markSignalFrameInstalled() {
+        registers[IDX_ERRCODE] = SIGNAL_FRAME_INSTALLED
+    }
+
     fun copyInto(destination: ULongArray) =
         repeat(minOf(destination.size, REGISTER_COUNT)) { index ->
             destination[index] = registers[index]
@@ -60,4 +78,27 @@ class PtraceRegisters(private val registers: CPointer<ULongVar>) {
         repeat(minOf(source.size, REGISTER_COUNT)) { index ->
             registers[index] = source[index]
         }
+
+    fun copyExtendedStateTo(destination: ByteArray, offset: Int) {
+        require(offset >= 0 && offset <= destination.size - EXTENDED_STATE_SIZE)
+        destination.usePinned { bytes ->
+            memcpy(
+                bytes.addressOf(offset),
+                requireNotNull(registers.reinterpret<UByteVar>() + EXTENDED_STATE_OFFSET),
+                EXTENDED_STATE_SIZE.toULong(),
+            )
+        }
+    }
+
+    fun restoreExtendedState(source: ByteArray, offset: Int = 0): Boolean {
+        if (offset < 0 || offset > source.size - EXTENDED_STATE_SIZE) return false
+        source.usePinned { bytes ->
+            memcpy(
+                requireNotNull(registers.reinterpret<UByteVar>() + EXTENDED_STATE_OFFSET),
+                bytes.addressOf(offset),
+                EXTENDED_STATE_SIZE.toULong(),
+            )
+        }
+        return true
+    }
 }

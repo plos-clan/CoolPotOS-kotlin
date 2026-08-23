@@ -293,6 +293,7 @@ internal fun getTimeOfDay(regs: PtraceRegisters, process: Process): Long {
 }
 
 internal fun nanoSleep(regs: PtraceRegisters, process: Process): Long {
+    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
     val bytes = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI])
         .copyFromUser(TimeSpec.NATIVE_SIZE)
         ?: return errno(Errno.EFAULT)
@@ -314,6 +315,21 @@ internal fun nanoSleep(regs: PtraceRegisters, process: Process): Long {
     val start = TscClock.nanoTime()
     val deadline = if (duration > ULong.MAX_VALUE - start) ULong.MAX_VALUE else start + duration
     while (TscClock.nanoTime() < deadline) {
+        if (thread.hasPendingSignal()) {
+            val remaining = deadline - TscClock.nanoTime().coerceAtMost(deadline)
+            val remainingAddress = regs[PtraceRegisters.IDX_RSI]
+            if (remainingAddress != 0uL &&
+                !UserMemory(process.addressSpace, remainingAddress).copyToUser(
+                    TimeSpec(
+                        sec = (remaining / NANOSECONDS_PER_SECOND).toLong(),
+                        nsec = (remaining % NANOSECONDS_PER_SECOND).toLong(),
+                    ).toNativeBytes(),
+                )
+            ) {
+                return errno(Errno.EFAULT)
+            }
+            return errno(Errno.EINTR)
+        }
         Scheduler.yieldCurrent()
         bridge.wait_for_interrupt()
     }

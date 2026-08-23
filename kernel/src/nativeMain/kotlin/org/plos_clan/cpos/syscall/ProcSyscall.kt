@@ -9,21 +9,19 @@ import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.module.elf.ElfLoader
 import org.plos_clan.cpos.syscall.Syscall.copyWordToUser
 import org.plos_clan.cpos.syscall.Syscall.errno
+import org.plos_clan.cpos.tasks.ChildEventKind
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessGroupResult
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.ProcessResource
-import org.plos_clan.cpos.tasks.ProcessState
 import org.plos_clan.cpos.tasks.ResourceLimit
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.Scheduler
-import org.plos_clan.cpos.tasks.TaskState
 import org.plos_clan.cpos.tasks.Thread
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.PtraceRegisters
-import org.plos_clan.cpos.utils.readULongLE
 import org.plos_clan.cpos.utils.toByteArray
 
 private const val ARCH_SET_GS = 0x1001uL
@@ -32,15 +30,10 @@ private const val ARCH_GET_FS = 0x1003uL
 private const val ARCH_GET_GS = 0x1004uL
 private const val MSR_KERNEL_GS_BASE = 0xC0000102U
 private const val WAIT_WNOHANG = 1uL
-private const val WAIT_SUPPORTED = 0x0buL // WNOHANG | WUNTRACED | WCONTINUED
-private const val SIGNAL_COUNT = 64
-private const val SIGNAL_SET_SIZE = ULong.SIZE_BYTES
-private const val SIGACTION_SIZE = 32
-private const val SIGKILL = 9
-private const val SIGSTOP = 19
+private const val WAIT_WUNTRACED = 2uL
+private const val WAIT_WCONTINUED = 8uL
+private const val WAIT_SUPPORTED = 0x0buL
 private const val ROBUST_LIST_SIZE = 24uL
-private const val BLOCKABLE_SIGNAL_MASK = 0xffff_ffff_fffb_feffuL
-private const val SIG_IGN_HANDLER = 1uL
 private const val PR_SET_PDEATHSIG = 1UL
 private const val PR_GET_PDEATHSIG = 2UL
 private const val PR_GET_DUMPABLE = 3UL
@@ -75,38 +68,6 @@ private const val PR_TASK_PERF_EVENTS_DISABLE = 31UL
 private const val PR_TASK_PERF_EVENTS_ENABLE = 32UL
 private const val PR_GET_SPECULATION_CTRL = 52UL
 private const val PR_SET_SPECULATION_CTRL = 53UL
-
-fun resetSignalActionsForExec(process: Process) =
-    process.signalActions.forEachIndexed { index, action ->
-        if (action == null) {
-            return@forEachIndexed
-        }
-        val handler = action.readULongLE(0)
-        if (handler == 1uL) {
-            process.signalActions[index] =
-                ByteArray(SIGACTION_SIZE).apply {
-                    this[0] = 1
-                }
-        } else {
-            process.signalActions[index] = null
-        }
-    }
-
-private enum class SignalMaskOperation(val value: ULong) {
-    BLOCK(0uL),
-    UNBLOCK(1uL),
-    SET(2uL),
-    ;
-
-    companion object {
-        fun from(value: ULong): SignalMaskOperation? = when (value) {
-            BLOCK.value -> BLOCK
-            UNBLOCK.value -> UNBLOCK
-            SET.value -> SET
-            else -> null
-        }
-    }
-}
 
 private class IdTriplet(
     private val real: Int,
@@ -303,63 +264,6 @@ internal fun prlimit64(regs: PtraceRegisters, process: Process): Long {
     return 0L
 }
 
-internal fun rtSigaction(regs: PtraceRegisters, process: Process): Long {
-    val signal = regs[PtraceRegisters.IDX_RDI]
-    if (signal !in 1uL..SIGNAL_COUNT.toULong() ||
-        regs[PtraceRegisters.IDX_R10] != SIGNAL_SET_SIZE.toULong()
-    ) {
-        return errno(Errno.EINVAL)
-    }
-
-    val actionAddress = regs[PtraceRegisters.IDX_RSI]
-    if (actionAddress != 0uL && (signal == SIGKILL.toULong() || signal == SIGSTOP.toULong())) {
-        return errno(Errno.EINVAL)
-    }
-    val action = if (actionAddress == 0uL) {
-        null
-    } else {
-        UserMemory(process.addressSpace, actionAddress).copyFromUser(SIGACTION_SIZE)
-            ?: return errno(Errno.EFAULT)
-    }
-
-    val index = signal.toInt() - 1
-    val previous = process.signalActions[index] ?: ByteArray(SIGACTION_SIZE)
-    if (action != null) process.signalActions[index] = action
-    val previousAddress = regs[PtraceRegisters.IDX_RDX]
-    if (previousAddress != 0uL &&
-        !UserMemory(process.addressSpace, previousAddress).copyToUser(previous)
-    ) {
-        return errno(Errno.EFAULT)
-    }
-    return 0L
-}
-
-internal fun rtSigprocmask(regs: PtraceRegisters, process: Process): Long {
-    if (regs[PtraceRegisters.IDX_R10] != SIGNAL_SET_SIZE.toULong()) {
-        return errno(Errno.EINVAL)
-    }
-    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
-    val setAddress = regs[PtraceRegisters.IDX_RSI]
-    val previous = thread.signalMask
-    if (setAddress != 0uL) {
-        val operation = SignalMaskOperation.from(regs[PtraceRegisters.IDX_RDI])
-            ?: return errno(Errno.EINVAL)
-        val bytes = UserMemory(process.addressSpace, setAddress).copyFromUser(SIGNAL_SET_SIZE)
-            ?: return errno(Errno.EFAULT)
-        val mask = LittleEndianBuffer(bytes).readU64(0) and BLOCKABLE_SIGNAL_MASK
-        thread.signalMask = when (operation) {
-            SignalMaskOperation.BLOCK -> previous or mask
-            SignalMaskOperation.UNBLOCK -> previous and mask.inv()
-            SignalMaskOperation.SET -> mask
-        }
-    }
-    val previousAddress = regs[PtraceRegisters.IDX_RDX]
-    if (previousAddress != 0uL && copyWordToUser(process, previousAddress, previous) != 0L) {
-        return errno(Errno.EFAULT)
-    }
-    return 0L
-}
-
 internal fun schedGetAffinity(regs: PtraceRegisters, process: Process): Long {
     val pid = regs[PtraceRegisters.IDX_RDI].toInt()
     val cpusetsize = regs[PtraceRegisters.IDX_RSI]
@@ -410,41 +314,11 @@ internal fun getTid(regs: PtraceRegisters, process: Process): Long {
     return thread.id.toLong()
 }
 
-internal fun exit(regs: PtraceRegisters, process: Process): Long = terminate(
-    process = process,
-    group = false,
-    status = regs[PtraceRegisters.IDX_RDI].toInt(),
-)
+internal fun exit(regs: PtraceRegisters, process: Process): Long =
+    ProcessExit.current(process, regs[PtraceRegisters.IDX_RDI].toInt(), group = false)
 
-internal fun exitGroup(regs: PtraceRegisters, process: Process): Long = terminate(
-    process = process,
-    group = true,
-    status = regs[PtraceRegisters.IDX_RDI].toInt(),
-)
-
-private fun terminate(process: Process, group: Boolean, status: Int): Nothing {
-    val current = ProcessManager.currentThread() ?: error("exit without a current thread")
-    if (group) {
-        process.threads.forEach { it.state = TaskState.ZOMBIE }
-    } else {
-        current.state = TaskState.ZOMBIE
-    }
-
-    val clearChildTid = current.clearChildTid
-    current.clearChildTid = 0uL
-    if (clearChildTid != 0uL &&
-        UserMemory(process.addressSpace, clearChildTid).copyToUser(ByteArray(Int.SIZE_BYTES))
-    ) {
-        Futex.wakePrivate(process, clearChildTid)
-    }
-    if (group || process.threads.none { it.state != TaskState.ZOMBIE }) {
-        ProcessManager.markExited(process, status)
-    }
-    Scheduler.yieldCurrent()
-    while (true) {
-        bridge.wait_for_interrupt()
-    }
-}
+internal fun exitGroup(regs: PtraceRegisters, process: Process): Long =
+    ProcessExit.current(process, regs[PtraceRegisters.IDX_RDI].toInt(), group = true)
 
 internal fun setTidAddress(regs: PtraceRegisters, process: Process): Long {
     val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
@@ -480,7 +354,8 @@ internal fun execve(regs: PtraceRegisters, process: Process): Long {
     }
     process.installExecutable(executablePath, arguments.ifEmpty { listOf(executablePath) })
     process.fdTable.closeOnExec()
-    resetSignalActionsForExec(process)
+    process.signals.resetForExec()
+    ProcessManager.currentThread()?.signals?.replaceStack(org.plos_clan.cpos.tasks.SignalStack.DISABLED)
 
     regs[PtraceRegisters.IDX_RIP] = image.entryPoint
     regs[PtraceRegisters.IDX_RSP] = image.stackPointer
@@ -491,11 +366,13 @@ internal fun execve(regs: PtraceRegisters, process: Process): Long {
 }
 
 internal fun wait4(regs: PtraceRegisters, process: Process): Long {
+    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
     val requestedPid = regs[PtraceRegisters.IDX_RDI].toUInt().toInt().toLong()
     val options = regs[PtraceRegisters.IDX_RDX]
     if (options and WAIT_SUPPORTED.inv() != 0uL) return errno(Errno.EINVAL)
 
     while (true) {
+        val observedSequence = process.childEvents.sequence()
         val children = ProcessManager.childrenOf(process.id).filter { child ->
             when {
                 requestedPid > 0 -> child.id.toLong() == requestedPid
@@ -505,25 +382,39 @@ internal fun wait4(regs: PtraceRegisters, process: Process): Long {
             }
         }
         if (children.isEmpty()) return errno(Errno.ECHILD)
-        val exited = children.firstOrNull { it.state == ProcessState.ZOMBIE }
-        if (exited != null) {
+        val event = process.childEvents.take(
+            childIds = children.mapTo(mutableSetOf(), Process::id),
+            stopped = options and WAIT_WUNTRACED != 0uL,
+            continued = options and WAIT_WCONTINUED != 0uL,
+        )
+        if (event != null) {
             val status = regs[PtraceRegisters.IDX_RSI]
             if (status != 0uL &&
                 !UserMemory(process.addressSpace, status).copyToUser(
                     byteArrayOf(
-                        0,
-                        (exited.exitCode and 0xff).toByte(),
-                        0,
-                        0,
+                        event.status.toByte(),
+                        (event.status ushr 8).toByte(),
+                        (event.status ushr 16).toByte(),
+                        (event.status ushr 24).toByte(),
                     ),
                 )
-            ) return errno(Errno.EFAULT)
-            if (!ProcessManager.reapChild(process.id, exited)) continue
-            return exited.id.toLong()
+            ) {
+                process.childEvents.restore(event)
+                return errno(Errno.EFAULT)
+            }
+            if (event.kind == ChildEventKind.EXITED &&
+                !ProcessManager.reapChild(process.id, event.child)
+            ) {
+                continue
+            }
+            return event.child.id.toLong()
         }
         if (options and WAIT_WNOHANG != 0uL) return 0L
-        Scheduler.yieldCurrent()
-        bridge.wait_for_interrupt()
+        if (thread.hasPendingSignal()) return errno(Errno.EINTR)
+        if (!process.childEvents.awaitChange(thread, observedSequence)) {
+            if (thread.hasPendingSignal()) return errno(Errno.EINTR)
+            Scheduler.yieldCurrent()
+        }
     }
 }
 

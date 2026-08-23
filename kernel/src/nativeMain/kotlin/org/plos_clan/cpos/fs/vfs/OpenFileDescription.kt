@@ -277,7 +277,9 @@ class OpenFileDescription private constructor(
             if (result.error != VfsError.WOULD_BLOCK || mode == IoMode.NON_BLOCKING) {
                 return result.recordAccess(count)
             }
-            waitable.await(IoEvent.READABLE, count)
+            if (!waitable.await(IoEvent.READABLE, count)) {
+                return IoResult.failure(VfsError.INTERRUPTED)
+            }
         }
     }
 
@@ -316,7 +318,10 @@ class OpenFileDescription private constructor(
                 return if (transferred == 0) result else IoResult.success(transferred)
             }
 
-            waitable.await(IoEvent.WRITABLE, count - transferred)
+            if (!waitable.await(IoEvent.WRITABLE, count - transferred)) {
+                return if (transferred == 0) IoResult.failure(VfsError.INTERRUPTED)
+                else IoResult.success(transferred)
+            }
         }
         return IoResult.success(transferred)
     }

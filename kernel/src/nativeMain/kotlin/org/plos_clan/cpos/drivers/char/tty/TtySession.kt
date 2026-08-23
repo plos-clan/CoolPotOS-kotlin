@@ -8,6 +8,9 @@ import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.Signal
+import org.plos_clan.cpos.tasks.SignalInfo
+import org.plos_clan.cpos.tasks.SignalRouter
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.IrqSpinLock
 
@@ -63,6 +66,17 @@ class TtySession(
     ): Long = backend.write(this, buffer, bufferOffset, size)
 
     fun keyboardInput(data: CharArray) = backend.keyboardInput(this, data)
+
+    internal fun signalForeground(signal: Signal) {
+        val processGroup = foregroundProcessGroup
+        if (processGroup == 0) return
+        val info = SignalInfo(signal, SignalInfo.KERNEL)
+        for (process in ProcessManager.snapshotProcesses()) {
+            if (process.processGroupId == processGroup) {
+                SignalRouter.sendProcess(null, process, info)
+            }
+        }
+    }
 
     fun attach(process: Process): Boolean = stateLock.withLock {
         if (process.sessionId != process.id ||

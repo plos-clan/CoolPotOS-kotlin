@@ -17,6 +17,7 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
@@ -32,6 +33,7 @@ enum class TaskState {
 internal enum class ProcessState {
     READY,
     RUNNING,
+    STOPPED,
     EXITING,
     ZOMBIE,
 }
@@ -52,17 +54,113 @@ internal data class ProcessMembership(
     val processGroupId: Int,
 )
 
-class Thread(
+internal enum class ChildEventKind {
+    EXITED,
+    STOPPED,
+    CONTINUED,
+}
+
+internal data class ChildWaitEvent(
+    val child: Process,
+    val kind: ChildEventKind,
+    val status: Int,
+)
+
+internal class ChildWaitQueue {
+    private val lock = IrqSpinLock()
+    private val events = mutableListOf<ChildWaitEvent>()
+    private val waiters = mutableSetOf<Thread>()
+    private var sequence = 0uL
+
+    fun sequence(): ULong = lock.withLock { sequence }
+
+    fun publish(event: ChildWaitEvent) {
+        val awakened = lock.withLock {
+            events += event
+            sequence++
+            waiters.toList().also { waiters.clear() }
+        }
+        awakened.forEach(Scheduler::wake)
+    }
+
+    fun notifyChange() {
+        val awakened = lock.withLock {
+            sequence++
+            waiters.toList().also { waiters.clear() }
+        }
+        awakened.forEach(Scheduler::wake)
+    }
+
+    fun take(childIds: Set<Int>, stopped: Boolean, continued: Boolean): ChildWaitEvent? =
+        lock.withLock {
+            val index = events.indexOfFirst { event ->
+                event.child.id in childIds && when (event.kind) {
+                    ChildEventKind.EXITED -> true
+                    ChildEventKind.STOPPED -> stopped
+                    ChildEventKind.CONTINUED -> continued
+                }
+            }
+            if (index < 0) null else events.removeAt(index)
+        }
+
+    fun restore(event: ChildWaitEvent) {
+        val awakened = lock.withLock {
+            events.add(0, event)
+            sequence++
+            waiters.toList().also { waiters.clear() }
+        }
+        awakened.forEach(Scheduler::wake)
+    }
+
+    fun discard(child: Process) {
+        lock.withLock { events.removeAll { it.child === child } }
+    }
+
+    fun awaitChange(thread: Thread, observedSequence: ULong): Boolean {
+        val registered = lock.withLock {
+            if (sequence != observedSequence) false
+            else {
+                waiters += thread
+                true
+            }
+        }
+        if (!registered) return true
+        if (thread.hasPendingSignal()) {
+            lock.withLock { waiters.remove(thread) }
+            return false
+        }
+        val parked = Scheduler.parkCurrent()
+        lock.withLock { waiters.remove(thread) }
+        return parked
+    }
+}
+
+class Thread internal constructor(
     val id: Int,
     val process: Process,
     val kernelStackTop: ULong = 0uL,
     val kernelStackPhysicalBase: ULong = 0uL,
     val kernelStackPages: ULong = 0uL,
     val kernelFsBase: ULong = 0uL,
-    var signalMask: ULong = 0uL,
+    internal val signals: ThreadSignalState = process.signals.newThread(),
     var name: String = "",
     val affinityMask: ULong = 0UL,
 ) {
+    private val scheduledCpu = AtomicLong(-1)
+
+    internal val scheduledLapicId: UInt?
+        get() = scheduledCpu.load().takeIf { it >= 0 }?.toUInt()
+
+    internal fun bindToCpu(lapicId: UInt) {
+        val requested = lapicId.toLong()
+        val assigned = scheduledCpu.load()
+        check(assigned == requested || assigned == -1L &&
+            scheduledCpu.compareAndSet(-1L, requested)
+        ) {
+            "thread $id cannot migrate from LAPIC $assigned to $lapicId"
+        }
+    }
+
     var clearChildTid: ULong = 0uL
 
     var robustListHead: ULong = 0uL
@@ -136,6 +234,17 @@ class Thread(
             nativeContext,
             addressSpace.pageDirectory.pml4PhysicalAddress,
         )
+
+    internal val pendingSignalMask: ULong
+        get() = signals.pending.mask or process.signals.pending.mask
+
+    internal fun takePendingSignal(accepted: ULong): SignalInfo? =
+        signals.pending.take(accepted) ?: process.signals.pending.take(accepted)
+
+    internal fun hasPendingSignal(): Boolean {
+        val accepted = signals.mask.inv()
+        return process.signals.hasActionable(pendingSignalMask and accepted)
+    }
 }
 
 private class VforkCompletion(parent: Thread) {
@@ -169,6 +278,7 @@ class Process internal constructor(
     var fileCreationMask: UInt = 0x12u,
     val parentId: Int = 0,
     val startTimeTicks: ULong,
+    internal val terminationSignal: Signal? = Signal.CHILD,
     vforkParent: Thread? = null,
 ) {
     private val vforkCompletion = vforkParent?.let(::VforkCompletion)
@@ -186,22 +296,31 @@ class Process internal constructor(
     val processGroupId: Int
         get() = membership.processGroupId
 
-    val threads = mutableListOf<Thread>()
+    private val threadState = AtomicReference<List<Thread>>(emptyList())
+    val threads: List<Thread>
+        get() = threadState.load()
     var commandLine: ByteArray = name.encodeToByteArray() + byteArrayOf(0)
         internal set
-    internal var state = ProcessState.READY
-    val signalActions = arrayOfNulls<ByteArray>(64)
+    private val processState = AtomicReference(ProcessState.READY)
+    internal var state: ProcessState
+        get() = processState.load()
+        set(value) = processState.store(value)
     val resourceLimits = ProcessLimits()
-    var exitCode: Int = 0
+    internal val signals = ProcessSignalState(
+        uid = { ruid },
+        limit = { resourceLimits.get(ProcessResource.PENDING_SIGNALS).soft },
+    )
+    internal val childEvents = ChildWaitQueue()
 
     val fdTable = FileDescriptorTable()
 
     fun addThread(thread: Thread) {
         require(thread.process === this) { "Thread ${thread.id} belongs to another process" }
-        if (thread in threads) {
-            return
+        while (true) {
+            val observed = threadState.load()
+            if (thread in observed) return
+            if (threadState.compareAndSet(observed, observed + thread)) return
         }
-        threads += thread
     }
 
     fun getFSContext(): FileSystemContext = requireNotNull(context) {
@@ -249,9 +368,7 @@ class Process internal constructor(
         fsgid = parent.fsgid
         fileCreationMask = parent.fileCreationMask
         membershipState.store(parent.membership)
-        parent.signalActions.forEachIndexed { index, action ->
-            signalActions[index] = action?.copyOf()
-        }
+        signals.inherit(parent.signals)
         resourceLimits.inherit(parent.resourceLimits)
         commandLine = parent.commandLine.copyOf()
     }
@@ -337,6 +454,7 @@ object ProcessManager {
         parent: Process? = null,
         memory: MemoryCloneMode = MemoryCloneMode.COPY,
         vforkParent: Thread? = null,
+        terminationSignal: Signal? = Signal.CHILD,
     ): Process {
         val addressSpace = when {
             parent == null ->
@@ -353,6 +471,7 @@ object ProcessManager {
             parentId = parent?.id ?: 0,
             inherit = parent,
             vforkParent = vforkParent,
+            terminationSignal = terminationSignal,
         )
         if (parent == null) return child
 
@@ -360,14 +479,14 @@ object ProcessManager {
         return child
     }
 
-    fun createUserThread(
+    internal fun createUserThread(
         process: Process,
         entryPoint: ULong,
         stackPointer: ULong,
         fsBase: ULong = 0uL,
         kernelStackPages: ULong = DEFAULT_THREAD_STACK_PAGES,
         registers: ULongArray? = null,
-        signalMask: ULong = 0uL,
+        signals: ThreadSignalState? = null,
     ): Thread? {
         if (process.isKernelProcess || entryPoint == 0uL || stackPointer == 0uL) {
             return null
@@ -387,7 +506,7 @@ object ProcessManager {
             kernelStackPhysicalBase = stack.physicalBase,
             kernelStackPages = stack.pages,
             kernelFsBase = kernelFsBase,
-            signalMask = signalMask,
+            signals = signals,
         ).also { thread ->
             if (registers == null) {
                 thread.initializeUserContext(entryPoint, stackPointer, fsBase)
@@ -432,6 +551,8 @@ object ProcessManager {
         return processLock.withLock { processes.firstOrNull { it.id == pid } }
     }
 
+    fun findThread(tid: Int): Thread? = threadTableLock.withLock { threadTable[tid] }
+
     fun snapshotProcesses(): List<Process> = processLock.withLock {
         processes.filterNot(Process::isKernelProcess).sortedBy(Process::id)
     }
@@ -471,7 +592,7 @@ object ProcessManager {
         ProcessGroupResult.SUCCESS
     }
 
-    fun markExited(process: Process, status: Int) {
+    fun markExited(process: Process, waitStatus: Int) {
         val context = processLock.withLock {
             if (process.state == ProcessState.EXITING || process.state == ProcessState.ZOMBIE) return
             process.state = ProcessState.EXITING
@@ -479,23 +600,112 @@ object ProcessManager {
         }
         process.fdTable.closeAll()
         context?.release()
-        processLock.withLock {
-            process.exitCode = status and 0xff
+        val parent = processLock.withLock {
             process.state = ProcessState.ZOMBIE
+            processes.firstOrNull { it.id == process.parentId }
         }
         process.completeVfork()
+        val target = parent ?: return
+        val termination = waitStatus and 0x7f
+        val signal = process.terminationSignal
+        if (signal == null) {
+            target.childEvents.publish(ChildWaitEvent(process, ChildEventKind.EXITED, waitStatus))
+            return
+        }
+        val childAction = if (signal == Signal.CHILD) {
+            target.signals.action(Signal.CHILD)
+        } else {
+            null
+        }
+        val autoReap = childAction?.let { action ->
+            action.isIgnored || action.has(SignalActionFlag.NO_CHILD_WAIT)
+        } == true
+        if (!autoReap) {
+            target.childEvents.publish(
+                ChildWaitEvent(process, ChildEventKind.EXITED, waitStatus),
+            )
+        }
+        if (childAction?.isIgnored != true) {
+            SignalRouter.sendProcess(
+                sender = null,
+                target = target,
+                info = SignalInfo(
+                    signal = signal,
+                    code = when {
+                        termination == 0 -> SignalInfo.CHILD_EXITED
+                        waitStatus and 0x80 != 0 -> SignalInfo.CHILD_DUMPED
+                        else -> SignalInfo.CHILD_KILLED
+                    },
+                    payload = SignalPayload.Child(
+                        pid = process.id,
+                        uid = process.ruid,
+                        status = if (termination == 0) waitStatus ushr 8 and 0xff else termination,
+                    ),
+                ),
+            )
+        }
+        if (autoReap && reapChild(target.id, process)) {
+            target.childEvents.notifyChange()
+        }
     }
 
+    internal fun markStopped(process: Process, signal: Signal) = publishChildState(
+        process = process,
+        kind = ChildEventKind.STOPPED,
+        waitStatus = signal.number shl 8 or 0x7f,
+        infoCode = SignalInfo.CHILD_STOPPED,
+        infoStatus = signal.number,
+    )
+
+    internal fun markContinued(process: Process) = publishChildState(
+        process = process,
+        kind = ChildEventKind.CONTINUED,
+        waitStatus = 0xffff,
+        infoCode = SignalInfo.CHILD_CONTINUED,
+        infoStatus = Signal.CONTINUE.number,
+    )
+
     fun reapChild(parentId: Int, child: Process): Boolean {
+        var parent: Process? = null
         val reaped = processLock.withLock {
-            child.parentId == parentId &&
-                    child.state == ProcessState.ZOMBIE &&
-                    processes.remove(child)
+            val removable = child.parentId == parentId &&
+                child.state == ProcessState.ZOMBIE && processes.remove(child)
+            if (removable) parent = processes.firstOrNull { it.id == parentId }
+            removable
         }
         if (reaped) {
+            parent?.childEvents?.discard(child)
             child.addressSpace.release()
         }
         return reaped
+    }
+
+    private fun publishChildState(
+        process: Process,
+        kind: ChildEventKind,
+        waitStatus: Int,
+        infoCode: Int,
+        infoStatus: Int,
+    ) {
+        val parent = processLock.withLock {
+            processes.firstOrNull { it.id == process.parentId }
+        } ?: return
+        parent.childEvents.publish(ChildWaitEvent(process, kind, waitStatus))
+        val action = parent.signals.action(Signal.CHILD)
+        if (action.isIgnored || action.has(SignalActionFlag.NO_CHILD_STOP)) return
+        SignalRouter.sendProcess(
+            sender = null,
+            target = parent,
+            info = SignalInfo(
+                signal = Signal.CHILD,
+                code = infoCode,
+                payload = SignalPayload.Child(
+                    pid = process.id,
+                    uid = process.ruid,
+                    status = infoStatus,
+                ),
+            ),
+        )
     }
 
     private fun allocateKernelStack(name: String, stackPages: ULong): KernelStack? {
@@ -526,6 +736,7 @@ object ProcessManager {
         parentId: Int = 0,
         inherit: Process? = null,
         vforkParent: Thread? = null,
+        terminationSignal: Signal? = Signal.CHILD,
     ): Process = Process(
         id = nextTaskId.fetchAndAdd(1),
         name = name,
@@ -534,6 +745,7 @@ object ProcessManager {
         context,
         parentId = parentId,
         startTimeTicks = TscClock.nanoTime() / NANOSECONDS_PER_USER_TICK,
+        terminationSignal = terminationSignal,
         vforkParent = vforkParent,
     ).also { created ->
         inherit?.let(created::inherit)
@@ -546,7 +758,7 @@ object ProcessManager {
         kernelStackPhysicalBase: ULong = 0uL,
         kernelStackPages: ULong = 0uL,
         kernelFsBase: ULong = 0uL,
-        signalMask: ULong = 0uL,
+        signals: ThreadSignalState? = null,
     ): Thread =
         Thread(
             id = if (process.threads.isEmpty()) process.id else nextTaskId.fetchAndAdd(1),
@@ -555,7 +767,7 @@ object ProcessManager {
             kernelStackPhysicalBase = kernelStackPhysicalBase,
             kernelStackPages = kernelStackPages,
             kernelFsBase = kernelFsBase,
-            signalMask = signalMask,
+            signals = signals ?: process.signals.newThread(),
         ).also { thread ->
             process.addThread(thread)
             threadTableLock.withLock { threadTable[thread.id] = thread }
