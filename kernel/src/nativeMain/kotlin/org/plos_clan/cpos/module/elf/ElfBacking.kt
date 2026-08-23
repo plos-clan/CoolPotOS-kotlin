@@ -1,6 +1,6 @@
 package org.plos_clan.cpos.module.elf
 
-import org.plos_clan.cpos.fs.OpenFileDescription
+import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.addressspace.FileRegionBacking
 import org.plos_clan.cpos.module.elf.ElfLayout.checkedAdd

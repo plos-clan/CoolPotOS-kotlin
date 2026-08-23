@@ -1,6 +1,6 @@
 package org.plos_clan.cpos.module.elf
 
-import org.plos_clan.cpos.fs.OpenFileDescription
+import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 
 internal enum class ElfObjectType {
     EXECUTABLE,

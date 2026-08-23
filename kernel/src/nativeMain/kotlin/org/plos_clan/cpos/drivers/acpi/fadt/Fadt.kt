@@ -1,6 +1,6 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.drivers.acpi
+package org.plos_clan.cpos.drivers.acpi.fadt
 
 import bridge.asm_pause
 import bridge.io_in16
@@ -9,6 +9,7 @@ import bridge.io_in8
 import bridge.io_out16
 import bridge.io_out32
 import bridge.io_out8
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.acpi.aml.Aml
 import org.plos_clan.cpos.drivers.acpi.aml.AmlInteger
 import org.plos_clan.cpos.drivers.acpi.aml.AmlPackage

@@ -1,12 +1,13 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.syscall
+package org.plos_clan.cpos.syscall.fs
 
 import kotlinx.cinterop.CPointer
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.plus
 import org.plos_clan.cpos.fs.IoResult
-import org.plos_clan.cpos.fs.OpenFileDescription
+import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.mem.IoBuffer
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource

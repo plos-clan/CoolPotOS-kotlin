@@ -2,6 +2,7 @@
 
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.utils.IrqSpinLock
 import kotlin.concurrent.atomics.AtomicReference
 

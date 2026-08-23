@@ -5,7 +5,7 @@ package org.plos_clan.cpos.syscall
 import KERNEL_NAME
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.TscClock
-import org.plos_clan.cpos.drivers.acpi.Fadt
+import org.plos_clan.cpos.drivers.acpi.fadt.Fadt
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.syscall.Syscall.errno

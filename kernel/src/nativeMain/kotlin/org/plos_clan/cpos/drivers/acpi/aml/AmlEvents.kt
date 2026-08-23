@@ -3,10 +3,11 @@
 package org.plos_clan.cpos.drivers.acpi.aml
 
 import org.plos_clan.cpos.coroutines.KernelEvent
-import org.plos_clan.cpos.drivers.acpi.Fadt
+import org.plos_clan.cpos.drivers.acpi.fadt.Fadt
 import org.plos_clan.cpos.drivers.acpi.apic.IoApic
-import org.plos_clan.cpos.drivers.acpi.readByte
-import org.plos_clan.cpos.drivers.acpi.writeByte
+import org.plos_clan.cpos.drivers.acpi.fadt.GenericAddressStructure
+import org.plos_clan.cpos.drivers.acpi.fadt.readByte
+import org.plos_clan.cpos.drivers.acpi.fadt.writeByte
 import org.plos_clan.cpos.fault.IRQ_BASE_VECTOR
 import org.plos_clan.cpos.fault.IRQ_LAST_DEVICE_VECTOR
 import org.plos_clan.cpos.fault.IrqController
@@ -166,7 +167,7 @@ object AmlEvents {
     }
 
     private fun processPm1Block(
-        block: org.plos_clan.cpos.drivers.acpi.GenericAddressStructure?,
+        block: GenericAddressStructure?,
         byteLength: UInt,
     ): UInt {
         if (block == null || byteLength < 2u || (byteLength and 1u) != 0u) {
@@ -189,7 +190,7 @@ object AmlEvents {
     }
 
     private fun configureFixedEvents(
-        block: org.plos_clan.cpos.drivers.acpi.GenericAddressStructure?,
+        block: GenericAddressStructure?,
         byteLength: UInt,
     ) {
         if (block == null || byteLength < 4u || (byteLength and 1u) != 0u) {
@@ -204,7 +205,7 @@ object AmlEvents {
     }
 
     private fun processGpeBlock(
-        block: org.plos_clan.cpos.drivers.acpi.GenericAddressStructure?,
+        block: GenericAddressStructure?,
         byteLength: UInt,
         base: UInt,
     ) {
@@ -251,7 +252,7 @@ object AmlEvents {
     }
 
     private fun enableGpeInBlock(
-        block: org.plos_clan.cpos.drivers.acpi.GenericAddressStructure?,
+        block: GenericAddressStructure?,
         byteLength: UInt,
         relativeNumber: UInt,
     ): Boolean {

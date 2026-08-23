@@ -3,7 +3,7 @@ package org.plos_clan.cpos.module.elf
 import org.plos_clan.cpos.fs.AccessMode
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.MountFlag
-import org.plos_clan.cpos.fs.OpenFileDescription
+import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.fs.OpenOptions
 import org.plos_clan.cpos.fs.VfsError
 import org.plos_clan.cpos.fs.VfsPathname

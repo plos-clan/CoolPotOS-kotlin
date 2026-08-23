@@ -1,7 +1,26 @@
 @file:OptIn(ExperimentalAtomicApi::class)
 
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.fs.AccessMode
+import org.plos_clan.cpos.fs.DirectoryEntry
+import org.plos_clan.cpos.fs.DiscardingOpenFileBackend
+import org.plos_clan.cpos.fs.FilePosition
+import org.plos_clan.cpos.fs.Inode
+import org.plos_clan.cpos.fs.InodeType
+import org.plos_clan.cpos.fs.IoEvent
+import org.plos_clan.cpos.fs.IoMode
+import org.plos_clan.cpos.fs.IoResult
+import org.plos_clan.cpos.fs.MountFlag
+import org.plos_clan.cpos.fs.OpenFileBackend
+import org.plos_clan.cpos.fs.OpenFlags
+import org.plos_clan.cpos.fs.OpenOptions
+import org.plos_clan.cpos.fs.PositionlessOpenFileBackend
+import org.plos_clan.cpos.fs.RegularFileBackend
+import org.plos_clan.cpos.fs.VfsError
+import org.plos_clan.cpos.fs.VfsPath
+import org.plos_clan.cpos.fs.VfsResult
+import org.plos_clan.cpos.fs.WaitableOpenFileBackend
 import org.plos_clan.cpos.mem.BufferDestination
 import org.plos_clan.cpos.mem.BufferSource
 import org.plos_clan.cpos.mem.PageCacheProvider

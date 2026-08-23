@@ -1,4 +1,4 @@
-package org.plos_clan.cpos.drivers.char
+package org.plos_clan.cpos.drivers.char.tty
 
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource

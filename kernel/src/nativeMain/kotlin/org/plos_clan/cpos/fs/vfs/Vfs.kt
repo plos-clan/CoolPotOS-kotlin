@@ -1,5 +1,7 @@
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.fs.vfs.OpenFileDescription
+
 class Vfs(maxSymlinkDepth: Int = 40) {
     private val paths = VfsPathResolver(maxSymlinkDepth)
     private val nodes = VfsNodeOperations(paths)

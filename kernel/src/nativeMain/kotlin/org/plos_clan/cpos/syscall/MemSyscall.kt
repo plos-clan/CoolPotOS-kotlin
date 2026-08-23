@@ -5,7 +5,7 @@ package org.plos_clan.cpos.syscall
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.InodeType
 import org.plos_clan.cpos.fs.MountFlag
-import org.plos_clan.cpos.fs.OpenFileDescription
+import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.addressspace.FileRegionBacking
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_ACCESS_MASK

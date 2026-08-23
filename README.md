@@ -17,6 +17,7 @@
 - VDSO
 - ACPI AML
 - devtmpfs & procfs & erofs rootfs
+- Signal Delivery and Handling
 - Linux programs binary compatible (glibc)
 - GC & Coroutine & runtime exception
 
@@ -67,8 +68,9 @@ You need to install:
 
 **Overridable environment variables:**
 
-The assignments below show the default values. Set an environment variable to
-override its value for a build.
+The assignments below show the default values where applicable. Optional
+variables are unset by default. Set an environment variable to override its
+value for a build.
 
 | Environment variable                              | Purpose                                |
 |---------------------------------------------------|----------------------------------------|
@@ -84,6 +86,15 @@ override its value for a build.
 | `USERLAND_IMAGE=docker.io/cachyos/cachyos:latest` | OCI image used to build the rootfs.    |
 | `QEMU_CPU_SET=0-7`                                | Host CPU set passed to `taskset`.      |
 | `QEMU_MEMORY=2g`                                  | Guest memory passed to QEMU.           |
+| `QEMU_ACPI_TABLE_DIR`                             | Directory of SSDTs injected into QEMU. |
+| `QEMU_ACPI_TABLES`                                | Comma-separated SSDTs to inject.       |
+| `ACPI_AML_TABLE_DIR`                              | Firmware tables used by AML tests.     |
+
+`QEMU_ACPI_TABLE_DIR` must contain files named `ssdtN.dat`. By default, all
+matching files are injected in numeric order; `QEMU_ACPI_TABLES` restricts the
+selection to names such as `ssdt3.dat,ssdt5.dat`. `ACPI_AML_TABLE_DIR` enables
+the full firmware regression in `nativeTest` and must contain `dsdt.dat` plus
+`ssdt1.dat` through `ssdt17.dat`.
 
 ## Kernel coroutines
 

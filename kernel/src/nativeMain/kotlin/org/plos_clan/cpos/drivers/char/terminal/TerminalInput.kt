@@ -1,8 +1,14 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.drivers.char
+package org.plos_clan.cpos.drivers.char.terminal
 
+import bridge.enable_interrupt
+import bridge.irq_restore
+import bridge.irq_save
+import bridge.wait_for_interrupt
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.TscClock
+import org.plos_clan.cpos.drivers.char.tty.TtySession
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
@@ -317,10 +323,10 @@ internal class TerminalInput(
 
     private fun waitForInterrupt() {
         Scheduler.yieldCurrent()
-        val flags = bridge.irq_save()
-        bridge.enable_interrupt()
-        bridge.wait_for_interrupt()
-        bridge.irq_restore(flags)
+        val flags = irq_save()
+        enable_interrupt()
+        wait_for_interrupt()
+        irq_restore(flags)
     }
 
     private fun interrupted(): Boolean =

@@ -9,11 +9,11 @@ import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.get
 import kotlinx.cinterop.pointed
-import org.plos_clan.cpos.drivers.char.TtyDevice
-import org.plos_clan.cpos.drivers.char.TtyDeviceType
-import org.plos_clan.cpos.drivers.char.TtyManager
-import org.plos_clan.cpos.drivers.char.TtyPhysicalDevice
-import org.plos_clan.cpos.drivers.char.TtySession
+import org.plos_clan.cpos.drivers.char.tty.TtyDevice
+import org.plos_clan.cpos.drivers.char.tty.TtyDeviceType
+import org.plos_clan.cpos.drivers.char.tty.TtyManager
+import org.plos_clan.cpos.drivers.char.tty.TtyPhysicalDevice
+import org.plos_clan.cpos.drivers.char.tty.TtySession
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory

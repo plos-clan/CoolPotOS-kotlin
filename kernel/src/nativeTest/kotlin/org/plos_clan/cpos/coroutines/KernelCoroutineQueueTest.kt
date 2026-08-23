@@ -12,9 +12,9 @@ class KernelCoroutineQueueTest {
     fun claimsImmediateTasksInFifoBatches() {
         val queue = KernelCoroutineQueue()
         val executed = mutableListOf<String>()
-        queue.enqueue(Runnable { executed += "first" })
-        queue.enqueue(Runnable { executed += "second" })
-        queue.enqueue(Runnable { executed += "third" })
+        queue.enqueue { executed += "first" }
+        queue.enqueue { executed += "second" }
+        queue.enqueue { executed += "third" }
 
         assertTrue(queue.hasImmediateWork())
         queue.claimReady(0uL, 2).forEach { it.run() }
@@ -30,9 +30,9 @@ class KernelCoroutineQueueTest {
     fun ordersDelayedTasksByDeadlineThenSubmission() {
         val queue = KernelCoroutineQueue()
         val executed = mutableListOf<String>()
-        val last = queue.scheduleAt(20uL, Runnable { executed += "last" })
-        val first = queue.scheduleAt(10uL, Runnable { executed += "first" })
-        val second = queue.scheduleAt(10uL, Runnable { executed += "second" })
+        val last = queue.scheduleAt(20uL) { executed += "last" }
+        val first = queue.scheduleAt(10uL) { executed += "first" }
+        val second = queue.scheduleAt(10uL) { executed += "second" }
 
         assertEquals(10uL, queue.nextDeadline())
         assertTrue(queue.claimReady(9uL, 3).isEmpty())
@@ -49,8 +49,8 @@ class KernelCoroutineQueueTest {
     fun skipsDisposedTasks() {
         val queue = KernelCoroutineQueue()
         val executed = mutableListOf<String>()
-        val discarded = queue.scheduleAt(10uL, Runnable { executed += "discarded" })
-        val retained = queue.scheduleAt(20uL, Runnable { executed += "retained" })
+        val discarded = queue.scheduleAt(10uL) { executed += "discarded" }
+        val retained = queue.scheduleAt(20uL) { executed += "retained" }
 
         assertTrue(queue.dispose(discarded))
         assertFalse(queue.dispose(discarded))

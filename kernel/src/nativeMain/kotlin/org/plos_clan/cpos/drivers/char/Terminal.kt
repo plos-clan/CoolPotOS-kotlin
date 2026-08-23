@@ -13,6 +13,13 @@ import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.set
 import kotlinx.cinterop.staticCFunction
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
+import org.plos_clan.cpos.drivers.char.terminal.TerminalInput
+import org.plos_clan.cpos.drivers.char.tty.IoctlConstants
+import org.plos_clan.cpos.drivers.char.tty.Termios
+import org.plos_clan.cpos.drivers.char.tty.Termios2
+import org.plos_clan.cpos.drivers.char.tty.TtySession
+import org.plos_clan.cpos.drivers.char.tty.TtySessionBackend
+import org.plos_clan.cpos.drivers.char.tty.WinSize
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory

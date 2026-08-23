@@ -10,6 +10,7 @@ import kotlinx.cinterop.pointed
 import kotlinx.cinterop.reinterpret
 import org.plos_clan.cpos.drivers.acpi.aml.Aml
 import org.plos_clan.cpos.drivers.acpi.apic.Apic
+import org.plos_clan.cpos.drivers.acpi.fadt.FadtParser
 import org.plos_clan.cpos.drivers.pcie.Pcie
 import org.plos_clan.cpos.drivers.pcie.PcieEcamRegion
 import org.plos_clan.cpos.mem.Hhdm

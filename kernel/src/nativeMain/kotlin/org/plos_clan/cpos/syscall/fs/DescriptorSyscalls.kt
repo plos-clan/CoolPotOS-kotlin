@@ -1,12 +1,14 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.syscall
+package org.plos_clan.cpos.syscall.fs
 
+import bridge.wait_for_interrupt
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.AccessMode
 import org.plos_clan.cpos.fs.InodeType
 import org.plos_clan.cpos.fs.OpenFlags
-import org.plos_clan.cpos.fs.SeekOrigin
+import org.plos_clan.cpos.fs.vfs.SeekOrigin
 import org.plos_clan.cpos.fs.VfsError
 import org.plos_clan.cpos.fs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
@@ -25,6 +27,7 @@ import org.plos_clan.cpos.syscall.FsConstants.POLL_FD_SIZE
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.SignalDelivery
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
+import org.plos_clan.cpos.syscall.TimeSpec
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
@@ -231,7 +234,7 @@ private fun waitForPoll(
                 }
             }
             Scheduler.yieldCurrent()
-            bridge.wait_for_interrupt()
+            wait_for_interrupt()
         }
     } finally {
         if (previousMask != null && !regs.signalFrameInstalled) {
@@ -298,7 +301,7 @@ internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
                 }
             }
             Scheduler.yieldCurrent()
-            bridge.wait_for_interrupt()
+            wait_for_interrupt()
         }
     } finally {
         if (previousMask != null && !regs.signalFrameInstalled) {

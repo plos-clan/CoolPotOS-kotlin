@@ -8,7 +8,7 @@ import org.plos_clan.cpos.drivers.FrameBuffer
 import org.plos_clan.cpos.drivers.MemoryDevice
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.acpi.Acpi
-import org.plos_clan.cpos.drivers.char.TtyManager
+import org.plos_clan.cpos.drivers.char.tty.TtyManager
 import org.plos_clan.cpos.drivers.usb.Usb
 import org.plos_clan.cpos.fault.ErrorHandler
 import org.plos_clan.cpos.fs.FileSystemManager

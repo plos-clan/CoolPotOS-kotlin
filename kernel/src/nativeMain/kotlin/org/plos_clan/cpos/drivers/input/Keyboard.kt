@@ -7,7 +7,7 @@ import org.plos_clan.cpos.drivers.DeviceRegistration
 import org.plos_clan.cpos.drivers.DeviceType
 import org.plos_clan.cpos.drivers.LinuxDeviceMajor
 import org.plos_clan.cpos.drivers.TscClock
-import org.plos_clan.cpos.drivers.char.TtyManager
+import org.plos_clan.cpos.drivers.char.tty.TtyManager
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 internal enum class KeyModifier(val mask: Int) {

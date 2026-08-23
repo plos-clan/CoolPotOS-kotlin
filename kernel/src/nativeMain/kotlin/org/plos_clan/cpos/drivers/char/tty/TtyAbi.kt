@@ -1,4 +1,4 @@
-package org.plos_clan.cpos.drivers.char
+package org.plos_clan.cpos.drivers.char.tty
 
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct

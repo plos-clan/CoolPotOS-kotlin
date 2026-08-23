@@ -1,6 +1,6 @@
 package org.plos_clan.cpos.module
 
-import org.plos_clan.cpos.drivers.char.TtyManager
+import org.plos_clan.cpos.drivers.char.tty.TtyManager
 import org.plos_clan.cpos.fs.AccessMode
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.OpenOptions

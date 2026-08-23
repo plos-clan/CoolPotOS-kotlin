@@ -1,4 +1,4 @@
-package org.plos_clan.cpos.drivers.char
+package org.plos_clan.cpos.drivers.char.tty
 
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceManager
@@ -6,6 +6,7 @@ import org.plos_clan.cpos.drivers.DeviceRegistration
 import org.plos_clan.cpos.drivers.DeviceType
 import org.plos_clan.cpos.drivers.LinuxDeviceMajor
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
+import org.plos_clan.cpos.drivers.char.TerminalSession
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Cmdline
 import org.plos_clan.cpos.utils.TermiosConstants
@@ -48,7 +49,7 @@ object TtyManager {
     private fun createDefaultTermios(): Termios {
         return Termios(
             TermiosConstants.BRKINT or TermiosConstants.ICRNL or
-                TermiosConstants.INPCK or TermiosConstants.ISTRIP or TermiosConstants.IXON,
+                    TermiosConstants.INPCK or TermiosConstants.ISTRIP or TermiosConstants.IXON,
             TermiosConstants.OPOST,
             TermiosConstants.CS8 or TermiosConstants.CREAD or TermiosConstants.CLOCAL,
             TermiosConstants.ECHO or TermiosConstants.ICANON or TermiosConstants.IEXTEN or TermiosConstants.ISIG,
