@@ -3,9 +3,9 @@
 package org.plos_clan.cpos.syscall
 
 import kotlinx.cinterop.ExperimentalForeignApi
-import org.plos_clan.cpos.fs.VfsResult
-import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.module.elf.ElfLoader
 import org.plos_clan.cpos.syscall.Syscall.copyWordToUser
 import org.plos_clan.cpos.syscall.Syscall.errno
@@ -17,6 +17,7 @@ import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.tasks.ResourceLimit
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.Scheduler
+import org.plos_clan.cpos.tasks.SignalStack
 import org.plos_clan.cpos.tasks.Thread
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
@@ -355,7 +356,7 @@ internal fun execve(regs: PtraceRegisters, process: Process): Long {
     process.installExecutable(executablePath, arguments.ifEmpty { listOf(executablePath) })
     process.fdTable.closeOnExec()
     process.signals.resetForExec()
-    ProcessManager.currentThread()?.signals?.replaceStack(org.plos_clan.cpos.tasks.SignalStack.DISABLED)
+    ProcessManager.currentThread()?.signals?.replaceStack(SignalStack.DISABLED)
 
     regs[PtraceRegisters.IDX_RIP] = image.entryPoint
     regs[PtraceRegisters.IDX_RSP] = image.stackPointer

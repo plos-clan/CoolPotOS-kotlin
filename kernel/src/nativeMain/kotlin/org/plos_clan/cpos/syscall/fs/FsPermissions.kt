@@ -1,6 +1,6 @@
-package org.plos_clan.cpos.syscall
+package org.plos_clan.cpos.syscall.fs
 
-import org.plos_clan.cpos.fs.InodeMetadata
+import org.plos_clan.cpos.fs.vfs.InodeMetadata
 import org.plos_clan.cpos.tasks.Process
 
 internal object FsPermissions {

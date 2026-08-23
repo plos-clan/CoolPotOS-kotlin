@@ -2,10 +2,11 @@
 
 package org.plos_clan.cpos.coroutines
 
-import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
+import org.plos_clan.cpos.utils.IrqSpinLock
 
 class KernelSemaphore(initialPermits: Int) {
     private val lock = IrqSpinLock()
@@ -27,7 +28,7 @@ class KernelSemaphore(initialPermits: Int) {
     }
 
     suspend fun acquire() {
-        suspendCoroutine { continuation ->
+        suspendCancellableCoroutine { continuation ->
             val acquireNow = lock.withLock {
                 if (permits > 0) {
                     permits--

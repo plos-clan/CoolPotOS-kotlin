@@ -1,12 +1,12 @@
-package org.plos_clan.cpos.syscall
+package org.plos_clan.cpos.syscall.fs
 
-import org.plos_clan.cpos.fs.FileSystemContext
 import org.plos_clan.cpos.fs.FileSystemManager
-import org.plos_clan.cpos.fs.VfsError
-import org.plos_clan.cpos.fs.VfsPath
-import org.plos_clan.cpos.fs.VfsPathname
-import org.plos_clan.cpos.fs.VfsResult
-import org.plos_clan.cpos.syscall.FsConstants.AT_FDCWD
+import org.plos_clan.cpos.fs.vfs.FileSystemContext
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsPath
+import org.plos_clan.cpos.fs.vfs.VfsPathname
+import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_FDCWD
 import org.plos_clan.cpos.tasks.Process
 
 internal object FsPathResolver {

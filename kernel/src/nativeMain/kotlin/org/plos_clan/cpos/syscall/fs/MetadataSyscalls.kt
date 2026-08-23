@@ -1,38 +1,39 @@
 @file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.syscall
+package org.plos_clan.cpos.syscall.fs
 
-import org.plos_clan.cpos.fs.AccessMode
-import org.plos_clan.cpos.fs.FileMode
 import org.plos_clan.cpos.fs.FileSystemManager
-import org.plos_clan.cpos.fs.Inode
-import org.plos_clan.cpos.fs.InodeTimestampSet
-import org.plos_clan.cpos.fs.InodeType
-import org.plos_clan.cpos.fs.Mount
-import org.plos_clan.cpos.fs.SymlinkBackend
-import org.plos_clan.cpos.fs.VfsError
-import org.plos_clan.cpos.fs.VfsPath
-import org.plos_clan.cpos.fs.VfsPathname
-import org.plos_clan.cpos.fs.VfsResult
-import org.plos_clan.cpos.fs.VfsTimestamp
+import org.plos_clan.cpos.fs.vfs.AccessMode
+import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.InodeTimestampSet
+import org.plos_clan.cpos.fs.vfs.InodeType
+import org.plos_clan.cpos.fs.vfs.Mount
+import org.plos_clan.cpos.fs.vfs.SymlinkBackend
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsPath
+import org.plos_clan.cpos.fs.vfs.VfsPathname
+import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.fs.vfs.VfsTimestamp
 import org.plos_clan.cpos.mem.UserMemory
-import org.plos_clan.cpos.syscall.FsConstants.AT_EACCESS
-import org.plos_clan.cpos.syscall.FsConstants.AT_EMPTY_PATH
-import org.plos_clan.cpos.syscall.FsConstants.AT_FDCWD
-import org.plos_clan.cpos.syscall.FsConstants.AT_NO_AUTOMOUNT
-import org.plos_clan.cpos.syscall.FsConstants.AT_STATX_FORCE_SYNC
-import org.plos_clan.cpos.syscall.FsConstants.AT_STATX_SYNC_TYPE
-import org.plos_clan.cpos.syscall.FsConstants.AT_SYMLINK_NOFOLLOW
-import org.plos_clan.cpos.syscall.FsConstants.STATX_RESERVED
-import org.plos_clan.cpos.syscall.FsConstants.S_IALLUGO
-import org.plos_clan.cpos.syscall.FsConstants.S_ISGID
-import org.plos_clan.cpos.syscall.FsConstants.UTIME_NOW
-import org.plos_clan.cpos.syscall.FsConstants.UTIME_OMIT
-import org.plos_clan.cpos.syscall.FsPathResolver.resolveAt
-import org.plos_clan.cpos.syscall.FsPermissions.mayWrite
 import org.plos_clan.cpos.syscall.Syscall.copyPath
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
+import org.plos_clan.cpos.syscall.TimeSpec
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_EACCESS
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_EMPTY_PATH
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_FDCWD
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_NO_AUTOMOUNT
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_STATX_FORCE_SYNC
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_STATX_SYNC_TYPE
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_SYMLINK_NOFOLLOW
+import org.plos_clan.cpos.syscall.fs.FsConstants.STATX_RESERVED
+import org.plos_clan.cpos.syscall.fs.FsConstants.S_IALLUGO
+import org.plos_clan.cpos.syscall.fs.FsConstants.S_ISGID
+import org.plos_clan.cpos.syscall.fs.FsConstants.UTIME_NOW
+import org.plos_clan.cpos.syscall.fs.FsConstants.UTIME_OMIT
+import org.plos_clan.cpos.syscall.fs.FsPathResolver.resolveAt
+import org.plos_clan.cpos.syscall.fs.FsPermissions.mayWrite
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
@@ -330,8 +331,7 @@ private fun timestampValue(
     input: LittleEndianBuffer,
     offset: Int,
 ): VfsResult<InodeTimestampSet.Value> {
-    val nanoseconds = input.readU64(offset + Long.SIZE_BYTES).toLong()
-    val value = when (nanoseconds) {
+    val value = when (val nanoseconds = input.readU64(offset + Long.SIZE_BYTES).toLong()) {
         UTIME_NOW -> InodeTimestampSet.Value.Now
         UTIME_OMIT -> InodeTimestampSet.Value.Omit
         in 0 until VfsTimestamp.NANOSECONDS_PER_SECOND.toLong() -> InodeTimestampSet.Value.Exact(

@@ -1,9 +1,9 @@
 package org.plos_clan.cpos.fs.procfs
 
 import org.plos_clan.cpos.fs.FileSystemManager
-import org.plos_clan.cpos.fs.MountFlag
-import org.plos_clan.cpos.fs.MountFlags
-import org.plos_clan.cpos.fs.VfsResult
+import org.plos_clan.cpos.fs.vfs.MountFlag
+import org.plos_clan.cpos.fs.vfs.MountFlags
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.tasks.Process
 
 object FilesystemsFile : ProcFSRender {

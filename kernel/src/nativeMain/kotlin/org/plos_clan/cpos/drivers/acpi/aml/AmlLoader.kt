@@ -3,7 +3,37 @@
 package org.plos_clan.cpos.drivers.acpi.aml
 
 import org.plos_clan.cpos.drivers.acpi.AcpiTable
-import org.plos_clan.cpos.drivers.acpi.aml.evaluator.*
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_ALIAS_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_BREAK_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_BUFFER_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_BYTE_PREFIX
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_CONTINUE_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_DWORD_PREFIX
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_ELSE_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_EXTERNAL_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_EXT_BANK_FIELD_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_EXT_DEVICE_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_EXT_EVENT_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_EXT_FIELD_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_EXT_INDEX_FIELD_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_EXT_MUTEX_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_EXT_OPERATION_REGION_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_EXT_OP_PREFIX
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_EXT_POWER_RESOURCE_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_EXT_PROCESSOR_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_EXT_THERMAL_ZONE_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_IF_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_METHOD_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_NAME_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_NOOP_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_PACKAGE_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_QWORD_PREFIX
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_RETURN_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_SCOPE_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_STRING_PREFIX
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_VAR_PACKAGE_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_WHILE_OP
+import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_WORD_PREFIX
 
 private const val ACPI_SDT_HEADER_LENGTH = 36
 private const val MAX_AML_STATIC_BUFFER_SIZE = 16 * 1024 * 1024

@@ -2,24 +2,25 @@
 
 package org.plos_clan.cpos.tasks
 
-import kotlinx.cinterop.addressOf
-import kotlinx.cinterop.usePinned
-import org.plos_clan.cpos.drivers.TscClock
-import org.plos_clan.cpos.fs.FileDescriptorTable
-import org.plos_clan.cpos.fs.FileSystemContext
-import org.plos_clan.cpos.fs.FileSystemManager
-import org.plos_clan.cpos.mem.addressspace.AddressSpace
-import org.plos_clan.cpos.mem.BuddyFrameAllocator
-import org.plos_clan.cpos.mem.Hhdm
-import org.plos_clan.cpos.mem.INVALID_FRAME
-import org.plos_clan.cpos.mem.page.KernelPageDirectory
-import org.plos_clan.cpos.utils.IrqSpinLock
-import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
-import org.plos_clan.cpos.utils.alignDown
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import kotlinx.cinterop.addressOf
+import kotlinx.cinterop.usePinned
+import org.plos_clan.cpos.drivers.TscClock
+import org.plos_clan.cpos.fs.FileDescriptorTable
+import org.plos_clan.cpos.fs.FileSystemManager
+import org.plos_clan.cpos.fs.vfs.FileSystemContext
+import org.plos_clan.cpos.mem.BuddyFrameAllocator
+import org.plos_clan.cpos.mem.Hhdm
+import org.plos_clan.cpos.mem.INVALID_FRAME
+import org.plos_clan.cpos.mem.addressspace.AddressSpace
+import org.plos_clan.cpos.mem.page.KernelPageDirectory
+import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
+import org.plos_clan.cpos.utils.PtraceRegisters
+import org.plos_clan.cpos.utils.alignDown
 
 private const val DEFAULT_THREAD_STACK_PAGES = 64uL
 
@@ -218,7 +219,7 @@ class Thread internal constructor(
         fsBase: ULong = 0uL,
     ) {
         require(!process.isKernelProcess) { "Kernel process cannot own a user context" }
-        require(registers.size == org.plos_clan.cpos.utils.PtraceRegisters.REGISTER_COUNT)
+        require(registers.size == PtraceRegisters.REGISTER_COUNT)
         registers.usePinned { snapshot ->
             bridge.fast_handoff_init_user_registers(
                 nativeContext,

@@ -1,4 +1,4 @@
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.vfs
 
 import org.plos_clan.cpos.drivers.TscClock
 

@@ -1,6 +1,6 @@
 @file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.mem
+package org.plos_clan.cpos.mem.page
 
 import bridge.invlpg
 import bridge.read_cr3
@@ -8,10 +8,16 @@ import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set
+import org.plos_clan.cpos.mem.BuddyFrameAllocator
+import org.plos_clan.cpos.mem.INVALID_FRAME
 import org.plos_clan.cpos.mem.addressspace.MemoryRegion
-import org.plos_clan.cpos.mem.page.PageTableAllocation
-import org.plos_clan.cpos.mem.page.UserFrameReferences
-import org.plos_clan.cpos.utils.*
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
+import org.plos_clan.cpos.utils.PTE_COUNT
+import org.plos_clan.cpos.utils.clear
+import org.plos_clan.cpos.utils.hex
+import org.plos_clan.cpos.utils.isPageAligned
+import org.plos_clan.cpos.utils.toVirtualPointer
+
 internal const val PTE_PRESENT = 0x001uL
 internal const val PTE_WRITABLE = 0x002uL
 internal const val PTE_USER = 0x004uL

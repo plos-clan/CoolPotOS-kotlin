@@ -1,26 +1,26 @@
 @file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.syscall
+package org.plos_clan.cpos.syscall.fs
 
-import org.plos_clan.cpos.fs.AccessMode
-import org.plos_clan.cpos.fs.EXTENDED_ATTRIBUTE_VALUE_MAX
-import org.plos_clan.cpos.fs.ExtendedAttributeMode
-import org.plos_clan.cpos.fs.ExtendedAttributeName
 import org.plos_clan.cpos.fs.FileSystemManager
-import org.plos_clan.cpos.fs.Inode
-import org.plos_clan.cpos.fs.VfsError
-import org.plos_clan.cpos.fs.VfsPath
-import org.plos_clan.cpos.fs.VfsPathname
-import org.plos_clan.cpos.fs.VfsResult
+import org.plos_clan.cpos.fs.vfs.AccessMode
+import org.plos_clan.cpos.fs.vfs.EXTENDED_ATTRIBUTE_VALUE_MAX
+import org.plos_clan.cpos.fs.vfs.ExtendedAttributeMode
+import org.plos_clan.cpos.fs.vfs.ExtendedAttributeName
+import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsPath
+import org.plos_clan.cpos.fs.vfs.VfsPathname
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
-import org.plos_clan.cpos.syscall.FsConstants.AT_FDCWD
-import org.plos_clan.cpos.syscall.FsConstants.XATTR_CREATE
-import org.plos_clan.cpos.syscall.FsConstants.XATTR_REPLACE
-import org.plos_clan.cpos.syscall.FsPathResolver.resolveAt
-import org.plos_clan.cpos.syscall.FsPermissions.mayWrite
 import org.plos_clan.cpos.syscall.Syscall.copyPath
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_FDCWD
+import org.plos_clan.cpos.syscall.fs.FsConstants.XATTR_CREATE
+import org.plos_clan.cpos.syscall.fs.FsConstants.XATTR_REPLACE
+import org.plos_clan.cpos.syscall.fs.FsPathResolver.resolveAt
+import org.plos_clan.cpos.syscall.fs.FsPermissions.mayWrite
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters

@@ -1,5 +1,24 @@
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.tmpfs
 
+import org.plos_clan.cpos.fs.vfs.DirectoryBackend
+import org.plos_clan.cpos.fs.vfs.DirectoryEntry
+import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.FilePosition
+import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.InodeBackend
+import org.plos_clan.cpos.fs.vfs.InodeMetadata
+import org.plos_clan.cpos.fs.vfs.InodeTimestampEvent
+import org.plos_clan.cpos.fs.vfs.InodeType
+import org.plos_clan.cpos.fs.vfs.MutableInodeBackend
+import org.plos_clan.cpos.fs.vfs.NodeCreation
+import org.plos_clan.cpos.fs.vfs.NodeKind
+import org.plos_clan.cpos.fs.vfs.OpenFileBackend
+import org.plos_clan.cpos.fs.vfs.OpenOptions
+import org.plos_clan.cpos.fs.vfs.RemoveMode
+import org.plos_clan.cpos.fs.vfs.RenameMode
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 internal class TmpfsDirectory(

@@ -2,23 +2,89 @@
 
 package org.plos_clan.cpos.syscall
 
+import kotlin.experimental.ExperimentalNativeApi
 import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.reinterpret
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.module.Vdso
+import org.plos_clan.cpos.syscall.fs.access
+import org.plos_clan.cpos.syscall.fs.chdir
+import org.plos_clan.cpos.syscall.fs.chmod
+import org.plos_clan.cpos.syscall.fs.chown
+import org.plos_clan.cpos.syscall.fs.close
 import org.plos_clan.cpos.syscall.fs.dup
 import org.plos_clan.cpos.syscall.fs.dup2
+import org.plos_clan.cpos.syscall.fs.faccessAt
+import org.plos_clan.cpos.syscall.fs.faccessAt2
 import org.plos_clan.cpos.syscall.fs.fadvise64
+import org.plos_clan.cpos.syscall.fs.fallocate
+import org.plos_clan.cpos.syscall.fs.fchdir
+import org.plos_clan.cpos.syscall.fs.fchmod
+import org.plos_clan.cpos.syscall.fs.fchmodAt
+import org.plos_clan.cpos.syscall.fs.fchmodAt2
+import org.plos_clan.cpos.syscall.fs.fchown
+import org.plos_clan.cpos.syscall.fs.fchownAt
 import org.plos_clan.cpos.syscall.fs.fcntl
+import org.plos_clan.cpos.syscall.fs.fdatasync
+import org.plos_clan.cpos.syscall.fs.fgetxattr
+import org.plos_clan.cpos.syscall.fs.flistxattr
+import org.plos_clan.cpos.syscall.fs.fremovexattr
+import org.plos_clan.cpos.syscall.fs.fsetxattr
+import org.plos_clan.cpos.syscall.fs.fstat
+import org.plos_clan.cpos.syscall.fs.fstatfs
+import org.plos_clan.cpos.syscall.fs.fsync
+import org.plos_clan.cpos.syscall.fs.ftruncate
+import org.plos_clan.cpos.syscall.fs.getCwd
+import org.plos_clan.cpos.syscall.fs.getdents64
+import org.plos_clan.cpos.syscall.fs.getxattr
+import org.plos_clan.cpos.syscall.fs.ioctl
+import org.plos_clan.cpos.syscall.fs.lchown
+import org.plos_clan.cpos.syscall.fs.lgetxattr
+import org.plos_clan.cpos.syscall.fs.link
+import org.plos_clan.cpos.syscall.fs.linkAt
+import org.plos_clan.cpos.syscall.fs.listxattr
+import org.plos_clan.cpos.syscall.fs.llistxattr
+import org.plos_clan.cpos.syscall.fs.lremovexattr
 import org.plos_clan.cpos.syscall.fs.lseek
+import org.plos_clan.cpos.syscall.fs.lsetxattr
+import org.plos_clan.cpos.syscall.fs.lstat
+import org.plos_clan.cpos.syscall.fs.mkdir
+import org.plos_clan.cpos.syscall.fs.mkdirAt
+import org.plos_clan.cpos.syscall.fs.mknod
+import org.plos_clan.cpos.syscall.fs.mknodAt
+import org.plos_clan.cpos.syscall.fs.mount
+import org.plos_clan.cpos.syscall.fs.newFstatAt
+import org.plos_clan.cpos.syscall.fs.open
+import org.plos_clan.cpos.syscall.fs.openAt
+import org.plos_clan.cpos.syscall.fs.pipe
+import org.plos_clan.cpos.syscall.fs.pipe2
 import org.plos_clan.cpos.syscall.fs.poll
 import org.plos_clan.cpos.syscall.fs.ppoll
 import org.plos_clan.cpos.syscall.fs.pread64
 import org.plos_clan.cpos.syscall.fs.pselect6
 import org.plos_clan.cpos.syscall.fs.pwrite64
 import org.plos_clan.cpos.syscall.fs.read
+import org.plos_clan.cpos.syscall.fs.readlink
+import org.plos_clan.cpos.syscall.fs.readlinkAt
 import org.plos_clan.cpos.syscall.fs.readv
+import org.plos_clan.cpos.syscall.fs.removexattr
+import org.plos_clan.cpos.syscall.fs.rename
+import org.plos_clan.cpos.syscall.fs.renameAt
+import org.plos_clan.cpos.syscall.fs.renameAt2
+import org.plos_clan.cpos.syscall.fs.rmdir
+import org.plos_clan.cpos.syscall.fs.setxattr
+import org.plos_clan.cpos.syscall.fs.stat
+import org.plos_clan.cpos.syscall.fs.statfs
+import org.plos_clan.cpos.syscall.fs.statx
+import org.plos_clan.cpos.syscall.fs.symlink
+import org.plos_clan.cpos.syscall.fs.symlinkAt
+import org.plos_clan.cpos.syscall.fs.truncate
+import org.plos_clan.cpos.syscall.fs.umask
+import org.plos_clan.cpos.syscall.fs.umount2
+import org.plos_clan.cpos.syscall.fs.unlink
+import org.plos_clan.cpos.syscall.fs.unlinkAt
+import org.plos_clan.cpos.syscall.fs.utimensAt
 import org.plos_clan.cpos.syscall.fs.write
 import org.plos_clan.cpos.syscall.fs.writev
 import org.plos_clan.cpos.tasks.Process
@@ -26,7 +92,6 @@ import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.TaskState
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
-import kotlin.experimental.ExperimentalNativeApi
 
 private const val MSR_EFER = 0xC0000080U // EFER MSR寄存器
 private const val MSR_STAR = 0xC0000081U // STAR MSR寄存器
@@ -76,6 +141,21 @@ private enum class LinuxSyscall(
     PAUSE(34, SignalSyscalls::pause),
     NANO_SLEEP(35, ::nanoSleep),
     GETPID(39, ::getPid),
+    SOCKET(41, SocketSyscalls::socket),
+    CONNECT(42, SocketSyscalls::connect, restartable = true),
+    ACCEPT(43, SocketSyscalls::accept, restartable = true),
+    SENDTO(44, SocketSyscalls::sendto, restartable = true),
+    RECVFROM(45, SocketSyscalls::recvfrom, restartable = true),
+    SENDMSG(46, SocketSyscalls::sendmsg, restartable = true),
+    RECVMSG(47, SocketSyscalls::recvmsg, restartable = true),
+    SHUTDOWN(48, SocketSyscalls::shutdown),
+    BIND(49, SocketSyscalls::bind),
+    LISTEN(50, SocketSyscalls::listen),
+    GETSOCKNAME(51, SocketSyscalls::getsockname),
+    GETPEERNAME(52, SocketSyscalls::getpeername),
+    SOCKETPAIR(53, SocketSyscalls::socketpair),
+    SETSOCKOPT(54, SocketSyscalls::setsockopt),
+    GETSOCKOPT(55, SocketSyscalls::getsockopt),
     CLONE(56, ::clone),
     EXECVE(59, ::execve),
     EXIT(60, ::exit),
@@ -172,9 +252,12 @@ private enum class LinuxSyscall(
     SET_ROBUST_LIST(273, ::setRobustList),
     UTIMENSAT(280, ::utimensAt),
     FALLOCATE(285, ::fallocate),
+    ACCEPT4(288, SocketSyscalls::accept4, restartable = true),
     PIPE2(293, ::pipe2),
     RT_TGSIGQUEUEINFO(297, SignalSyscalls::rtTgsigqueueinfo),
+    RECVMMSG(299, SocketSyscalls::recvmmsg, restartable = true),
     PRLIMIT64(302, ::prlimit64),
+    SENDMMSG(307, SocketSyscalls::sendmmsg, restartable = true),
     GETCPU(309, ::getCPU),
     RENAMEAT2(316, ::renameAt2),
     GETRANDOM(318, ::getRandom, restartable = true),

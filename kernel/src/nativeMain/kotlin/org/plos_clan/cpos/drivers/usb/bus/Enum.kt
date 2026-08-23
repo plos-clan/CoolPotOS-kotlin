@@ -128,7 +128,7 @@ suspend fun UsbDevice.enumerate(): Unit? {
         ) ?: return null
 
         println("Parsing config tree (len: $totalLength)")
-        parseConfigTree(configBuffer.view<UByteVar>(), totalLength)
+        parseConfigTree(configBuffer.view(), totalLength)
 
         val endpoints = mutableListOf<UsbEndpoint>()
         for (iface in interfaces) {

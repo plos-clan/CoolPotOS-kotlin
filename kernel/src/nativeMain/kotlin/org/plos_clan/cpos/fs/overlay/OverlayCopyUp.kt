@@ -1,5 +1,21 @@
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.overlay
 
+import org.plos_clan.cpos.fs.vfs.AccessMode
+import org.plos_clan.cpos.fs.vfs.DirectoryBackend
+import org.plos_clan.cpos.fs.vfs.ExtendedAttributeMode
+import org.plos_clan.cpos.fs.vfs.ExtendedAttributeName
+import org.plos_clan.cpos.fs.vfs.FilePosition
+import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.InodeTimestampEvent
+import org.plos_clan.cpos.fs.vfs.InodeType
+import org.plos_clan.cpos.fs.vfs.NodeCreation
+import org.plos_clan.cpos.fs.vfs.NodeKind
+import org.plos_clan.cpos.fs.vfs.OpenOptions
+import org.plos_clan.cpos.fs.vfs.RemoveMode
+import org.plos_clan.cpos.fs.vfs.SymlinkBackend
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsPath
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 
 internal object OverlayCopyUp {
@@ -10,14 +26,14 @@ internal object OverlayCopyUp {
         val name = location.name ?: return false
         val upperParent = ensureUpper(parent) ?: return false
         val parentInode = upperParent.inode ?: return false
-        val parentBackend = parentInode.backend as? org.plos_clan.cpos.fs.DirectoryBackend ?: return false
+        val parentBackend = parentInode.backend as? DirectoryBackend ?: return false
         val lowerInode = lower.inode ?: return false
         val metadata = lowerInode.metadata()
         val kind = when (lowerInode.type) {
             InodeType.REGULAR -> NodeKind.Regular
             InodeType.DIRECTORY -> NodeKind.Directory
             InodeType.SYMLINK -> {
-                val target = (lowerInode.backend as? org.plos_clan.cpos.fs.SymlinkBackend)?.readLink(lowerInode)
+                val target = (lowerInode.backend as? SymlinkBackend)?.readLink(lowerInode)
                     ?: return false
                 when (target) {
                     is VfsResult.Ok -> NodeKind.SymbolicLink(target.value)
@@ -114,7 +130,7 @@ internal object OverlayCopyUp {
             val transferBuffer = ByteArrayBuffer(buffer)
             val destinationBuffer = checkNotNull(transferBuffer.prepareWrite(0, buffer.size))
             val sourceBuffer = checkNotNull(transferBuffer.prepareRead(0, buffer.size))
-            var position = FilePosition()
+            val position = FilePosition()
             var copied = 0uL
             while (copied < size) {
                 val count = minOf(buffer.size.toULong(), size - copied).toInt()
@@ -143,7 +159,7 @@ internal object OverlayCopyUp {
         val parent = location.parent ?: return null
         val upperParent = ensureUpper(parent) ?: return null
         val parentInode = upperParent.inode ?: return null
-        val backend = parentInode.backend as? org.plos_clan.cpos.fs.DirectoryBackend ?: return null
+        val backend = parentInode.backend as? DirectoryBackend ?: return null
         val lowerInode = location.lower?.inode ?: return null
         val name = location.name ?: return null
         val metadata = lowerInode.metadata()

@@ -6,6 +6,7 @@ import kotlinx.benchmark.Scope
 import kotlinx.benchmark.Setup
 import kotlinx.benchmark.State
 import kotlinx.benchmark.TearDown
+import org.plos_clan.cpos.fs.vfs.ByteCircularBuffer
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.MappedUserMemory
 import org.plos_clan.cpos.mem.PreparedBufferDestination
@@ -16,13 +17,13 @@ class PipeBufferBenchmark {
     @Param("512", "4096", "8192", "65536")
     var byteCount = 0
 
-    private lateinit var buffer: PipeBuffer
+    private lateinit var buffer: ByteCircularBuffer
     private var source: PreparedBufferSource? = null
     private var destination: PreparedBufferDestination? = null
 
     @Setup
     fun prepare() {
-        buffer = PipeBuffer(64 * 1024)
+        buffer = ByteCircularBuffer(64 * 1024)
         source = ByteArrayBuffer(ByteArray(byteCount) { it.toByte() })
             .prepareRead(0, byteCount)
         destination = ByteArrayBuffer(ByteArray(byteCount))
@@ -44,12 +45,12 @@ class PipeTransferBenchmark {
         const val READ_BYTES = 512
     }
 
-    private lateinit var buffer: PipeBuffer
+    private lateinit var buffer: ByteCircularBuffer
     private lateinit var memory: MappedUserMemory
 
     @Setup
     fun prepare() {
-        buffer = PipeBuffer(PIPE_CAPACITY_BYTES)
+        buffer = ByteCircularBuffer(PIPE_CAPACITY_BYTES)
         memory = MappedUserMemory(TRANSFER_BYTES)
     }
 

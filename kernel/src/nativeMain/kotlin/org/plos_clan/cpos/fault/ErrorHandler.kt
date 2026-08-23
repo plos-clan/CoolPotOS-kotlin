@@ -11,8 +11,8 @@ import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.staticCFunction
-import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.mem.addressspace.PageFaultResult
+import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.syscall.SignalGateway
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.SMProcessor
@@ -143,7 +143,9 @@ private fun haltOnFault(
     name: String,
 ) {
     printFaultContext(name, frame, errorCode, interruptedRbp)
-    while (true) {}
+    while (true) {
+        bridge.wait_for_interrupt()
+    }
 }
 
 private fun redirectUserSignal(

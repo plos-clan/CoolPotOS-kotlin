@@ -1,14 +1,14 @@
 @file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.syscall
+package org.plos_clan.cpos.syscall.fs
 
-import org.plos_clan.cpos.fs.VfsResult
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
-import org.plos_clan.cpos.syscall.FsConstants.DIRENT64_MIN_SIZE
-import org.plos_clan.cpos.syscall.FsConstants.IO_CHUNK_SIZE
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.syscall.Syscall.partialOrError
+import org.plos_clan.cpos.syscall.fs.FsConstants.DIRENT64_MIN_SIZE
+import org.plos_clan.cpos.syscall.fs.FsConstants.IO_CHUNK_SIZE
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters

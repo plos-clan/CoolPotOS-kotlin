@@ -2,13 +2,13 @@
 
 package org.plos_clan.cpos.module
 
+import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_WRITABLE
 import org.plos_clan.cpos.mem.addressspace.MemoryRegion
 import org.plos_clan.cpos.mem.addressspace.MemoryRegionType
-import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
-import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.module.elf.ElfInterpreterLoadResult
 import org.plos_clan.cpos.module.elf.ElfLoadResult
 import org.plos_clan.cpos.tasks.Process

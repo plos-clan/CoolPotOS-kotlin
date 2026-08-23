@@ -1,11 +1,11 @@
 package org.plos_clan.cpos.syscall
 
-import org.plos_clan.cpos.utils.LittleEndianBuffer
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.plos_clan.cpos.utils.LittleEndianBuffer
 
 class TimeSpecTest {
     @Test

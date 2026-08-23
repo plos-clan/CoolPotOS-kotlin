@@ -1,5 +1,26 @@
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.erofs
 
+import org.plos_clan.cpos.fs.vfs.CachedFileBackend
+import org.plos_clan.cpos.fs.vfs.DirectoryBackend
+import org.plos_clan.cpos.fs.vfs.DirectoryEntry
+import org.plos_clan.cpos.fs.vfs.FilePosition
+import org.plos_clan.cpos.fs.vfs.FileSystemOptions
+import org.plos_clan.cpos.fs.vfs.FileSystemType
+import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.InodeId
+import org.plos_clan.cpos.fs.vfs.InodeMetadata
+import org.plos_clan.cpos.fs.vfs.InodeTimestampUpdate
+import org.plos_clan.cpos.fs.vfs.InodeType
+import org.plos_clan.cpos.fs.vfs.OpenFileBackend
+import org.plos_clan.cpos.fs.vfs.OpenOptions
+import org.plos_clan.cpos.fs.vfs.RegularFileBackend
+import org.plos_clan.cpos.fs.vfs.SuperBlock
+import org.plos_clan.cpos.fs.vfs.SuperBlockBackend
+import org.plos_clan.cpos.fs.vfs.SymlinkBackend
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsPathname
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.module.ModuleData
 import org.plos_clan.cpos.utils.IrqSpinLock
@@ -54,9 +75,9 @@ private class ErofsInstance private constructor(
         inodeLock.withLock { inodeCache[nid] }?.let { return it }
         val node = readNode(nid) ?: return null
         val backend = when (node) {
-            is DirectoryNode -> DirectoryBackend(this, superBlock, node)
+            is DirectoryNode -> ErofsDirectoryBackend(this, superBlock, node)
             is FileNode -> RegularBackend(this, node)
-            is SymlinkNode -> SymlinkBackend(node.target)
+            is SymlinkNode -> ErofsSymlinkBackend(node.target)
         }
         val candidate = Inode(InodeId(nid), superBlock, backend, node.metadata)
         return inodeLock.withLock {
@@ -187,11 +208,11 @@ private class ErofsInstance private constructor(
         }
     }
 
-    private class DirectoryBackend(
+    private class ErofsDirectoryBackend(
         private val instance: ErofsInstance,
         private val superBlock: SuperBlock,
         private val node: DirectoryNode,
-    ) : org.plos_clan.cpos.fs.DirectoryBackend {
+    ) : DirectoryBackend {
         override val type: InodeType = InodeType.DIRECTORY
 
         override fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?> {
@@ -244,9 +265,9 @@ private class ErofsInstance private constructor(
         }
     }
 
-    private class SymlinkBackend(
+    private class ErofsSymlinkBackend(
         private val target: VfsPathname,
-    ) : org.plos_clan.cpos.fs.SymlinkBackend {
+    ) : SymlinkBackend {
         override val type: InodeType = InodeType.SYMLINK
         override fun readLink(inode: Inode): VfsResult<VfsPathname> = VfsResult.Ok(target)
         override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =

@@ -1,5 +1,30 @@
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.overlay
 
+import org.plos_clan.cpos.fs.vfs.DirectoryBackend
+import org.plos_clan.cpos.fs.vfs.DirectoryEntry
+import org.plos_clan.cpos.fs.vfs.ExtendedAttributeMode
+import org.plos_clan.cpos.fs.vfs.ExtendedAttributeName
+import org.plos_clan.cpos.fs.vfs.FileAllocationMode
+import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.FilePosition
+import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.InodeBackend
+import org.plos_clan.cpos.fs.vfs.InodeTimestampEvent
+import org.plos_clan.cpos.fs.vfs.InodeType
+import org.plos_clan.cpos.fs.vfs.IoResult
+import org.plos_clan.cpos.fs.vfs.NodeCreation
+import org.plos_clan.cpos.fs.vfs.OpenFileBackend
+import org.plos_clan.cpos.fs.vfs.OpenOptions
+import org.plos_clan.cpos.fs.vfs.RegularFileBackend
+import org.plos_clan.cpos.fs.vfs.RemoveMode
+import org.plos_clan.cpos.fs.vfs.RenameMode
+import org.plos_clan.cpos.fs.vfs.SuperBlock
+import org.plos_clan.cpos.fs.vfs.SymlinkBackend
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsPath
+import org.plos_clan.cpos.fs.vfs.VfsPathname
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PageCacheProvider
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
@@ -7,10 +32,14 @@ import org.plos_clan.cpos.mem.PreparedBufferSource
 internal class OverlayLocation(
     val lower: VfsPath?,
     var upper: VfsPath?,
-    val parent: OverlayLocation?,
-    val name: VfsName?,
+    parent: OverlayLocation?,
+    name: VfsName?,
 ) {
     private val children = mutableMapOf<VfsName, OverlayLocation>()
+    var parent = parent
+        private set
+    var name = name
+        private set
     var overlayInode: Inode? = null
 
     val type: InodeType
@@ -24,6 +53,11 @@ internal class OverlayLocation(
 
     fun invalidate(name: VfsName) {
         children.remove(name)
+    }
+
+    fun relocate(parent: OverlayLocation, name: VfsName) {
+        this.parent = parent
+        this.name = name
     }
 }
 
@@ -67,7 +101,7 @@ internal class OverlayDirectoryBackend(
     override val instance: OverlayInstance,
     private val superBlock: SuperBlock,
     override val location: OverlayLocation,
-) : org.plos_clan.cpos.fs.DirectoryBackend, OverlayNodeBackend {
+) : DirectoryBackend, OverlayNodeBackend {
     override val type: InodeType = InodeType.DIRECTORY
     override fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?> =
         VfsResult.Ok(instance.child(superBlock, location, name))
@@ -208,11 +242,11 @@ internal class OverlayFileHandle(
 internal class OverlaySymlinkBackend(
     override val instance: OverlayInstance,
     override val location: OverlayLocation,
-) : org.plos_clan.cpos.fs.SymlinkBackend, OverlayNodeBackend {
+) : SymlinkBackend, OverlayNodeBackend {
     override val type: InodeType = InodeType.SYMLINK
     override fun readLink(inode: Inode): VfsResult<VfsPathname> =
         (location.upper ?: location.lower)?.inode?.let { source ->
-            (source.backend as? org.plos_clan.cpos.fs.SymlinkBackend)?.readLink(source)
+            (source.backend as? SymlinkBackend)?.readLink(source)
         } ?: VfsResult.Err(VfsError.NOT_FOUND)
     override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
         VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)

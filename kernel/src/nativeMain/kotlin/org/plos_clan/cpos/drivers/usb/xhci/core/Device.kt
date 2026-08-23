@@ -156,7 +156,7 @@ internal fun Xhci.setupOneEndpoint(
     } else {
         endpointNumber.toUInt() * 2u
     }
-    if (dci < 2u || dci > 31u) {
+    if (dci !in 2u..31u) {
         return null
     }
 

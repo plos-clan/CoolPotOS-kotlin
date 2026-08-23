@@ -2,7 +2,7 @@ package org.plos_clan.cpos.fs.procfs
 
 import org.plos_clan.cpos.drivers.char.tty.TtyManager
 import org.plos_clan.cpos.fs.FileSystemManager
-import org.plos_clan.cpos.fs.VfsResult
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.addressspace.FileRegionBacking
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_EXECUTABLE
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE

@@ -1,6 +1,6 @@
 @file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.erofs
 
 import bridge.cp_zstd_decompress
 import kotlinx.cinterop.addressOf

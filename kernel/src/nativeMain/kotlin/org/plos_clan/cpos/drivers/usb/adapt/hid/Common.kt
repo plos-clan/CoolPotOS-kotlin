@@ -122,7 +122,7 @@ class HidDevice(
                 return null
             }
 
-            val parser = HidParser(descBuffer.view<UByteVar>(), descLength)
+            val parser = HidParser(descBuffer.view(), descLength)
             val parsedDescriptor = parser.parse() ?: run {
                 println("HID: Failed to parse descriptor")
                 descBuffer.free()

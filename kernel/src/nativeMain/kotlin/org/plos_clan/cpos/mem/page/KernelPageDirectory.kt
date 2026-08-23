@@ -5,10 +5,8 @@ package org.plos_clan.cpos.mem.page
 import bridge.read_cr3
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
-import org.plos_clan.cpos.mem.PTE_ADDR_MASK
-import org.plos_clan.cpos.mem.PageDirectory
 import org.plos_clan.cpos.mem.addressspace.AddressSpace
-import org.plos_clan.cpos.utils.*
+import org.plos_clan.cpos.utils.hex
 
 object KernelPageDirectory {
     private var activeDirectory: PageDirectory? = null

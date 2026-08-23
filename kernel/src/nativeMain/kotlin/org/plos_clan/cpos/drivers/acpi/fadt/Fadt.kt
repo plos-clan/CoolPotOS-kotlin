@@ -119,7 +119,7 @@ object Fadt {
     }
 
     fun shutdown(): Boolean {
-        val fadt = current ?: return fail("FADT is unavailable")
+        current ?: return fail("FADT is unavailable")
         val sleepType = findS5SleepType()
             ?: return fail("cannot evaluate AML _S5 package")
         return shutdown(sleepType.pm1a, sleepType.pm1b)

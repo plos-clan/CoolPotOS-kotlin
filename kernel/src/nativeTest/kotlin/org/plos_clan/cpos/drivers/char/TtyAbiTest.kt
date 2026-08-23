@@ -1,15 +1,15 @@
 package org.plos_clan.cpos.drivers.char
 
-import org.plos_clan.cpos.drivers.char.tty.Termios
-import org.plos_clan.cpos.drivers.char.tty.Termios2
-import org.plos_clan.cpos.drivers.char.tty.WinSize
-import org.plos_clan.cpos.utils.LittleEndianBuffer
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.plos_clan.cpos.drivers.char.tty.Termios
+import org.plos_clan.cpos.drivers.char.tty.Termios2
+import org.plos_clan.cpos.drivers.char.tty.WinSize
+import org.plos_clan.cpos.utils.LittleEndianBuffer
 
 class TtyAbiTest {
     @Test

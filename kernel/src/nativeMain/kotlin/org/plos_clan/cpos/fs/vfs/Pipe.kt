@@ -1,14 +1,12 @@
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.vfs
 
-import org.plos_clan.cpos.fs.vfs.OpenFileDescription
+import org.plos_clan.cpos.fs.sock.IoWaitQueue
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.ProcessManager
-import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.Signal
 import org.plos_clan.cpos.tasks.SignalInfo
 import org.plos_clan.cpos.tasks.SignalRouter
-import org.plos_clan.cpos.tasks.Thread
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PollEvents
@@ -34,13 +32,6 @@ internal class FifoBackend : MutableInodeBackend {
 
     override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
         state.open(options.access, options.nonBlocking)
-}
-
-internal data object SocketNodeBackend : MutableInodeBackend {
-    override val type: InodeType = InodeType.SOCKET
-
-    override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
-        VfsResult.Err(VfsError.NO_SUCH_DEVICE_OR_ADDRESS)
 }
 
 private class PipeEndpoint(
@@ -80,95 +71,6 @@ private class PipeEndpoint(
     override fun release() = state.close(access)
 }
 
-private class PipeWaitQueue {
-    class Waiter {
-        var minimumBytes = 0
-        lateinit var thread: Thread
-        var ready = false
-
-        fun arm(minimumBytes: Int, thread: Thread) {
-            this.minimumBytes = minimumBytes
-            this.thread = thread
-            ready = false
-        }
-    }
-
-    private val waiters = ArrayDeque<Waiter>()
-    private val recycled = ArrayDeque<Waiter>()
-
-    fun acquire(minimumBytes: Int, thread: Thread): Waiter =
-        (recycled.removeFirstOrNull() ?: Waiter()).also { waiter ->
-            waiter.arm(minimumBytes, thread)
-            waiters.addLast(waiter)
-        }
-
-    fun release(waiter: Waiter) {
-        check(waiter.ready)
-        recycled.addLast(waiter)
-    }
-
-    fun notifyReady(availableBytes: Int) {
-        val waiter = waiters.firstOrNull() ?: return
-        if (availableBytes < waiter.minimumBytes) return
-        waiters.removeFirst()
-        waiter.ready = true
-        Scheduler.wake(waiter.thread)
-    }
-
-    fun notifyAllWaiters() {
-        while (waiters.isNotEmpty()) {
-            val waiter = waiters.removeFirst()
-            waiter.ready = true
-            Scheduler.wake(waiter.thread)
-        }
-    }
-}
-
-internal class PipeBuffer(capacity: Int) {
-    private val bytes = ByteArray(capacity)
-    private var readOffset = 0
-    private var writeOffset = 0
-
-    val capacity: Int
-        get() = bytes.size
-
-    var size = 0
-        private set
-
-    val remaining: Int
-        get() = capacity - size
-
-    init {
-        require(capacity > 0)
-    }
-
-    fun read(destination: PreparedBufferDestination, offset: Int, count: Int): Int {
-        val requested = minOf(count, size)
-        val firstChunk = minOf(requested, capacity - readOffset)
-        var transferred = destination.copyFrom(offset, bytes, readOffset, firstChunk)
-        val remainingChunk = requested - firstChunk
-        if (transferred == firstChunk && remainingChunk != 0) {
-            transferred += destination.copyFrom(offset + firstChunk, bytes, 0, remainingChunk)
-        }
-        readOffset = (readOffset + transferred) % capacity
-        size -= transferred
-        return transferred
-    }
-
-    fun write(source: PreparedBufferSource, offset: Int, count: Int): Int {
-        val requested = minOf(count, remaining)
-        val firstChunk = minOf(requested, capacity - writeOffset)
-        var transferred = source.copyTo(offset, bytes, writeOffset, firstChunk)
-        val remainingChunk = requested - firstChunk
-        if (transferred == firstChunk && remainingChunk != 0) {
-            transferred += source.copyTo(offset + firstChunk, bytes, 0, remainingChunk)
-        }
-        writeOffset = (writeOffset + transferred) % capacity
-        size += transferred
-        return transferred
-    }
-}
-
 private class PipeState(
     private var readers: Int,
     private var writers: Int,
@@ -180,60 +82,52 @@ private class PipeState(
     }
 
     private val lock = IrqSpinLock()
-    private val buffer = PipeBuffer(CAPACITY_BYTES)
-    private val readWaiters = PipeWaitQueue()
-    private val writeWaiters = PipeWaitQueue()
-    private val readerOpenWaiters = PipeWaitQueue()
-    private val writerOpenWaiters = PipeWaitQueue()
+    private val buffer = ByteCircularBuffer(CAPACITY_BYTES)
+    private val readWaiters = IoWaitQueue()
+    private val writeWaiters = IoWaitQueue()
+    private val readerOpenWaiters = IoWaitQueue()
+    private val writerOpenWaiters = IoWaitQueue()
 
     fun open(access: AccessMode, nonBlocking: Boolean): VfsResult<OpenFileBackend> {
         val thread = ProcessManager.currentThread()
-        var waiter: PipeWaitQueue.Waiter? = null
+        var waiter: IoWaitQueue.Waiter? = null
+        var waitQueue: IoWaitQueue? = null
         val error = lock.withLock {
             when (access) {
                 AccessMode.READ -> {
                     readers++
-                    writerOpenWaiters.notifyAllWaiters()
+                    writerOpenWaiters.wakeAll()
                     if (!nonBlocking && writers == 0) {
-                        waiter = readerOpenWaiters.acquire(1, checkNotNull(thread))
+                        waitQueue = readerOpenWaiters
+                        waiter = readerOpenWaiters.add(checkNotNull(thread))
                     }
                 }
                 AccessMode.WRITE -> {
                     if (nonBlocking && readers == 0) return@withLock VfsError.NO_SUCH_DEVICE_OR_ADDRESS
                     writers++
-                    readerOpenWaiters.notifyAllWaiters()
+                    readerOpenWaiters.wakeAll()
                     if (readers == 0) {
-                        waiter = writerOpenWaiters.acquire(1, checkNotNull(thread))
+                        waitQueue = writerOpenWaiters
+                        waiter = writerOpenWaiters.add(checkNotNull(thread))
                     }
                 }
                 AccessMode.READ_WRITE -> {
                     readers++
                     writers++
-                    readerOpenWaiters.notifyAllWaiters()
-                    writerOpenWaiters.notifyAllWaiters()
+                    readerOpenWaiters.wakeAll()
+                    writerOpenWaiters.wakeAll()
                 }
                 AccessMode.PATH -> return@withLock VfsError.BAD_DESCRIPTOR
             }
             null
         }
         if (error != null) return VfsResult.Err(error)
-        val queued = waiter
-        if (queued != null) {
-            var interrupted = false
-            while (!lock.withLock { queued.ready }) {
-                if (checkNotNull(thread).hasPendingSignal() || !Scheduler.parkCurrent()) {
-                    interrupted = true
-                    break
-                }
-            }
+        val queued = waiter ?: return VfsResult.Ok(PipeEndpoint(this, access))
+        if (!checkNotNull(waitQueue).await(lock, queued)) {
             lock.withLock {
-                if (access == AccessMode.READ) readerOpenWaiters.release(queued)
-                else writerOpenWaiters.release(queued)
-                if (interrupted) {
-                    if (access == AccessMode.READ) readers-- else writers--
-                }
+                if (access == AccessMode.READ) readers-- else writers--
             }
-            if (interrupted) return VfsResult.Err(VfsError.INTERRUPTED)
+            return VfsResult.Err(VfsError.INTERRUPTED)
         }
         return VfsResult.Ok(PipeEndpoint(this, access))
     }
@@ -246,7 +140,8 @@ private class PipeState(
         }
         val transferred = buffer.read(destination, offset, count)
         if (transferred == 0) return@withLock IoResult.failure(VfsError.FAULT)
-        writeWaiters.notifyReady(buffer.remaining)
+        writeWaiters.wakeReady(buffer.remaining)
+        if (buffer.size != 0) readWaiters.wakeReady(buffer.size)
         IoResult.success(transferred)
     }
 
@@ -278,7 +173,7 @@ private class PipeState(
         }
         val transferred = buffer.write(source, offset, count)
         if (transferred == 0) return@withLock IoResult.failure(VfsError.FAULT)
-        readWaiters.notifyReady(buffer.size)
+        readWaiters.wakeReady(buffer.size)
         IoResult.success(transferred)
     }
 
@@ -290,7 +185,7 @@ private class PipeState(
             minOf(count, buffer.capacity)
         }
         val queue = if (event == IoEvent.READABLE) readWaiters else writeWaiters
-        var waiter: PipeWaitQueue.Waiter? = null
+        var waiter: IoWaitQueue.Waiter? = null
         lock.withLock {
             val availableBytes = when (event) {
                 IoEvent.READABLE -> buffer.size
@@ -301,20 +196,12 @@ private class PipeState(
                 IoEvent.WRITABLE -> readers == 0
             }
             if (!becameReady) {
-                waiter = queue.acquire(minimumBytes, thread)
+                waiter = queue.add(thread, minimumBytes)
             }
         }
         val queued = waiter ?: return true
 
-        var interrupted = false
-        while (!lock.withLock { queued.ready }) {
-            if (thread.hasPendingSignal() || !Scheduler.parkCurrent()) {
-                interrupted = true
-                break
-            }
-        }
-        lock.withLock { queue.release(queued) }
-        return !interrupted
+        return queue.await(lock, queued)
     }
 
     fun poll(events: Int, access: AccessMode): Long = lock.withLock {
@@ -335,25 +222,28 @@ private class PipeState(
         if (access.canWrite) {
             check(writers > 0)
             writers--
-            if (writers == 0) readWaiters.notifyAllWaiters()
+            if (writers == 0) readWaiters.wakeAll()
         }
         if (access.canRead) {
             check(readers > 0)
             readers--
-            if (readers == 0) writeWaiters.notifyAllWaiters()
+            if (readers == 0) writeWaiters.wakeAll()
         }
     }
 }
 
-internal class PipeFactory {
-    private val lock = IrqSpinLock()
-    private var nextInode = ULong.MAX_VALUE
+internal class PipeFactory(
+    private val anonymousFiles: AnonymousFileFactory,
+) {
 
     fun create(context: FileSystemContext): VfsResult<Pair<OpenFileDescription, OpenFileDescription>> {
         val path = context.root
-        val superBlock = path.mount.superBlock
         val state = PipeState(readers = 1, writers = 1)
-        val inode = pipeInode(superBlock, state)
+        val inode = anonymousFiles.createInode(
+            context,
+            PipeInode(state),
+            InodeMetadata(mode = FileMode(0x1A4u), linkCount = 0u),
+        )
         val readFile = when (val result = OpenFileDescription.open(
             path,
             inode,
@@ -376,14 +266,4 @@ internal class PipeFactory {
         }
         return VfsResult.Ok(readFile to writeFile)
     }
-
-    private fun pipeInode(
-        superBlock: SuperBlock,
-        state: PipeState,
-    ): Inode = Inode(
-        id = lock.withLock { InodeId(nextInode--) },
-        superBlock = superBlock,
-        backend = PipeInode(state),
-        metadata = InodeMetadata(FileMode(0x1A4u)),
-    )
 }

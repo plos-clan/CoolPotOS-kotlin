@@ -5,11 +5,12 @@ import kotlinx.benchmark.Param
 import kotlinx.benchmark.Scope
 import kotlinx.benchmark.Setup
 import kotlinx.benchmark.State
-import org.plos_clan.cpos.fs.DirectoryEntry
-import org.plos_clan.cpos.fs.InodeId
-import org.plos_clan.cpos.fs.InodeType
-import org.plos_clan.cpos.fs.VfsName
-import org.plos_clan.cpos.fs.VfsResult
+import org.plos_clan.cpos.fs.vfs.DirectoryEntry
+import org.plos_clan.cpos.fs.vfs.InodeId
+import org.plos_clan.cpos.fs.vfs.InodeType
+import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.syscall.fs.LinuxDirent64
 
 @State(Scope.Benchmark)
 class LinuxDirent64Benchmark {

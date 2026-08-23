@@ -3,8 +3,8 @@
 package org.plos_clan.cpos.drivers.acpi.aml
 
 import org.plos_clan.cpos.coroutines.KernelEvent
-import org.plos_clan.cpos.drivers.acpi.fadt.Fadt
 import org.plos_clan.cpos.drivers.acpi.apic.IoApic
+import org.plos_clan.cpos.drivers.acpi.fadt.Fadt
 import org.plos_clan.cpos.drivers.acpi.fadt.GenericAddressStructure
 import org.plos_clan.cpos.drivers.acpi.fadt.readByte
 import org.plos_clan.cpos.drivers.acpi.fadt.writeByte

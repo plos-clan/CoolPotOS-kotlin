@@ -13,8 +13,8 @@ import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.Signal
-import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.ByteRingBuffer
+import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PollEvents
 import org.plos_clan.cpos.utils.TermiosConstants
 

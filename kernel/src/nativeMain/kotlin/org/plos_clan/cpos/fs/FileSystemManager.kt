@@ -1,6 +1,24 @@
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.fs.erofs.Erofs
+import org.plos_clan.cpos.fs.erofs.ErofsOptions
+import org.plos_clan.cpos.fs.overlay.Overlayfs
+import org.plos_clan.cpos.fs.overlay.OverlayfsOptions
 import org.plos_clan.cpos.fs.procfs.Procfs
+import org.plos_clan.cpos.fs.tmpfs.Tmpfs
+import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.FileSystemContext
+import org.plos_clan.cpos.fs.vfs.FileSystemType
+import org.plos_clan.cpos.fs.vfs.MountFlag
+import org.plos_clan.cpos.fs.vfs.MountFlags
+import org.plos_clan.cpos.fs.vfs.MountRequest
+import org.plos_clan.cpos.fs.vfs.NodeCreation
+import org.plos_clan.cpos.fs.vfs.NodeKind
+import org.plos_clan.cpos.fs.vfs.RootMountOptions
+import org.plos_clan.cpos.fs.vfs.Vfs
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsPathname
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.module.ModuleManager
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Cmdline

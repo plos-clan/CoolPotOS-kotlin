@@ -35,7 +35,7 @@ private fun Xhci.waitResetComplete(): Boolean {
     return false
 }
 
-private fun Xhci.waitBiosRelease(legacy: LegacySupport): Boolean {
+private fun waitBiosRelease(legacy: LegacySupport): Boolean {
     repeat(1_000_000) {
         if (!legacy.isBiosOwned) {
             return true

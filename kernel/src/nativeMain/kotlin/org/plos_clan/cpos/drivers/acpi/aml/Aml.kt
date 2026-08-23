@@ -3,11 +3,10 @@
 package org.plos_clan.cpos.drivers.acpi.aml
 
 import org.plos_clan.cpos.coroutines.KernelEvent
-
 import org.plos_clan.cpos.drivers.acpi.Acpi
 import org.plos_clan.cpos.drivers.acpi.AcpiTable
-import org.plos_clan.cpos.drivers.acpi.fadt.Fadt
 import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AmlEvaluator
+import org.plos_clan.cpos.drivers.acpi.fadt.Fadt
 import org.plos_clan.cpos.drivers.char.Ps2Keyboard
 import org.plos_clan.cpos.utils.checksumOk
 

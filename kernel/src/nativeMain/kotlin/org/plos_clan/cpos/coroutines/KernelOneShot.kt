@@ -2,10 +2,11 @@
 
 package org.plos_clan.cpos.coroutines
 
-import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
+import org.plos_clan.cpos.utils.IrqSpinLock
 
 class KernelOneShot<T> {
     private val lock = IrqSpinLock()
@@ -34,7 +35,7 @@ class KernelOneShot<T> {
         continuation?.resume(value)
     }
 
-    suspend fun recv(): T = suspendCoroutine { continuation ->
+    suspend fun recv(): T = suspendCancellableCoroutine { continuation ->
         val result = lock.withLock {
             if (hasValue) {
                 val current = value

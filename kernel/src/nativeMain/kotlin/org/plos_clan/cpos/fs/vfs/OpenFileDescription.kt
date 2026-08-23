@@ -2,25 +2,9 @@
 
 package org.plos_clan.cpos.fs.vfs
 
-import org.plos_clan.cpos.fs.AccessMode
-import org.plos_clan.cpos.fs.DirectoryEntry
-import org.plos_clan.cpos.fs.DiscardingOpenFileBackend
-import org.plos_clan.cpos.fs.FilePosition
-import org.plos_clan.cpos.fs.Inode
-import org.plos_clan.cpos.fs.InodeType
-import org.plos_clan.cpos.fs.IoEvent
-import org.plos_clan.cpos.fs.IoMode
-import org.plos_clan.cpos.fs.IoResult
-import org.plos_clan.cpos.fs.MountFlag
-import org.plos_clan.cpos.fs.OpenFileBackend
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import org.plos_clan.cpos.fs.OpenFlags
-import org.plos_clan.cpos.fs.OpenOptions
-import org.plos_clan.cpos.fs.PositionlessOpenFileBackend
-import org.plos_clan.cpos.fs.RegularFileBackend
-import org.plos_clan.cpos.fs.VfsError
-import org.plos_clan.cpos.fs.VfsPath
-import org.plos_clan.cpos.fs.VfsResult
-import org.plos_clan.cpos.fs.WaitableOpenFileBackend
 import org.plos_clan.cpos.mem.BufferDestination
 import org.plos_clan.cpos.mem.BufferSource
 import org.plos_clan.cpos.mem.PageCacheProvider
@@ -30,8 +14,6 @@ import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PollEvents
-import kotlin.concurrent.atomics.AtomicInt
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 enum class SeekOrigin {
     START,
@@ -40,13 +22,14 @@ enum class SeekOrigin {
 }
 
 private data object PathOnlyHandle : OpenFileBackend
+private const val FIONBIO = 0x5421
 
 class OpenFileDescription private constructor(
     val path: VfsPath,
     val inode: Inode,
     val access: AccessMode,
     initialStatusFlags: Int,
-    private val backend: OpenFileBackend,
+    internal val backend: OpenFileBackend,
 ) {
     private val references = AtomicInt(1)
     private val positionLock = IrqSpinLock()
@@ -229,6 +212,18 @@ class OpenFileDescription private constructor(
     fun ioctl(command: Int, args: UserMemory): Long = positionLock.withLock {
         if (references.load() == 0) {
             -VfsError.BAD_DESCRIPTOR.errno.toLong()
+        } else if (command == FIONBIO) {
+            val enabled = args.readUIntLE() ?: return@withLock -VfsError.FAULT.errno.toLong()
+            while (true) {
+                val observed = statusFlags.load()
+                val updated = if (enabled == 0u) {
+                    observed and OpenFlags.O_NONBLOCK.inv()
+                } else {
+                    observed or OpenFlags.O_NONBLOCK
+                }
+                if (statusFlags.compareAndSet(observed, updated)) break
+            }
+            0L
         } else {
             backend.ioctl(inode, command, args)
         }
@@ -288,6 +283,10 @@ class OpenFileDescription private constructor(
                 backend.read(inode, destination, offset, count, filePosition)
             }.recordAccess(count)
         }
+        if (positionless is ModeAwareOpenFileBackend) {
+            return positionless.read(inode, destination, offset, count, currentIoMode())
+                .recordAccess(count)
+        }
         val waitable = positionless as? WaitableOpenFileBackend
             ?: return positionless.read(inode, destination, offset, count).recordAccess(count)
         while (true) {
@@ -317,6 +316,9 @@ class OpenFileDescription private constructor(
                 val append = statusFlags.load() and OpenFlags.O_APPEND != 0
                 backend.write(inode, source, offset, count, filePosition, append)
             }
+        }
+        if (positionless is ModeAwareOpenFileBackend) {
+            return positionless.write(inode, source, offset, count, currentIoMode())
         }
         val waitable = positionless as? WaitableOpenFileBackend
             ?: return positionless.write(inode, source, offset, count)

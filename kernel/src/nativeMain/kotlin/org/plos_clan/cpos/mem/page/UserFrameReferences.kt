@@ -8,7 +8,8 @@ import kotlinx.cinterop.set
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.INVALID_FRAME
-import org.plos_clan.cpos.utils.*
+import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import platform.posix.memcpy
 
 internal enum class FrameReleaseResult {

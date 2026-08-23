@@ -1,34 +1,34 @@
 @file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.syscall
+package org.plos_clan.cpos.syscall.fs
 
 import org.plos_clan.cpos.drivers.DeviceNumber
-import org.plos_clan.cpos.fs.FileMode
 import org.plos_clan.cpos.fs.FileSystemManager
-import org.plos_clan.cpos.fs.InodeType
-import org.plos_clan.cpos.fs.NodeCreation
-import org.plos_clan.cpos.fs.NodeKind
-import org.plos_clan.cpos.fs.RemoveMode
-import org.plos_clan.cpos.fs.RenameMode
-import org.plos_clan.cpos.fs.VfsPathname
-import org.plos_clan.cpos.fs.VfsResult
-import org.plos_clan.cpos.syscall.FsConstants.AT_EMPTY_PATH
-import org.plos_clan.cpos.syscall.FsConstants.AT_FDCWD
-import org.plos_clan.cpos.syscall.FsConstants.AT_REMOVEDIR
-import org.plos_clan.cpos.syscall.FsConstants.AT_SYMLINK_FOLLOW
-import org.plos_clan.cpos.syscall.FsConstants.RENAME_EXCHANGE
-import org.plos_clan.cpos.syscall.FsConstants.RENAME_NOREPLACE
-import org.plos_clan.cpos.syscall.FsConstants.RENAME_WHITEOUT
-import org.plos_clan.cpos.syscall.FsConstants.S_IALLUGO
-import org.plos_clan.cpos.syscall.FsConstants.S_IFBLK
-import org.plos_clan.cpos.syscall.FsConstants.S_IFCHR
-import org.plos_clan.cpos.syscall.FsConstants.S_IFIFO
-import org.plos_clan.cpos.syscall.FsConstants.S_IFMT
-import org.plos_clan.cpos.syscall.FsConstants.S_IFREG
-import org.plos_clan.cpos.syscall.FsConstants.S_IFSOCK
-import org.plos_clan.cpos.syscall.FsPathResolver.atPath
+import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.InodeType
+import org.plos_clan.cpos.fs.vfs.NodeCreation
+import org.plos_clan.cpos.fs.vfs.NodeKind
+import org.plos_clan.cpos.fs.vfs.RemoveMode
+import org.plos_clan.cpos.fs.vfs.RenameMode
+import org.plos_clan.cpos.fs.vfs.VfsPathname
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.syscall.Syscall.copyPath
 import org.plos_clan.cpos.syscall.Syscall.errno
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_EMPTY_PATH
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_FDCWD
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_REMOVEDIR
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_SYMLINK_FOLLOW
+import org.plos_clan.cpos.syscall.fs.FsConstants.RENAME_EXCHANGE
+import org.plos_clan.cpos.syscall.fs.FsConstants.RENAME_NOREPLACE
+import org.plos_clan.cpos.syscall.fs.FsConstants.RENAME_WHITEOUT
+import org.plos_clan.cpos.syscall.fs.FsConstants.S_IALLUGO
+import org.plos_clan.cpos.syscall.fs.FsConstants.S_IFBLK
+import org.plos_clan.cpos.syscall.fs.FsConstants.S_IFCHR
+import org.plos_clan.cpos.syscall.fs.FsConstants.S_IFIFO
+import org.plos_clan.cpos.syscall.fs.FsConstants.S_IFMT
+import org.plos_clan.cpos.syscall.fs.FsConstants.S_IFREG
+import org.plos_clan.cpos.syscall.fs.FsConstants.S_IFSOCK
+import org.plos_clan.cpos.syscall.fs.FsPathResolver.atPath
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
@@ -72,8 +72,7 @@ private fun mknodAt(
     rawMode: ULong,
     rawDevice: ULong,
 ): Long {
-    val fileType = rawMode.toUInt() and S_IFMT
-    val kind = when (fileType) {
+    val kind = when (val fileType = rawMode.toUInt() and S_IFMT) {
         0u, S_IFREG -> NodeKind.Regular
         S_IFIFO -> NodeKind.Fifo
         S_IFSOCK -> NodeKind.Socket

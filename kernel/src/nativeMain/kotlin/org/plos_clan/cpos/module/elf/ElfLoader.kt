@@ -1,23 +1,24 @@
 package org.plos_clan.cpos.module.elf
 
-import org.plos_clan.cpos.fs.AccessMode
+import kotlin.collections.iterator
 import org.plos_clan.cpos.fs.FileSystemManager
-import org.plos_clan.cpos.fs.MountFlag
+import org.plos_clan.cpos.fs.vfs.AccessMode
+import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
-import org.plos_clan.cpos.fs.OpenOptions
-import org.plos_clan.cpos.fs.VfsError
-import org.plos_clan.cpos.fs.VfsPathname
-import org.plos_clan.cpos.fs.VfsResult
-import org.plos_clan.cpos.mem.addressspace.AddressSpace
+import org.plos_clan.cpos.fs.vfs.OpenOptions
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsPathname
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.ByteArrayBuffer
-import org.plos_clan.cpos.mem.page.KernelPageDirectory
+import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_EXECUTABLE
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_WRITABLE
 import org.plos_clan.cpos.mem.addressspace.MemoryRegion
 import org.plos_clan.cpos.mem.addressspace.MemoryRegionBacking
 import org.plos_clan.cpos.mem.addressspace.MemoryRegionType
-import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
+import org.plos_clan.cpos.mem.page.KernelPageDirectory
+import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.module.UserStackBuilder
 import org.plos_clan.cpos.module.Vdso
 import org.plos_clan.cpos.module.elf.ElfLayout.checkedAdd
@@ -29,7 +30,6 @@ import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.alignUp
-import kotlin.collections.iterator
 
 private const val ELF64_HEADER_SIZE = 64
 private const val ELF64_PROGRAM_HEADER_SIZE = 56

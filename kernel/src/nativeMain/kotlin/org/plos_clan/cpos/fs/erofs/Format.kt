@@ -1,7 +1,11 @@
 @file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.erofs
 
+import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.InodeMetadata
+import org.plos_clan.cpos.fs.vfs.InodeTimestamps
+import org.plos_clan.cpos.fs.vfs.VfsTimestamp
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.module.ModuleData
 import org.plos_clan.cpos.utils.alignUp

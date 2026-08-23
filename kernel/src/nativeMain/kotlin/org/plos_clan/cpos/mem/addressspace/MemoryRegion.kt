@@ -1,9 +1,9 @@
 package org.plos_clan.cpos.mem.addressspace
 
-import org.plos_clan.cpos.fs.vfs.OpenFileDescription
-import org.plos_clan.cpos.mem.PageCacheSource
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import org.plos_clan.cpos.fs.vfs.OpenFileDescription
+import org.plos_clan.cpos.mem.PageCacheSource
 
 const val MEMORY_REGION_READABLE = 0x1uL
 const val MEMORY_REGION_WRITABLE = 0x2uL

@@ -1,4 +1,4 @@
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.vfs
 
 import org.plos_clan.cpos.mem.PageCache
 import org.plos_clan.cpos.mem.PageCacheFailure
@@ -13,7 +13,9 @@ abstract class FileSystemType(
     val requiresDevice: Boolean = false,
 ) {
     open fun parseOptions(source: String?, data: ByteArray?): VfsResult<FileSystemOptions> =
-        if (data == null || data.isEmpty()) VfsResult.Ok(EmptyFileSystemOptions)
+        if (data == null || data.isEmpty()) VfsResult.Ok(
+            EmptyFileSystemOptions
+        )
         else VfsResult.Err(VfsError.INVALID_ARGUMENT)
 
     internal fun createSuperBlock(
@@ -83,7 +85,8 @@ interface InodeBackend {
     fun getExtendedAttribute(
         inode: Inode,
         name: ExtendedAttributeName,
-    ): VfsResult<ByteArray> = VfsResult.Err(VfsError.NOT_SUPPORTED)
+    ): VfsResult<ByteArray> = VfsResult.Err(
+        VfsError.NOT_SUPPORTED)
 
     fun listExtendedAttributes(inode: Inode): VfsResult<ByteArray> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
@@ -93,12 +96,14 @@ interface InodeBackend {
         name: ExtendedAttributeName,
         value: ByteArray,
         mode: ExtendedAttributeMode,
-    ): VfsResult<Unit> = VfsResult.Err(VfsError.NOT_SUPPORTED)
+    ): VfsResult<Unit> = VfsResult.Err(
+        VfsError.NOT_SUPPORTED)
 
     fun removeExtendedAttribute(
         inode: Inode,
         name: ExtendedAttributeName,
-    ): VfsResult<Unit> = VfsResult.Err(VfsError.NOT_SUPPORTED)
+    ): VfsResult<Unit> = VfsResult.Err(
+        VfsError.NOT_SUPPORTED)
 
     fun evict(inode: Inode) {}
 }
@@ -154,7 +159,8 @@ abstract class RegularFileBackend : InodeBackend {
         offset: ULong,
         length: ULong,
         mode: FileAllocationMode,
-    ): VfsResult<Unit> = VfsResult.Err(VfsError.NOT_SUPPORTED)
+    ): VfsResult<Unit> = VfsResult.Err(
+        VfsError.NOT_SUPPORTED)
 }
 
 interface ContentBackedFile {
@@ -216,7 +222,8 @@ interface DirectoryBackend : InodeBackend {
         targetName: VfsName,
         target: Inode?,
         mode: RenameMode,
-    ): VfsResult<Unit> = VfsResult.Err(VfsError.NOT_SUPPORTED)
+    ): VfsResult<Unit> = VfsResult.Err(
+        VfsError.NOT_SUPPORTED)
 
     fun remove(
         directory: Inode,
@@ -253,7 +260,8 @@ interface OpenFileBackend {
         destinationOffset: Int,
         count: Int,
         position: FilePosition,
-    ): IoResult = IoResult.failure(VfsError.NOT_SUPPORTED)
+    ): IoResult = IoResult.failure(
+        VfsError.NOT_SUPPORTED)
 
     fun write(
         inode: Inode,
@@ -262,13 +270,15 @@ interface OpenFileBackend {
         count: Int,
         position: FilePosition,
         append: Boolean,
-    ): IoResult = IoResult.failure(VfsError.NOT_SUPPORTED)
+    ): IoResult = IoResult.failure(
+        VfsError.NOT_SUPPORTED)
 
     fun iterate(
         inode: Inode,
         position: FilePosition,
         emit: (entry: DirectoryEntry, nextOffset: Long) -> Boolean,
-    ): VfsResult<Unit> = VfsResult.Err(VfsError.NOT_DIRECTORY)
+    ): VfsResult<Unit> = VfsResult.Err(
+        VfsError.NOT_DIRECTORY)
 
     fun ioctl(inode: Inode, command: Int, args: UserMemory): Long =
         -VfsError.NOT_SUPPORTED.errno.toLong()
@@ -322,14 +332,16 @@ interface PositionlessOpenFileBackend : OpenFileBackend {
         destination: PreparedBufferDestination,
         destinationOffset: Int,
         count: Int,
-    ): IoResult = IoResult.failure(VfsError.NOT_SUPPORTED)
+    ): IoResult = IoResult.failure(
+        VfsError.NOT_SUPPORTED)
 
     fun write(
         inode: Inode,
         source: PreparedBufferSource,
         sourceOffset: Int,
         count: Int,
-    ): IoResult = IoResult.failure(VfsError.NOT_SUPPORTED)
+    ): IoResult = IoResult.failure(
+        VfsError.NOT_SUPPORTED)
 
     override fun read(
         inode: Inode,
@@ -347,6 +359,39 @@ interface PositionlessOpenFileBackend : OpenFileBackend {
         position: FilePosition,
         append: Boolean,
     ): IoResult = write(inode, source, sourceOffset, count)
+}
+
+/** A positionless backend that owns the complete blocking operation. */
+interface ModeAwareOpenFileBackend : PositionlessOpenFileBackend {
+    fun read(
+        inode: Inode,
+        destination: PreparedBufferDestination,
+        destinationOffset: Int,
+        count: Int,
+        mode: IoMode,
+    ): IoResult
+
+    fun write(
+        inode: Inode,
+        source: PreparedBufferSource,
+        sourceOffset: Int,
+        count: Int,
+        mode: IoMode,
+    ): IoResult
+
+    override fun read(
+        inode: Inode,
+        destination: PreparedBufferDestination,
+        destinationOffset: Int,
+        count: Int,
+    ): IoResult = read(inode, destination, destinationOffset, count, IoMode.BLOCKING)
+
+    override fun write(
+        inode: Inode,
+        source: PreparedBufferSource,
+        sourceOffset: Int,
+        count: Int,
+    ): IoResult = write(inode, source, sourceOffset, count, IoMode.BLOCKING)
 }
 
 interface DiscardingOpenFileBackend : PositionlessOpenFileBackend {

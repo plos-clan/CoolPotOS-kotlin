@@ -11,7 +11,7 @@ import kotlinx.cinterop.plus
 import kotlinx.cinterop.pointed
 import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.toKString
-import org.plos_clan.cpos.fs.FileContent
+import org.plos_clan.cpos.fs.vfs.FileContent
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 
@@ -39,7 +39,7 @@ class ModuleData internal constructor(
     }
 
     fun copyOfRange(startIndex: Int, endIndex: Int): ByteArray {
-        require(startIndex >= 0 && endIndex >= startIndex && endIndex <= size)
+        require(startIndex in 0..endIndex && endIndex <= size)
         return ByteArray(endIndex - startIndex).also { destination ->
             val target = checkNotNull(ByteArrayBuffer(destination).prepareWrite(0, destination.size))
             copyInto(target, 0, startIndex, destination.size)

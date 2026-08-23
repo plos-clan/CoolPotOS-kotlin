@@ -426,7 +426,7 @@ object BuddyFrameAllocator {
             .sortedBy { it.key.toLong() }
             .forEach { (type, bytes) ->
                 val mib = bytes / BYTES_PER_MIB
-                println("Buddy: memmap ${memmapTypeName(type)} = ${mib} MiB (${bytes.hex()} bytes)")
+                println("Buddy: memmap ${memmapTypeName(type)} = $mib MiB (${bytes.hex()} bytes)")
             }
     }
 

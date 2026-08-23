@@ -1,38 +1,38 @@
 @file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
 
-package org.plos_clan.cpos.syscall
+package org.plos_clan.cpos.syscall.fs
 
-import org.plos_clan.cpos.fs.AccessMode
-import org.plos_clan.cpos.fs.CreateDisposition
-import org.plos_clan.cpos.fs.FileAllocationMode
 import org.plos_clan.cpos.fs.FileDescriptorFlags
-import org.plos_clan.cpos.fs.FileMode
 import org.plos_clan.cpos.fs.FileSystemManager
-import org.plos_clan.cpos.fs.InodeType
-import org.plos_clan.cpos.fs.MountFlag
-import org.plos_clan.cpos.fs.MountFlags
-import org.plos_clan.cpos.fs.MountRequest
 import org.plos_clan.cpos.fs.OpenFlags
-import org.plos_clan.cpos.fs.OpenOptions
-import org.plos_clan.cpos.fs.UnmountMode
-import org.plos_clan.cpos.fs.VfsError
-import org.plos_clan.cpos.fs.VfsPath
-import org.plos_clan.cpos.fs.VfsPathname
-import org.plos_clan.cpos.fs.VfsResult
+import org.plos_clan.cpos.fs.vfs.AccessMode
+import org.plos_clan.cpos.fs.vfs.CreateDisposition
+import org.plos_clan.cpos.fs.vfs.FileAllocationMode
+import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.InodeType
+import org.plos_clan.cpos.fs.vfs.MountFlag
+import org.plos_clan.cpos.fs.vfs.MountFlags
+import org.plos_clan.cpos.fs.vfs.MountRequest
+import org.plos_clan.cpos.fs.vfs.OpenOptions
+import org.plos_clan.cpos.fs.vfs.UnmountMode
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsPath
+import org.plos_clan.cpos.fs.vfs.VfsPathname
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
-import org.plos_clan.cpos.syscall.FsConstants.AT_FDCWD
-import org.plos_clan.cpos.syscall.FsConstants.FALLOC_FL_KEEP_SIZE
-import org.plos_clan.cpos.syscall.FsConstants.MS_SILENT
-import org.plos_clan.cpos.syscall.FsConstants.O_CLOEXEC
-import org.plos_clan.cpos.syscall.FsConstants.O_NONBLOCK
-import org.plos_clan.cpos.syscall.FsConstants.SUPPORTED_OPEN_FLAGS
-import org.plos_clan.cpos.syscall.FsConstants.S_IALLUGO
-import org.plos_clan.cpos.syscall.FsPathResolver.atPath
-import org.plos_clan.cpos.syscall.FsPathResolver.resolveAt
-import org.plos_clan.cpos.syscall.FsPermissions.mayWrite
 import org.plos_clan.cpos.syscall.Syscall.copyPath
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_FDCWD
+import org.plos_clan.cpos.syscall.fs.FsConstants.FALLOC_FL_KEEP_SIZE
+import org.plos_clan.cpos.syscall.fs.FsConstants.MS_SILENT
+import org.plos_clan.cpos.syscall.fs.FsConstants.O_CLOEXEC
+import org.plos_clan.cpos.syscall.fs.FsConstants.O_NONBLOCK
+import org.plos_clan.cpos.syscall.fs.FsConstants.SUPPORTED_OPEN_FLAGS
+import org.plos_clan.cpos.syscall.fs.FsConstants.S_IALLUGO
+import org.plos_clan.cpos.syscall.fs.FsPathResolver.atPath
+import org.plos_clan.cpos.syscall.fs.FsPathResolver.resolveAt
+import org.plos_clan.cpos.syscall.fs.FsPermissions.mayWrite
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
@@ -364,15 +364,14 @@ private fun createPipe(process: Process, outputAddress: ULong, flags: ULong): Lo
     } else {
         0uL
     }
-    val readFd = process.fdTable.install(readEnd, descriptorFlags)
-    val writeFd = process.fdTable.install(writeEnd, descriptorFlags)
-    if (readFd == null || writeFd == null) {
-        readFd?.let(process.fdTable::close)
-        writeFd?.let(process.fdTable::close)
-        if (readFd == null) readEnd.release()
-        if (writeFd == null) writeEnd.release()
+    val descriptors = process.fdTable.installAll(listOf(readEnd, writeEnd), descriptorFlags)
+    if (descriptors == null) {
+        readEnd.release()
+        writeEnd.release()
         return errno(Errno.EMFILE)
     }
+    val readFd = descriptors[0]
+    val writeFd = descriptors[1]
 
     val output = ByteArray(Int.SIZE_BYTES * 2).also { bytes ->
         LittleEndianBuffer(bytes).apply {

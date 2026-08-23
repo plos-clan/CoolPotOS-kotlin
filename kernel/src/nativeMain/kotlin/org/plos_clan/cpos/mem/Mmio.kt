@@ -74,7 +74,7 @@ class MmioRegion private constructor(
     }
 
     fun <T : CPointed> view(): CPointer<T> =
-        requireNotNull(virtualAddress.toPointer<T>()) {
+        requireNotNull(virtualAddress.toPointer()) {
             "MmioRegion: virtual address ${virtualAddress.hex()} is not valid"
         }
 

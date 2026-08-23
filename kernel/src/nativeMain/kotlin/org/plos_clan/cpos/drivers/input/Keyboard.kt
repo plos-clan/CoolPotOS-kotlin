@@ -200,7 +200,7 @@ internal class KeyboardReport(
             return
         }
         KeyCode.entries.forEach { key ->
-            if (key.hidUsage >= first && key.hidUsage <= last) {
+            if (key.hidUsage in first..last) {
                 updated[key.linuxCode.toInt()] = true
             }
         }
@@ -326,13 +326,13 @@ internal class KeyboardInputDevice(
         return true
     }
 
-    private fun updateRepeatLocked(key: KeyCode, action: KeyAction): Boolean = when {
-        action == KeyAction.PRESSED && key.repeatable -> {
+    private fun updateRepeatLocked(key: KeyCode, action: KeyAction): Boolean = when (action) {
+        KeyAction.PRESSED if key.repeatable -> {
             repeatKey = key
             repeatGeneration++
             repeatPeriodMillis != 0
         }
-        action == KeyAction.RELEASED && repeatKey == key -> {
+        KeyAction.RELEASED if repeatKey == key -> {
             repeatKey = null
             repeatGeneration++
             false

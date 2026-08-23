@@ -1,4 +1,4 @@
-package org.plos_clan.cpos.syscall
+package org.plos_clan.cpos.syscall.fs
 
 import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.OpenFlags
@@ -6,7 +6,6 @@ import org.plos_clan.cpos.fs.OpenFlags
 internal object FsConstants {
     const val IO_CHUNK_SIZE = 64 * 1024
     const val MAX_RW_COUNT = 0x7ffff000uL
-    const val IO_VECTOR_SIZE = ULong.SIZE_BYTES * 2
     const val MAX_IO_VECTORS = 1024
     const val AT_FDCWD = -100
     const val AT_SYMLINK_NOFOLLOW = 0x100

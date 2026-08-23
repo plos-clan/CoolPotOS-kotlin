@@ -2,8 +2,8 @@
 
 package org.plos_clan.cpos.syscall
 
-import org.plos_clan.cpos.mem.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.tasks.MemoryCloneMode
 import org.plos_clan.cpos.tasks.Process
@@ -11,6 +11,7 @@ import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.Signal
 import org.plos_clan.cpos.tasks.SignalStack
+import org.plos_clan.cpos.tasks.TaskState
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -120,7 +121,7 @@ private data class Request(
         if (parentTidMemory?.copyToUser(tid) == false ||
             childTidMemory?.copyToUser(tid) == false
         ) {
-            childThread.state = org.plos_clan.cpos.tasks.TaskState.ZOMBIE
+            childThread.state = TaskState.ZOMBIE
             return errno(Errno.EFAULT)
         }
         if (has(Flag.CHILD_CLEARTID)) childThread.clearChildTid = childTid

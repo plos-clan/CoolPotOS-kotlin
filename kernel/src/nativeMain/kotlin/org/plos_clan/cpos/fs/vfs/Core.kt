@@ -1,4 +1,4 @@
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.vfs
 
 internal const val ALLOCATION_BLOCK_SIZE = 512uL
 internal const val EXTENDED_ATTRIBUTE_VALUE_MAX = 65_536
@@ -33,7 +33,20 @@ enum class VfsError(val errno: Int) {
     NOT_EMPTY(39),
     TOO_MANY_SYMLINKS(40),
     NO_DATA(61),
+    DESTINATION_ADDRESS_REQUIRED(89),
+    MESSAGE_TOO_LONG(90),
+    WRONG_PROTOCOL_TYPE(91),
+    PROTOCOL_OPTION_NOT_AVAILABLE(92),
+    PROTOCOL_NOT_SUPPORTED(93),
+    SOCKET_TYPE_NOT_SUPPORTED(94),
     NOT_SUPPORTED(95),
+    ADDRESS_FAMILY_NOT_SUPPORTED(97),
+    ADDRESS_IN_USE(98),
+    ADDRESS_NOT_AVAILABLE(99),
+    ALREADY_CONNECTED(106),
+    NOT_CONNECTED(107),
+    CONNECTION_REFUSED(111),
+    ALREADY_IN_PROGRESS(114),
     NOT_FOUND(2);
 
     companion object {

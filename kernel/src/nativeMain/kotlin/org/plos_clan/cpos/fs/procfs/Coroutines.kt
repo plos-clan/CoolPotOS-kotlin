@@ -2,12 +2,12 @@ package org.plos_clan.cpos.fs.procfs
 
 import org.plos_clan.cpos.coroutines.CoroutineEntry
 import org.plos_clan.cpos.coroutines.KernelCoroutines
-import org.plos_clan.cpos.fs.DirectoryEntry
-import org.plos_clan.cpos.fs.Inode
-import org.plos_clan.cpos.fs.InodeType
-import org.plos_clan.cpos.fs.SuperBlock
-import org.plos_clan.cpos.fs.VfsName
-import org.plos_clan.cpos.fs.VfsResult
+import org.plos_clan.cpos.fs.vfs.DirectoryEntry
+import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.InodeType
+import org.plos_clan.cpos.fs.vfs.SuperBlock
+import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsResult
 
 internal class ProcCoroutineDirectory(
     fileSystem: ProcfsInstance,

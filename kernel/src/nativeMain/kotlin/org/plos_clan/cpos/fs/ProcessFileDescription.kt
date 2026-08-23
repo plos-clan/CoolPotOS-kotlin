@@ -2,9 +2,9 @@
 
 package org.plos_clan.cpos.fs
 
+import kotlin.concurrent.atomics.AtomicReference
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.utils.IrqSpinLock
-import kotlin.concurrent.atomics.AtomicReference
 
 object OpenFlags {
     const val O_ACCMODE = 0x000003
@@ -70,6 +70,29 @@ class FileDescriptorTable {
         val fd = entries.firstEmpty(minimum) ?: return@withLock null
         entries[fd] = FileDescriptor(file, flags)
         fd
+    }
+
+    /** Consumes all supplied file references, or leaves the table unchanged. */
+    fun installAll(
+        files: List<OpenFileDescription>,
+        flags: ULong,
+        minimum: Int = 0,
+    ): IntArray? = lock.withLock {
+        val descriptors = entries.emptyIndices(files.size, minimum) ?: return@withLock null
+        entries.install(descriptors, files, flags)
+        descriptors
+    }
+
+    /** Consumes as many leading file references as fit, up to [maximum]. */
+    fun installAvailable(
+        files: List<OpenFileDescription>,
+        flags: ULong,
+        maximum: Int = files.size,
+    ): IntArray = lock.withLock {
+        val count = minOf(files.size, maximum.coerceAtLeast(0))
+        val descriptors = entries.emptyIndicesUpTo(count)
+        entries.install(descriptors, files, flags)
+        descriptors
     }
 
     fun contains(fd: Int): Boolean = entries[fd] != null
@@ -207,6 +230,47 @@ class FileDescriptorTable {
                 index = (segmentIndex + 1) * SEGMENT_SIZE
             }
             return null
+        }
+
+        fun emptyIndices(count: Int, minimum: Int): IntArray? {
+            if (count < 0 || minimum !in indices && !(count == 0 && minimum == size)) return null
+            val result = IntArray(count)
+            var next = minimum
+            repeat(count) { index ->
+                val fd = firstEmpty(next) ?: return null
+                result[index] = fd
+                next = fd + 1
+            }
+            return result
+        }
+
+        fun emptyIndicesUpTo(count: Int): IntArray {
+            if (count <= 0) return IntArray(0)
+            val result = IntArray(minOf(count, size))
+            var found = 0
+            var next = 0
+            while (found < result.size) {
+                val fd = firstEmpty(next) ?: break
+                result[found++] = fd
+                next = fd + 1
+            }
+            return if (found == result.size) result else result.copyOf(found)
+        }
+
+        fun install(indices: IntArray, files: List<OpenFileDescription>, flags: ULong) {
+            require(indices.size <= files.size)
+            var first = 0
+            while (first < indices.size) {
+                val segmentIndex = indices[first] / SEGMENT_SIZE
+                val updated = segments[segmentIndex].load().copyOf()
+                var index = first
+                while (index < indices.size && indices[index] / SEGMENT_SIZE == segmentIndex) {
+                    updated[indices[index] % SEGMENT_SIZE] = FileDescriptor(files[index], flags)
+                    index++
+                }
+                segments[segmentIndex].store(updated)
+                first = index
+            }
         }
 
         fun occupiedIndices(): IntArray {

@@ -2,6 +2,7 @@
 
 package org.plos_clan.cpos.utils
 
+import kotlin.experimental.ExperimentalNativeApi
 import kotlinx.cinterop.CPointed
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
@@ -11,7 +12,6 @@ import kotlinx.cinterop.get
 import kotlinx.cinterop.set
 import kotlinx.cinterop.toCPointer
 import org.plos_clan.cpos.mem.Hhdm
-import kotlin.experimental.ExperimentalNativeApi
 
 const val PTE_COUNT = 512
 const val PAGE_SIZE_BYTES = 4096uL

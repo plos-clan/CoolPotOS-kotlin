@@ -1,12 +1,19 @@
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.vfs
 
-import org.plos_clan.cpos.fs.vfs.OpenFileDescription
+import org.plos_clan.cpos.fs.sock.FileSystemIdentity
+import org.plos_clan.cpos.fs.sock.UnixCredentials
+import org.plos_clan.cpos.fs.sock.UnixSocket
+import org.plos_clan.cpos.fs.sock.UnixSocketAddress
+import org.plos_clan.cpos.fs.sock.UnixSocketSubsystem
+import org.plos_clan.cpos.fs.sock.UnixSocketType
 
 class Vfs(maxSymlinkDepth: Int = 40) {
     private val paths = VfsPathResolver(maxSymlinkDepth)
     private val nodes = VfsNodeOperations(paths)
     private val mounts = VfsMountManager(paths)
-    private val pipes = PipeFactory()
+    private val anonymousFiles = AnonymousFileFactory()
+    private val pipes = PipeFactory(anonymousFiles)
+    private val sockets = UnixSocketSubsystem(paths, nodes, anonymousFiles)
 
     fun snapshotFileSystems(): List<FileSystemType> =
         mounts.snapshotFileSystems()
@@ -22,6 +29,54 @@ class Vfs(maxSymlinkDepth: Int = 40) {
     fun createPipe(
         context: FileSystemContext,
     ): VfsResult<Pair<OpenFileDescription, OpenFileDescription>> = pipes.create(context)
+
+    internal fun createUnixSocket(
+        context: FileSystemContext,
+        type: UnixSocketType,
+        nonBlocking: Boolean,
+        credentials: UnixCredentials,
+    ): VfsResult<OpenFileDescription> = sockets.create(
+        context,
+        type,
+        nonBlocking,
+        credentials,
+    )
+
+    internal fun openUnixSocket(
+        context: FileSystemContext,
+        socket: UnixSocket,
+        nonBlocking: Boolean,
+    ): VfsResult<OpenFileDescription> = sockets.open(context, socket, nonBlocking)
+
+    internal fun createUnixSocketPair(
+        context: FileSystemContext,
+        type: UnixSocketType,
+        credentials: UnixCredentials,
+        nonBlocking: Boolean,
+    ): VfsResult<Pair<OpenFileDescription, OpenFileDescription>> =
+        sockets.pair(context, type, credentials, nonBlocking)
+
+    internal fun bindUnixSocket(
+        context: FileSystemContext,
+        socket: UnixSocket,
+        address: UnixSocketAddress,
+        mode: FileMode,
+        uid: UInt,
+        gid: UInt,
+    ): VfsResult<UnixSocketAddress> = sockets.bind(
+        context,
+        socket,
+        address,
+        mode,
+        uid,
+        gid,
+    )
+
+    internal fun resolveUnixSocket(
+        context: FileSystemContext,
+        address: UnixSocketAddress,
+        identity: FileSystemIdentity,
+    ): VfsResult<UnixSocket> = sockets.resolve(context, address, identity)
 
     fun mount(
         context: FileSystemContext,

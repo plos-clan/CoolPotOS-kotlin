@@ -1,20 +1,25 @@
 package org.plos_clan.cpos.syscall
 
-import org.plos_clan.cpos.fs.DirectoryEntry
-import org.plos_clan.cpos.fs.FileMode
-import org.plos_clan.cpos.fs.InodeId
-import org.plos_clan.cpos.fs.InodeMetadata
-import org.plos_clan.cpos.fs.InodeTimestamps
-import org.plos_clan.cpos.fs.InodeType
-import org.plos_clan.cpos.fs.VfsName
-import org.plos_clan.cpos.fs.VfsResult
-import org.plos_clan.cpos.fs.VfsTimestamp
-import org.plos_clan.cpos.utils.LittleEndianBuffer
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
+import org.plos_clan.cpos.fs.vfs.DirectoryEntry
+import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.InodeId
+import org.plos_clan.cpos.fs.vfs.InodeMetadata
+import org.plos_clan.cpos.fs.vfs.InodeTimestamps
+import org.plos_clan.cpos.fs.vfs.InodeType
+import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.fs.vfs.VfsTimestamp
+import org.plos_clan.cpos.syscall.fs.FsConstants
+import org.plos_clan.cpos.syscall.fs.LinuxDirent64
+import org.plos_clan.cpos.syscall.fs.LinuxFileStatus
+import org.plos_clan.cpos.syscall.fs.LinuxStat
+import org.plos_clan.cpos.syscall.fs.LinuxStatx
+import org.plos_clan.cpos.utils.LittleEndianBuffer
 
 class StatStructuresTest {
     private val status = LinuxFileStatus(

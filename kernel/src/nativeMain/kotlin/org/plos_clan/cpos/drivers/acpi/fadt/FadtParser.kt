@@ -2,6 +2,8 @@
 
 package org.plos_clan.cpos.drivers.acpi.fadt
 
+import org.plos_clan.cpos.drivers.acpi.AcpiTable
+import org.plos_clan.cpos.drivers.acpi.AcpiTableParser
 import org.plos_clan.cpos.utils.checksumOk
 import org.plos_clan.cpos.utils.readU16
 import org.plos_clan.cpos.utils.readU32
@@ -48,11 +50,10 @@ private const val FADT_X_PM_TIMER_OFFSET = 208
 private const val FADT_X_GPE0_OFFSET = 220
 private const val FADT_X_GPE1_OFFSET = 232
 
-object FadtParser :
-    org.plos_clan.cpos.drivers.acpi.AcpiTableParser<FadtInfo> {
+object FadtParser : AcpiTableParser<FadtInfo> {
     override val signature: String = "FACP"
 
-    override fun parse(table: org.plos_clan.cpos.drivers.acpi.AcpiTable): FadtInfo? {
+    override fun parse(table: AcpiTable): FadtInfo? {
         if (!table.hasLength(FADT_MIN_LENGTH)) {
             println("ACPI: FADT is too short: ${table.length}")
             return null
@@ -208,14 +209,14 @@ object FadtParser :
         ).also(Fadt::install)
     }
 
-    private fun org.plos_clan.cpos.drivers.acpi.AcpiTable.hasRange(offset: Int, size: Int): Boolean {
+    private fun AcpiTable.hasRange(offset: Int, size: Int): Boolean {
         if (offset < 0 || size < 0 || size > length) {
             return false
         }
         return offset <= length - size
     }
 
-    private fun org.plos_clan.cpos.drivers.acpi.AcpiTable.readGas(offset: Int): GenericAddressStructure? {
+    private fun AcpiTable.readGas(offset: Int): GenericAddressStructure? {
         if (!hasRange(offset, GAS_LENGTH)) {
             return null
         }

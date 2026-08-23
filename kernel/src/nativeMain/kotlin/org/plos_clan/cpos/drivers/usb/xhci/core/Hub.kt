@@ -17,7 +17,7 @@ suspend fun Xhci.xhciHubThread() {
     }
 }
 
-internal suspend fun Xhci.waitPortReset(port: Port): Boolean {
+internal suspend fun waitPortReset(port: Port): Boolean {
     repeat(1_000_000) {
         if (port.isInReset) {
             yield()

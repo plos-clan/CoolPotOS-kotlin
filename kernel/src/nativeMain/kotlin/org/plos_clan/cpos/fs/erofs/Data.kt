@@ -1,4 +1,4 @@
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.erofs
 
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 

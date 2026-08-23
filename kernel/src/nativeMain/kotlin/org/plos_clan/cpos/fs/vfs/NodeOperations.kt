@@ -1,4 +1,4 @@
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.vfs
 
 internal data class OpenedPath(
     val path: VfsPath,
@@ -19,7 +19,10 @@ internal class VfsNodeOperations(
         val path = when (val result = createChild(
             directory,
             name,
-            NodeCreation(NodeKind.Regular, mode),
+            NodeCreation(
+                NodeKind.Regular,
+                mode
+            ),
         )) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result

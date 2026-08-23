@@ -6,6 +6,7 @@
 package org.plos_clan.cpos.fault
 
 import bridge.register_interrupt_handler
+import kotlin.concurrent.atomics.AtomicInt
 import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.staticCFunction
@@ -18,7 +19,6 @@ import org.plos_clan.cpos.tasks.SignalPreemption
 import org.plos_clan.cpos.tasks.SignalRouter
 import org.plos_clan.cpos.tasks.Thread
 import org.plos_clan.cpos.utils.InterruptFrame
-import kotlin.concurrent.atomics.AtomicInt
 
 internal object SignalInterrupt : SignalPreemption {
     private const val VECTOR: UShort = 31u

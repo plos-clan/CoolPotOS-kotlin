@@ -1,4 +1,33 @@
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.overlay
+
+import org.plos_clan.cpos.fs.vfs.DirectoryBackend
+import org.plos_clan.cpos.fs.vfs.DirectoryEntry
+import org.plos_clan.cpos.fs.vfs.ExtendedAttributeMode
+import org.plos_clan.cpos.fs.vfs.ExtendedAttributeName
+import org.plos_clan.cpos.fs.vfs.FileAllocationMode
+import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.FilePosition
+import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.InodeId
+import org.plos_clan.cpos.fs.vfs.InodeTimestampEvent
+import org.plos_clan.cpos.fs.vfs.InodeTimestampSet
+import org.plos_clan.cpos.fs.vfs.InodeTimestampUpdate
+import org.plos_clan.cpos.fs.vfs.InodeType
+import org.plos_clan.cpos.fs.vfs.MountFlag
+import org.plos_clan.cpos.fs.vfs.NodeCreation
+import org.plos_clan.cpos.fs.vfs.OpenFileBackend
+import org.plos_clan.cpos.fs.vfs.OpenOptions
+import org.plos_clan.cpos.fs.vfs.RegularFileBackend
+import org.plos_clan.cpos.fs.vfs.RemoveMode
+import org.plos_clan.cpos.fs.vfs.RenameMode
+import org.plos_clan.cpos.fs.vfs.SuperBlock
+import org.plos_clan.cpos.fs.vfs.SuperBlockBackend
+import org.plos_clan.cpos.fs.vfs.SymlinkBackend
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsPath
+import org.plos_clan.cpos.fs.vfs.VfsPathname
+import org.plos_clan.cpos.fs.vfs.VfsResult
 
 internal class OverlayInstance private constructor(options: OverlayfsOptions) : SuperBlockBackend {
     companion object {
@@ -116,7 +145,7 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
         }
         val upper = OverlayCopyUp.ensureUpper(directory) ?: return VfsResult.Err(VfsError.READ_ONLY)
         val parent = upper.inode ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val backend = parent.backend as? org.plos_clan.cpos.fs.DirectoryBackend
+        val backend = parent.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
         val result = backend.create(parent, name, node)
         if (result is VfsResult.Ok) reveal(directory, name)
@@ -134,7 +163,7 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
         if (child.overlayInode !== expectedTarget) return VfsResult.Err(VfsError.NOT_FOUND)
         val upper = OverlayCopyUp.ensureUpper(directory) ?: return VfsResult.Err(VfsError.READ_ONLY)
         val parent = upper.inode ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val backend = parent.backend as? org.plos_clan.cpos.fs.DirectoryBackend
+        val backend = parent.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
         if (mode == RemoveMode.DIRECTORY && entries(superBlock, child).isNotEmpty()) {
             return VfsResult.Err(VfsError.NOT_EMPTY)
@@ -173,7 +202,7 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
         val source = target.upper?.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val upper = OverlayCopyUp.ensureUpper(directory) ?: return VfsResult.Err(VfsError.READ_ONLY)
         val parent = upper.inode ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val backend = parent.backend as? org.plos_clan.cpos.fs.DirectoryBackend
+        val backend = parent.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
         val result = backend.link(parent, name, source)
         if (result is VfsResult.Ok) {
@@ -206,10 +235,10 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
         if (mode == RenameMode.NO_REPLACE && target != null) {
             return VfsResult.Err(VfsError.ALREADY_EXISTS)
         }
-        if (mode == RenameMode.EXCHANGE && target == null) {
-            return VfsResult.Err(VfsError.NOT_FOUND)
-        }
-        if (mode != RenameMode.EXCHANGE && target != null) {
+        val exchanged = if (mode == RenameMode.EXCHANGE) {
+            target ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        } else null
+        if (exchanged == null && target != null) {
             if (source.type != target.type &&
                 (source.type == InodeType.DIRECTORY || target.type == InodeType.DIRECTORY)
             ) {
@@ -222,43 +251,47 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
                 return VfsResult.Err(VfsError.NOT_EMPTY)
             }
         }
-        if (!OverlayCopyUp.ensureWritable(source) ||
-            (mode == RenameMode.EXCHANGE && !OverlayCopyUp.ensureWritable(checkNotNull(target)))
-        ) {
+        if (!OverlayCopyUp.ensureWritable(source)) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        val sourceParent = OverlayCopyUp.ensureUpper(sourceDirectory)?.inode
+        if (exchanged != null && !OverlayCopyUp.ensureWritable(exchanged)) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
+        val sourceUpper = source.upper ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val targetUpper = target?.upper
+        val sourceParentPath = OverlayCopyUp.ensureUpper(sourceDirectory)
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val targetParent = OverlayCopyUp.ensureUpper(targetDirectory)?.inode
+        val targetParentPath = OverlayCopyUp.ensureUpper(targetDirectory)
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val backend = sourceParent.backend as? org.plos_clan.cpos.fs.DirectoryBackend
+        val sourceParent = sourceParentPath.inode
+            ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        val targetParent = targetParentPath.inode
+            ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        val backend = sourceParent.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
         val sourceLayerLower = layerChild(sourceDirectory.lower, sourceName)
         val targetLayerLower = layerChild(targetDirectory.lower, targetName)
         val result = backend.rename(
             sourceParent,
             sourceName,
-            source.upper?.inode ?: return VfsResult.Err(VfsError.NOT_FOUND),
+            sourceUpper.inode ?: return VfsResult.Err(VfsError.NOT_FOUND),
             targetParent,
             targetName,
-            target?.upper?.inode,
+            targetUpper?.inode,
             mode,
         )
         if (result is VfsResult.Err) return result
-        val sourceOverlay = source.overlayInode
-        val targetOverlay = target?.overlayInode
-        if (mode != RenameMode.EXCHANGE) {
-            val metadata = target?.upper?.inode?.metadata()
-            targetOverlay?.updateMetadata(
+        if (exchanged == null) {
+            val metadata = targetUpper?.inode?.metadata()
+            expectedTarget?.updateMetadata(
                 if (metadata == null) InodeTimestampEvent.STATUS_CHANGED
                 else InodeTimestampEvent.NONE,
             ) { current -> metadata ?: current.copy(linkCount = 0u) }
         }
-        if (mode != RenameMode.EXCHANGE && source.lower != null) {
+        if (exchanged == null && source.lower != null) {
             whiteouts += Whiteout(sourceDirectory, sourceName)
         }
-        if (mode == RenameMode.EXCHANGE) {
-            val exchanged = checkNotNull(target)
+        if (exchanged != null) {
             val sourceWhiteout = Whiteout(sourceDirectory, sourceName)
             val targetWhiteout = Whiteout(targetDirectory, targetName)
             if (sourceLayerLower != null && sourceLayerLower != exchanged.lower) {
@@ -276,26 +309,21 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
             if (targetLayerLower != source.lower) whiteouts += targetWhiteout
             else whiteouts.remove(targetWhiteout)
         }
+        sourceParentPath.dentry.renameChild(
+            sourceUpper.dentry,
+            targetParentPath.dentry,
+            targetName,
+            targetUpper?.dentry.takeIf { exchanged != null },
+        )
         sourceDirectory.invalidate(sourceName)
         targetDirectory.invalidate(targetName)
-        val movedSource = OverlayLocation(
-            source.lower,
-            layerChild(targetDirectory.upper, targetName),
-            targetDirectory,
-            targetName,
-        ).also { it.overlayInode = sourceOverlay }
-        targetDirectory.cache(targetName, movedSource)
-        sourceOverlay?.let { refreshMetadata(movedSource, it) }
-        if (mode == RenameMode.EXCHANGE) {
-            val exchanged = checkNotNull(target)
-            val movedTarget = OverlayLocation(
-                exchanged.lower,
-                layerChild(sourceDirectory.upper, sourceName),
-                sourceDirectory,
-                sourceName,
-            ).also { it.overlayInode = targetOverlay }
-            sourceDirectory.cache(sourceName, movedTarget)
-            targetOverlay?.let { refreshMetadata(movedTarget, it) }
+        source.relocate(targetDirectory, targetName)
+        targetDirectory.cache(targetName, source)
+        refreshMetadata(source, expectedSource)
+        if (exchanged != null) {
+            exchanged.relocate(sourceDirectory, sourceName)
+            sourceDirectory.cache(sourceName, exchanged)
+            refreshMetadata(exchanged, checkNotNull(expectedTarget))
         }
         return VfsResult.Ok(Unit)
     }
@@ -427,7 +455,7 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
     internal fun link(location: OverlayLocation): VfsResult<VfsPathname> {
         val target = location.upper ?: location.lower ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val inode = target.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        return (inode.backend as? org.plos_clan.cpos.fs.SymlinkBackend)?.readLink(inode)
+        return (inode.backend as? SymlinkBackend)?.readLink(inode)
             ?: VfsResult.Err(VfsError.NOT_SUPPORTED)
     }
 
@@ -445,7 +473,7 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
 
     private fun layerChild(parent: VfsPath?, name: VfsName): VfsPath? {
         val inode = parent?.inode ?: return null
-        val backend = inode.backend as? org.plos_clan.cpos.fs.DirectoryBackend ?: return null
+        val backend = inode.backend as? DirectoryBackend ?: return null
         val child = when (val result = backend.lookup(inode, name)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> null
@@ -455,7 +483,7 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
 
     private fun layerEntries(path: VfsPath?): List<DirectoryEntry> {
         val inode = path?.inode ?: return emptyList()
-        val backend = inode.backend as? org.plos_clan.cpos.fs.DirectoryBackend ?: return emptyList()
+        val backend = inode.backend as? DirectoryBackend ?: return emptyList()
         val handle = when (val result = backend.open(inode, OpenOptions())) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return emptyList()

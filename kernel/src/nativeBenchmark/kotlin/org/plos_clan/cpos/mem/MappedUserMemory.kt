@@ -8,6 +8,11 @@ import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.allocArray
 import kotlinx.cinterop.nativeHeap
 import kotlinx.cinterop.set
+import org.plos_clan.cpos.mem.page.PTE_PRESENT
+import org.plos_clan.cpos.mem.page.PTE_USER
+import org.plos_clan.cpos.mem.page.PTE_WRITABLE
+import org.plos_clan.cpos.mem.page.PageDirectory
+import org.plos_clan.cpos.mem.page.PageTableLevel
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.alignUp

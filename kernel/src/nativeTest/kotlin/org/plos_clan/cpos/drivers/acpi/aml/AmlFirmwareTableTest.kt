@@ -2,12 +2,12 @@
 
 package org.plos_clan.cpos.drivers.acpi.aml
 
-import kotlinx.cinterop.addressOf
-import kotlinx.cinterop.toKString
-import kotlinx.cinterop.usePinned
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlinx.cinterop.addressOf
+import kotlinx.cinterop.toKString
+import kotlinx.cinterop.usePinned
 import platform.posix.SEEK_END
 import platform.posix.fclose
 import platform.posix.fopen

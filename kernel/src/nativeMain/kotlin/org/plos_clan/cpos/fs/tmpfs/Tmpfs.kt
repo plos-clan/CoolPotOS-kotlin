@@ -1,5 +1,24 @@
-package org.plos_clan.cpos.fs
+package org.plos_clan.cpos.fs.tmpfs
 
+import org.plos_clan.cpos.fs.DeviceNode
+import org.plos_clan.cpos.fs.sock.SocketNodeBackend
+import org.plos_clan.cpos.fs.vfs.EmptyFileSystemOptions
+import org.plos_clan.cpos.fs.vfs.FifoBackend
+import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.FileSystemOptions
+import org.plos_clan.cpos.fs.vfs.FileSystemType
+import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.InodeBackend
+import org.plos_clan.cpos.fs.vfs.InodeId
+import org.plos_clan.cpos.fs.vfs.InodeMetadata
+import org.plos_clan.cpos.fs.vfs.NodeCreation
+import org.plos_clan.cpos.fs.vfs.NodeKind
+import org.plos_clan.cpos.fs.vfs.SuperBlock
+import org.plos_clan.cpos.fs.vfs.SuperBlockBackend
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsPathname
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES

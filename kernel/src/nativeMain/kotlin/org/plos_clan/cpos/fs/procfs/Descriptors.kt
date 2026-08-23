@@ -1,14 +1,14 @@
 package org.plos_clan.cpos.fs.procfs
 
-import org.plos_clan.cpos.fs.DirectoryEntry
 import org.plos_clan.cpos.fs.FileSystemManager
-import org.plos_clan.cpos.fs.Inode
-import org.plos_clan.cpos.fs.InodeType
-import org.plos_clan.cpos.fs.SuperBlock
-import org.plos_clan.cpos.fs.VfsName
-import org.plos_clan.cpos.fs.VfsPathname
-import org.plos_clan.cpos.fs.VfsError
-import org.plos_clan.cpos.fs.VfsResult
+import org.plos_clan.cpos.fs.vfs.DirectoryEntry
+import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.InodeType
+import org.plos_clan.cpos.fs.vfs.SuperBlock
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsPathname
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 

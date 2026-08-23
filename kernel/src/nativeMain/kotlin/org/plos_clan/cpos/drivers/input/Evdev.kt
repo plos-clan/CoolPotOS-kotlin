@@ -142,14 +142,14 @@ internal class EvdevDevice(
         val number = request.ioctlNumber
         val direction = request.ioctlDirection
 
-        return when {
-            number == 0x01 && direction.hasRead && size >= Int.SIZE_BYTES ->
+        return when (number) {
+            0x01 if direction.hasRead && size >= Int.SIZE_BYTES ->
                 args.copyResult(intBytes(EVDEV_VERSION), fixedSize = true)
 
-            number == 0x02 && direction.hasRead && size >= InputId.SIZE_BYTES ->
+            0x02 if direction.hasRead && size >= InputId.SIZE_BYTES ->
                 args.copyResult(id.toByteArray(), fixedSize = true)
 
-            number == 0x03 && direction.hasRead && size >= REPEAT_BYTES -> {
+            0x03 if direction.hasRead && size >= REPEAT_BYTES -> {
                 val repeat = repeatController.repeatSettings()
                 args.copyResult(ByteArray(REPEAT_BYTES).also { bytes ->
                     LittleEndianBuffer(bytes).apply {
@@ -159,7 +159,7 @@ internal class EvdevDevice(
                 }, fixedSize = true)
             }
 
-            number == 0x03 && direction.hasWrite && size >= REPEAT_BYTES -> {
+            0x03 if direction.hasWrite && size >= REPEAT_BYTES -> {
                 val bytes = args.copyFromUser(REPEAT_BYTES) ?: return -Errno.EFAULT.toLong()
                 val input = LittleEndianBuffer(bytes)
                 val delay = input.readU32(0).toInt()
@@ -169,12 +169,12 @@ internal class EvdevDevice(
                 ) -Errno.EINVAL.toLong() else 0L
             }
 
-            number == 0x06 && direction.hasRead -> args.copyCString(name, size)
-            number == 0x07 && direction.hasRead -> args.copyCString(physicalPath, size)
-            number == 0x08 && direction.hasRead -> args.copyCString("", size)
-            number == 0x09 && direction.hasRead -> args.copyBitmap(ByteArray(PROPERTY_BITMAP_BYTES), size)
-            number == 0x18 && direction.hasRead -> args.copyBitmap(lock.withLock { keyState.copyOf() }, size)
-            number in 0x20..0x3f && direction.hasRead -> {
+            0x06 if direction.hasRead -> args.copyCString(name, size)
+            0x07 if direction.hasRead -> args.copyCString(physicalPath, size)
+            0x08 if direction.hasRead -> args.copyCString("", size)
+            0x09 if direction.hasRead -> args.copyBitmap(ByteArray(PROPERTY_BITMAP_BYTES), size)
+            0x18 if direction.hasRead -> args.copyBitmap(lock.withLock { keyState.copyOf() }, size)
+            in 0x20..0x3f if direction.hasRead -> {
                 val bitmap = when (number - 0x20) {
                     0 -> EVENT_TYPE_CAPABILITIES
                     InputEventType.KEY.value.toInt() -> keyCapabilities
@@ -184,12 +184,12 @@ internal class EvdevDevice(
                 args.copyBitmap(bitmap, size)
             }
 
-            number == 0x90 && direction.hasWrite && size >= Int.SIZE_BYTES -> {
+            0x90 if direction.hasWrite && size >= Int.SIZE_BYTES -> {
                 val enabled = args.readInt() ?: return -Errno.EFAULT.toLong()
                 if (enabled !in 0..1) -Errno.EINVAL.toLong() else setGrab(client, enabled == 1)
             }
 
-            number == 0x91 && direction.hasWrite && size >= Int.SIZE_BYTES -> {
+            0x91 if direction.hasWrite && size >= Int.SIZE_BYTES -> {
                 val value = args.readInt() ?: return -Errno.EFAULT.toLong()
                 if (value != 0) -Errno.EINVAL.toLong() else {
                     client.revoke()
@@ -197,7 +197,7 @@ internal class EvdevDevice(
                 }
             }
 
-            number == 0xa0 && direction.hasWrite && size >= Int.SIZE_BYTES -> {
+            0xa0 if direction.hasWrite && size >= Int.SIZE_BYTES -> {
                 val clockId = args.readInt() ?: return -Errno.EFAULT.toLong()
                 if (clockId in SUPPORTED_CLOCK_IDS) 0L else -Errno.EINVAL.toLong()
             }
