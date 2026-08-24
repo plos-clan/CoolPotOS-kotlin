@@ -1,11 +1,11 @@
 package org.plos_clan.cpos.fs.vfs
 
-import org.plos_clan.cpos.fs.sock.FileSystemIdentity
 import org.plos_clan.cpos.fs.sock.UnixCredentials
 import org.plos_clan.cpos.fs.sock.UnixSocket
 import org.plos_clan.cpos.fs.sock.UnixSocketAddress
 import org.plos_clan.cpos.fs.sock.UnixSocketSubsystem
 import org.plos_clan.cpos.fs.sock.UnixSocketType
+import org.plos_clan.cpos.mem.PageCache
 
 class Vfs(maxSymlinkDepth: Int = 40) {
     private val paths = VfsPathResolver(maxSymlinkDepth)
@@ -27,15 +27,18 @@ class Vfs(maxSymlinkDepth: Int = 40) {
     ): VfsResult<FileSystemContext> = mounts.createContext(fileSystemName, options)
 
     fun createPipe(
+        caller: VfsOperationContext,
         context: FileSystemContext,
-    ): VfsResult<Pair<OpenFileDescription, OpenFileDescription>> = pipes.create(context)
+    ): VfsResult<Pair<OpenFileDescription, OpenFileDescription>> = pipes.create(caller, context)
 
     internal fun createUnixSocket(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         type: UnixSocketType,
         nonBlocking: Boolean,
         credentials: UnixCredentials,
     ): VfsResult<OpenFileDescription> = sockets.create(
+        caller,
         context,
         type,
         nonBlocking,
@@ -43,20 +46,23 @@ class Vfs(maxSymlinkDepth: Int = 40) {
     )
 
     internal fun openUnixSocket(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         socket: UnixSocket,
         nonBlocking: Boolean,
-    ): VfsResult<OpenFileDescription> = sockets.open(context, socket, nonBlocking)
+    ): VfsResult<OpenFileDescription> = sockets.open(caller, context, socket, nonBlocking)
 
     internal fun createUnixSocketPair(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         type: UnixSocketType,
         credentials: UnixCredentials,
         nonBlocking: Boolean,
     ): VfsResult<Pair<OpenFileDescription, OpenFileDescription>> =
-        sockets.pair(context, type, credentials, nonBlocking)
+        sockets.pair(caller, context, type, credentials, nonBlocking)
 
     internal fun bindUnixSocket(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         socket: UnixSocket,
         address: UnixSocketAddress,
@@ -64,6 +70,7 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         uid: UInt,
         gid: UInt,
     ): VfsResult<UnixSocketAddress> = sockets.bind(
+        caller,
         context,
         socket,
         address,
@@ -73,37 +80,42 @@ class Vfs(maxSymlinkDepth: Int = 40) {
     )
 
     internal fun resolveUnixSocket(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         address: UnixSocketAddress,
-        identity: FileSystemIdentity,
-    ): VfsResult<UnixSocket> = sockets.resolve(context, address, identity)
+    ): VfsResult<UnixSocket> = sockets.resolve(caller, context, address)
 
     fun mount(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         target: VfsPathname,
         request: MountRequest,
-    ): VfsResult<Unit> = mounts.mount(context, target, request)
+    ): VfsResult<Unit> = mounts.mount(caller, context, target, request)
 
     fun unmount(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         target: VfsPathname,
         mode: UnmountMode = UnmountMode.REGULAR,
         followFinalSymlink: Boolean = true,
-    ): VfsResult<Unit> = mounts.unmount(context, target, mode, followFinalSymlink)
+    ): VfsResult<Unit> = mounts.unmount(caller, context, target, mode, followFinalSymlink)
 
     fun resolve(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         pathname: VfsPathname,
         followFinalSymlink: Boolean = true,
-    ): VfsResult<VfsPath> = paths.resolve(context, pathname, followFinalSymlink)
+    ): VfsResult<VfsPath> = paths.resolve(caller, context, pathname, followFinalSymlink)
 
     fun resolveAt(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         directory: VfsPath,
         pathname: VfsPathname,
         followFinalSymlink: Boolean = true,
         allowEmpty: Boolean = false,
     ): VfsResult<VfsPath> = paths.resolveAt(
+        caller,
         context,
         directory,
         pathname,
@@ -112,17 +124,20 @@ class Vfs(maxSymlinkDepth: Int = 40) {
     )
 
     fun open(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         pathname: VfsPathname,
         options: OpenOptions = OpenOptions(),
     ): VfsResult<OpenFileDescription> = openAt(
         context = context,
+        caller = caller,
         directory = context.workingDirectory,
         pathname = pathname,
         options = options,
     )
 
     fun openAt(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         directory: VfsPath,
         pathname: VfsPathname,
@@ -135,6 +150,7 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         val opened = when (options.create) {
             CreateDisposition.OPEN_EXISTING -> when (
                 val result = resolveAt(
+                    caller,
                     context,
                     directory,
                     pathname,
@@ -147,7 +163,9 @@ class Vfs(maxSymlinkDepth: Int = 40) {
 
             CreateDisposition.OPEN_OR_CREATE,
             CreateDisposition.CREATE_NEW,
-            -> when (val result = nodes.openOrCreate(context, directory, pathname, options)) {
+            -> when (
+                val result = nodes.openOrCreate(caller, context, directory, pathname, options)
+            ) {
                 is VfsResult.Ok -> result.value
                 is VfsResult.Err -> return result
             }
@@ -155,10 +173,14 @@ class Vfs(maxSymlinkDepth: Int = 40) {
 
         val path = opened.path
         val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        if (options.noAtime && !options.privileged && options.createUid != inode.metadata().uid) {
-            return VfsResult.Err(VfsError.NOT_PERMITTED)
+        if (options.noAtime && !caller.privileged) {
+            val owner = when (val result = inode.attributes(caller)) {
+                is VfsResult.Ok -> result.value.metadata.uid
+                is VfsResult.Err -> return result
+            }
+            if (caller.uid != owner) return VfsResult.Err(VfsError.NOT_PERMITTED)
         }
-        if (inode.type == InodeType.SYMLINK) {
+        if (inode.type == InodeType.SYMLINK && options.access != AccessMode.PATH) {
             return VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
         }
         if (options.directoryOnly && inode.type != InodeType.DIRECTORY) {
@@ -177,7 +199,20 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         ) {
             return VfsResult.Err(VfsError.PERMISSION_DENIED)
         }
+        val requestedAccess = when (options.access) {
+            AccessMode.READ -> AccessPermissions.READ
+            AccessMode.WRITE -> AccessPermissions.WRITE
+            AccessMode.READ_WRITE -> AccessPermissions.READ + AccessPermission.WRITE
+            AccessMode.PATH -> AccessPermissions.NONE
+        }
+        if (!opened.created) {
+            when (val result = inode.backend.checkAccess(caller, inode, requestedAccess)) {
+                is VfsResult.Ok -> Unit
+                is VfsResult.Err -> return result
+            }
+        }
         return OpenFileDescription.open(
+            caller,
             path,
             inode,
             options,
@@ -185,16 +220,34 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         )
     }
 
-    fun resize(mount: Mount, inode: Inode, size: ULong): VfsResult<Unit> {
+    fun resize(
+        caller: VfsOperationContext,
+        mount: Mount,
+        inode: Inode,
+        size: ULong,
+    ): VfsResult<Unit> {
         if (MountFlag.READ_ONLY in mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val backend = inode.backend as? RegularFileBackend
             ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        return backend.resize(inode, size)
+        val result = backend.resize(caller, inode, size)
+        if (result is VfsResult.Ok) {
+            PageCache.invalidate(inode)
+            val identity = backend.pageCacheIdentity(inode)
+            if (identity != inode) PageCache.invalidate(identity)
+        }
+        return result
     }
 
+    fun checkAccess(
+        caller: VfsOperationContext,
+        inode: Inode,
+        requested: AccessPermissions,
+    ): VfsResult<Unit> = inode.backend.checkAccess(caller, inode, requested)
+
     fun allocate(
+        caller: VfsOperationContext,
         mount: Mount,
         inode: Inode,
         offset: ULong,
@@ -209,24 +262,42 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         }
         val backend = inode.backend as? RegularFileBackend
             ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        return backend.allocate(inode, offset, length, mode)
+        val result = backend.allocate(caller, inode, offset, length, mode)
+        if (result is VfsResult.Ok) {
+            PageCache.invalidate(inode, offset, length)
+            val identity = backend.pageCacheIdentity(inode)
+            if (identity != inode) PageCache.invalidate(identity, offset, length)
+        }
+        return result
     }
 
-    fun setMode(mount: Mount, inode: Inode, mode: FileMode): VfsResult<Unit> {
+    fun setMode(
+        caller: VfsOperationContext,
+        mount: Mount,
+        inode: Inode,
+        mode: FileMode,
+    ): VfsResult<Unit> {
         if (MountFlag.READ_ONLY in mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        return inode.backend.setMode(inode, mode)
+        return inode.backend.setMode(caller, inode, mode)
     }
 
-    fun setOwner(mount: Mount, inode: Inode, uid: UInt?, gid: UInt?): VfsResult<Unit> {
+    fun setOwner(
+        caller: VfsOperationContext,
+        mount: Mount,
+        inode: Inode,
+        uid: UInt?,
+        gid: UInt?,
+    ): VfsResult<Unit> {
         if (MountFlag.READ_ONLY in mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        return inode.backend.setOwner(inode, uid, gid)
+        return inode.backend.setOwner(caller, inode, uid, gid)
     }
 
     fun updateTimestamps(
+        caller: VfsOperationContext,
         mount: Mount,
         inode: Inode,
         update: InodeTimestampSet,
@@ -235,18 +306,22 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         if (MountFlag.READ_ONLY in mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        return inode.superBlock.backend.updateTimestamps(inode, update)
+        return inode.superBlock.backend.updateTimestamps(caller, inode, update)
     }
 
     fun getExtendedAttribute(
+        caller: VfsOperationContext,
         inode: Inode,
         name: ExtendedAttributeName,
-    ): VfsResult<ByteArray> = inode.backend.getExtendedAttribute(inode, name)
+    ): VfsResult<ByteArray> = inode.backend.getExtendedAttribute(caller, inode, name)
 
-    fun listExtendedAttributes(inode: Inode): VfsResult<ByteArray> =
-        inode.backend.listExtendedAttributes(inode)
+    fun listExtendedAttributes(
+        caller: VfsOperationContext,
+        inode: Inode,
+    ): VfsResult<ByteArray> = inode.backend.listExtendedAttributes(caller, inode)
 
     fun setExtendedAttribute(
+        caller: VfsOperationContext,
         mount: Mount,
         inode: Inode,
         name: ExtendedAttributeName,
@@ -256,10 +331,11 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         if (MountFlag.READ_ONLY in mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        return inode.backend.setExtendedAttribute(inode, name, value, mode)
+        return inode.backend.setExtendedAttribute(caller, inode, name, value, mode)
     }
 
     fun removeExtendedAttribute(
+        caller: VfsOperationContext,
         mount: Mount,
         inode: Inode,
         name: ExtendedAttributeName,
@@ -267,10 +343,11 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         if (MountFlag.READ_ONLY in mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        return inode.backend.removeExtendedAttribute(inode, name)
+        return inode.backend.removeExtendedAttribute(caller, inode, name)
     }
 
     internal fun createFile(
+        caller: VfsOperationContext,
         directory: VfsPath,
         name: VfsName,
         mode: FileMode,
@@ -278,38 +355,43 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         contentOffset: Int,
         contentSize: Int,
     ): VfsResult<VfsPath> =
-        nodes.createFile(directory, name, mode, content, contentOffset, contentSize)
+        nodes.createFile(caller, directory, name, mode, content, contentOffset, contentSize)
 
     fun createNode(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         directory: VfsPath,
         pathname: VfsPathname,
         node: NodeCreation,
-    ): VfsResult<VfsPath> = nodes.createNode(context, directory, pathname, node)
+    ): VfsResult<VfsPath> = nodes.createNode(caller, context, directory, pathname, node)
 
     fun createNode(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         pathname: VfsPathname,
         node: NodeCreation,
-    ): VfsResult<VfsPath> = nodes.createNode(context, pathname, node)
+    ): VfsResult<VfsPath> = nodes.createNode(caller, context, pathname, node)
 
     fun remove(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         directory: VfsPath,
         pathname: VfsPathname,
         mode: RemoveMode,
-    ): VfsResult<Unit> = nodes.remove(context, directory, pathname, mode)
+    ): VfsResult<Unit> = nodes.remove(caller, context, directory, pathname, mode)
 
     fun link(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         sourceMount: Mount,
         sourceInode: Inode,
         targetDirectory: VfsPath,
         target: VfsPathname,
     ): VfsResult<Unit> =
-        nodes.link(context, sourceMount, sourceInode, targetDirectory, target)
+        nodes.link(caller, context, sourceMount, sourceInode, targetDirectory, target)
 
     fun rename(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         sourceDirectory: VfsPath,
         source: VfsPathname,
@@ -317,20 +399,32 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         target: VfsPathname,
         mode: RenameMode,
     ): VfsResult<Unit> =
-        nodes.rename(context, sourceDirectory, source, targetDirectory, target, mode)
+        nodes.rename(caller, context, sourceDirectory, source, targetDirectory, target, mode)
 
-    fun chdir(context: FileSystemContext, pathname: VfsPathname): VfsResult<Unit> {
-        val path = when (val result = resolve(context, pathname)) {
+    fun chdir(
+        caller: VfsOperationContext,
+        context: FileSystemContext,
+        pathname: VfsPathname,
+    ): VfsResult<Unit> {
+        val path = when (val result = resolve(caller, context, pathname)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        return chdir(context, path)
+        return chdir(caller, context, path)
     }
 
-    internal fun chdir(context: FileSystemContext, path: VfsPath): VfsResult<Unit> {
+    internal fun chdir(
+        caller: VfsOperationContext,
+        context: FileSystemContext,
+        path: VfsPath,
+    ): VfsResult<Unit> {
         val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         if (inode.type != InodeType.DIRECTORY) {
             return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        }
+        when (val access = inode.backend.checkAccess(caller, inode, AccessPermissions.EXECUTE)) {
+            is VfsResult.Ok -> Unit
+            is VfsResult.Err -> return access
         }
         return if (context.changeWorkingDirectory(path)) VfsResult.Ok(Unit)
         else VfsResult.Err(VfsError.NOT_FOUND)

@@ -4,6 +4,9 @@ package org.plos_clan.cpos.fs
 
 import kotlin.concurrent.atomics.AtomicReference
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 object OpenFlags {
@@ -72,7 +75,6 @@ class FileDescriptorTable {
         fd
     }
 
-    /** Consumes all supplied file references, or leaves the table unchanged. */
     fun installAll(
         files: List<OpenFileDescription>,
         flags: ULong,
@@ -83,7 +85,6 @@ class FileDescriptorTable {
         descriptors
     }
 
-    /** Consumes as many leading file references as fit, up to [maximum]. */
     fun installAvailable(
         files: List<OpenFileDescription>,
         flags: ULong,
@@ -131,35 +132,30 @@ class FileDescriptorTable {
 
     fun snapshotDescriptors(): IntArray = lock.withLock { entries.occupiedIndices() }
 
-    fun dup2(oldFd: Int, newFd: Int): Boolean = lock.withLock {
-        if (newFd !in entries.indices) {
-            return@withLock false
-        }
-        val source = entries[oldFd] ?: return@withLock false
+    fun dup2(caller: VfsOperationContext, oldFd: Int, newFd: Int): Boolean {
+        var replaced: OpenFileDescription? = null
+        val duplicated = lock.withLock {
+            if (newFd !in entries.indices) return@withLock false
+            val source = entries[oldFd] ?: return@withLock false
+            if (oldFd == newFd) return@withLock true
+            if (!source.file.retain()) return@withLock false
 
-        if (oldFd == newFd) {
-            return@withLock true
+            replaced = entries[newFd]?.file
+            entries[newFd] = FileDescriptor(source.file, 0uL)
+            true
         }
-
-        if (!source.file.retain()) {
-            return@withLock false
-        }
-
-        val replaced = entries[newFd]
-        entries[newFd] = FileDescriptor(source.file, 0uL)
-        replaced?.file?.release()
-        true
+        if (duplicated) replaced?.closeDescriptor(caller)
+        return duplicated
     }
 
-    fun close(fd: Int): Boolean {
+    fun close(caller: VfsOperationContext, fd: Int): VfsResult<Unit> {
         val file = lock.withLock {
             val openFile = entries[fd]?.file ?: return@withLock null
             entries[fd] = null
             openFile
-        } ?: return false
+        } ?: return VfsResult.Err(VfsError.BAD_DESCRIPTOR)
 
-        file.release()
-        return true
+        return file.closeDescriptor(caller)
     }
 
     fun copyInto(destination: FileDescriptorTable): Boolean {
@@ -181,15 +177,26 @@ class FileDescriptorTable {
         }
     }
 
-    fun closeOnExec() = closeMatching { descriptor ->
+    fun closeOnExec(caller: VfsOperationContext) = closeMatching(caller) { descriptor ->
         descriptor.flags and FileDescriptorFlags.FD_CLOEXEC != 0uL
     }
 
-    fun closeAll() = closeMatching { true }
+    fun closeAll(caller: VfsOperationContext) = closeMatching(caller) { true }
 
-    private fun closeMatching(predicate: (FileDescriptor) -> Boolean) {
+    private fun closeMatching(
+        caller: VfsOperationContext,
+        predicate: (FileDescriptor) -> Boolean,
+    ) {
         val descriptors = lock.withLock { entries.removeIf(predicate) }
-        descriptors.forEach { it.file.release() }
+        descriptors.forEach { it.file.closeDescriptor(caller) }
+    }
+
+    private fun OpenFileDescription.closeDescriptor(
+        caller: VfsOperationContext,
+    ): VfsResult<Unit> {
+        val result = flush(caller)
+        release()
+        return result
     }
 
     private class DescriptorEntries(val size: Int) {

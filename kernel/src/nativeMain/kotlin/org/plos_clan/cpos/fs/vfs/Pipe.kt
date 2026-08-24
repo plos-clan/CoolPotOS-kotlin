@@ -17,7 +17,11 @@ private class PipeInode(
     override val type: InodeType
         get() = InodeType.PIPE
 
-    override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
+    override fun open(
+        caller: VfsOperationContext,
+        inode: Inode,
+        options: OpenOptions,
+    ): VfsResult<OpenFileBackend> =
         when (options.access) {
             AccessMode.READ,
             AccessMode.WRITE,
@@ -30,7 +34,11 @@ internal class FifoBackend : MutableInodeBackend {
     override val type: InodeType = InodeType.PIPE
     private val state = PipeState(readers = 0, writers = 0)
 
-    override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
+    override fun open(
+        caller: VfsOperationContext,
+        inode: Inode,
+        options: OpenOptions,
+    ): VfsResult<OpenFileBackend> =
         state.open(options.access, options.nonBlocking)
 }
 
@@ -39,6 +47,7 @@ private class PipeEndpoint(
     private val access: AccessMode,
 ) : WaitableOpenFileBackend {
     override fun read(
+        caller: VfsOperationContext,
         inode: Inode,
         destination: PreparedBufferDestination,
         destinationOffset: Int,
@@ -50,6 +59,7 @@ private class PipeEndpoint(
     }
 
     override fun write(
+        caller: VfsOperationContext,
         inode: Inode,
         source: PreparedBufferSource,
         sourceOffset: Int,
@@ -66,7 +76,11 @@ private class PipeEndpoint(
         return state.await(event, count)
     }
 
-    override fun poll(inode: Inode, events: Int): Long = state.poll(events, access)
+    override fun poll(
+        caller: VfsOperationContext,
+        inode: Inode,
+        events: Int,
+    ): Long = state.poll(events, access)
 
     override fun release() = state.close(access)
 }
@@ -236,7 +250,10 @@ internal class PipeFactory(
     private val anonymousFiles: AnonymousFileFactory,
 ) {
 
-    fun create(context: FileSystemContext): VfsResult<Pair<OpenFileDescription, OpenFileDescription>> {
+    fun create(
+        caller: VfsOperationContext,
+        context: FileSystemContext,
+    ): VfsResult<Pair<OpenFileDescription, OpenFileDescription>> {
         val path = context.root
         val state = PipeState(readers = 1, writers = 1)
         val inode = anonymousFiles.createInode(
@@ -245,6 +262,7 @@ internal class PipeFactory(
             InodeMetadata(mode = FileMode(0x1A4u), linkCount = 0u),
         )
         val readFile = when (val result = OpenFileDescription.open(
+            caller,
             path,
             inode,
             OpenOptions(access = AccessMode.READ),
@@ -253,6 +271,7 @@ internal class PipeFactory(
             is VfsResult.Err -> return VfsResult.Err(VfsError.IO)
         }
         val writeFile = when (val result = OpenFileDescription.open(
+            caller,
             path,
             inode,
             OpenOptions(access = AccessMode.WRITE),

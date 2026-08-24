@@ -107,6 +107,15 @@ private class CachedPage(
     var referenced: Boolean = true,
 )
 
+private class PageLoad(val key: PageCacheKey) {
+    var valid = true
+}
+
+private sealed interface PageLookup {
+    data class Cached(val frame: ULong) : PageLookup
+    data class Missing(val load: PageLoad) : PageLookup
+}
+
 private enum class ClockScanResult {
     RECLAIMED,
     UNAVAILABLE,
@@ -117,6 +126,7 @@ internal object PageCache : FrameReclaimer {
     private val lock = IrqSpinLock()
     private val pages = mutableMapOf<PageCacheKey, CachedPage>()
     private val clock = ArrayDeque<CachedPage>()
+    private val loads = mutableSetOf<PageLoad>()
 
     init {
         BuddyFrameAllocator.register(this)
@@ -129,11 +139,9 @@ internal object PageCache : FrameReclaimer {
     ): PageCacheAcquireResult {
         require(offset.isPageAligned() && scratch.size >= PAGE_SIZE_BYTES.toInt())
         val key = PageCacheKey(source.identity, offset)
-        val cached = retainCached(key)
-        return if (cached != INVALID_FRAME) {
-            PageCacheAcquireResult.acquired(cached)
-        } else {
-            load(source, key, scratch)
+        return when (val lookup = lookup(key)) {
+            is PageLookup.Cached -> PageCacheAcquireResult.acquired(lookup.frame)
+            is PageLookup.Missing -> load(source, lookup.load, scratch)
         }
     }
 
@@ -157,18 +165,29 @@ internal object PageCache : FrameReclaimer {
             val position = sourceOffset + copied.toULong()
             val pageOffset = position.alignDown(PAGE_SIZE_BYTES)
             val key = PageCacheKey(identity, pageOffset)
-            var frame = retainCached(key)
-            if (frame == INVALID_FRAME) {
-                val buffer = scratch ?: ByteArray(PAGE_SIZE_BYTES.toInt()).also { scratch = it }
-                val loaded = load(source, key, buffer)
-                if (!loaded.isSuccess) {
-                    return if (copied == 0) {
-                        PageCacheReadResult.failed(loaded.failure)
-                    } else {
-                        PageCacheReadResult.completed(copied)
+            val frame = when (val lookup = lookup(key)) {
+                is PageLookup.Cached -> lookup.frame
+                is PageLookup.Missing -> {
+                    val buffer = scratch ?: try {
+                        ByteArray(PAGE_SIZE_BYTES.toInt()).also { scratch = it }
+                    } catch (_: OutOfMemoryError) {
+                        cancel(lookup.load)
+                        return if (copied == 0) {
+                            PageCacheReadResult.failed(PageCacheFailure.OUT_OF_MEMORY)
+                        } else {
+                            PageCacheReadResult.completed(copied)
+                        }
                     }
+                    val loaded = load(source, lookup.load, buffer)
+                    if (!loaded.isSuccess) {
+                        return if (copied == 0) {
+                            PageCacheReadResult.failed(loaded.failure)
+                        } else {
+                            PageCacheReadResult.completed(copied)
+                        }
+                    }
+                    loaded.frame
                 }
-                frame = loaded.frame
             }
 
             val sourcePointer = Hhdm.toVirtualPointer<UByteVar>(frame)
@@ -198,6 +217,33 @@ internal object PageCache : FrameReclaimer {
         UserFrameReferences.release(frame)
     }
 
+    fun invalidate(
+        identity: Any,
+        offset: ULong = 0uL,
+        length: ULong? = null,
+    ) {
+        if (length == 0uL) return
+        val end = length?.let { if (it > ULong.MAX_VALUE - offset) null else offset + it }
+        val retired = mutableListOf<CachedPage>()
+        lock.withLock {
+            for (load in loads) {
+                if (load.key.intersects(identity, offset, end)) load.valid = false
+            }
+            val iterator = pages.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next()
+                if (!entry.key.intersects(identity, offset, end)) continue
+                retired += entry.value
+                iterator.remove()
+            }
+            repeat(clock.size) {
+                val page = clock.removeFirst()
+                if (pages[page.key] === page) clock.addLast(page)
+            }
+        }
+        retired.forEach { UserFrameReferences.release(it.frame) }
+    }
+
     override fun reclaim(target: ULong): ULong {
         var reclaimed = 0uL
         while (reclaimed < target && scanClock() == ClockScanResult.RECLAIMED) {
@@ -221,44 +267,59 @@ internal object PageCache : FrameReclaimer {
         )
     }
 
-    private fun retainCached(key: PageCacheKey): ULong = lock.withLock {
-        val page = pages[key] ?: return@withLock INVALID_FRAME
-        page.referenced = true
-        UserFrameReferences.retain(page.frame)
-        page.frame
+    private fun lookup(key: PageCacheKey): PageLookup = lock.withLock {
+        val page = pages[key]
+        if (page != null) {
+            page.referenced = true
+            UserFrameReferences.retain(page.frame)
+            PageLookup.Cached(page.frame)
+        } else {
+            PageLookup.Missing(PageLoad(key).also(loads::add))
+        }
     }
 
     private fun load(
         source: PageCacheSource,
-        key: PageCacheKey,
+        load: PageLoad,
         scratch: ByteArray,
     ): PageCacheAcquireResult {
         val frame = BuddyFrameAllocator.allocate(1uL)
         if (frame == INVALID_FRAME) {
+            cancel(load)
             return PageCacheAcquireResult.failed(PageCacheFailure.OUT_OF_MEMORY)
         }
         val destination = Hhdm.toVirtualPointer<UByteVar>(frame)
         if (destination == null) {
+            cancel(load)
             BuddyFrameAllocator.free(frame, 1uL)
             return PageCacheAcquireResult.failed(PageCacheFailure.IO_ERROR)
         }
 
         scratch.fill(0, 0, PAGE_SIZE_BYTES.toInt())
-        val count = source.read(key.offset, scratch)
+        val count = try {
+            source.read(load.key.offset, scratch)
+        } catch (_: Throwable) {
+            cancel(load)
+            BuddyFrameAllocator.free(frame, 1uL)
+            return PageCacheAcquireResult.failed(PageCacheFailure.IO_ERROR)
+        }
         if (count !in 0..PAGE_SIZE_BYTES.toInt()) {
+            cancel(load)
             BuddyFrameAllocator.free(frame, 1uL)
             return PageCacheAcquireResult.failed(PageCacheFailure.IO_ERROR)
         }
         scratch.usePinned { data ->
             memcpy(destination, data.addressOf(0), PAGE_SIZE_BYTES)
         }
-        return PageCacheAcquireResult.acquired(publish(CachedPage(key, frame)))
+        return PageCacheAcquireResult.acquired(publish(CachedPage(load.key, frame), load))
     }
 
-    private fun publish(candidate: CachedPage): ULong {
+    private fun publish(candidate: CachedPage, load: PageLoad): ULong {
         val frame = candidate.frame
         UserFrameReferences.retain(frame)
         val acquired = lock.withLock {
+            check(loads.remove(load))
+            if (!load.valid) return@withLock frame
             val existing = pages[candidate.key]
             if (existing != null) {
                 existing.referenced = true
@@ -273,6 +334,19 @@ internal object PageCache : FrameReclaimer {
         }
         if (acquired != frame) UserFrameReferences.release(frame)
         return acquired
+    }
+
+    private fun cancel(load: PageLoad) {
+        lock.withLock { check(loads.remove(load)) }
+    }
+
+    private fun PageCacheKey.intersects(
+        identity: Any,
+        start: ULong,
+        end: ULong?,
+    ): Boolean {
+        if (this.identity != identity || end != null && offset >= end) return false
+        return offset > ULong.MAX_VALUE - PAGE_SIZE_BYTES || start < offset + PAGE_SIZE_BYTES
     }
 
     private fun scanClock(): ClockScanResult {

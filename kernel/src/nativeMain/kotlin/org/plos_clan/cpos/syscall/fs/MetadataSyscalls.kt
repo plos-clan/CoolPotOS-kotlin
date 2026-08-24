@@ -4,6 +4,7 @@ package org.plos_clan.cpos.syscall.fs
 
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.vfs.AccessMode
+import org.plos_clan.cpos.fs.vfs.AccessPermissions
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.vfs.InodeTimestampSet
@@ -11,6 +12,7 @@ import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.Mount
 import org.plos_clan.cpos.fs.vfs.SymlinkBackend
 import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPath
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
@@ -33,7 +35,6 @@ import org.plos_clan.cpos.syscall.fs.FsConstants.S_ISGID
 import org.plos_clan.cpos.syscall.fs.FsConstants.UTIME_NOW
 import org.plos_clan.cpos.syscall.fs.FsConstants.UTIME_OMIT
 import org.plos_clan.cpos.syscall.fs.FsPathResolver.resolveAt
-import org.plos_clan.cpos.syscall.fs.FsPermissions.mayWrite
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
@@ -64,9 +65,10 @@ internal fun lchown(regs: PtraceRegisters, process: Process): Long = chownPath(
 internal fun fchown(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI]) ?: return errno(Errno.EBADF)
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
+    val caller = process.vfsOperationContext
     return try {
         changeOwner(
-            process,
+            caller,
             file.path.mount,
             file.inode,
             regs[PtraceRegisters.IDX_RSI],
@@ -86,19 +88,21 @@ internal fun fchownAt(regs: PtraceRegisters, process: Process): Long {
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RSI])
         ?: return errno(Errno.EFAULT)
     val dirFd = regs[PtraceRegisters.IDX_RDI].toUInt().toInt()
+    val caller = process.vfsOperationContext
     val target = when (val result = resolveAt(
         process = process,
         dirFd = dirFd,
         pathname = VfsPathname.fromBytes(pathname),
         followFinalSymlink = flags.toInt() and AT_SYMLINK_NOFOLLOW == 0,
         allowEmpty = flags.toInt() and AT_EMPTY_PATH != 0,
+        caller = caller,
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
     val inode = target.inode ?: return errno(Errno.ENOENT)
     return changeOwner(
-        process,
+        caller,
         target.mount,
         inode,
         regs[PtraceRegisters.IDX_RDX],
@@ -115,33 +119,41 @@ private fun chownPath(
 ): Long {
     val pathname = copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
     if (pathname.isEmpty()) return errno(Errno.ENOENT)
+    val caller = process.vfsOperationContext
     val target = when (val result = resolveAt(
         process,
         AT_FDCWD,
         VfsPathname.fromBytes(pathname),
         followFinalSymlink,
+        caller = caller,
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
     val inode = target.inode ?: return errno(Errno.ENOENT)
-    return changeOwner(process, target.mount, inode, uid, gid)
+    return changeOwner(caller, target.mount, inode, uid, gid)
 }
 
 private fun changeOwner(
-    process: Process,
+    caller: VfsOperationContext,
     mount: Mount,
     inode: Inode,
     uid: ULong,
     gid: ULong,
 ): Long {
-    if (process.euid != 0) return errno(Errno.EPERM)
+    if (!caller.privileged) return errno(Errno.EPERM)
     if (uid > UInt.MAX_VALUE.toULong() || gid > UInt.MAX_VALUE.toULong()) {
         return errno(Errno.EINVAL)
     }
     val owner = uid.toUInt().takeUnless { it == UInt.MAX_VALUE }
     val group = gid.toUInt().takeUnless { it == UInt.MAX_VALUE }
-    return when (val result = FileSystemManager.vfs.setOwner(mount, inode, owner, group)) {
+    return when (val result = FileSystemManager.vfs.setOwner(
+        caller,
+        mount,
+        inode,
+        owner,
+        group,
+    )) {
         is VfsResult.Ok -> 0L
         is VfsResult.Err -> errno(result.error.errno)
     }
@@ -158,9 +170,10 @@ internal fun chmod(regs: PtraceRegisters, process: Process): Long = changeModeAt
 internal fun fchmod(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI]) ?: return errno(Errno.EBADF)
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
+    val caller = process.vfsOperationContext
     return try {
         if (file.access == AccessMode.PATH) errno(Errno.EBADF)
-        else changeMode(process, file.path.mount, file.inode, regs[PtraceRegisters.IDX_RSI])
+        else changeMode(caller, file.path.mount, file.inode, regs[PtraceRegisters.IDX_RSI])
     } finally {
         file.release()
     }
@@ -194,37 +207,47 @@ private fun changeModeAt(
         return errno(Errno.EINVAL)
     }
     val pathname = copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
+    val caller = process.vfsOperationContext
     val target = when (val result = resolveAt(
         process = process,
         dirFd = dirFd,
         pathname = VfsPathname.fromBytes(pathname),
         followFinalSymlink = flags.toInt() and AT_SYMLINK_NOFOLLOW == 0,
         allowEmpty = flags.toInt() and AT_EMPTY_PATH != 0,
+        caller = caller,
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
     val inode = target.inode ?: return errno(Errno.ENOENT)
     if (inode.type == InodeType.SYMLINK) return errno(Errno.EOPNOTSUPP)
-    return changeMode(process, target.mount, inode, rawMode)
+    return changeMode(caller, target.mount, inode, rawMode)
 }
 
 private fun changeMode(
-    process: Process,
+    caller: VfsOperationContext,
     mount: Mount,
     inode: Inode,
     rawMode: ULong,
 ): Long {
-    val metadata = inode.metadata()
-    if (process.euid != 0 && process.fsuid.toUInt() != metadata.uid) {
+    val metadata = when (val result = inode.attributes(caller)) {
+        is VfsResult.Ok -> result.value.metadata
+        is VfsResult.Err -> return errno(result.error.errno)
+    }
+    if (!caller.privileged && caller.uid != metadata.uid) {
         return errno(Errno.EPERM)
     }
 
     var mode = rawMode.toUInt() and S_IALLUGO
-    if (process.euid != 0 && metadata.gid != process.fsgid.toUInt()) {
+    if (!caller.privileged && metadata.gid != caller.gid) {
         mode = mode and S_ISGID.inv()
     }
-    return when (val result = FileSystemManager.vfs.setMode(mount, inode, FileMode(mode))) {
+    return when (val result = FileSystemManager.vfs.setMode(
+        caller,
+        mount,
+        inode,
+        FileMode(mode),
+    )) {
         is VfsResult.Ok -> 0L
         is VfsResult.Err -> errno(result.error.errno)
     }
@@ -244,6 +267,7 @@ internal fun utimensAt(regs: PtraceRegisters, process: Process): Long {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
+    val caller = process.vfsOperationContext
 
     if (pathnameAddress == 0uL) {
         val descriptor = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
@@ -251,7 +275,7 @@ internal fun utimensAt(regs: PtraceRegisters, process: Process): Long {
         val file = process.fdTable.acquire(descriptor) ?: return errno(Errno.EBADF)
         return try {
             if (file.access == AccessMode.PATH && !timestamps.omitsBoth) errno(Errno.EBADF)
-            else setTimestamps(process, file.path.mount, file.inode, timestamps)
+            else setTimestamps(caller, file.path.mount, file.inode, timestamps)
         } finally {
             file.release()
         }
@@ -262,13 +286,13 @@ internal fun utimensAt(regs: PtraceRegisters, process: Process): Long {
         if (dirFd == AT_FDCWD) {
             val path = process.context?.workingDirectory ?: return errno(Errno.ENOENT)
             val inode = path.inode ?: return errno(Errno.ENOENT)
-            return setTimestamps(process, path.mount, inode, timestamps)
+            return setTimestamps(caller, path.mount, inode, timestamps)
         }
         val descriptor = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
             ?: return errno(Errno.EBADF)
         val file = process.fdTable.acquire(descriptor) ?: return errno(Errno.EBADF)
         return try {
-            setTimestamps(process, file.path.mount, file.inode, timestamps)
+            setTimestamps(caller, file.path.mount, file.inode, timestamps)
         } finally {
             file.release()
         }
@@ -279,30 +303,45 @@ internal fun utimensAt(regs: PtraceRegisters, process: Process): Long {
         pathname = VfsPathname.fromBytes(pathname),
         followFinalSymlink = flags.toInt() and AT_SYMLINK_NOFOLLOW == 0,
         allowEmpty = flags.toInt() and AT_EMPTY_PATH != 0,
+        caller = caller,
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
     val inode = target.inode ?: return errno(Errno.ENOENT)
-    return setTimestamps(process, target.mount, inode, timestamps)
+    return setTimestamps(caller, target.mount, inode, timestamps)
 }
 
 private fun setTimestamps(
-    process: Process,
+    caller: VfsOperationContext,
     mount: Mount,
     inode: Inode,
     timestamps: InodeTimestampSet,
 ): Long {
     if (timestamps.omitsBoth) return 0L
 
-    val metadata = inode.metadata()
-    val ownsFile = process.euid == 0 || process.fsuid.toUInt() == metadata.uid
+    val metadata = when (val result = inode.attributes(caller)) {
+        is VfsResult.Ok -> result.value.metadata
+        is VfsResult.Err -> return errno(result.error.errno)
+    }
+    val ownsFile = caller.privileged || caller.uid == metadata.uid
     if (!ownsFile) {
-        if (!timestamps.setsBothToNow || !process.mayWrite(metadata)) {
-            return errno(if (timestamps.setsBothToNow) Errno.EACCES else Errno.EPERM)
+        if (!timestamps.setsBothToNow) return errno(Errno.EPERM)
+        when (val access = FileSystemManager.vfs.checkAccess(
+            caller,
+            inode,
+            AccessPermissions.WRITE,
+        )) {
+            is VfsResult.Ok -> Unit
+            is VfsResult.Err -> return errno(access.error.errno)
         }
     }
-    return when (val result = FileSystemManager.vfs.updateTimestamps(mount, inode, timestamps)) {
+    return when (val result = FileSystemManager.vfs.updateTimestamps(
+        caller,
+        mount,
+        inode,
+        timestamps,
+    )) {
         is VfsResult.Ok -> 0L
         is VfsResult.Err -> errno(result.error.errno)
     }
@@ -360,33 +399,55 @@ internal fun statfs(regs: PtraceRegisters, process: Process): Long {
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EFAULT)
     if (pathname.isEmpty()) return errno(Errno.ENOENT)
+    val caller = process.vfsOperationContext
     val path = when (val result = FileSystemManager.vfs.resolve(
+        caller,
         process.getFSContext(),
         VfsPathname.fromBytes(pathname),
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
-    return copyStatFs(process, regs[PtraceRegisters.IDX_RSI], path)
+    return copyStatFs(process, caller, regs[PtraceRegisters.IDX_RSI], path)
 }
 
 internal fun fstatfs(regs: PtraceRegisters, process: Process): Long {
     val descriptor = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     val file = process.fdTable.acquire(descriptor) ?: return errno(Errno.EBADF)
+    val caller = process.vfsOperationContext
     return try {
-        copyStatFs(process, regs[PtraceRegisters.IDX_RSI], file.path)
+        copyStatFs(process, caller, regs[PtraceRegisters.IDX_RSI], file.path)
     } finally {
         file.release()
     }
 }
 
-private fun copyStatFs(process: Process, address: ULong, path: VfsPath): Long =
-    if (UserMemory(process.addressSpace, address).copyToUser(LinuxStatFs(path).toNativeBytes())) {
+private fun copyStatFs(
+    process: Process,
+    caller: VfsOperationContext,
+    address: ULong,
+    path: VfsPath,
+): Long {
+    val statistics = when (
+        val result = path.mount.superBlock.backend.statistics(caller)
+    ) {
+        is VfsResult.Ok -> result.value
+        is VfsResult.Err -> return errno(result.error.errno)
+    }
+    return if (UserMemory(process.addressSpace, address).copyToUser(
+            LinuxStatFs(
+                path.mount.superBlock.type.magic,
+                path.mount.flags,
+                statistics,
+            ).toNativeBytes(),
+        )
+    ) {
         0L
     } else {
         errno(Errno.EFAULT)
     }
+}
 
 internal fun access(regs: PtraceRegisters, process: Process): Long {
     val mode = regs[PtraceRegisters.IDX_RSI]
@@ -396,8 +457,10 @@ internal fun access(regs: PtraceRegisters, process: Process): Long {
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EFAULT)
     val context = process.context ?: return errno(Errno.ENOENT)
+    val caller = process.accessContext(effective = false)
     val path = when (
         val result = FileSystemManager.vfs.resolve(
+            caller,
             context = context,
             pathname = VfsPathname.fromBytes(pathname),
         )
@@ -406,11 +469,10 @@ internal fun access(regs: PtraceRegisters, process: Process): Long {
         is VfsResult.Err -> return errno(result.error.errno)
     }
     val inode = path.inode ?: return errno(Errno.ENOENT)
-    val permissionBits = inode.metadata().mode.bits
-    return if (mode and 0x1uL != 0uL && permissionBits and 0x49u == 0u) {
-        errno(Errno.EACCES)
-    } else {
-        0L
+    val requested = AccessPermissions.fromBits(mode.toUInt()) ?: return errno(Errno.EINVAL)
+    return when (val result = FileSystemManager.vfs.checkAccess(caller, inode, requested)) {
+        is VfsResult.Ok -> 0L
+        is VfsResult.Err -> errno(result.error.errno)
     }
 }
 
@@ -441,24 +503,31 @@ private fun accessAt(
     val supportedFlags = (AT_EACCESS or AT_SYMLINK_NOFOLLOW or AT_EMPTY_PATH).toULong()
     if (flags and supportedFlags.inv() != 0uL) return errno(Errno.EINVAL)
     val pathname = copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
+    val caller = process.accessContext(effective = flags.toInt() and AT_EACCESS != 0)
     val target = when (val result = resolveAt(
         process = process,
         dirFd = dirFd,
         pathname = VfsPathname.fromBytes(pathname),
         followFinalSymlink = flags.toInt() and AT_SYMLINK_NOFOLLOW == 0,
         allowEmpty = flags.toInt() and AT_EMPTY_PATH != 0,
+        caller = caller,
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
     val inode = target.inode ?: return errno(Errno.ENOENT)
-    val permissions = inode.metadata().mode.bits
-    return if (mode and 0x1uL != 0uL && permissions and 0x49u == 0u) {
-        errno(Errno.EACCES)
-    } else {
-        0L
+    val requested = AccessPermissions.fromBits(mode.toUInt()) ?: return errno(Errno.EINVAL)
+    return when (val result = FileSystemManager.vfs.checkAccess(caller, inode, requested)) {
+        is VfsResult.Ok -> 0L
+        is VfsResult.Err -> errno(result.error.errno)
     }
 }
+
+private fun Process.accessContext(effective: Boolean) = vfsOperationContext.copy(
+    uid = (if (effective) euid else ruid).toUInt(),
+    gid = (if (effective) egid else rgid).toUInt(),
+    privileged = (if (effective) euid else ruid) == 0,
+)
 
 internal fun newFstatAt(regs: PtraceRegisters, process: Process): Long {
     val flags = regs[PtraceRegisters.IDX_R10]
@@ -470,18 +539,20 @@ internal fun newFstatAt(regs: PtraceRegisters, process: Process): Long {
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RSI])
         ?: return errno(Errno.EFAULT)
     val dirFd = regs[PtraceRegisters.IDX_RDI].toUInt().toInt()
+    val caller = process.vfsOperationContext
     val target = when (val result = resolveAt(
         process = process,
         dirFd = dirFd,
         pathname = VfsPathname.fromBytes(pathname),
         followFinalSymlink = flags.toInt() and AT_SYMLINK_NOFOLLOW == 0,
         allowEmpty = flags.toInt() and AT_EMPTY_PATH != 0,
+        caller = caller,
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
     val inode = target.inode ?: return errno(Errno.ENOENT)
-    return copyStat(process, regs[PtraceRegisters.IDX_RDX], inode)
+    return copyStat(process, caller, regs[PtraceRegisters.IDX_RDX], inode)
 }
 
 internal fun statx(regs: PtraceRegisters, process: Process): Long {
@@ -504,25 +575,28 @@ internal fun statx(regs: PtraceRegisters, process: Process): Long {
     } else {
         copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
     }
+    val caller = process.vfsOperationContext
     val target = when (val result = resolveAt(
         process = process,
         dirFd = regs[PtraceRegisters.IDX_RDI].toUInt().toInt(),
         pathname = VfsPathname.fromBytes(pathname),
         followFinalSymlink = flags.toInt() and AT_SYMLINK_NOFOLLOW == 0,
         allowEmpty = flags.toInt() and AT_EMPTY_PATH != 0,
+        caller = caller,
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
     val inode = target.inode ?: return errno(Errno.ENOENT)
-    if (flags.toInt() and AT_STATX_FORCE_SYNC != 0) {
-        when (val result = inode.backend.sync(inode, dataOnly = false)) {
-            is VfsResult.Ok -> Unit
-            is VfsResult.Err -> return errno(result.error.errno)
-        }
+    val attributes = when (val result = inode.attributes(
+        caller,
+        forceRefresh = flags.toInt() and AT_STATX_FORCE_SYNC != 0,
+    )) {
+        is VfsResult.Ok -> result.value
+        is VfsResult.Err -> return errno(result.error.errno)
     }
     val status = LinuxStatx(
-        LinuxFileStatus.snapshot(inode),
+        LinuxFileStatus.snapshot(inode, attributes),
         isMountRoot = target.dentry === target.mount.root,
     ).toNativeBytes()
     return if (UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_R8]).copyToUser(status)) {
@@ -557,12 +631,14 @@ private fun readlinkAt(
 ): Long {
     if (bufferSize == 0uL) return errno(Errno.EINVAL)
     val pathname = copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
+    val caller = process.vfsOperationContext
     val path = when (val result = resolveAt(
         process = process,
         dirFd = dirFd,
         pathname = VfsPathname.fromBytes(pathname),
         followFinalSymlink = false,
         allowEmpty = dirFd != AT_FDCWD,
+        caller = caller,
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
@@ -570,8 +646,10 @@ private fun readlinkAt(
     val inode = path.inode ?: return errno(Errno.ENOENT)
     if (inode.type != InodeType.SYMLINK) return errno(Errno.EINVAL)
     val backend = inode.backend as? SymlinkBackend ?: return errno(Errno.EINVAL)
-    val target = when (val result = backend.readLink(inode)) {
-        is VfsResult.Ok -> result.value.copyBytes().also { path.mount.recordAccess(inode) }
+    val target = when (val result = backend.readLink(caller, inode)) {
+        is VfsResult.Ok -> result.value.copyBytes().also {
+            path.mount.recordAccess(caller, inode)
+        }
         is VfsResult.Err -> return errno(result.error.errno)
     }
     val count = minOf(bufferSize, target.size.toULong()).toInt()
@@ -586,8 +664,9 @@ internal fun fstat(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
+    val caller = process.vfsOperationContext
     return try {
-        copyStat(process, regs[PtraceRegisters.IDX_RSI], file.inode)
+        copyStat(process, caller, regs[PtraceRegisters.IDX_RSI], file.inode)
     } finally {
         file.release()
     }
@@ -600,25 +679,37 @@ private fun statPath(
     followFinalSymlink: Boolean,
 ): Long {
     val pathname = copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
+    val caller = process.vfsOperationContext
     val path = when (val result = resolveAt(
         process = process,
         dirFd = AT_FDCWD,
         pathname = VfsPathname.fromBytes(pathname),
         followFinalSymlink = followFinalSymlink,
+        caller = caller,
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
     val inode = path.inode ?: return errno(Errno.ENOENT)
-    return copyStat(process, statAddress, inode)
+    return copyStat(process, caller, statAddress, inode)
 }
 
-private fun copyStat(process: Process, address: ULong, inode: Inode): Long =
-    if (UserMemory(process.addressSpace, address).copyToUser(
-            LinuxStat(LinuxFileStatus.snapshot(inode)).toNativeBytes(),
+private fun copyStat(
+    process: Process,
+    caller: VfsOperationContext,
+    address: ULong,
+    inode: Inode,
+): Long {
+    val attributes = when (val result = inode.attributes(caller)) {
+        is VfsResult.Ok -> result.value
+        is VfsResult.Err -> return errno(result.error.errno)
+    }
+    return if (UserMemory(process.addressSpace, address).copyToUser(
+            LinuxStat(LinuxFileStatus.snapshot(inode, attributes)).toNativeBytes(),
         )
     ) {
         0L
     } else {
         errno(Errno.EFAULT)
     }
+}

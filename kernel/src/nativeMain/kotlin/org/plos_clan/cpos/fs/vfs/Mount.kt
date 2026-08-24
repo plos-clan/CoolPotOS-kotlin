@@ -9,6 +9,7 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 
 class Mount internal constructor(
     val superBlock: SuperBlock,
+    val fileSystemName: String,
     val source: String,
     val root: Dentry = superBlock.root,
     flags: MountFlags = MountFlags.NONE,
@@ -61,7 +62,7 @@ class Mount internal constructor(
         return current === ancestor
     }
 
-    internal fun recordAccess(inode: Inode) {
+    internal fun recordAccess(caller: VfsOperationContext, inode: Inode) {
         val update = when {
             MountFlag.READ_ONLY in flags || MountFlag.NO_ATIME in flags ->
                 InodeTimestampEvent.NONE
@@ -73,11 +74,12 @@ class Mount internal constructor(
             else -> InodeTimestampEvent.RELATIVE_ACCESS
         }
         if (update != InodeTimestampEvent.NONE) {
-            superBlock.backend.updateTimestamps(inode, update)
+            superBlock.backend.updateTimestamps(caller, inode, update)
         }
     }
 
     private fun releaseResources() {
+        superBlock.root.releaseCachedChildren()
         superBlock.backend.release()
         detachFromParent()
     }
@@ -121,6 +123,7 @@ class MountNamespace internal constructor(val root: Mount) {
     internal fun attach(
         target: VfsPath,
         superBlock: SuperBlock,
+        fileSystemName: String,
         source: String,
         flags: MountFlags,
     ): VfsResult<Unit> = lock.withLock {
@@ -129,6 +132,7 @@ class MountNamespace internal constructor(val root: Mount) {
 
         mounts[target] = Mount(
             superBlock = superBlock,
+            fileSystemName = fileSystemName,
             source = source,
             flags = flags,
             attachment = target,

@@ -4,6 +4,7 @@ package org.plos_clan.cpos.syscall.fs
 
 import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.mem.IoBuffer
 import org.plos_clan.cpos.mem.UserIoVector
 import org.plos_clan.cpos.mem.UserMemory
@@ -42,7 +43,7 @@ private object FileIo {
     ): Long = withFile(regs, process) { file ->
         val count = minOf(regs[PtraceRegisters.IDX_RDX], MAX_RW_COUNT).toInt()
         val buffer = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
-        direction.transfer(file, buffer, count, position).raw
+        direction.transfer(process.vfsOperationContext, file, buffer, count, position).raw
     }
 
     fun vector(
@@ -58,7 +59,7 @@ private object FileIo {
             vectorCount.toInt(),
             MAX_RW_COUNT.toInt(),
         ) ?: return@withFile errno(Errno.EFAULT)
-        direction.transfer(file, buffer, buffer.size, null).raw
+        direction.transfer(process.vfsOperationContext, file, buffer, buffer.size, null).raw
     }
 
     private inline fun withFile(
@@ -81,21 +82,22 @@ private object FileIo {
         WRITE;
 
         fun transfer(
+            caller: VfsOperationContext,
             file: OpenFileDescription,
             buffer: IoBuffer,
             count: Int,
             position: ULong?,
         ): IoResult = when (this) {
             READ -> if (position == null) {
-                file.read(buffer, 0, count)
+                file.read(caller, buffer, 0, count)
             } else {
-                file.readAt(position, buffer, 0, count)
+                file.readAt(caller, position, buffer, 0, count)
             }
 
             WRITE -> if (position == null) {
-                file.write(buffer, 0, count)
+                file.write(caller, buffer, 0, count)
             } else {
-                file.writeAt(position, buffer, 0, count)
+                file.writeAt(caller, position, buffer, 0, count)
             }
         }
     }

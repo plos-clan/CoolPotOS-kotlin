@@ -9,6 +9,7 @@ internal class VfsNodeOperations(
     private val paths: VfsPathResolver,
 ) {
     fun createFile(
+        caller: VfsOperationContext,
         directory: VfsPath,
         name: VfsName,
         mode: FileMode,
@@ -17,6 +18,7 @@ internal class VfsNodeOperations(
         contentSize: Int,
     ): VfsResult<VfsPath> {
         val path = when (val result = createChild(
+            caller,
             directory,
             name,
             NodeCreation(
@@ -35,47 +37,62 @@ internal class VfsNodeOperations(
 
         val parent = directory.inode ?: return VfsResult.Err(VfsError.IO)
         val backend = parent.backend as? DirectoryBackend ?: return VfsResult.Err(VfsError.IO)
-        backend.remove(parent, name, inode, RemoveMode.FILE)
+        backend.remove(caller, parent, name, inode, RemoveMode.FILE)
         directory.dentry.markChildNegative(name, path.dentry)
         return VfsResult.Err(VfsError.IO)
     }
 
     fun createNode(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         directory: VfsPath,
         pathname: VfsPathname,
         node: NodeCreation,
     ): VfsResult<VfsPath> {
         if (pathname.isRoot) return VfsResult.Err(VfsError.ALREADY_EXISTS)
-        val parent = when (val result = paths.resolveParent(context, directory, pathname)) {
+        val parent = when (
+            val result = paths.resolveParent(caller, context, directory, pathname)
+        ) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
         if (pathname.requiresDirectory && node.kind != NodeKind.Directory &&
             !parent.name.isDot && !parent.name.isDotDot
         ) {
-            return when (val existing = paths.lookupChild(context, parent.path, parent.name)) {
+            return when (
+                val existing = paths.lookupChild(caller, context, parent.path, parent.name)
+            ) {
                 is VfsResult.Ok -> VfsResult.Err(VfsError.ALREADY_EXISTS)
                 is VfsResult.Err -> existing
             }
         }
-        return createChild(parent.path, parent.name, node)
+        return createChild(caller, parent.path, parent.name, node)
     }
 
     fun createNode(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         pathname: VfsPathname,
         node: NodeCreation,
-    ): VfsResult<VfsPath> = createNode(context, context.workingDirectory, pathname, node)
+    ): VfsResult<VfsPath> = createNode(
+        caller,
+        context,
+        context.workingDirectory,
+        pathname,
+        node,
+    )
 
     fun remove(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         directory: VfsPath,
         pathname: VfsPathname,
         mode: RemoveMode,
     ): VfsResult<Unit> {
         if (pathname.isRoot) return VfsResult.Err(VfsError.BUSY)
-        val parent = when (val result = paths.resolveParent(context, directory, pathname)) {
+        val parent = when (
+            val result = paths.resolveParent(caller, context, directory, pathname)
+        ) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
@@ -95,7 +112,13 @@ internal class VfsNodeOperations(
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val target = when (
-            val result = paths.lookupChild(context, parent.path, parent.name, followMount = false)
+            val result = paths.lookupChild(
+                caller,
+                context,
+                parent.path,
+                parent.name,
+                followMount = false,
+            )
         ) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
@@ -116,7 +139,15 @@ internal class VfsNodeOperations(
         val parentInode = parent.path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = parentInode.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val result = backend.remove(parentInode, parent.name, inode, mode)
+        when (val access = backend.checkAccess(
+            caller,
+            parentInode,
+            AccessPermissions.WRITE_AND_EXECUTE,
+        )) {
+            is VfsResult.Ok -> Unit
+            is VfsResult.Err -> return access
+        }
+        val result = backend.remove(caller, parentInode, parent.name, inode, mode)
         if (result is VfsResult.Ok) {
             parent.path.dentry.markChildNegative(parent.name, target.dentry)
         }
@@ -124,6 +155,7 @@ internal class VfsNodeOperations(
     }
 
     fun link(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         sourceMount: Mount,
         sourceInode: Inode,
@@ -134,7 +166,9 @@ internal class VfsNodeOperations(
         if (sourceInode.type == InodeType.DIRECTORY) {
             return VfsResult.Err(VfsError.NOT_PERMITTED)
         }
-        val parent = when (val result = paths.resolveParent(context, targetDirectory, target)) {
+        val parent = when (
+            val result = paths.resolveParent(caller, context, targetDirectory, target)
+        ) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
@@ -142,7 +176,9 @@ internal class VfsNodeOperations(
             return VfsResult.Err(VfsError.ALREADY_EXISTS)
         }
         if (target.requiresDirectory) {
-            return when (val existing = paths.lookupChild(context, parent.path, parent.name)) {
+            return when (
+                val existing = paths.lookupChild(caller, context, parent.path, parent.name)
+            ) {
                 is VfsResult.Ok -> VfsResult.Err(VfsError.ALREADY_EXISTS)
                 is VfsResult.Err -> existing
             }
@@ -156,14 +192,23 @@ internal class VfsNodeOperations(
         val parentInode = parent.path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = parentInode.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val result = backend.link(parentInode, parent.name, sourceInode)
+        when (val access = backend.checkAccess(
+            caller,
+            parentInode,
+            AccessPermissions.WRITE_AND_EXECUTE,
+        )) {
+            is VfsResult.Ok -> Unit
+            is VfsResult.Err -> return access
+        }
+        val result = backend.link(caller, parentInode, parent.name, sourceInode)
         if (result is VfsResult.Ok) {
-            parent.path.dentry.cacheChild(parent.name, sourceInode)
+            parent.path.dentry.cacheChild(parent.name, DirectoryLookup(sourceInode))
         }
         return result
     }
 
     fun rename(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         sourceDirectory: VfsPath,
         source: VfsPathname,
@@ -172,11 +217,15 @@ internal class VfsNodeOperations(
         mode: RenameMode,
     ): VfsResult<Unit> {
         if (source.isRoot || target.isRoot) return VfsResult.Err(VfsError.BUSY)
-        val sourceParent = when (val result = paths.resolveParent(context, sourceDirectory, source)) {
+        val sourceParent = when (
+            val result = paths.resolveParent(caller, context, sourceDirectory, source)
+        ) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        val targetParent = when (val result = paths.resolveParent(context, targetDirectory, target)) {
+        val targetParent = when (
+            val result = paths.resolveParent(caller, context, targetDirectory, target)
+        ) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
@@ -192,7 +241,13 @@ internal class VfsNodeOperations(
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val sourcePath = when (
-            val result = paths.lookupChild(context, sourceParent.path, sourceParent.name, followMount = false)
+            val result = paths.lookupChild(
+                caller,
+                context,
+                sourceParent.path,
+                sourceParent.name,
+                followMount = false,
+            )
         ) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
@@ -210,7 +265,13 @@ internal class VfsNodeOperations(
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
         val targetPath = when (
-            val result = paths.lookupChild(context, targetParent.path, targetParent.name, followMount = false)
+            val result = paths.lookupChild(
+                caller,
+                context,
+                targetParent.path,
+                targetParent.name,
+                followMount = false,
+            )
         ) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> if (result.error == VfsError.NOT_FOUND) null else return result
@@ -241,7 +302,26 @@ internal class VfsNodeOperations(
             ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = sourceParentInode.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        when (val access = backend.checkAccess(
+            caller,
+            sourceParentInode,
+            AccessPermissions.WRITE_AND_EXECUTE,
+        )) {
+            is VfsResult.Ok -> Unit
+            is VfsResult.Err -> return access
+        }
+        if (targetParentInode !== sourceParentInode) {
+            when (val access = targetParentInode.backend.checkAccess(
+                caller,
+                targetParentInode,
+                AccessPermissions.WRITE_AND_EXECUTE,
+            )) {
+                is VfsResult.Ok -> Unit
+                is VfsResult.Err -> return access
+            }
+        }
         val result = backend.rename(
+            caller,
             sourceParentInode,
             sourceParent.name,
             sourceInode,
@@ -262,6 +342,7 @@ internal class VfsNodeOperations(
     }
 
     fun openOrCreate(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         directory: VfsPath,
         pathname: VfsPathname,
@@ -271,10 +352,12 @@ internal class VfsNodeOperations(
             return if (options.create == CreateDisposition.CREATE_NEW) {
                 VfsResult.Err(VfsError.ALREADY_EXISTS)
             } else {
-                resolveExisting(context, directory, pathname, options.followFinalSymlink)
+                resolveExisting(caller, context, directory, pathname, options.followFinalSymlink)
             }
         }
-        val parent = when (val result = paths.resolveParent(context, directory, pathname)) {
+        val parent = when (
+            val result = paths.resolveParent(caller, context, directory, pathname)
+        ) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
@@ -282,17 +365,27 @@ internal class VfsNodeOperations(
             return if (options.create == CreateDisposition.CREATE_NEW) {
                 VfsResult.Err(VfsError.ALREADY_EXISTS)
             } else {
-                resolveExisting(context, directory, pathname, options.followFinalSymlink)
+                resolveExisting(caller, context, directory, pathname, options.followFinalSymlink)
             }
         }
 
-        when (val existing = paths.lookupChild(context, parent.path, parent.name)) {
+        val parentInode = parent.path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val backend = parentInode.backend as? DirectoryBackend
+            ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
+
+        when (val existing = paths.lookupChild(caller, context, parent.path, parent.name)) {
             is VfsResult.Ok -> {
                 if (options.create == CreateDisposition.CREATE_NEW) {
                     return VfsResult.Err(VfsError.ALREADY_EXISTS)
                 }
                 if (options.followFinalSymlink && existing.value.inode?.type == InodeType.SYMLINK) {
-                    return resolveExisting(context, directory, pathname, followSymlink = true)
+                    return resolveExisting(
+                        caller,
+                        context,
+                        directory,
+                        pathname,
+                        followSymlink = true,
+                    )
                 }
                 return VfsResult.Ok(OpenedPath(existing.value, created = false))
             }
@@ -304,16 +397,21 @@ internal class VfsNodeOperations(
         if (MountFlag.READ_ONLY in parent.path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        val parentInode = parent.path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val backend = parentInode.backend as? DirectoryBackend
-            ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        when (val access = backend.checkAccess(
+            caller,
+            parentInode,
+            AccessPermissions.WRITE_AND_EXECUTE,
+        )) {
+            is VfsResult.Ok -> Unit
+            is VfsResult.Err -> return access
+        }
         val node = NodeCreation(
             kind = NodeKind.Regular,
             mode = options.createMode,
-            uid = options.createUid,
-            gid = options.createGid,
+            uid = caller.uid,
+            gid = caller.gid,
         )
-        val inode = when (val created = backend.create(parentInode, parent.name, node)) {
+        val inode = when (val created = backend.create(caller, parentInode, parent.name, node)) {
             is VfsResult.Ok -> created.value
             is VfsResult.Err -> {
                 if (created.error == VfsError.ALREADY_EXISTS &&
@@ -321,6 +419,7 @@ internal class VfsNodeOperations(
                 ) {
                     parent.path.dentry.invalidateNegativeChild(parent.name)
                     return resolveExisting(
+                        caller,
                         context,
                         directory,
                         pathname,
@@ -330,23 +429,25 @@ internal class VfsNodeOperations(
                 return created
             }
         }
-        val dentry = parent.path.dentry.cacheChild(parent.name, inode)
+        val dentry = parent.path.dentry.cacheChild(parent.name, DirectoryLookup(inode))
         return VfsResult.Ok(OpenedPath(VfsPath(parent.path.mount, dentry), created = true))
     }
 
     private fun resolveExisting(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         directory: VfsPath,
         pathname: VfsPathname,
         followSymlink: Boolean,
     ): VfsResult<OpenedPath> = when (
-        val result = paths.resolveAt(context, directory, pathname, followSymlink)
+        val result = paths.resolveAt(caller, context, directory, pathname, followSymlink)
     ) {
         is VfsResult.Ok -> VfsResult.Ok(OpenedPath(result.value, created = false))
         is VfsResult.Err -> result
     }
 
     private fun createChild(
+        caller: VfsOperationContext,
         directory: VfsPath,
         name: VfsName,
         node: NodeCreation,
@@ -360,10 +461,20 @@ internal class VfsNodeOperations(
         val parent = directory.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = parent.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val inode = when (val result = backend.create(parent, name, node)) {
+        when (val access = backend.checkAccess(
+            caller,
+            parent,
+            AccessPermissions.WRITE_AND_EXECUTE,
+        )) {
+            is VfsResult.Ok -> Unit
+            is VfsResult.Err -> return access
+        }
+        val inode = when (val result = backend.create(caller, parent, name, node)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        return VfsResult.Ok(VfsPath(directory.mount, directory.dentry.cacheChild(name, inode)))
+        return VfsResult.Ok(
+            VfsPath(directory.mount, directory.dentry.cacheChild(name, DirectoryLookup(inode))),
+        )
     }
 }

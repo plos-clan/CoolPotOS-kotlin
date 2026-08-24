@@ -10,6 +10,7 @@ import org.plos_clan.cpos.fs.vfs.AccessMode
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.SeekOrigin
 import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.syscall.SignalDelivery
@@ -58,7 +59,11 @@ internal fun lseek(regs: PtraceRegisters, process: Process): Long {
             InodeType.PIPE,
             InodeType.SOCKET,
             -> errno(Errno.ESPIPE)
-            else -> when (val result = file.seek(regs[PtraceRegisters.IDX_RSI].toLong(), origin)) {
+            else -> when (val result = file.seek(
+                process.vfsOperationContext,
+                regs[PtraceRegisters.IDX_RSI].toLong(),
+                origin,
+            )) {
                 is VfsResult.Ok -> result.value
                 is VfsResult.Err -> errno(result.error.errno)
             }
@@ -85,7 +90,7 @@ internal fun dup2(regs: PtraceRegisters, process: Process): Long {
         ?: return errno(Errno.EBADF)
     val newFd = fileDescriptor(regs[PtraceRegisters.IDX_RSI])
         ?: return errno(Errno.EBADF)
-    return if (process.fdTable.dup2(oldFd, newFd)) {
+    return if (process.fdTable.dup2(process.vfsOperationContext, oldFd, newFd)) {
         newFd.toLong()
     } else {
         errno(Errno.EBADF)
@@ -137,13 +142,18 @@ internal fun fcntl(regs: PtraceRegisters, process: Process): Long {
 
         F_SETFL -> {
             val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
+            val caller = process.vfsOperationContext
             try {
                 val enablesNoAtime = argument.toInt() and OpenFlags.O_NOATIME != 0 &&
                     file.getStatusFlags() and OpenFlags.O_NOATIME == 0
-                if (enablesNoAtime && process.euid != 0 &&
-                    process.fsuid.toUInt() != file.inode.metadata().uid
-                ) {
-                    return errno(Errno.EPERM)
+                if (enablesNoAtime && !caller.privileged) {
+                    val owner = when (
+                        val result = file.inode.attributes(caller)
+                    ) {
+                        is VfsResult.Ok -> result.value.metadata.uid
+                        is VfsResult.Err -> return errno(result.error.errno)
+                    }
+                    if (caller.uid != owner) return errno(Errno.EPERM)
                 }
                 file.setStatusFlags(argument.toInt())
                 0L
@@ -175,7 +185,14 @@ internal fun poll(regs: PtraceRegisters, process: Process): Long {
             immediate = false,
         )
     }
-    return waitForPoll(regs, process, countValue.toInt(), timeout, temporaryMask = null)
+    return waitForPoll(
+        regs,
+        process,
+        process.vfsOperationContext,
+        countValue.toInt(),
+        timeout,
+        temporaryMask = null,
+    )
 }
 
 internal fun ppoll(regs: PtraceRegisters, process: Process): Long {
@@ -204,12 +221,20 @@ internal fun ppoll(regs: PtraceRegisters, process: Process): Long {
             ?.let { LittleEndianBuffer(it).readU64(0) and Signal.BLOCKABLE_MASK }
             ?: return errno(Errno.EFAULT)
     }
-    return waitForPoll(regs, process, countValue.toInt(), timeout, mask)
+    return waitForPoll(
+        regs,
+        process,
+        process.vfsOperationContext,
+        countValue.toInt(),
+        timeout,
+        mask,
+    )
 }
 
 private fun waitForPoll(
     regs: PtraceRegisters,
     process: Process,
+    caller: VfsOperationContext,
     count: Int,
     timeout: PollTimeout,
     temporaryMask: ULong?,
@@ -221,7 +246,7 @@ private fun waitForPoll(
     val previousMask = temporaryMask?.let { thread.signals.replaceMask(it) }
     try {
         while (true) {
-            val ready = scanPollDescriptors(process, descriptors, count)
+            val ready = scanPollDescriptors(process, caller, descriptors, count)
             if (ready != 0 || timeout.immediate || timeout.expired()) {
                 return if (userFds.copyToUser(descriptors)) ready.toLong()
                 else errno(Errno.EFAULT)
@@ -276,6 +301,7 @@ internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
     val readyRead = ByteArray(setSize)
     val readyWrite = ByteArray(setSize)
     val readyExcept = ByteArray(setSize)
+    val caller = process.vfsOperationContext
     val previousMask = signalMask?.let { thread.signals.replaceMask(it) }
     try {
         val deadline = timeout?.let(::timeoutDeadline)
@@ -283,7 +309,14 @@ internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
             requestedRead.copyInto(readyRead)
             requestedWrite.copyInto(readyWrite)
             requestedExcept.copyInto(readyExcept)
-            val ready = scanSelectDescriptors(process, nfds, readyRead, readyWrite, readyExcept)
+            val ready = scanSelectDescriptors(
+                process,
+                caller,
+                nfds,
+                readyRead,
+                readyWrite,
+                readyExcept,
+            )
             if (ready < 0) return errno(-ready)
             val expired = deadline != null && TscClock.nanoTime() >= deadline
             if (ready != 0 || timeout?.isZero == true || expired) {
@@ -374,6 +407,7 @@ private fun timeoutDeadline(timeout: SelectTimeout): ULong {
 
 private fun scanSelectDescriptors(
     process: Process,
+    caller: VfsOperationContext,
     nfds: Int,
     read: ByteArray,
     write: ByteArray,
@@ -386,7 +420,11 @@ private fun scanSelectDescriptors(
             (if (except.isSet(fd)) PollEvents.POLLPRI else 0)
         if (requested == 0) continue
         val file = process.fdTable.acquire(fd) ?: return -Errno.EBADF
-        val events = try { file.poll(requested).toInt() } finally { file.release() }
+        val events = try {
+            file.poll(caller, requested).toInt()
+        } finally {
+            file.release()
+        }
         if (events < 0) return events
         val readable = events and PollEvents.NORMAL_INPUT != 0
         val writable = events and PollEvents.NORMAL_OUTPUT != 0
@@ -413,6 +451,7 @@ private fun ByteArray.set(fd: Int, value: Boolean) {
 
 private fun scanPollDescriptors(
     process: Process,
+    caller: VfsOperationContext,
     descriptors: ByteArray,
     count: Int,
 ): Int {
@@ -430,7 +469,7 @@ private fun scanPollDescriptors(
                     PollEvents.POLLNVAL
                 } else {
                     try {
-                        val result = file.poll(requested)
+                        val result = file.poll(caller, requested)
                         if (result < 0) {
                             PollEvents.POLLERR
                         } else {

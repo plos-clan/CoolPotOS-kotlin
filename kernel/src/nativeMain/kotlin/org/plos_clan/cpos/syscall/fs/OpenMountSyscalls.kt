@@ -6,6 +6,7 @@ import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.OpenFlags
 import org.plos_clan.cpos.fs.vfs.AccessMode
+import org.plos_clan.cpos.fs.vfs.AccessPermissions
 import org.plos_clan.cpos.fs.vfs.CreateDisposition
 import org.plos_clan.cpos.fs.vfs.FileAllocationMode
 import org.plos_clan.cpos.fs.vfs.FileMode
@@ -13,9 +14,11 @@ import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.fs.vfs.MountFlags
 import org.plos_clan.cpos.fs.vfs.MountRequest
+import org.plos_clan.cpos.fs.vfs.MountResources
 import org.plos_clan.cpos.fs.vfs.OpenOptions
 import org.plos_clan.cpos.fs.vfs.UnmountMode
 import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPath
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
@@ -32,7 +35,6 @@ import org.plos_clan.cpos.syscall.fs.FsConstants.SUPPORTED_OPEN_FLAGS
 import org.plos_clan.cpos.syscall.fs.FsConstants.S_IALLUGO
 import org.plos_clan.cpos.syscall.fs.FsPathResolver.atPath
 import org.plos_clan.cpos.syscall.fs.FsPathResolver.resolveAt
-import org.plos_clan.cpos.syscall.fs.FsPermissions.mayWrite
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
@@ -69,6 +71,7 @@ internal fun open(regs: PtraceRegisters, process: Process): Long {
         ?: return errno(Errno.EFAULT)
     return open(
         process = process,
+        caller = process.vfsOperationContext,
         pathname = pathname,
         rawFlags = regs[PtraceRegisters.IDX_RSI],
         rawMode = regs[PtraceRegisters.IDX_RDX],
@@ -79,16 +82,19 @@ internal fun openAt(regs: PtraceRegisters, process: Process): Long {
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RSI])
         ?: return errno(Errno.EFAULT)
     val dirFd = regs[PtraceRegisters.IDX_RDI].toUInt().toInt()
+    val caller = process.vfsOperationContext
     val target = when (val result = atPath(
         process,
         dirFd,
         VfsPathname.fromBytes(pathname),
+        caller,
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
     return open(
         process = process,
+        caller = caller,
         pathname = pathname,
         rawFlags = regs[PtraceRegisters.IDX_RDX],
         rawMode = regs[PtraceRegisters.IDX_R10],
@@ -98,6 +104,7 @@ internal fun openAt(regs: PtraceRegisters, process: Process): Long {
 
 private fun open(
     process: Process,
+    caller: VfsOperationContext,
     pathname: ByteArray,
     rawFlags: ULong,
     rawMode: ULong,
@@ -135,21 +142,24 @@ private fun open(
     val options = OpenOptions(
         access = access,
         create = create,
-        createMode = FileMode(rawMode.toUInt() and S_IALLUGO and process.fileCreationMask.inv()),
+        createMode = FileMode(rawMode.toUInt() and S_IALLUGO and caller.fileCreationMask.inv()),
         truncate = !pathOnly && flags and OpenFlags.O_TRUNC != 0,
         append = !pathOnly && flags and OpenFlags.O_APPEND != 0,
         directoryOnly = flags and OpenFlags.O_DIRECTORY != 0,
         followFinalSymlink = flags and OpenFlags.O_NOFOLLOW == 0,
         nonBlocking = flags and OpenFlags.O_NONBLOCK != 0,
         noAtime = !pathOnly && flags and OpenFlags.O_NOATIME != 0,
-        createUid = process.fsuid.toUInt(),
-        createGid = process.fsgid.toUInt(),
-        privileged = process.euid == 0,
     )
     val opened = if (directory == null) {
-        FileSystemManager.vfs.open(context, vfsPathname, options)
+        FileSystemManager.vfs.open(caller, context, vfsPathname, options)
     } else {
-        FileSystemManager.vfs.openAt(context, directory, vfsPathname, options)
+        FileSystemManager.vfs.openAt(
+            caller,
+            context,
+            directory,
+            vfsPathname,
+            options,
+        )
     }
     val file = when (opened) {
         is VfsResult.Ok -> opened.value
@@ -169,7 +179,10 @@ private fun open(
 internal fun close(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
-    return if (process.fdTable.close(fd)) 0L else errno(Errno.EBADF)
+    return when (val result = process.fdTable.close(process.vfsOperationContext, fd)) {
+        is VfsResult.Ok -> 0L
+        is VfsResult.Err -> errno(result.error.errno)
+    }
 }
 
 internal fun mount(regs: PtraceRegisters, process: Process): Long {
@@ -195,6 +208,7 @@ internal fun mount(regs: PtraceRegisters, process: Process): Long {
         ?: return errno(Errno.EOPNOTSUPP)
     val context = process.context ?: return errno(Errno.ENOENT)
     return when (val result = FileSystemManager.vfs.mount(
+        caller = process.vfsOperationContext,
         context = context,
         target = VfsPathname.fromBytes(target),
         request = MountRequest(
@@ -202,6 +216,7 @@ internal fun mount(regs: PtraceRegisters, process: Process): Long {
             source = source,
             flags = flags,
             data = data,
+            resources = MountResources(process.fdTable::acquire),
         ),
     )) {
         is VfsResult.Ok -> 0L
@@ -227,6 +242,7 @@ internal fun umount2(regs: PtraceRegisters, process: Process): Long {
         else -> UnmountMode.REGULAR
     }
     return when (val result = FileSystemManager.vfs.unmount(
+        caller = process.vfsOperationContext,
         context = context,
         target = VfsPathname.fromBytes(target),
         mode = mode,
@@ -247,7 +263,7 @@ private fun syncFile(process: Process, rawFd: ULong, dataOnly: Boolean): Long {
     val fd = fileDescriptor(rawFd) ?: return errno(Errno.EBADF)
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
     return try {
-        when (val result = file.sync(dataOnly)) {
+        when (val result = file.sync(process.vfsOperationContext, dataOnly)) {
             is VfsResult.Ok -> 0L
             is VfsResult.Err -> errno(result.error.errno)
         }
@@ -261,11 +277,13 @@ internal fun truncate(regs: PtraceRegisters, process: Process): Long {
     if (size > Long.MAX_VALUE.toULong()) return errno(Errno.EINVAL)
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EFAULT)
+    val caller = process.vfsOperationContext
     val path = when (val result = resolveAt(
         process,
         AT_FDCWD,
         VfsPathname.fromBytes(pathname),
         followFinalSymlink = true,
+        caller = caller,
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
@@ -273,8 +291,20 @@ internal fun truncate(regs: PtraceRegisters, process: Process): Long {
     val inode = path.inode ?: return errno(Errno.ENOENT)
     if (inode.type == InodeType.DIRECTORY) return errno(Errno.EISDIR)
     if (MountFlag.READ_ONLY in path.mount.flags) return errno(Errno.EROFS)
-    if (!process.mayWrite(inode.metadata())) return errno(Errno.EACCES)
-    return when (val result = FileSystemManager.vfs.resize(path.mount, inode, size)) {
+    when (val access = FileSystemManager.vfs.checkAccess(
+        caller,
+        inode,
+        AccessPermissions.WRITE,
+    )) {
+        is VfsResult.Ok -> Unit
+        is VfsResult.Err -> return errno(access.error.errno)
+    }
+    return when (val result = FileSystemManager.vfs.resize(
+        caller,
+        path.mount,
+        inode,
+        size,
+    )) {
         is VfsResult.Ok -> 0L
         is VfsResult.Err -> errno(result.error.errno)
     }
@@ -288,7 +318,12 @@ internal fun ftruncate(regs: PtraceRegisters, process: Process): Long {
     return try {
         if (file.inode.type != InodeType.REGULAR) return errno(Errno.EINVAL)
         if (!file.access.canWrite) return errno(Errno.EBADF)
-        when (val result = FileSystemManager.vfs.resize(file.path.mount, file.inode, size)) {
+        when (val result = FileSystemManager.vfs.resize(
+            process.vfsOperationContext,
+            file.path.mount,
+            file.inode,
+            size,
+        )) {
             is VfsResult.Ok -> 0L
             is VfsResult.Err -> errno(result.error.errno)
         }
@@ -322,6 +357,7 @@ internal fun fallocate(regs: PtraceRegisters, process: Process): Long {
             else -> return errno(Errno.ENODEV)
         }
         when (val result = FileSystemManager.vfs.allocate(
+            process.vfsOperationContext,
             file.path.mount,
             file.inode,
             offset,
@@ -350,7 +386,11 @@ private fun createPipe(process: Process, outputAddress: ULong, flags: ULong): Lo
         return errno(Errno.EINVAL)
     }
     val context = process.context ?: return errno(Errno.ENOENT)
-    val pipe = when (val result = FileSystemManager.vfs.createPipe(context)) {
+    val caller = process.vfsOperationContext
+    val pipe = when (val result = FileSystemManager.vfs.createPipe(
+        caller,
+        context,
+    )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
@@ -380,8 +420,8 @@ private fun createPipe(process: Process, outputAddress: ULong, flags: ULong): Lo
         }
     }
     if (!UserMemory(process.addressSpace, outputAddress).copyToUser(output)) {
-        process.fdTable.close(readFd)
-        process.fdTable.close(writeFd)
+        process.fdTable.close(caller, readFd)
+        process.fdTable.close(caller, writeFd)
         return errno(Errno.EFAULT)
     }
     return 0L

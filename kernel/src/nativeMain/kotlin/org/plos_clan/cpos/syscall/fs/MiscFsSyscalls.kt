@@ -19,6 +19,7 @@ internal fun ioctl(regs: PtraceRegisters, process: Process): Long {
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
     return try {
         file.ioctl(
+            caller = process.vfsOperationContext,
             command = regs[PtraceRegisters.IDX_RSI].toInt(),
             args = UserMemory(
                 process.addressSpace,
@@ -36,6 +37,7 @@ internal fun chdir(regs: PtraceRegisters, process: Process): Long {
     if (pathname.isEmpty()) return errno(Errno.ENOENT)
     val context = process.context ?: return errno(Errno.ENOENT)
     return when (val result = FileSystemManager.vfs.chdir(
+        process.vfsOperationContext,
         context,
         VfsPathname.fromBytes(pathname),
     )) {
@@ -50,7 +52,11 @@ internal fun fchdir(regs: PtraceRegisters, process: Process): Long {
     val file = process.fdTable.acquire(descriptor) ?: return errno(Errno.EBADF)
     return try {
         val context = process.context ?: return errno(Errno.ENOENT)
-        when (val result = FileSystemManager.vfs.chdir(context, file.path)) {
+        when (val result = FileSystemManager.vfs.chdir(
+            process.vfsOperationContext,
+            context,
+            file.path,
+        )) {
             is VfsResult.Ok -> 0L
             is VfsResult.Err -> errno(result.error.errno)
         }

@@ -3,12 +3,13 @@
 package org.plos_clan.cpos.syscall.fs
 
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
+import org.plos_clan.cpos.fs.vfs.FileSystemStatistics
 import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.InodeAttributes
 import org.plos_clan.cpos.fs.vfs.InodeMetadata
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.fs.vfs.MountFlags
-import org.plos_clan.cpos.fs.vfs.VfsPath
 import org.plos_clan.cpos.fs.vfs.VfsTimestamp
 import org.plos_clan.cpos.syscall.fs.FsConstants.DIRENT64_ALIGNMENT
 import org.plos_clan.cpos.syscall.fs.FsConstants.DIRENT64_HEADER_SIZE
@@ -43,6 +44,7 @@ internal data class LinuxFileStatus(
     val type: InodeType,
     val metadata: InodeMetadata,
     val blocks: ULong,
+    val blockSize: ULong = STAT_BLKSIZE,
 ) {
     val mode: UInt
         get() = metadata.mode.bits or when (type) {
@@ -63,11 +65,12 @@ internal data class LinuxFileStatus(
             (metadata.deviceNumber shr 12 and 0xfffff00uL)).toUInt()
 
     companion object {
-        fun snapshot(inode: Inode) = LinuxFileStatus(
+        fun snapshot(inode: Inode, attributes: InodeAttributes) = LinuxFileStatus(
             inodeId = inode.id.value,
             type = inode.type,
-            metadata = inode.metadata(),
-            blocks = inode.backend.allocatedBlocks(inode),
+            metadata = attributes.metadata,
+            blocks = attributes.allocatedBlocks,
+            blockSize = attributes.blockSize,
         )
     }
 }
@@ -84,7 +87,7 @@ internal class LinuxStat(private val status: LinuxFileStatus) : NativeStruct {
             writeU32(36, 0u) // __pad0
             writeU64(40, status.metadata.deviceNumber)
             writeU64(48, status.metadata.size)
-            writeU64(56, STAT_BLKSIZE)
+            writeU64(56, status.blockSize)
             writeU64(64, status.blocks)
             writeU64(72, status.metadata.timestamps.accessTime.seconds.toULong())
             writeU64(80, status.metadata.timestamps.accessTime.nanoseconds.toULong())
@@ -104,7 +107,7 @@ internal class LinuxStatx(
         LittleEndianBuffer(buffer).apply {
             val birthTime = status.metadata.timestamps.birthTime
             writeU32(0, STATX_SUPPORTED_FIELDS or if (birthTime == null) 0u else STATX_BTIME)
-            writeU32(4, STAT_BLKSIZE.toUInt())
+            writeU32(4, status.blockSize.toUInt())
             writeU64(8, if (isMountRoot) STATX_ATTR_MOUNT_ROOT else 0uL)
             writeU32(16, status.metadata.linkCount)
             writeU32(20, status.metadata.uid)
@@ -129,14 +132,23 @@ internal class LinuxStatx(
     }
 }
 
-internal class LinuxStatFs(private val path: VfsPath) : NativeStruct {
+internal class LinuxStatFs(
+    private val fileSystemMagic: ULong,
+    private val mountFlags: MountFlags,
+    private val statistics: FileSystemStatistics,
+) : NativeStruct {
     override fun toNativeBytes(): ByteArray = ByteArray(STATFS_SIZE).also { buffer ->
         LittleEndianBuffer(buffer).apply {
-            writeU64(0, path.mount.superBlock.type.magic)
-            writeU64(8, STAT_BLKSIZE)
-            writeU64(64, 255uL)
-            writeU64(72, STAT_BLKSIZE)
-            writeU64(80, path.mount.flags.toStatFsFlags())
+            writeU64(0, fileSystemMagic)
+            writeU64(8, statistics.blockSize)
+            writeU64(16, statistics.blocks)
+            writeU64(24, statistics.freeBlocks)
+            writeU64(32, statistics.availableBlocks)
+            writeU64(40, statistics.files)
+            writeU64(48, statistics.freeFiles)
+            writeU64(64, statistics.maximumNameLength)
+            writeU64(72, statistics.fragmentSize)
+            writeU64(80, mountFlags.toStatFsFlags())
         }
     }
 

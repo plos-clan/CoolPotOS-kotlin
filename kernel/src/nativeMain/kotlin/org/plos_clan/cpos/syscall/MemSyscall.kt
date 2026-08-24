@@ -6,6 +6,7 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.addressspace.FileRegionBacking
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_ACCESS_MASK
@@ -15,6 +16,7 @@ import org.plos_clan.cpos.mem.addressspace.MemoryRegionType
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.tasks.Process
+import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
 import org.plos_clan.cpos.utils.isPageAligned
@@ -48,11 +50,22 @@ private class MappedFile(file: OpenFileDescription) : FileRegionBacking(file) {
     override val cacheSource
         get() = file.cacheSource ?: this
 
+    override val identity
+        get() = file.inode
+
     override val sharedMemoryIdentity: Any
         get() = file.inode
 
     override fun read(offset: ULong, destination: ByteArray): Int {
-        val result = file.readAt(offset, ByteArrayBuffer(destination), 0, destination.size)
+        val caller = ProcessManager.currentProcess()?.vfsOperationContext
+            ?: VfsOperationContext.KERNEL
+        val result = file.readAt(
+            caller,
+            offset,
+            ByteArrayBuffer(destination),
+            0,
+            destination.size,
+        )
         return if (result.isSuccess) result.bytesTransferred else result.raw.toInt()
     }
 }
@@ -187,7 +200,7 @@ internal fun mmap(regs: PtraceRegisters, process: Process): Long {
                     populate = (flags and (MAP_POPULATE or MAP_LOCKED)) != 0uL,
                 ),
             )
-            if (result is MemoryMapResult.Ok) file.recordAccess()
+            if (result is MemoryMapResult.Ok) file.recordAccess(process.vfsOperationContext)
             mmapResult(result)
         } finally {
             backing.release()

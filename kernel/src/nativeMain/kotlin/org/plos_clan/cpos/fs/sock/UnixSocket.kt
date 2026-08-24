@@ -5,12 +5,12 @@ package org.plos_clan.cpos.fs.sock
 import bridge.wait_for_interrupt
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.vfs.AccessMode
+import org.plos_clan.cpos.fs.vfs.AccessPermissions
 import org.plos_clan.cpos.fs.vfs.AnonymousFileFactory
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FileSystemContext
 import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.vfs.InodeBackend
-import org.plos_clan.cpos.fs.vfs.InodeMetadata
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.IoMode
 import org.plos_clan.cpos.fs.vfs.IoResult
@@ -23,6 +23,7 @@ import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.fs.vfs.OpenOptions
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsNodeOperations
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPathResolver
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
@@ -89,22 +90,6 @@ internal data class UnixCredentials(
     val userId: UInt,
     val groupId: UInt,
 )
-
-internal data class FileSystemIdentity(
-    val userId: UInt,
-    val groupId: UInt,
-    val privileged: Boolean,
-) {
-    fun mayWrite(metadata: InodeMetadata): Boolean {
-        if (privileged) return true
-        val shift = when {
-            userId == metadata.uid -> 6
-            groupId == metadata.gid -> 3
-            else -> 0
-        }
-        return metadata.mode.bits shr shift and 0x2u != 0u
-    }
-}
 
 internal class UnixSocketDeadline private constructor(
     private val expirationNanos: ULong,
@@ -283,7 +268,11 @@ internal abstract class UnixSocket(
     final override val type: InodeType
         get() = InodeType.SOCKET
 
-    final override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
+    final override fun open(
+        caller: VfsOperationContext,
+        inode: Inode,
+        options: OpenOptions,
+    ): VfsResult<OpenFileBackend> =
         if (options.access == AccessMode.READ_WRITE && lock.withLock { !closed }) {
             VfsResult.Ok(this)
         } else {
@@ -291,6 +280,7 @@ internal abstract class UnixSocket(
         }
 
     final override fun read(
+        caller: VfsOperationContext,
         inode: Inode,
         destination: PreparedBufferDestination,
         destinationOffset: Int,
@@ -312,6 +302,7 @@ internal abstract class UnixSocket(
     }
 
     final override fun write(
+        caller: VfsOperationContext,
         inode: Inode,
         source: PreparedBufferSource,
         sourceOffset: Int,
@@ -331,14 +322,23 @@ internal abstract class UnixSocket(
         )
     }
 
-    final override fun ioctl(inode: Inode, command: Int, args: UserMemory): Long {
+    final override fun ioctl(
+        caller: VfsOperationContext,
+        inode: Inode,
+        command: Int,
+        args: UserMemory,
+    ): Long {
         if (command != FIONREAD) return -VfsError.NOT_SUPPORTED.errno.toLong()
         val bytes = ByteArray(Int.SIZE_BYTES)
         LittleEndianBuffer(bytes).writeU32(0, readableBytes().coerceAtLeast(0).toUInt())
         return if (args.copyToUser(bytes)) 0L else -VfsError.FAULT.errno.toLong()
     }
 
-    final override fun poll(inode: Inode, events: Int): Long = pollSocket(events).toLong()
+    final override fun poll(
+        caller: VfsOperationContext,
+        inode: Inode,
+        events: Int,
+    ): Long = pollSocket(events).toLong()
 
     final override fun release() {
         var cleanup: (() -> Unit)? = null
@@ -520,7 +520,11 @@ internal abstract class UnixSocket(
 internal data object SocketNodeBackend : MutableInodeBackend {
     override val type: InodeType = InodeType.SOCKET
 
-    override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
+    override fun open(
+        caller: VfsOperationContext,
+        inode: Inode,
+        options: OpenOptions,
+    ): VfsResult<OpenFileBackend> =
         VfsResult.Err(VfsError.NO_SUCH_DEVICE_OR_ADDRESS)
 }
 
@@ -535,21 +539,25 @@ internal class UnixSocketSubsystem(
     private var nextAutomaticName = 0u
 
     fun create(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         type: UnixSocketType,
         nonBlocking: Boolean,
         credentials: UnixCredentials,
     ): VfsResult<OpenFileDescription> = open(
+        caller,
         context,
         newSocket(type, credentials),
         nonBlocking,
     )
 
     fun open(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         socket: UnixSocket,
         nonBlocking: Boolean,
     ): VfsResult<OpenFileDescription> = anonymousFiles.open(
+        caller,
         context,
         socket,
         OpenOptions(access = AccessMode.READ_WRITE, nonBlocking = nonBlocking),
@@ -563,6 +571,7 @@ internal class UnixSocketSubsystem(
     }
 
     fun bind(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         socket: UnixSocket,
         requested: UnixSocketAddress,
@@ -576,6 +585,7 @@ internal class UnixSocketSubsystem(
             UnixSocketAddress.Unnamed -> bindAutomatic(socket)
             is UnixSocketAddress.Abstract -> bindAbstract(socket, requested)
             is UnixSocketAddress.Pathname -> bindPathname(
+                caller,
                 context,
                 socket,
                 requested,
@@ -589,9 +599,9 @@ internal class UnixSocketSubsystem(
     }
 
     fun resolve(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         address: UnixSocketAddress,
-        identity: FileSystemIdentity,
     ): VfsResult<UnixSocket> = when (address) {
         UnixSocketAddress.Unnamed -> VfsResult.Err(VfsError.ADDRESS_NOT_AVAILABLE)
         is UnixSocketAddress.Abstract -> lock.withLock {
@@ -599,7 +609,7 @@ internal class UnixSocketSubsystem(
                 ?: VfsResult.Err(VfsError.CONNECTION_REFUSED)
         }
         is UnixSocketAddress.Pathname -> {
-            val path = when (val result = paths.resolve(context, address.pathname)) {
+            val path = when (val result = paths.resolve(caller, context, address.pathname)) {
                 is VfsResult.Ok -> result.value
                 is VfsResult.Err -> return result
             }
@@ -607,8 +617,9 @@ internal class UnixSocketSubsystem(
             if (inode.type != InodeType.SOCKET) {
                 return VfsResult.Err(VfsError.CONNECTION_REFUSED)
             }
-            if (!identity.mayWrite(inode.metadata())) {
-                return VfsResult.Err(VfsError.PERMISSION_DENIED)
+            when (val access = inode.backend.checkAccess(caller, inode, AccessPermissions.WRITE)) {
+                is VfsResult.Ok -> Unit
+                is VfsResult.Err -> return access
             }
             lock.withLock {
                 pathnameBindings[inode]?.let { VfsResult.Ok(it) }
@@ -618,6 +629,7 @@ internal class UnixSocketSubsystem(
     }
 
     fun pair(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         type: UnixSocketType,
         credentials: UnixCredentials,
@@ -631,7 +643,7 @@ internal class UnixSocketSubsystem(
             second.release()
             return paired
         }
-        val firstFile = when (val result = open(context, first, nonBlocking)) {
+        val firstFile = when (val result = open(caller, context, first, nonBlocking)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> {
                 first.release()
@@ -639,7 +651,7 @@ internal class UnixSocketSubsystem(
                 return result
             }
         }
-        val secondFile = when (val result = open(context, second, nonBlocking)) {
+        val secondFile = when (val result = open(caller, context, second, nonBlocking)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> {
                 firstFile.release()
@@ -699,6 +711,7 @@ internal class UnixSocketSubsystem(
     }
 
     private fun bindPathname(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         socket: UnixSocket,
         address: UnixSocketAddress.Pathname,
@@ -707,6 +720,7 @@ internal class UnixSocketSubsystem(
         gid: UInt,
     ): VfsResult<UnixSocketAddress> {
         val path = when (val result = nodes.createNode(
+            caller,
             context,
             context.workingDirectory,
             address.pathname,

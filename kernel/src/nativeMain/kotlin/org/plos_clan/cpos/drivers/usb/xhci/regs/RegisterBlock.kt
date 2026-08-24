@@ -2,7 +2,6 @@ package org.plos_clan.cpos.drivers.usb.xhci.regs
 
 import org.plos_clan.cpos.mem.MmioAddress
 
-/** Common little-endian MMIO access used by xHCI register blocks. */
 abstract class RegisterBlock(
     protected val address: MmioAddress,
 ) {

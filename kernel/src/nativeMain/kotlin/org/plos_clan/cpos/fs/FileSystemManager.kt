@@ -18,6 +18,7 @@ import org.plos_clan.cpos.fs.vfs.RootMountOptions
 import org.plos_clan.cpos.fs.vfs.Vfs
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsPathname
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.module.ModuleManager
 import org.plos_clan.cpos.tasks.ProcessManager
@@ -113,6 +114,7 @@ object FileSystemManager {
     ): Boolean {
         val target = VfsPathname.fromString(path)
         val created = vfs.createNode(
+            VfsOperationContext.KERNEL,
             context,
             target,
             NodeCreation(NodeKind.Directory, FileMode(0x1EDu)),
@@ -122,6 +124,7 @@ object FileSystemManager {
             return false
         }
         return when (val result = vfs.mount(
+            VfsOperationContext.KERNEL,
             context,
             target,
             MountRequest(fileSystem.name, flags = flags),

@@ -34,6 +34,7 @@ data class MemoryRegion(
     val shared: Boolean = false,
     internal val backing: MemoryRegionBacking? = null,
     internal val sharedIdentity: Any? = null,
+    internal val identity: Any = Any(),
 ) {
     val length: ULong
         get() = end - start

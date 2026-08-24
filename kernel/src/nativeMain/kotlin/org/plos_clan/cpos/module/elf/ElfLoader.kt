@@ -3,10 +3,13 @@ package org.plos_clan.cpos.module.elf
 import kotlin.collections.iterator
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.vfs.AccessMode
+import org.plos_clan.cpos.fs.vfs.AccessPermissions
+import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.fs.vfs.OpenOptions
 import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.ByteArrayBuffer
@@ -88,6 +91,7 @@ object ElfLoader {
                 is VfsResult.Err -> return result
             }
 
+
             val executable = try {
                 loadImage(executableFile, addressSpace, path, 0uL)
             } finally {
@@ -156,6 +160,7 @@ object ElfLoader {
     private fun open(process: Process, path: String): VfsResult<ElfFile> {
         val file = when (
             val result = FileSystemManager.vfs.open(
+                caller = process.vfsOperationContext,
                 context = process.getFSContext(),
                 pathname = VfsPathname.fromString(path),
                 options = OpenOptions(access = AccessMode.READ),
@@ -167,12 +172,20 @@ object ElfLoader {
                 return result
             }
         }
-        if (MountFlag.NO_EXEC in file.path.mount.flags) {
+        if (file.inode.type != InodeType.REGULAR && MountFlag.NO_EXEC in file.path.mount.flags) {
             file.release()
             println("ELF: execution is disabled on the mount containing $path")
             return VfsResult.Err(VfsError.PERMISSION_DENIED)
         }
-        val image = parseImage(file, path) ?: run {
+        when(val result = file.inode.backend.checkAccess(
+            process.vfsOperationContext,
+            file.inode,
+            AccessPermissions.EXECUTE
+        )) {
+            is VfsResult.Err -> return result
+            is VfsResult.Ok -> {}
+        }
+        val image = parseImage(process.vfsOperationContext, file, path) ?: run {
             file.release()
             return VfsResult.Err(VfsError.EXEC_FORMAT)
         }
@@ -231,14 +244,18 @@ object ElfLoader {
         )
     }
 
-    private fun parseImage(file: OpenFileDescription, path: String): ElfImage? {
+    private fun parseImage(
+        caller: VfsOperationContext,
+        file: OpenFileDescription,
+        path: String,
+    ): ElfImage? {
         fun reject(message: String): ElfImage? {
             println("ELF: $path: $message")
             return null
         }
 
         val size = file.inode.metadata().size
-        val headerData = readExact(file, 0uL, ELF64_HEADER_SIZE)
+        val headerData = readExact(caller, file, 0uL, ELF64_HEADER_SIZE)
             ?: return reject("header is truncated")
         val headerInput = LittleEndianBuffer(headerData)
         if (headerData[0].toUByte() != 0x7fu.toUByte() ||
@@ -276,7 +293,7 @@ object ElfLoader {
         if (header.programHeaderCount > 0u && header.programHeaderOffset == 0uL ||
             !fitsInFile(header.programHeaderOffset, tableSize, size)
         ) return reject("program header table is truncated")
-        val table = readExact(file, header.programHeaderOffset, tableSize.toInt())
+        val table = readExact(caller, file, header.programHeaderOffset, tableSize.toInt())
             ?: return reject("cannot read program header table")
         val tableInput = LittleEndianBuffer(table)
         val programHeaders = List(header.programHeaderCount.toInt()) { index ->
@@ -298,8 +315,9 @@ object ElfLoader {
                 interpreter.fileSize > Int.MAX_VALUE.toULong() ||
                 !fitsInFile(interpreter.fileOffset, interpreter.fileSize, size)
             ) return reject("PT_INTERP is invalid")
-            val bytes = readExact(file, interpreter.fileOffset, interpreter.fileSize.toInt())
-                ?: return reject("cannot read PT_INTERP")
+            val bytes =
+                readExact(caller, file, interpreter.fileOffset, interpreter.fileSize.toInt())
+                    ?: return reject("cannot read PT_INTERP")
             if (bytes.last() != 0.toByte()) return reject("PT_INTERP is not null-terminated")
             val pathBytes = bytes.copyOf(bytes.lastIndex)
             if (pathBytes.isEmpty() || pathBytes.first() != '/'.code.toByte() ||
@@ -329,7 +347,7 @@ object ElfLoader {
         }
         if (header.alignment > 1uL &&
             (!header.alignment.isPowerOfTwo() ||
-                start % header.alignment != header.fileOffset % header.alignment)
+                    start % header.alignment != header.fileOffset % header.alignment)
         ) {
             println("ELF: invalid load segment alignment")
             return null
@@ -350,9 +368,9 @@ object ElfLoader {
             while (address < end) {
                 val page = pages.getOrPut(address, ::PagePlan)
                 page.readable = page.readable ||
-                    (segment.header.flags and PROGRAM_FLAG_READABLE) != 0u
+                        (segment.header.flags and PROGRAM_FLAG_READABLE) != 0u
                 page.writable = page.writable ||
-                    (segment.header.flags and PROGRAM_FLAG_WRITABLE) != 0u
+                        (segment.header.flags and PROGRAM_FLAG_WRITABLE) != 0u
                 page.executable = page.executable || segment.executable
                 address += PAGE_SIZE_BYTES
             }
@@ -369,8 +387,8 @@ object ElfLoader {
         for ((address, page) in pages) {
             val access =
                 (if (page.readable) MEMORY_REGION_READABLE else 0uL) or
-                    (if (page.writable) MEMORY_REGION_WRITABLE else 0uL) or
-                    (if (page.executable) MEMORY_REGION_EXECUTABLE else 0uL)
+                        (if (page.writable) MEMORY_REGION_WRITABLE else 0uL) or
+                        (if (page.executable) MEMORY_REGION_EXECUTABLE else 0uL)
             val previous = regions.lastOrNull()
             if (previous != null && previous.end == address && previous.access == access) {
                 previous.end += PAGE_SIZE_BYTES
@@ -398,7 +416,7 @@ object ElfLoader {
             return checkedAdd(header.virtualAddress, loadBias)
         }
         val tableSize = image.header.programHeaderCount.toULong() *
-            image.header.programHeaderEntrySize.toULong()
+                image.header.programHeaderEntrySize.toULong()
         val tableEnd = checkedAdd(image.header.programHeaderOffset, tableSize) ?: return null
         val segment = segments.firstOrNull {
             val fileEnd = checkedAdd(it.header.fileOffset, it.header.fileSize)
@@ -409,6 +427,7 @@ object ElfLoader {
     }
 
     private fun readExact(
+        caller: VfsOperationContext,
         file: OpenFileDescription,
         fileOffset: ULong,
         count: Int,
@@ -417,6 +436,7 @@ object ElfLoader {
         var copied = 0
         while (copied < count) {
             val result = file.readAt(
+                caller = caller,
                 fileOffset = fileOffset + copied.toULong(),
                 destination = ByteArrayBuffer(data),
                 offset = copied,

@@ -34,9 +34,10 @@ internal class MemoryRegionMap(
         target.entries += entries.map(MemoryRegion::copy)
     }
 
-    fun releaseAll() {
-        entries.forEach { it.backing?.release() }
+    fun removeAll(): List<MemoryRegionBacking> {
+        val backings = entries.mapNotNull(MemoryRegion::backing)
         entries.clear()
+        return backings
     }
 
     fun insertCopies(source: List<MemoryRegion>): Boolean {
@@ -181,6 +182,7 @@ internal class MemoryRegionMap(
             left.type == right.type &&
             left.shared == right.shared &&
             left.sharedIdentity === right.sharedIdentity &&
+            left.identity === right.identity &&
             left.backing === right.backing &&
             ((left.type != MemoryRegionType.FILE && left.type != MemoryRegionType.MMIO) ||
                 left.offset + left.length == right.offset)

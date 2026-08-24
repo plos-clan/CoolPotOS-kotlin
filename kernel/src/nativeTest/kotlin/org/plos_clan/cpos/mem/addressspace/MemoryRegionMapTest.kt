@@ -57,6 +57,7 @@ class MemoryRegionMapTest {
     @Test
     fun splitsAndRemovesRangesWhilePreservingFileOffsets() {
         val map = regionMap()
+        val identity = Any()
         assertTrue(
             map.insertOwned(
                 region(
@@ -64,13 +65,14 @@ class MemoryRegionMapTest {
                     6,
                     type = MemoryRegionType.FILE,
                     offset = page(10),
-                ),
+                ).copy(identity = identity),
             ),
         )
 
         map.splitAt(page(4))
         assertEquals(listOf(page(2), page(4)), map.map(MemoryRegion::start))
         assertEquals(listOf(page(10), page(12)), map.map(MemoryRegion::offset))
+        assertTrue(map.all { it.identity === identity })
 
         val removed = map.removeRange(page(3), page(5))
         assertEquals(listOf(page(3), page(4)), removed.map(MemoryRegion::start))
@@ -83,8 +85,11 @@ class MemoryRegionMapTest {
     @Test
     fun mergesOnlyCompatibleAdjacentRegions() {
         val map = regionMap()
+        val identity = Any()
         val first = region(1, 2, type = MemoryRegionType.FILE, offset = 0uL)
+            .copy(identity = identity)
         val second = region(2, 3, type = MemoryRegionType.FILE, offset = page(1))
+            .copy(identity = identity)
         val incompatible = region(3, 4, type = MemoryRegionType.FILE, offset = 0uL)
         listOf(first, second, incompatible).forEach { assertTrue(map.insertOwned(it)) }
 

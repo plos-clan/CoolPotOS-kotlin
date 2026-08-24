@@ -423,7 +423,9 @@ internal object SocketControlMessages {
         if (installed.size < originalRights) truncated = true
         ancillary?.release()
         if (used != 0 && !memory.copyToUser(output, size = used)) {
-            installed.forEach(process.fdTable::close)
+            installed.forEach { descriptor ->
+                process.fdTable.close(process.vfsOperationContext, descriptor)
+            }
             return VfsResult.Err(VfsError.FAULT)
         }
         return VfsResult.Ok(ControlWriteResult(used, truncated, installed))

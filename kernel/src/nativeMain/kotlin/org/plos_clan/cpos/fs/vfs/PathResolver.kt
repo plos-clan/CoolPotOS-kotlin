@@ -8,10 +8,12 @@ internal class VfsPathResolver(
     }
 
     fun resolve(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         pathname: VfsPathname,
         followFinalSymlink: Boolean = true,
     ): VfsResult<VfsPath> = resolveAt(
+        caller = caller,
         context = context,
         directory = context.workingDirectory,
         pathname = pathname,
@@ -19,6 +21,7 @@ internal class VfsPathResolver(
     )
 
     fun resolveAt(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         directory: VfsPath,
         pathname: VfsPathname,
@@ -39,6 +42,7 @@ internal class VfsPathResolver(
             is VfsResult.Err -> return result
         }
         val result = walk(
+            caller,
             context,
             start,
             components,
@@ -100,6 +104,7 @@ internal class VfsPathResolver(
     data class ParentPath(val path: VfsPath, val name: VfsName)
 
     fun resolveParent(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         directory: VfsPath,
         pathname: VfsPathname,
@@ -116,7 +121,9 @@ internal class VfsPathResolver(
         }
         val name = components.last()
         val start = if (pathname.isAbsolute) context.root else directory
-        val parent = when (val result = walk(context, start, components.dropLast(1), true)) {
+        val parent = when (
+            val result = walk(caller, context, start, components.dropLast(1), true)
+        ) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
@@ -127,6 +134,7 @@ internal class VfsPathResolver(
     }
 
     private fun walk(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         start: VfsPath,
         components: List<VfsName>,
@@ -134,20 +142,30 @@ internal class VfsPathResolver(
     ): VfsResult<VfsPath> {
         var current = followMounts(context.namespace, start)
         var symlinkDepth = 0
+        var requireDirectory = false
         val remaining = ArrayDeque(components)
 
         while (remaining.isNotEmpty()) {
             val name = remaining.removeFirst()
             when {
-                name.isDot -> continue
+                name.isDot -> {
+                    when (val access = current.requireSearch(caller)) {
+                        is VfsResult.Ok -> continue
+                        is VfsResult.Err -> return access
+                    }
+                }
                 name.isDotDot -> {
+                    when (val access = current.requireSearch(caller)) {
+                        is VfsResult.Ok -> Unit
+                        is VfsResult.Err -> return access
+                    }
                     current = walkUp(context, current)
                     continue
                 }
             }
 
             val parent = current
-            val next = when (val result = lookupChild(context, parent, name)) {
+            val next = when (val result = lookupChild(caller, context, parent, name)) {
                 is VfsResult.Ok -> result.value
                 is VfsResult.Err -> return result
             }
@@ -167,10 +185,12 @@ internal class VfsPathResolver(
             }
             val symlink = inode.backend as? SymlinkBackend
                 ?: return VfsResult.Err(VfsError.NOT_SUPPORTED)
-            val target = when (val result = symlink.readLink(inode)) {
-                is VfsResult.Ok -> result.value.also { next.mount.recordAccess(inode) }
+            val target = when (val result = symlink.readLink(caller, inode)) {
+                is VfsResult.Ok -> result.value.also { next.mount.recordAccess(caller, inode) }
                 is VfsResult.Err -> return result
             }
+            if (target.size == 0) return VfsResult.Err(VfsError.NOT_FOUND)
+            if (target.requiresDirectory && remaining.isEmpty()) requireDirectory = true
             val targetComponents = when (val result = target.components()) {
                 is VfsResult.Ok -> result.value
                 is VfsResult.Err -> return result
@@ -180,10 +200,14 @@ internal class VfsPathResolver(
                 remaining.addFirst(targetComponents[index])
             }
         }
+        if (requireDirectory && current.inode?.type != InodeType.DIRECTORY) {
+            return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        }
         return VfsResult.Ok(current)
     }
 
     fun lookupChild(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         parent: VfsPath,
         name: VfsName,
@@ -192,28 +216,29 @@ internal class VfsPathResolver(
         val directory = parent.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = directory.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        when (val access = backend.checkAccess(caller, directory, AccessPermissions.EXECUTE)) {
+            is VfsResult.Ok -> Unit
+            is VfsResult.Err -> return access
+        }
         parent.dentry.cachedChild(name)?.let { cached ->
             val inode = cached.inode()
-            if (backend.isLookupStable(name, inode)) {
-                if (inode == null) return VfsResult.Err(VfsError.NOT_FOUND)
-                val path = VfsPath(parent.mount, cached)
-                return VfsResult.Ok(
-                    if (followMount) followMounts(context.namespace, path) else path,
-                )
-            }
+            if (inode == null) return VfsResult.Err(VfsError.NOT_FOUND)
+            val path = VfsPath(parent.mount, cached)
+            return VfsResult.Ok(
+                if (followMount) followMounts(context.namespace, path) else path,
+            )
         }
 
-        val inode = when (val result = backend.lookup(directory, name)) {
+        val lookup = when (val result = backend.lookup(caller, directory, name)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
+        val inode = lookup.inode
         if (inode == null) {
-            if (backend.isLookupStable(name, null)) {
-                parent.dentry.cacheChild(name, null)
-            }
+            parent.dentry.cacheChild(name, lookup)
             return VfsResult.Err(VfsError.NOT_FOUND)
         }
-        val dentry = parent.dentry.cacheChild(name, inode)
+        val dentry = parent.dentry.cacheChild(name, lookup)
         val path = VfsPath(parent.mount, dentry)
         return VfsResult.Ok(if (followMount) followMounts(context.namespace, path) else path)
     }
@@ -233,6 +258,13 @@ internal class VfsPathResolver(
             current = current.parent
         }
         return false
+    }
+
+    private fun VfsPath.requireSearch(caller: VfsOperationContext): VfsResult<Unit> {
+        val inode = inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val backend = inode.backend as? DirectoryBackend
+            ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        return backend.checkAccess(caller, inode, AccessPermissions.EXECUTE)
     }
 
     private fun walkUp(context: FileSystemContext, initial: VfsPath): VfsPath {

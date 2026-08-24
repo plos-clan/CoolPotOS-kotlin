@@ -1,15 +1,19 @@
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 class Inode internal constructor(
     val id: InodeId,
     val superBlock: SuperBlock,
     internal val backend: InodeBackend,
-    metadata: InodeMetadata,
+    initialAttributes: InodeAttributeSnapshot,
+    val generation: ULong = 0uL,
 ) {
     private val lock = IrqSpinLock()
-    private var currentMetadata = metadata
+    private var currentMetadata = initialAttributes.attributes.metadata
+    private var attributeSnapshot: InodeAttributeSnapshot? = initialAttributes
+    private var attributeGeneration = 0uL
     private var extendedAttributes: MutableMap<ExtendedAttributeName, ByteArray>? = null
     private var openReferences = 0
     private var evicted = false
@@ -19,6 +23,49 @@ class Inode internal constructor(
 
     fun metadata(): InodeMetadata = lock.withLock { currentMetadata }
 
+    fun attributes(
+        caller: VfsOperationContext,
+        forceRefresh: Boolean = false,
+    ): VfsResult<InodeAttributes> = when (
+        val result = attributeSnapshot(caller, forceRefresh)
+    ) {
+        is VfsResult.Ok -> VfsResult.Ok(result.value.attributes)
+        is VfsResult.Err -> result
+    }
+
+    internal fun attributeSnapshot(
+        caller: VfsOperationContext,
+        forceRefresh: Boolean = false,
+    ): VfsResult<InodeAttributeSnapshot> {
+        val request = lock.withLock {
+            if (!forceRefresh) {
+                attributeSnapshot?.takeIf {
+                    it.validity.isValid(TscClock.nanoTime())
+                }?.let { return VfsResult.Ok(it) }
+            }
+            ++attributeGeneration to currentMetadata
+        }
+        val loaded = when (val result = backend.loadAttributes(caller, this)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        val snapshot = lock.withLock {
+            if (evicted || currentMetadata != request.second) {
+                InodeAttributeSnapshot(
+                    loaded.attributes.copy(metadata = currentMetadata),
+                    CacheValidity.Volatile,
+                )
+            } else {
+                if (request.first == attributeGeneration) {
+                    currentMetadata = loaded.attributes.metadata
+                    attributeSnapshot = loaded
+                }
+                loaded
+            }
+        }
+        return VfsResult.Ok(snapshot)
+    }
+
     internal fun updateMetadata(
         timestamps: InodeTimestampUpdate = InodeTimestampEvent.STATUS_CHANGED,
         update: (InodeMetadata) -> InodeMetadata = { it },
@@ -27,6 +74,8 @@ class Inode internal constructor(
         lock.withLock {
             if (!evicted) {
                 currentMetadata = updateMetadataLocked(timestamps, update)
+                attributeSnapshot = null
+                attributeGeneration++
                 if (currentMetadata.linkCount == 0u && openReferences == 0) {
                     evicted = true
                     shouldEvict = true
@@ -84,6 +133,8 @@ class Inode internal constructor(
         }
         destination[name] = value.copyOf()
         currentMetadata = updateMetadataLocked(InodeTimestampEvent.STATUS_CHANGED)
+        attributeSnapshot = null
+        attributeGeneration++
         VfsResult.Ok(Unit)
     }
 
@@ -95,6 +146,8 @@ class Inode internal constructor(
             }
             if (attributes.isEmpty()) extendedAttributes = null
             currentMetadata = updateMetadataLocked(InodeTimestampEvent.STATUS_CHANGED)
+            attributeSnapshot = null
+            attributeGeneration++
             VfsResult.Ok(Unit)
         }
 
@@ -140,11 +193,17 @@ class Dentry internal constructor(
     parent: Dentry?,
     inode: Inode?,
 ) {
+    private class CachedChild(
+        val dentry: Dentry,
+        var validity: CacheValidity,
+        var reference: DentryReference?,
+    )
+
     private val lock = IrqSpinLock()
     private var currentName = name
     private var currentParent = parent
     private var currentInode = inode
-    private val children = mutableMapOf<VfsName, Dentry>()
+    private val children = mutableMapOf<VfsName, CachedChild>()
 
     val name: VfsName
         get() = lock.withLock { currentName }
@@ -154,32 +213,61 @@ class Dentry internal constructor(
 
     fun inode(): Inode? = lock.withLock { currentInode }
 
-    internal fun cachedChild(name: VfsName): Dentry? = lock.withLock { children[name] }
+    internal fun cachedChild(name: VfsName): Dentry? = lock.withLock {
+        val child = children[name] ?: return@withLock null
+        child.dentry.takeIf { child.validity.isValid(TscClock.nanoTime()) }
+    }
 
-    internal fun cacheChild(name: VfsName, inode: Inode?): Dentry = lock.withLock {
-        children[name]?.let { cached ->
-            val current = cached.inode()
-            if (inode == null || current == null ||
-                current.superBlock === inode.superBlock && current.id == inode.id
-            ) {
-                if (current !== inode) cached.install(inode)
-                return@withLock cached
+    internal fun cacheChild(name: VfsName, lookup: DirectoryLookup): Dentry {
+        var retiredReference: DentryReference? = null
+        var retiredDentry: Dentry? = null
+        val result = lock.withLock {
+            val inode = lookup.inode
+            val cached = children[name]
+            if (cached != null) {
+                val current = cached.dentry.inode()
+                if (inode == null || current == null || current.sameIdentity(inode)) {
+                    if (inode == null && current != null) retiredDentry = cached.dentry
+                    if (current !== inode) cached.dentry.install(inode)
+                    if (cached.reference !== lookup.reference) {
+                        retiredReference = cached.reference
+                    }
+                    cached.validity = lookup.validity
+                    cached.reference = lookup.reference
+                    return@withLock cached.dentry
+                }
+                retiredReference = cached.reference
+                retiredDentry = cached.dentry
+                cached.dentry.install(null)
             }
-            cached.install(null)
+            val child = Dentry(superBlock, name, this, inode)
+            children[name] = CachedChild(child, lookup.validity, lookup.reference)
+            child
         }
-        Dentry(superBlock, name, this, inode).also { children[name] = it }
+        retiredReference?.release()
+        retiredDentry?.releaseCachedChildren()
+        return result
     }
 
     internal fun markChildNegative(name: VfsName, expected: Dentry) {
+        var reference: DentryReference? = null
+        var invalidated = false
         lock.withLock {
-            children[name]?.takeIf { it === expected }?.install(null)
+            val child = children[name]?.takeIf { it.dentry === expected } ?: return@withLock
+            reference = child.reference
+            child.reference = null
+            child.validity = CacheValidity.Persistent
+            child.dentry.install(null)
+            invalidated = true
         }
+        reference?.release()
+        if (invalidated) expected.releaseCachedChildren()
     }
 
     internal fun invalidateNegativeChild(name: VfsName) {
         lock.withLock {
             val child = children[name] ?: return@withLock
-            if (child.inode() == null) children.remove(name)
+            if (child.dentry.inode() == null) children.remove(name)
         }
     }
 
@@ -189,17 +277,22 @@ class Dentry internal constructor(
         targetName: VfsName,
         exchange: Dentry?,
     ) {
+        var retired: CachedChild? = null
         renameLock.withLock {
             if (this === targetParent) {
-                lock.withLock { renameChildLocked(source, targetParent, targetName, exchange) }
+                lock.withLock {
+                    retired = renameChildLocked(source, targetParent, targetName, exchange)
+                }
             } else {
                 lock.withLock {
                     targetParent.lock.withLock {
-                        renameChildLocked(source, targetParent, targetName, exchange)
+                        retired = renameChildLocked(source, targetParent, targetName, exchange)
                     }
                 }
             }
         }
+        retired?.reference?.release()
+        retired?.dentry?.releaseCachedChildren()
     }
 
     private fun renameChildLocked(
@@ -207,18 +300,26 @@ class Dentry internal constructor(
         targetParent: Dentry,
         targetName: VfsName,
         exchange: Dentry?,
-    ) {
-        if (children[source.currentName] === source) {
-            children.remove(source.currentName)
-        }
+    ): CachedChild? {
+        val sourceName = source.currentName
+        val sourceChild = children[sourceName]?.takeIf { it.dentry === source }
+            ?: CachedChild(source, CacheValidity.Persistent, null)
+        if (children[sourceName]?.dentry === source) children.remove(sourceName)
         if (exchange == null) {
-            targetParent.children.put(targetName, source)?.install(null)
+            val retired = targetParent.children.put(targetName, sourceChild)
+            retired?.dentry?.install(null)
+            source.relocate(targetParent, targetName)
+            return retired
         } else {
-            targetParent.children[targetName] = source
-            children[source.currentName] = exchange
-            exchange.relocate(this, source.currentName)
+            val exchangeChild = targetParent.children[targetName]
+                ?.takeIf { it.dentry === exchange }
+                ?: CachedChild(exchange, CacheValidity.Persistent, null)
+            targetParent.children[targetName] = sourceChild
+            children[sourceName] = exchangeChild
+            exchange.relocate(this, sourceName)
         }
         source.relocate(targetParent, targetName)
+        return null
     }
 
     private fun relocate(parent: Dentry, name: VfsName) = lock.withLock {
@@ -229,6 +330,24 @@ class Dentry internal constructor(
     private fun install(inode: Inode?) {
         lock.withLock { currentInode = inode }
     }
+
+    internal fun releaseCachedChildren() {
+        val pending = ArrayDeque<Dentry>()
+        pending.addLast(this)
+        while (pending.isNotEmpty()) {
+            val parent = pending.removeLast()
+            val cached = parent.lock.withLock {
+                parent.children.values.toList().also { parent.children.clear() }
+            }
+            cached.forEach { child ->
+                child.reference?.release()
+                pending.addLast(child.dentry)
+            }
+        }
+    }
+
+    private fun Inode.sameIdentity(other: Inode): Boolean =
+        superBlock === other.superBlock && id == other.id && generation == other.generation
 
     private companion object {
         val renameLock = IrqSpinLock()

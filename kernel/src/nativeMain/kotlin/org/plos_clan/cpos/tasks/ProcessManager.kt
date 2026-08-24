@@ -12,6 +12,7 @@ import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.FileDescriptorTable
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.vfs.FileSystemContext
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.INVALID_FRAME
@@ -282,6 +283,15 @@ class Process internal constructor(
     internal val terminationSignal: Signal? = Signal.CHILD,
     vforkParent: Thread? = null,
 ) {
+    val vfsOperationContext: VfsOperationContext
+        get() = VfsOperationContext(
+            uid = fsuid.toUInt(),
+            gid = fsgid.toUInt(),
+            processId = id.toUInt(),
+            fileCreationMask = fileCreationMask,
+            privileged = euid == 0,
+        )
+
     private val vforkCompletion = vforkParent?.let(::VforkCompletion)
     var name = name
         internal set
@@ -525,7 +535,7 @@ object ProcessManager {
         val removed = processLock.withLock { processes.remove(process) }
         if (!removed) return false
 
-        process.fdTable.closeAll()
+        process.fdTable.closeAll(process.vfsOperationContext)
         process.context?.release()
         process.context = null
         process.addressSpace.release()
@@ -602,7 +612,7 @@ object ProcessManager {
             process.state = ProcessState.EXITING
             process.context.also { process.context = null }
         }
-        process.fdTable.closeAll()
+        process.fdTable.closeAll(process.vfsOperationContext)
         context?.release()
         val parent = processLock.withLock {
             process.state = ProcessState.ZOMBIE

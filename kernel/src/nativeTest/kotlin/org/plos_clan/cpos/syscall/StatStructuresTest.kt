@@ -7,10 +7,13 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
 import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.FileSystemStatistics
 import org.plos_clan.cpos.fs.vfs.InodeId
 import org.plos_clan.cpos.fs.vfs.InodeMetadata
 import org.plos_clan.cpos.fs.vfs.InodeTimestamps
 import org.plos_clan.cpos.fs.vfs.InodeType
+import org.plos_clan.cpos.fs.vfs.MountFlag
+import org.plos_clan.cpos.fs.vfs.MountFlags
 import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.fs.vfs.VfsTimestamp
@@ -18,6 +21,7 @@ import org.plos_clan.cpos.syscall.fs.FsConstants
 import org.plos_clan.cpos.syscall.fs.LinuxDirent64
 import org.plos_clan.cpos.syscall.fs.LinuxFileStatus
 import org.plos_clan.cpos.syscall.fs.LinuxStat
+import org.plos_clan.cpos.syscall.fs.LinuxStatFs
 import org.plos_clan.cpos.syscall.fs.LinuxStatx
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 
@@ -40,6 +44,7 @@ class StatStructuresTest {
             ),
         ),
         blocks = 0x1234uL,
+        blockSize = 8192uL,
     )
 
     @Test
@@ -57,7 +62,7 @@ class StatStructuresTest {
         assertEquals(0u, input.readU32(36))
         assertEquals(0x543A_BC21uL, input.readU64(40))
         assertEquals(0x1122_3344_5566uL, input.readU64(48))
-        assertEquals(FsConstants.STAT_BLKSIZE, input.readU64(56))
+        assertEquals(8192uL, input.readU64(56))
         assertEquals(0x1234uL, input.readU64(64))
         assertEquals(-2L, input.readU64(72).toLong())
         assertEquals(111uL, input.readU64(80))
@@ -78,7 +83,7 @@ class StatStructuresTest {
             FsConstants.STATX_SUPPORTED_FIELDS or FsConstants.STATX_BTIME,
             input.readU32(0),
         )
-        assertEquals(FsConstants.STAT_BLKSIZE.toUInt(), input.readU32(4))
+        assertEquals(8192u, input.readU32(4))
         assertEquals(0uL, input.readU64(8))
         assertEquals(3u, input.readU32(16))
         assertEquals(1000u, input.readU32(20))
@@ -157,5 +162,35 @@ class StatStructuresTest {
             val encoded = LinuxDirent64(entry.copy(type = type), 0).toNativeBytes()
             assertEquals(value, encoded[18].toInt(), "type=$type")
         }
+    }
+
+    @Test
+    fun serializesBackendFileSystemStatistics() {
+        val bytes = LinuxStatFs(
+            fileSystemMagic = 0x1234uL,
+            mountFlags = MountFlags.of(MountFlag.READ_ONLY, MountFlag.NO_EXEC),
+            statistics = FileSystemStatistics(
+                blockSize = 8192uL,
+                fragmentSize = 4096uL,
+                blocks = 100uL,
+                freeBlocks = 40uL,
+                availableBlocks = 30uL,
+                files = 20uL,
+                freeFiles = 10uL,
+                maximumNameLength = 127uL,
+            ),
+        ).toNativeBytes()
+        val input = LittleEndianBuffer(bytes)
+
+        assertEquals(0x1234uL, input.readU64(0))
+        assertEquals(8192uL, input.readU64(8))
+        assertEquals(100uL, input.readU64(16))
+        assertEquals(40uL, input.readU64(24))
+        assertEquals(30uL, input.readU64(32))
+        assertEquals(20uL, input.readU64(40))
+        assertEquals(10uL, input.readU64(48))
+        assertEquals(127uL, input.readU64(64))
+        assertEquals(4096uL, input.readU64(72))
+        assertEquals(FsConstants.ST_RDONLY or FsConstants.ST_NOEXEC, input.readU64(80))
     }
 }

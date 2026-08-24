@@ -14,15 +14,20 @@ internal class AnonymousFileFactory {
         id = lock.withLock { InodeId(nextInodeId--) },
         superBlock = context.root.mount.superBlock,
         backend = backend,
-        metadata = metadata,
+        initialAttributes = InodeAttributeSnapshot(
+            InodeAttributes(metadata),
+            CacheValidity.Persistent,
+        ),
     )
 
     fun open(
+        caller: VfsOperationContext,
         context: FileSystemContext,
         backend: InodeBackend,
         options: OpenOptions,
         mode: FileMode = FileMode(0x1FFu),
     ): VfsResult<OpenFileDescription> = OpenFileDescription.open(
+        caller,
         context.root,
         createInode(
             context,

@@ -3,55 +3,57 @@ package org.plos_clan.cpos.fs.vfs
 internal const val ALLOCATION_BLOCK_SIZE = 512uL
 internal const val EXTENDED_ATTRIBUTE_VALUE_MAX = 65_536
 
-enum class VfsError(val errno: Int) {
-    NOT_PERMITTED(1),
-    NO_SUCH_DEVICE_OR_ADDRESS(6),
-    INTERRUPTED(4),
-    IO(5),
-    EXEC_FORMAT(8),
-    BAD_DESCRIPTOR(9),
-    WOULD_BLOCK(11),
-    NO_MEMORY(12),
-    PERMISSION_DENIED(13),
-    FAULT(14),
-    BUSY(16),
-    ALREADY_EXISTS(17),
-    CROSS_DEVICE(18),
-    NO_DEVICE(19),
-    NOT_DIRECTORY(20),
-    IS_DIRECTORY(21),
-    INVALID_ARGUMENT(22),
-    NOT_TTY(25),
-    FILE_TOO_LARGE(27),
-    NO_SPACE(28),
-    ILLEGAL_SEEK(29),
-    READ_ONLY(30),
-    TOO_MANY_LINKS(31),
-    BROKEN_PIPE(32),
-    RANGE(34),
-    NAME_TOO_LONG(36),
-    NOT_EMPTY(39),
-    TOO_MANY_SYMLINKS(40),
-    NO_DATA(61),
-    DESTINATION_ADDRESS_REQUIRED(89),
-    MESSAGE_TOO_LONG(90),
-    WRONG_PROTOCOL_TYPE(91),
-    PROTOCOL_OPTION_NOT_AVAILABLE(92),
-    PROTOCOL_NOT_SUPPORTED(93),
-    SOCKET_TYPE_NOT_SUPPORTED(94),
-    NOT_SUPPORTED(95),
-    ADDRESS_FAMILY_NOT_SUPPORTED(97),
-    ADDRESS_IN_USE(98),
-    ADDRESS_NOT_AVAILABLE(99),
-    ALREADY_CONNECTED(106),
-    NOT_CONNECTED(107),
-    CONNECTION_REFUSED(111),
-    ALREADY_IN_PROGRESS(114),
-    NOT_FOUND(2);
-
+value class VfsError private constructor(val errno: Int) {
     companion object {
-        internal fun fromErrno(errno: Int): VfsError =
-            entries.firstOrNull { it.errno == errno } ?: IO
+        val NOT_PERMITTED = VfsError(1)
+        val NOT_FOUND = VfsError(2)
+        val INTERRUPTED = VfsError(4)
+        val IO = VfsError(5)
+        val NO_SUCH_DEVICE_OR_ADDRESS = VfsError(6)
+        val EXEC_FORMAT = VfsError(8)
+        val BAD_DESCRIPTOR = VfsError(9)
+        val WOULD_BLOCK = VfsError(11)
+        val NO_MEMORY = VfsError(12)
+        val PERMISSION_DENIED = VfsError(13)
+        val FAULT = VfsError(14)
+        val BUSY = VfsError(16)
+        val ALREADY_EXISTS = VfsError(17)
+        val CROSS_DEVICE = VfsError(18)
+        val NO_DEVICE = VfsError(19)
+        val NOT_DIRECTORY = VfsError(20)
+        val IS_DIRECTORY = VfsError(21)
+        val INVALID_ARGUMENT = VfsError(22)
+        val NOT_TTY = VfsError(25)
+        val FILE_TOO_LARGE = VfsError(27)
+        val NO_SPACE = VfsError(28)
+        val ILLEGAL_SEEK = VfsError(29)
+        val READ_ONLY = VfsError(30)
+        val TOO_MANY_LINKS = VfsError(31)
+        val BROKEN_PIPE = VfsError(32)
+        val RANGE = VfsError(34)
+        val NAME_TOO_LONG = VfsError(36)
+        val NOT_EMPTY = VfsError(39)
+        val TOO_MANY_SYMLINKS = VfsError(40)
+        val NO_DATA = VfsError(61)
+        val DESTINATION_ADDRESS_REQUIRED = VfsError(89)
+        val MESSAGE_TOO_LONG = VfsError(90)
+        val WRONG_PROTOCOL_TYPE = VfsError(91)
+        val PROTOCOL_OPTION_NOT_AVAILABLE = VfsError(92)
+        val PROTOCOL_NOT_SUPPORTED = VfsError(93)
+        val SOCKET_TYPE_NOT_SUPPORTED = VfsError(94)
+        val NOT_SUPPORTED = VfsError(95)
+        val ADDRESS_FAMILY_NOT_SUPPORTED = VfsError(97)
+        val ADDRESS_IN_USE = VfsError(98)
+        val ADDRESS_NOT_AVAILABLE = VfsError(99)
+        val ALREADY_CONNECTED = VfsError(106)
+        val NOT_CONNECTED = VfsError(107)
+        val CONNECTION_REFUSED = VfsError(111)
+        val ALREADY_IN_PROGRESS = VfsError(114)
+
+        fun fromErrno(errno: Int): VfsError =
+            if (errno in 1..MAX_ERRNO) VfsError(errno) else IO
+
+        private const val MAX_ERRNO = 4095
     }
 }
 
@@ -265,9 +267,6 @@ data class OpenOptions(
     val followFinalSymlink: Boolean = true,
     val nonBlocking: Boolean = false,
     val noAtime: Boolean = false,
-    val createUid: UInt = 0u,
-    val createGid: UInt = 0u,
-    val privileged: Boolean = false,
 )
 
 enum class MountFlag(bit: Int, internal val optionName: String? = null) {
@@ -331,17 +330,45 @@ data class MountRequest(
     val source: String? = null,
     val flags: MountFlags = MountFlags.NONE,
     val data: ByteArray? = null,
+    val resources: MountResources = MountResources.NONE,
 )
+
+class MountResources internal constructor(
+    private val acquireFile: (Int) -> OpenFileDescription?,
+) {
+    fun <T> withResource(
+        descriptor: Int,
+        use: (MountResource) -> VfsResult<T>,
+    ): VfsResult<T> {
+        val file = acquireFile(descriptor)
+            ?: return VfsResult.Err(VfsError.BAD_DESCRIPTOR)
+        return try {
+            val resource = file.mountResource
+                ?: return VfsResult.Err(VfsError.NO_DEVICE)
+            use(resource)
+        } finally {
+            file.release()
+        }
+    }
+
+    companion object {
+        val NONE = MountResources { null }
+    }
+}
 
 enum class UnmountMode {
     REGULAR,
     FORCE,
     DETACH;
 
-    internal fun unmount(namespace: MountNamespace, mount: Mount): VfsResult<Unit> = when (this) {
+    internal fun unmount(
+        caller: VfsOperationContext,
+        namespace: MountNamespace,
+        mount: Mount,
+    ): VfsResult<Unit> = when (this) {
         REGULAR,
         FORCE,
-        -> when (val result = mount.superBlock.backend.sync()) {
+        -> when (val result = mount.superBlock.backend.prepareUnmount(caller, this)) {
             is VfsResult.Ok -> namespace.unmount(mount)
             is VfsResult.Err -> result
         }

@@ -29,7 +29,7 @@ internal fun getdents64(regs: PtraceRegisters, process: Process): Long {
     var encountered = false
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
     try {
-        val result = file.iterate { entry, nextOffset ->
+        val result = file.iterate(process.vfsOperationContext) { entry, nextOffset ->
             encountered = true
             val record = LinuxDirent64(entry, nextOffset)
             if (record.recordSize > capacity - written) {

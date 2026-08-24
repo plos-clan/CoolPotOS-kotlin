@@ -2,12 +2,16 @@ package org.plos_clan.cpos.fs.tmpfs
 
 import org.plos_clan.cpos.fs.DeviceNode
 import org.plos_clan.cpos.fs.sock.SocketNodeBackend
+import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.EmptyFileSystemOptions
 import org.plos_clan.cpos.fs.vfs.FifoBackend
 import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.FileSystemStatistics
 import org.plos_clan.cpos.fs.vfs.FileSystemOptions
 import org.plos_clan.cpos.fs.vfs.FileSystemType
 import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.InodeAttributes
+import org.plos_clan.cpos.fs.vfs.InodeAttributeSnapshot
 import org.plos_clan.cpos.fs.vfs.InodeBackend
 import org.plos_clan.cpos.fs.vfs.InodeId
 import org.plos_clan.cpos.fs.vfs.InodeMetadata
@@ -17,6 +21,7 @@ import org.plos_clan.cpos.fs.vfs.SuperBlock
 import org.plos_clan.cpos.fs.vfs.SuperBlockBackend
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
@@ -98,11 +103,10 @@ abstract class TmpfsFileSystemType protected constructor(
     name: String,
     private val backendFactory: (TmpfsOptions) -> SuperBlockBackend,
 ) : FileSystemType(name, 0x0102_1994uL) {
-    final override fun parseOptions(
+    final override fun configure(
         source: String?,
         data: ByteArray?,
-    ): VfsResult<TmpfsOptions> =
-        TmpfsOptions.parse(data)
+    ): VfsResult<TmpfsOptions> = TmpfsOptions.parse(data)
 
     final override fun createBackend(
         options: FileSystemOptions,
@@ -137,6 +141,21 @@ internal open class TmpfsInstance(
         gid = options.rootGid,
         parent = null,
     )
+
+    override fun statistics(caller: VfsOperationContext): VfsResult<FileSystemStatistics> {
+        val (capacity, available) = lock.withLock {
+            val total = options.sizeLimit ?: BuddyFrameAllocator.statistics().totalBytes
+            total to (total - minOf(total, allocatedBytes))
+        }
+        val blockSize = pageSize.toULong()
+        return VfsResult.Ok(
+            FileSystemStatistics(
+                blockSize = blockSize,
+                blocks = capacity / blockSize,
+                freeBlocks = available / blockSize,
+            ),
+        )
+    }
 
     fun newRegularFile(
         superBlock: SuperBlock,
@@ -267,7 +286,10 @@ internal open class TmpfsInstance(
             id = id,
             superBlock = superBlock,
             backend = backend,
-            metadata = metadata,
+            initialAttributes = InodeAttributeSnapshot(
+                InodeAttributes(metadata),
+                CacheValidity.Persistent,
+            ),
         )
     }
 

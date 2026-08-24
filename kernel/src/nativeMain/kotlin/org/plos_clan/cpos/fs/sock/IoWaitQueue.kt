@@ -40,7 +40,6 @@ internal class IoWaitQueue {
         }
     }
 
-    /** Removes a waiter that was interrupted, or recycles one that was already awakened. */
     private fun finish(waiter: Waiter) {
         if (!waiter.ready) check(waiting.remove(waiter))
         waiter.recycle()

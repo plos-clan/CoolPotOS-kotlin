@@ -6,7 +6,6 @@ import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.OpenFlags
-import org.plos_clan.cpos.fs.sock.FileSystemIdentity
 import org.plos_clan.cpos.fs.sock.UnixAncillaryData
 import org.plos_clan.cpos.fs.sock.UnixCredentials
 import org.plos_clan.cpos.fs.sock.UnixReceiveRequest
@@ -84,7 +83,9 @@ internal object SocketSyscalls {
             is VfsResult.Err -> return errno(result.error.errno)
         }
         val context = process.context ?: return errno(Errno.ENOENT)
+        val caller = process.vfsOperationContext
         val file = when (val result = FileSystemManager.vfs.createUnixSocket(
+            caller,
             context,
             options.type,
             options.nonBlocking,
@@ -111,7 +112,9 @@ internal object SocketSyscalls {
             is VfsResult.Err -> return errno(result.error.errno)
         }
         val context = process.context ?: return errno(Errno.ENOENT)
+        val caller = process.vfsOperationContext
         val pair = when (val result = FileSystemManager.vfs.createUnixSocketPair(
+            caller,
             context,
             options.type,
             credentials(process),
@@ -137,7 +140,9 @@ internal object SocketSyscalls {
                 regs[PtraceRegisters.IDX_R10],
             ).copyToUser(output)
         ) {
-            descriptors.forEach(process.fdTable::close)
+            descriptors.forEach { descriptor ->
+                process.fdTable.close(caller, descriptor)
+            }
             return errno(Errno.EFAULT)
         }
         return 0L
@@ -158,14 +163,16 @@ internal object SocketSyscalls {
             is VfsResult.Err -> return@withSocket errno(decoded.error.errno)
         }
         val context = process.context ?: return@withSocket errno(Errno.ENOENT)
-        val mode = FileMode(0x1FFu and process.fileCreationMask.inv())
+        val caller = process.vfsOperationContext
+        val mode = FileMode(0x1FFu and caller.fileCreationMask.inv())
         when (val result = FileSystemManager.vfs.bindUnixSocket(
+            caller,
             context,
             socket,
             address,
             mode,
-            process.fsuid.toUInt(),
-            process.fsgid.toUInt(),
+            caller.uid,
+            caller.gid,
         )) {
             is VfsResult.Ok -> 0L
             is VfsResult.Err -> errno(result.error.errno)
@@ -194,10 +201,11 @@ internal object SocketSyscalls {
             )
             is DecodedSocketAddress.Unix -> {
                 val context = process.context ?: return@withSocket errno(Errno.ENOENT)
+                val caller = process.vfsOperationContext
                 val peer = when (val resolved = FileSystemManager.vfs.resolveUnixSocket(
+                    caller,
                     context,
                     address.address,
-                    fileSystemIdentity(process),
                 )) {
                     is VfsResult.Ok -> resolved.value
                     is VfsResult.Err -> return@withSocket errno(resolved.error.errno)
@@ -581,6 +589,7 @@ internal object SocketSyscalls {
                 return@withSocket errno(Errno.ENOENT)
             }
             val acceptedFile = when (val result = FileSystemManager.vfs.openUnixSocket(
+                process.vfsOperationContext,
                 context,
                 accepted,
                 nonBlocking = flags and SOCK_NONBLOCK != 0,
@@ -602,7 +611,7 @@ internal object SocketSyscalls {
                 return@withSocket errno(Errno.EMFILE)
             }
             if (!output.write(peerAddress)) {
-                process.fdTable.close(descriptor)
+                process.fdTable.close(process.vfsOperationContext, descriptor)
                 return@withSocket errno(Errno.EFAULT)
             }
             descriptor.toLong()
@@ -707,7 +716,9 @@ internal object SocketSyscalls {
         if (result.endOfRecord) outputFlags = outputFlags or MSG_EOR
         if (control.truncated) outputFlags = outputFlags or MSG_CTRUNC
         if (!header.writeResult(nameLength, control.length, outputFlags)) {
-            control.installedDescriptors.forEach(process.fdTable::close)
+            control.installedDescriptors.forEach { descriptor ->
+                process.fdTable.close(process.vfsOperationContext, descriptor)
+            }
             return errno(Errno.EFAULT)
         }
         return result.bytes.toLong()
@@ -809,9 +820,9 @@ internal object SocketSyscalls {
         }
         val context = process.context ?: return VfsResult.Err(VfsError.NOT_FOUND)
         return when (val result = FileSystemManager.vfs.resolveUnixSocket(
+            process.vfsOperationContext,
             context,
             address,
-            fileSystemIdentity(process),
         )) {
             is VfsResult.Ok -> VfsResult.Ok(
                 UnixSocketDestination.Resolved(result.value, address),
@@ -897,12 +908,6 @@ internal object SocketSyscalls {
     private fun credentials(process: Process): UnixCredentials =
         UnixCredentials(process.id, process.euid.toUInt(), process.egid.toUInt())
 
-    private fun fileSystemIdentity(process: Process): FileSystemIdentity = FileSystemIdentity(
-        process.fsuid.toUInt(),
-        process.fsgid.toUInt(),
-        process.fsuid == 0,
-    )
-
     private fun setPassCredentials(
         process: Process,
         socket: UnixSocket,
@@ -910,13 +915,15 @@ internal object SocketSyscalls {
     ): VfsResult<Unit> {
         if (!enabled || !socket.canBind()) return socket.setPassCredentials(enabled)
         val context = process.context ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val caller = process.vfsOperationContext
         val bound = FileSystemManager.vfs.bindUnixSocket(
+            caller,
             context,
             socket,
             UnixSocketAddress.Unnamed,
-            FileMode(0x1FFu and process.fileCreationMask.inv()),
-            process.fsuid.toUInt(),
-            process.fsgid.toUInt(),
+            FileMode(0x1FFu and caller.fileCreationMask.inv()),
+            caller.uid,
+            caller.gid,
         )
         if (bound is VfsResult.Err) return bound
         return socket.setPassCredentials(true)

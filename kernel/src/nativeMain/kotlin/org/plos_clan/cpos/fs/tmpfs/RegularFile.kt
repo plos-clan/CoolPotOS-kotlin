@@ -6,6 +6,8 @@ import org.plos_clan.cpos.fs.vfs.FileAllocationMode
 import org.plos_clan.cpos.fs.vfs.FileContent
 import org.plos_clan.cpos.fs.vfs.FilePosition
 import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.InodeAttributes
+import org.plos_clan.cpos.fs.vfs.InodeAttributeSnapshot
 import org.plos_clan.cpos.fs.vfs.InodeTimestampEvent
 import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.MutableInodeBackend
@@ -13,7 +15,9 @@ import org.plos_clan.cpos.fs.vfs.OpenFileBackend
 import org.plos_clan.cpos.fs.vfs.OpenOptions
 import org.plos_clan.cpos.fs.vfs.RegularFileBackend
 import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
@@ -54,10 +58,18 @@ internal class TmpfsRegularFile(
         return attached
     }
 
-    override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
+    override fun open(
+        caller: VfsOperationContext,
+        inode: Inode,
+        options: OpenOptions,
+    ): VfsResult<OpenFileBackend> =
         VfsResult.Ok(TmpfsRegularHandle(this))
 
-    override fun resize(inode: Inode, size: ULong): VfsResult<Unit> = lock.withLock {
+    override fun resize(
+        caller: VfsOperationContext,
+        inode: Inode,
+        size: ULong,
+    ): VfsResult<Unit> = lock.withLock {
         val previousSize = inode.metadata().size
         if (size < previousSize) {
             val pageSize = fileSystem.pageSize.toULong()
@@ -87,6 +99,7 @@ internal class TmpfsRegularFile(
     }
 
     override fun allocate(
+        caller: VfsOperationContext,
         inode: Inode,
         offset: ULong,
         length: ULong,
@@ -158,7 +171,10 @@ internal class TmpfsRegularFile(
         VfsResult.Ok(Unit)
     }
 
-    override fun allocatedBlocks(inode: Inode): ULong = lock.withLock {
+    override fun loadAttributes(
+        caller: VfsOperationContext,
+        inode: Inode,
+    ): VfsResult<InodeAttributeSnapshot> = lock.withLock {
         val pageSize = fileSystem.pageSize.toULong()
         val contentPages = if (contentSize == 0) {
             0uL
@@ -170,8 +186,14 @@ internal class TmpfsRegularFile(
             if (pageIndex >= contentPages) allocatedPages++
         }
         val allocatedBytes = allocatedPages * pageSize
-        allocatedBytes / ALLOCATION_BLOCK_SIZE +
+        val blocks = allocatedBytes / ALLOCATION_BLOCK_SIZE +
             if (allocatedBytes % ALLOCATION_BLOCK_SIZE == 0uL) 0uL else 1uL
+        VfsResult.Ok(
+            InodeAttributeSnapshot(
+                InodeAttributes(inode.metadata(), blocks),
+                CacheValidity.Persistent,
+            ),
+        )
     }
 
     override fun evict(inode: Inode) {
@@ -315,6 +337,7 @@ internal class TmpfsRegularFile(
 
 private class TmpfsRegularHandle(private val file: TmpfsRegularFile) : OpenFileBackend {
     override fun read(
+        caller: VfsOperationContext,
         inode: Inode,
         destination: PreparedBufferDestination,
         destinationOffset: Int,
@@ -323,6 +346,7 @@ private class TmpfsRegularHandle(private val file: TmpfsRegularFile) : OpenFileB
     ): IoResult = file.read(inode, destination, destinationOffset, count, position)
 
     override fun write(
+        caller: VfsOperationContext,
         inode: Inode,
         source: PreparedBufferSource,
         sourceOffset: Int,

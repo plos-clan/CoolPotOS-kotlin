@@ -1,5 +1,7 @@
 package org.plos_clan.cpos.fs.overlay
 
+import org.plos_clan.cpos.fs.vfs.AccessPermissions
+import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.DirectoryBackend
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
 import org.plos_clan.cpos.fs.vfs.ExtendedAttributeMode
@@ -8,6 +10,8 @@ import org.plos_clan.cpos.fs.vfs.FileAllocationMode
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FilePosition
 import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.InodeAttributes
+import org.plos_clan.cpos.fs.vfs.InodeAttributeSnapshot
 import org.plos_clan.cpos.fs.vfs.InodeId
 import org.plos_clan.cpos.fs.vfs.InodeTimestampEvent
 import org.plos_clan.cpos.fs.vfs.InodeTimestampSet
@@ -25,6 +29,7 @@ import org.plos_clan.cpos.fs.vfs.SuperBlockBackend
 import org.plos_clan.cpos.fs.vfs.SymlinkBackend
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPath
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
@@ -69,7 +74,8 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
             InodeType.SYMLINK -> OverlaySymlinkBackend(this, location)
             else -> OverlaySpecialBackend(this, location, location.type)
         }
-        return Inode(InodeId(nextInodeId++), superBlock, backend, metadata).also {
+        val attributes = InodeAttributeSnapshot(InodeAttributes(metadata), CacheValidity.Volatile)
+        return Inode(InodeId(nextInodeId++), superBlock, backend, attributes).also {
             location.overlayInode = it
         }
     }
@@ -79,6 +85,7 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
     override fun createRoot(superBlock: SuperBlock): Inode = inode(superBlock, root)
 
     override fun updateTimestamps(
+        caller: VfsOperationContext,
         inode: Inode,
         update: InodeTimestampUpdate,
     ): VfsResult<Unit> {
@@ -93,13 +100,13 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
             inode.updateMetadata(update)
             return VfsResult.Ok(Unit)
         }
-        if (update is InodeTimestampSet && !OverlayCopyUp.ensureWritable(location)) {
+        if (update is InodeTimestampSet && !OverlayCopyUp.ensureWritable(caller, location)) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val target = location.upper ?: location.lower
             ?: return VfsResult.Err(VfsError.READ_ONLY)
         val targetInode = target.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val result = target.mount.superBlock.backend.updateTimestamps(targetInode, update)
+        val result = target.mount.superBlock.backend.updateTimestamps(caller, targetInode, update)
         if (result is VfsResult.Err && result.error == VfsError.READ_ONLY && access) {
             inode.updateMetadata(update)
             return VfsResult.Ok(Unit)
@@ -111,70 +118,85 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
         return result
     }
 
-    override fun sync(): VfsResult<Unit> =
-        checkNotNull(root.upper).mount.superBlock.backend.sync()
+    override fun sync(caller: VfsOperationContext): VfsResult<Unit> =
+        checkNotNull(root.upper).mount.superBlock.backend.sync(caller)
 
     override fun release() {
         checkNotNull(root.upper).mount.release()
         checkNotNull(root.lower).mount.release()
     }
 
-    internal fun child(superBlock: SuperBlock, directory: OverlayLocation, name: VfsName): Inode? {
-        val location = childLocation(directory, name) ?: return null
+    internal fun child(
+        caller: VfsOperationContext,
+        superBlock: SuperBlock,
+        directory: OverlayLocation,
+        name: VfsName,
+    ): Inode? {
+        val location = childLocation(caller, directory, name) ?: return null
         return inode(superBlock, location)
     }
 
-    internal fun entries(superBlock: SuperBlock, directory: OverlayLocation): List<DirectoryEntry> {
+    internal fun entries(
+        caller: VfsOperationContext,
+        superBlock: SuperBlock,
+        directory: OverlayLocation,
+    ): List<DirectoryEntry> {
         val names = linkedSetOf<VfsName>()
-        layerEntries(directory.upper).forEach { names += it.name }
-        layerEntries(directory.lower).forEach { names += it.name }
+        layerEntries(caller, directory.upper).forEach { names += it.name }
+        layerEntries(caller, directory.lower).forEach { names += it.name }
         return names.mapNotNull { name ->
-            val child = childLocation(directory, name) ?: return@mapNotNull null
+            val child = childLocation(caller, directory, name) ?: return@mapNotNull null
             val inode = inode(superBlock, child)
             DirectoryEntry(name, inode.id, inode.type)
         }
     }
 
     internal fun create(
+        caller: VfsOperationContext,
         directory: OverlayLocation,
         name: VfsName,
         node: NodeCreation,
     ): VfsResult<Inode> {
-        if (childLocation(directory, name) != null) {
+        if (childLocation(caller, directory, name) != null) {
             return VfsResult.Err(VfsError.ALREADY_EXISTS)
         }
-        val upper = OverlayCopyUp.ensureUpper(directory) ?: return VfsResult.Err(VfsError.READ_ONLY)
+        val upper = OverlayCopyUp.ensureUpper(caller, directory)
+            ?: return VfsResult.Err(VfsError.READ_ONLY)
         val parent = upper.inode ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
         val backend = parent.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val result = backend.create(parent, name, node)
+        val result = backend.create(caller, parent, name, node)
         if (result is VfsResult.Ok) reveal(directory, name)
         return result
     }
 
     internal fun remove(
+        caller: VfsOperationContext,
         superBlock: SuperBlock,
         directory: OverlayLocation,
         name: VfsName,
         expectedTarget: Inode,
         mode: RemoveMode,
     ): VfsResult<Unit> {
-        val child = childLocation(directory, name) ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val child = childLocation(caller, directory, name)
+            ?: return VfsResult.Err(VfsError.NOT_FOUND)
         if (child.overlayInode !== expectedTarget) return VfsResult.Err(VfsError.NOT_FOUND)
-        val upper = OverlayCopyUp.ensureUpper(directory) ?: return VfsResult.Err(VfsError.READ_ONLY)
+        val upper = OverlayCopyUp.ensureUpper(caller, directory)
+            ?: return VfsResult.Err(VfsError.READ_ONLY)
         val parent = upper.inode ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
         val backend = parent.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        if (mode == RemoveMode.DIRECTORY && entries(superBlock, child).isNotEmpty()) {
+        if (mode == RemoveMode.DIRECTORY && entries(caller, superBlock, child).isNotEmpty()) {
             return VfsResult.Err(VfsError.NOT_EMPTY)
         }
         val upperTarget = child.upper?.inode
         val result = if (upperTarget != null) {
-            backend.remove(parent, name, upperTarget, mode)
+            backend.remove(caller, parent, name, upperTarget, mode)
         } else VfsResult.Ok(Unit)
         if (result is VfsResult.Err) return result
         if (upperTarget == null) {
             val timestampResult = parent.superBlock.backend.updateTimestamps(
+                caller,
                 parent,
                 InodeTimestampEvent.CONTENT_CHANGED,
             )
@@ -190,33 +212,38 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
     }
 
     internal fun link(
+        caller: VfsOperationContext,
         directory: OverlayLocation,
         name: VfsName,
         target: OverlayLocation,
         overlayInode: Inode,
     ): VfsResult<Unit> {
-        if (childLocation(directory, name) != null) {
+        if (childLocation(caller, directory, name) != null) {
             return VfsResult.Err(VfsError.ALREADY_EXISTS)
         }
-        if (!OverlayCopyUp.ensureWritable(target)) return VfsResult.Err(VfsError.READ_ONLY)
+        if (!OverlayCopyUp.ensureWritable(caller, target)) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
         val source = target.upper?.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val upper = OverlayCopyUp.ensureUpper(directory) ?: return VfsResult.Err(VfsError.READ_ONLY)
+        val upper = OverlayCopyUp.ensureUpper(caller, directory)
+            ?: return VfsResult.Err(VfsError.READ_ONLY)
         val parent = upper.inode ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
         val backend = parent.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val result = backend.link(parent, name, source)
+        val result = backend.link(caller, parent, name, source)
         if (result is VfsResult.Ok) {
             val metadata = source.metadata()
             overlayInode.updateMetadata(InodeTimestampEvent.NONE) {
                 it.copy(linkCount = metadata.linkCount, timestamps = metadata.timestamps)
             }
             reveal(directory, name)
-            childLocation(directory, name)?.overlayInode = overlayInode
+            childLocation(caller, directory, name)?.overlayInode = overlayInode
         }
         return result
     }
 
     internal fun rename(
+        caller: VfsOperationContext,
         superBlock: SuperBlock,
         sourceDirectory: OverlayLocation,
         sourceName: VfsName,
@@ -226,9 +253,9 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
         expectedTarget: Inode?,
         mode: RenameMode,
     ): VfsResult<Unit> {
-        val source = childLocation(sourceDirectory, sourceName)
+        val source = childLocation(caller, sourceDirectory, sourceName)
             ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val target = childLocation(targetDirectory, targetName)
+        val target = childLocation(caller, targetDirectory, targetName)
         if (source.overlayInode !== expectedSource || target?.overlayInode !== expectedTarget) {
             return VfsResult.Err(VfsError.NOT_FOUND)
         }
@@ -247,21 +274,23 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
                     else VfsError.IS_DIRECTORY,
                 )
             }
-            if (target.type == InodeType.DIRECTORY && entries(superBlock, target).isNotEmpty()) {
+            if (target.type == InodeType.DIRECTORY &&
+                entries(caller, superBlock, target).isNotEmpty()
+            ) {
                 return VfsResult.Err(VfsError.NOT_EMPTY)
             }
         }
-        if (!OverlayCopyUp.ensureWritable(source)) {
+        if (!OverlayCopyUp.ensureWritable(caller, source)) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        if (exchanged != null && !OverlayCopyUp.ensureWritable(exchanged)) {
+        if (exchanged != null && !OverlayCopyUp.ensureWritable(caller, exchanged)) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val sourceUpper = source.upper ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val targetUpper = target?.upper
-        val sourceParentPath = OverlayCopyUp.ensureUpper(sourceDirectory)
+        val sourceParentPath = OverlayCopyUp.ensureUpper(caller, sourceDirectory)
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val targetParentPath = OverlayCopyUp.ensureUpper(targetDirectory)
+        val targetParentPath = OverlayCopyUp.ensureUpper(caller, targetDirectory)
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
         val sourceParent = sourceParentPath.inode
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
@@ -269,9 +298,10 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
         val backend = sourceParent.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        val sourceLayerLower = layerChild(sourceDirectory.lower, sourceName)
-        val targetLayerLower = layerChild(targetDirectory.lower, targetName)
+        val sourceLayerLower = layerChild(caller, sourceDirectory.lower, sourceName)
+        val targetLayerLower = layerChild(caller, targetDirectory.lower, targetName)
         val result = backend.rename(
+            caller,
             sourceParent,
             sourceName,
             sourceUpper.inode ?: return VfsResult.Err(VfsError.NOT_FOUND),
@@ -332,78 +362,126 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
         directory.invalidate(name)
     }
 
-    internal fun open(location: OverlayLocation, inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> {
-        if (options.access.canWrite && !OverlayCopyUp.ensureWritable(location)) {
+    internal fun open(
+        caller: VfsOperationContext,
+        location: OverlayLocation,
+        inode: Inode,
+        options: OpenOptions,
+    ): VfsResult<OpenFileBackend> {
+        if (options.access.canWrite && !OverlayCopyUp.ensureWritable(caller, location)) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val target = location.upper ?: location.lower ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val targetInode = target.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val delegate = when (val result = targetInode.backend.open(targetInode, options)) {
+        val delegate = when (val result = targetInode.backend.open(caller, targetInode, options)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
         return VfsResult.Ok(OverlayFileHandle(inode, targetInode, delegate))
     }
 
-    internal fun resize(location: OverlayLocation, inode: Inode, size: ULong): VfsResult<Unit> {
-        if (!OverlayCopyUp.ensureWritable(location)) return VfsResult.Err(VfsError.READ_ONLY)
+    internal fun resize(
+        caller: VfsOperationContext,
+        location: OverlayLocation,
+        inode: Inode,
+        size: ULong,
+    ): VfsResult<Unit> {
+        if (!OverlayCopyUp.ensureWritable(caller, location)) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
         val target = location.upper ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val targetInode = target.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = targetInode.backend as? RegularFileBackend
             ?: return VfsResult.Err(VfsError.NOT_SUPPORTED)
-        val result = backend.resize(targetInode, size)
+        val result = backend.resize(caller, targetInode, size)
         if (result is VfsResult.Ok) refreshMetadata(location, inode)
         return result
     }
 
     internal fun allocate(
+        caller: VfsOperationContext,
         location: OverlayLocation,
         inode: Inode,
         offset: ULong,
         length: ULong,
         mode: FileAllocationMode,
     ): VfsResult<Unit> {
-        if (!OverlayCopyUp.ensureWritable(location)) return VfsResult.Err(VfsError.READ_ONLY)
+        if (!OverlayCopyUp.ensureWritable(caller, location)) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
         val target = location.upper ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val targetInode = target.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = targetInode.backend as? RegularFileBackend
             ?: return VfsResult.Err(VfsError.NOT_SUPPORTED)
-        val result = backend.allocate(targetInode, offset, length, mode)
+        val result = backend.allocate(caller, targetInode, offset, length, mode)
         if (result is VfsResult.Ok) refreshMetadata(location, inode)
         return result
     }
 
-    internal fun setMode(location: OverlayLocation, inode: Inode, mode: FileMode): VfsResult<Unit> {
-        if (!OverlayCopyUp.ensureWritable(location)) return VfsResult.Err(VfsError.READ_ONLY)
+    internal fun setMode(
+        caller: VfsOperationContext,
+        location: OverlayLocation,
+        inode: Inode,
+        mode: FileMode,
+    ): VfsResult<Unit> {
+        if (!OverlayCopyUp.ensureWritable(caller, location)) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
         val target = location.upper ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val targetInode = target.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val result = targetInode.backend.setMode(targetInode, mode)
+        val result = targetInode.backend.setMode(caller, targetInode, mode)
         if (result is VfsResult.Ok) refreshMetadata(location, inode)
         return result
     }
 
     internal fun setOwner(
+        caller: VfsOperationContext,
         location: OverlayLocation,
         inode: Inode,
         uid: UInt?,
         gid: UInt?,
     ): VfsResult<Unit> {
-        if (!OverlayCopyUp.ensureWritable(location)) return VfsResult.Err(VfsError.READ_ONLY)
+        if (!OverlayCopyUp.ensureWritable(caller, location)) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
         val targetInode = location.upper?.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val result = targetInode.backend.setOwner(targetInode, uid, gid)
+        val result = targetInode.backend.setOwner(caller, targetInode, uid, gid)
         if (result is VfsResult.Ok) refreshMetadata(location, inode)
         return result
     }
 
-    internal fun sync(location: OverlayLocation, dataOnly: Boolean): VfsResult<Unit> {
+    internal fun sync(
+        caller: VfsOperationContext,
+        location: OverlayLocation,
+        dataOnly: Boolean,
+    ): VfsResult<Unit> {
         val targetInode = (location.upper ?: location.lower)?.inode
             ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        return targetInode.backend.sync(targetInode, dataOnly)
+        return targetInode.backend.sync(caller, targetInode, dataOnly)
     }
 
-    internal fun allocatedBlocks(location: OverlayLocation): ULong {
-        val targetInode = (location.upper ?: location.lower)?.inode ?: return 0uL
-        return targetInode.backend.allocatedBlocks(targetInode)
+    internal fun pageCacheIdentity(location: OverlayLocation): Any {
+        val inode = (location.upper ?: location.lower)?.inode ?: return location
+        return inode.backend.pageCacheIdentity(inode)
+    }
+
+    internal fun loadAttributes(
+        caller: VfsOperationContext,
+        location: OverlayLocation,
+    ): VfsResult<InodeAttributeSnapshot> {
+        val target = (location.upper ?: location.lower)?.inode
+            ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        return target.attributeSnapshot(caller)
+    }
+
+    internal fun checkAccess(
+        caller: VfsOperationContext,
+        location: OverlayLocation,
+        requested: AccessPermissions,
+    ): VfsResult<Unit> {
+        val target = (location.upper ?: location.lower)?.inode
+            ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        return target.backend.checkAccess(caller, target, requested)
     }
 
     internal fun refreshMetadata(location: OverlayLocation, inode: Inode) {
@@ -412,85 +490,119 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
     }
 
     internal fun getExtendedAttribute(
+        caller: VfsOperationContext,
         location: OverlayLocation,
         name: ExtendedAttributeName,
     ): VfsResult<ByteArray> {
         val inode = (location.upper ?: location.lower)?.inode
             ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        return inode.backend.getExtendedAttribute(inode, name)
+        return inode.backend.getExtendedAttribute(caller, inode, name)
     }
 
-    internal fun listExtendedAttributes(location: OverlayLocation): VfsResult<ByteArray> {
+    internal fun listExtendedAttributes(
+        caller: VfsOperationContext,
+        location: OverlayLocation,
+    ): VfsResult<ByteArray> {
         val inode = (location.upper ?: location.lower)?.inode
             ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        return inode.backend.listExtendedAttributes(inode)
+        return inode.backend.listExtendedAttributes(caller, inode)
     }
 
     internal fun setExtendedAttribute(
+        caller: VfsOperationContext,
         location: OverlayLocation,
         overlayInode: Inode,
         name: ExtendedAttributeName,
         value: ByteArray,
         mode: ExtendedAttributeMode,
     ): VfsResult<Unit> {
-        if (!OverlayCopyUp.ensureWritable(location)) return VfsResult.Err(VfsError.READ_ONLY)
+        if (!OverlayCopyUp.ensureWritable(caller, location)) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
         val inode = location.upper?.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val result = inode.backend.setExtendedAttribute(inode, name, value, mode)
+        val result = inode.backend.setExtendedAttribute(caller, inode, name, value, mode)
         if (result is VfsResult.Ok) refreshMetadata(location, overlayInode)
         return result
     }
 
     internal fun removeExtendedAttribute(
+        caller: VfsOperationContext,
         location: OverlayLocation,
         overlayInode: Inode,
         name: ExtendedAttributeName,
     ): VfsResult<Unit> {
-        if (!OverlayCopyUp.ensureWritable(location)) return VfsResult.Err(VfsError.READ_ONLY)
+        if (!OverlayCopyUp.ensureWritable(caller, location)) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
         val inode = location.upper?.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val result = inode.backend.removeExtendedAttribute(inode, name)
+        val result = inode.backend.removeExtendedAttribute(caller, inode, name)
         if (result is VfsResult.Ok) refreshMetadata(location, overlayInode)
         return result
     }
 
-    internal fun link(location: OverlayLocation): VfsResult<VfsPathname> {
+    internal fun link(
+        caller: VfsOperationContext,
+        location: OverlayLocation,
+    ): VfsResult<VfsPathname> {
         val target = location.upper ?: location.lower ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val inode = target.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        return (inode.backend as? SymlinkBackend)?.readLink(inode)
+        return (inode.backend as? SymlinkBackend)?.readLink(caller, inode)
             ?: VfsResult.Err(VfsError.NOT_SUPPORTED)
     }
 
-    private fun childLocation(directory: OverlayLocation, name: VfsName): OverlayLocation? {
-        directory.cached(name)?.let { return it }
+    private fun childLocation(
+        caller: VfsOperationContext,
+        directory: OverlayLocation,
+        name: VfsName,
+    ): OverlayLocation? {
         val lowerHidden = whiteouts.contains(Whiteout(directory, name))
-        val upper = layerChild(directory.upper, name)
-        if (upper == null && lowerHidden) return null
-        val lower = if (lowerHidden) null else layerChild(directory.lower, name)
-        if (upper == null && lower == null) return null
+        val upper = layerChild(caller, directory.upper, name)
+        val lower = if (lowerHidden) null else layerChild(caller, directory.lower, name)
+        if (upper == null && lower == null) {
+            directory.invalidate(name)
+            return null
+        }
+        directory.cached(name)?.let { cached ->
+            cached.upper = upper
+            cached.lower = lower
+            return cached
+        }
         return OverlayLocation(lower, upper, directory, name).also {
             directory.cache(name, it)
         }
     }
 
-    private fun layerChild(parent: VfsPath?, name: VfsName): VfsPath? {
+    private fun layerChild(
+        caller: VfsOperationContext,
+        parent: VfsPath?,
+        name: VfsName,
+    ): VfsPath? {
         val inode = parent?.inode ?: return null
         val backend = inode.backend as? DirectoryBackend ?: return null
-        val child = when (val result = backend.lookup(inode, name)) {
+        parent.dentry.cachedChild(name)?.let { cached ->
+            return cached.inode()?.let { VfsPath(parent.mount, cached) }
+        }
+        val lookup = when (val result = backend.lookup(caller, inode, name)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> null
         } ?: return null
-        return VfsPath(parent.mount, parent.dentry.cacheChild(name, child))
+        val dentry = parent.dentry.cacheChild(name, lookup)
+        return lookup.inode?.let { VfsPath(parent.mount, dentry) }
     }
 
-    private fun layerEntries(path: VfsPath?): List<DirectoryEntry> {
+    private fun layerEntries(
+        caller: VfsOperationContext,
+        path: VfsPath?,
+    ): List<DirectoryEntry> {
         val inode = path?.inode ?: return emptyList()
         val backend = inode.backend as? DirectoryBackend ?: return emptyList()
-        val handle = when (val result = backend.open(inode, OpenOptions())) {
+        val handle = when (val result = backend.open(caller, inode, OpenOptions())) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return emptyList()
         }
         val result = mutableListOf<DirectoryEntry>()
         try {
-            handle.iterate(inode, FilePosition()) { entry, _ ->
+            handle.iterate(caller, inode, FilePosition()) { entry, _ ->
                 result += entry
                 true
             }
@@ -503,12 +615,13 @@ internal class OverlayInstance private constructor(options: OverlayfsOptions) : 
     private data class Whiteout(val directory: OverlayLocation, val name: VfsName)
 
     internal fun mapResult(
+        caller: VfsOperationContext,
         result: VfsResult<Inode>,
         superBlock: SuperBlock,
         directory: OverlayLocation,
         name: VfsName,
     ): VfsResult<Inode> = when (result) {
-        is VfsResult.Ok -> child(superBlock, directory, name)?.let { VfsResult.Ok(it) }
+        is VfsResult.Ok -> child(caller, superBlock, directory, name)?.let { VfsResult.Ok(it) }
             ?: VfsResult.Err(VfsError.IO)
         is VfsResult.Err -> result
     }

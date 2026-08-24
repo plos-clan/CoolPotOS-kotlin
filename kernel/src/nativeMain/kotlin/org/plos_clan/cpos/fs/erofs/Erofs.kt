@@ -1,12 +1,16 @@
 package org.plos_clan.cpos.fs.erofs
 
 import org.plos_clan.cpos.fs.vfs.CachedFileBackend
+import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.DirectoryBackend
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
+import org.plos_clan.cpos.fs.vfs.DirectoryLookup
 import org.plos_clan.cpos.fs.vfs.FilePosition
 import org.plos_clan.cpos.fs.vfs.FileSystemOptions
 import org.plos_clan.cpos.fs.vfs.FileSystemType
 import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.InodeAttributes
+import org.plos_clan.cpos.fs.vfs.InodeAttributeSnapshot
 import org.plos_clan.cpos.fs.vfs.InodeId
 import org.plos_clan.cpos.fs.vfs.InodeMetadata
 import org.plos_clan.cpos.fs.vfs.InodeTimestampUpdate
@@ -19,6 +23,7 @@ import org.plos_clan.cpos.fs.vfs.SuperBlockBackend
 import org.plos_clan.cpos.fs.vfs.SymlinkBackend
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.ByteArrayBuffer
@@ -67,6 +72,7 @@ private class ErofsInstance private constructor(
         inode(superBlock, header.rootNid) ?: error("EROFS root inode is invalid")
 
     override fun updateTimestamps(
+        caller: VfsOperationContext,
         inode: Inode,
         update: InodeTimestampUpdate,
     ): VfsResult<Unit> = VfsResult.Err(VfsError.READ_ONLY)
@@ -79,7 +85,11 @@ private class ErofsInstance private constructor(
             is FileNode -> RegularBackend(this, node)
             is SymlinkNode -> ErofsSymlinkBackend(node.target)
         }
-        val candidate = Inode(InodeId(nid), superBlock, backend, node.metadata)
+        val attributes = InodeAttributeSnapshot(
+            InodeAttributes(node.metadata),
+            CacheValidity.Persistent,
+        )
+        val candidate = Inode(InodeId(nid), superBlock, backend, attributes)
         return inodeLock.withLock {
             inodeCache[nid] ?: candidate.also { inodeCache[nid] = it }
         }
@@ -215,15 +225,23 @@ private class ErofsInstance private constructor(
     ) : DirectoryBackend {
         override val type: InodeType = InodeType.DIRECTORY
 
-        override fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?> {
+        override fun lookup(
+            caller: VfsOperationContext,
+            directory: Inode,
+            name: VfsName,
+        ): VfsResult<DirectoryLookup> {
             val entry = instance.directoryData(node)?.byName?.get(name)
-                ?: return VfsResult.Ok(null)
+                ?: return VfsResult.Ok(DirectoryLookup(null))
             val inode = instance.inode(superBlock, entry.nid)
                 ?: return VfsResult.Err(VfsError.IO)
-            return VfsResult.Ok(inode)
+            return VfsResult.Ok(DirectoryLookup(inode))
         }
 
-        override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> {
+        override fun open(
+            caller: VfsOperationContext,
+            inode: Inode,
+            options: OpenOptions,
+        ): VfsResult<OpenFileBackend> {
             val entries = instance.directoryData(node)?.entries
                 ?: return VfsResult.Err(VfsError.IO)
             return VfsResult.Ok(DirectoryHandle(entries))
@@ -232,6 +250,7 @@ private class ErofsInstance private constructor(
 
     private class DirectoryHandle(private val entries: List<DirectoryEntry>) : OpenFileBackend {
         override fun iterate(
+            caller: VfsOperationContext,
             inode: Inode,
             position: FilePosition,
             emit: (DirectoryEntry, Long) -> Boolean,
@@ -254,7 +273,11 @@ private class ErofsInstance private constructor(
         private val packed = instance.packed
         private val fragment = node.fragment
 
-        override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
+        override fun open(
+            caller: VfsOperationContext,
+            inode: Inode,
+            options: OpenOptions,
+        ): VfsResult<OpenFileBackend> =
             VfsResult.Ok(this)
 
         override fun read(offset: ULong, destination: ByteArray): Int {
@@ -269,8 +292,16 @@ private class ErofsInstance private constructor(
         private val target: VfsPathname,
     ) : SymlinkBackend {
         override val type: InodeType = InodeType.SYMLINK
-        override fun readLink(inode: Inode): VfsResult<VfsPathname> = VfsResult.Ok(target)
-        override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
+        override fun readLink(
+            caller: VfsOperationContext,
+            inode: Inode,
+        ): VfsResult<VfsPathname> = VfsResult.Ok(target)
+
+        override fun open(
+            caller: VfsOperationContext,
+            inode: Inode,
+            options: OpenOptions,
+        ): VfsResult<OpenFileBackend> =
             VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
     }
 }

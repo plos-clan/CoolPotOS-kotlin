@@ -2,6 +2,8 @@ package org.plos_clan.cpos.fs.tmpfs
 
 import org.plos_clan.cpos.fs.vfs.DirectoryBackend
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
+import org.plos_clan.cpos.fs.vfs.DirectoryLookup
+import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FilePosition
 import org.plos_clan.cpos.fs.vfs.Inode
@@ -18,6 +20,7 @@ import org.plos_clan.cpos.fs.vfs.RemoveMode
 import org.plos_clan.cpos.fs.vfs.RenameMode
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.utils.IrqSpinLock
 
@@ -27,16 +30,25 @@ internal class TmpfsDirectory(
     private var parent: Inode?,
 ) : DirectoryBackend, MutableInodeBackend {
     override val type: InodeType = InodeType.DIRECTORY
-    override fun isLookupStable(name: VfsName, inode: Inode?): Boolean =
-        fileSystem.cacheDirectoryLookups
-
     private val lock = IrqSpinLock()
     private val children = linkedMapOf<VfsName, Inode>()
 
-    override fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?> =
-        lock.withLock { VfsResult.Ok(children[name]) }
+    override fun lookup(
+        caller: VfsOperationContext,
+        directory: Inode,
+        name: VfsName,
+    ): VfsResult<DirectoryLookup> = lock.withLock {
+        VfsResult.Ok(
+            DirectoryLookup(
+                children[name],
+                if (fileSystem.cacheDirectoryLookups) CacheValidity.Persistent
+                else CacheValidity.Volatile,
+            ),
+        )
+    }
 
     override fun create(
+        caller: VfsOperationContext,
         directory: Inode,
         name: VfsName,
         node: NodeCreation,
@@ -60,7 +72,12 @@ internal class TmpfsDirectory(
         }
     }
 
-    override fun link(directory: Inode, name: VfsName, target: Inode): VfsResult<Unit> =
+    override fun link(
+        caller: VfsOperationContext,
+        directory: Inode,
+        name: VfsName,
+        target: Inode,
+    ): VfsResult<Unit> =
         fileSystem.mutate {
             lock.withLock {
                 if (children.containsKey(name)) {
@@ -78,6 +95,7 @@ internal class TmpfsDirectory(
         }
 
     override fun rename(
+        caller: VfsOperationContext,
         sourceDirectory: Inode,
         sourceName: VfsName,
         source: Inode,
@@ -106,6 +124,7 @@ internal class TmpfsDirectory(
     }
 
     override fun remove(
+        caller: VfsOperationContext,
         directory: Inode,
         name: VfsName,
         target: Inode,
@@ -135,7 +154,11 @@ internal class TmpfsDirectory(
         }
     }
 
-    override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
+    override fun open(
+        caller: VfsOperationContext,
+        inode: Inode,
+        options: OpenOptions,
+    ): VfsResult<OpenFileBackend> =
         VfsResult.Ok(TmpfsDirectoryHandle(this))
 
     fun snapshot(): List<DirectoryEntry> = lock.withLock {
@@ -377,6 +400,7 @@ internal class TmpfsDirectory(
 
 private class TmpfsDirectoryHandle(private val directory: TmpfsDirectory) : OpenFileBackend {
     override fun iterate(
+        caller: VfsOperationContext,
         inode: Inode,
         position: FilePosition,
         emit: (entry: DirectoryEntry, nextOffset: Long) -> Boolean,

@@ -2,14 +2,18 @@ package org.plos_clan.cpos.fs.procfs
 
 import KERNEL_NAME
 import org.plos_clan.cpos.drivers.TscClock
+import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.DirectoryBackend
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
+import org.plos_clan.cpos.fs.vfs.DirectoryLookup
 import org.plos_clan.cpos.fs.vfs.EmptyFileSystemOptions
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FilePosition
 import org.plos_clan.cpos.fs.vfs.FileSystemOptions
 import org.plos_clan.cpos.fs.vfs.FileSystemType
 import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.InodeAttributes
+import org.plos_clan.cpos.fs.vfs.InodeAttributeSnapshot
 import org.plos_clan.cpos.fs.vfs.InodeId
 import org.plos_clan.cpos.fs.vfs.InodeMetadata
 import org.plos_clan.cpos.fs.vfs.InodeTimestampEvent
@@ -24,6 +28,7 @@ import org.plos_clan.cpos.fs.vfs.SuperBlockBackend
 import org.plos_clan.cpos.fs.vfs.SymlinkBackend
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.fs.vfs.VfsTimestamp
@@ -150,12 +155,17 @@ internal class ProcfsInstance : SuperBlockBackend {
         id = InodeId(id),
         superBlock = superBlock,
         backend = backend,
-        metadata = InodeMetadata(
-            mode = FileMode(mode),
-            linkCount = 2u,
-            uid = owner?.euid?.toUInt() ?: 0u,
-            gid = owner?.egid?.toUInt() ?: 0u,
-            timestamps = InodeTimestamps.fromModificationTime(VfsTimestamp.now()),
+        initialAttributes = InodeAttributeSnapshot(
+            InodeAttributes(
+                InodeMetadata(
+                    mode = FileMode(mode),
+                    linkCount = 2u,
+                    uid = owner?.euid?.toUInt() ?: 0u,
+                    gid = owner?.egid?.toUInt() ?: 0u,
+                    timestamps = InodeTimestamps.fromModificationTime(VfsTimestamp.now()),
+                ),
+            ),
+            CacheValidity.Persistent,
         ),
     )
 
@@ -170,11 +180,16 @@ internal class ProcfsInstance : SuperBlockBackend {
         id = InodeId(id),
         superBlock = superBlock,
         backend = ProcTextFile(render, write),
-        metadata = InodeMetadata(
-            mode = FileMode(mode),
-            uid = owner?.euid?.toUInt() ?: 0u,
-            gid = owner?.egid?.toUInt() ?: 0u,
-            timestamps = InodeTimestamps.fromModificationTime(VfsTimestamp.now()),
+        initialAttributes = InodeAttributeSnapshot(
+            InodeAttributes(
+                InodeMetadata(
+                    mode = FileMode(mode),
+                    uid = owner?.euid?.toUInt() ?: 0u,
+                    gid = owner?.egid?.toUInt() ?: 0u,
+                    timestamps = InodeTimestamps.fromModificationTime(VfsTimestamp.now()),
+                ),
+            ),
+            CacheValidity.Persistent,
         ),
     )
 
@@ -188,11 +203,16 @@ internal class ProcfsInstance : SuperBlockBackend {
         id = InodeId(id),
         superBlock = superBlock,
         backend = ProcSymlink(target),
-        metadata = InodeMetadata(
-            mode = FileMode(mode),
-            uid = owner?.euid?.toUInt() ?: 0u,
-            gid = owner?.egid?.toUInt() ?: 0u,
-            timestamps = InodeTimestamps.fromModificationTime(VfsTimestamp.now()),
+        initialAttributes = InodeAttributeSnapshot(
+            InodeAttributes(
+                InodeMetadata(
+                    mode = FileMode(mode),
+                    uid = owner?.euid?.toUInt() ?: 0u,
+                    gid = owner?.egid?.toUInt() ?: 0u,
+                    timestamps = InodeTimestamps.fromModificationTime(VfsTimestamp.now()),
+                ),
+            ),
+            CacheValidity.Persistent,
         ),
     )
 
@@ -215,10 +235,17 @@ internal class ProcfsInstance : SuperBlockBackend {
 private class ProcRootDirectory(
     fileSystem: ProcfsInstance,
 ) : ProcDirectoryBackend(fileSystem) {
-    override fun isLookupStable(name: VfsName, inode: Inode?): Boolean {
-        if (inode != null) return ROOT_ENTRIES.any { it.inodeId == inode.id.value }
+    override fun lookupValidity(name: VfsName, inode: Inode?): CacheValidity {
+        if (inode != null) {
+            return if (ROOT_ENTRIES.any { it.inodeId == inode.id.value }) {
+                CacheValidity.Persistent
+            } else {
+                CacheValidity.Volatile
+            }
+        }
         val pid = name.toString().decimalInt()
-        return pid == null || pid == 0
+        return if (pid == null || pid == 0) CacheValidity.Persistent
+        else CacheValidity.Volatile
     }
 
     override fun resolve(superBlock: SuperBlock, name: VfsName): Inode? =
@@ -248,16 +275,27 @@ internal abstract class ProcDirectoryBackend(
     final override val type: InodeType
         get() = InodeType.DIRECTORY
 
-    override fun isLookupStable(name: VfsName, inode: Inode?): Boolean = false
-
     protected abstract fun resolve(superBlock: SuperBlock, name: VfsName): Inode?
+
+    protected open fun lookupValidity(name: VfsName, inode: Inode?): CacheValidity =
+        CacheValidity.Volatile
 
     protected abstract fun snapshot(): VfsResult<List<DirectoryEntry>>
 
-    final override fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?> =
-        VfsResult.Ok(resolve(directory.superBlock, name))
+    final override fun lookup(
+        caller: VfsOperationContext,
+        directory: Inode,
+        name: VfsName,
+    ): VfsResult<DirectoryLookup> {
+        val inode = resolve(directory.superBlock, name)
+        return VfsResult.Ok(DirectoryLookup(inode, lookupValidity(name, inode)))
+    }
 
-    final override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> =
+    final override fun open(
+        caller: VfsOperationContext,
+        inode: Inode,
+        options: OpenOptions,
+    ): VfsResult<OpenFileBackend> =
         VfsResult.Ok(ProcDirectoryHandle(::snapshot))
 }
 
@@ -273,7 +311,8 @@ internal class ProcStaticDirectory(
     fileSystem: ProcfsInstance,
     private val entries: List<ProcStaticEntry>,
 ) : ProcDirectoryBackend(fileSystem) {
-    override fun isLookupStable(name: VfsName, inode: Inode?): Boolean = true
+    override fun lookupValidity(name: VfsName, inode: Inode?): CacheValidity =
+        CacheValidity.Persistent
 
     override fun resolve(superBlock: SuperBlock, name: VfsName): Inode? {
         val fileName = name.toString()
@@ -292,6 +331,7 @@ private class ProcDirectoryHandle(
     private var entries: List<DirectoryEntry>? = null
 
     override fun iterate(
+        caller: VfsOperationContext,
         inode: Inode,
         position: FilePosition,
         emit: (entry: DirectoryEntry, nextOffset: Long) -> Boolean,
@@ -319,7 +359,11 @@ private class ProcTextFile(
     private val write: ((ByteArray) -> VfsResult<Unit>)?,
 ) : RegularFileBackend() {
 
-    override fun resize(inode: Inode, size: ULong): VfsResult<Unit> =
+    override fun resize(
+        caller: VfsOperationContext,
+        inode: Inode,
+        size: ULong,
+    ): VfsResult<Unit> =
         if (write != null && size == 0uL) {
             inode.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED)
             VfsResult.Ok(Unit)
@@ -328,11 +372,12 @@ private class ProcTextFile(
         }
 
     override fun open(
+        caller: VfsOperationContext,
         inode: Inode,
         options: OpenOptions
     ): VfsResult<OpenFileBackend> {
         if (options.access.canWrite &&
-            (write == null || ProcessManager.currentProcess()?.euid != 0)
+            (write == null || !caller.privileged)
         ) {
             return VfsResult.Err(VfsError.PERMISSION_DENIED)
         }
@@ -349,6 +394,7 @@ private class ProcTextHandle(
     private val write: ((ByteArray) -> VfsResult<Unit>)?,
 ) : OpenFileBackend {
     override fun read(
+        caller: VfsOperationContext,
         inode: Inode,
         destination: PreparedBufferDestination,
         destinationOffset: Int,
@@ -372,6 +418,7 @@ private class ProcTextHandle(
     }
 
     override fun write(
+        caller: VfsOperationContext,
         inode: Inode,
         source: PreparedBufferSource,
         sourceOffset: Int,
@@ -405,10 +452,14 @@ private class ProcSymlink(
     override val type: InodeType
         get() = InodeType.SYMLINK
 
-    override fun readLink(inode: Inode): VfsResult<VfsPathname> =
+    override fun readLink(
+        caller: VfsOperationContext,
+        inode: Inode,
+    ): VfsResult<VfsPathname> =
         target()?.let { VfsResult.Ok(it) } ?: VfsResult.Err(VfsError.NOT_FOUND)
 
     override fun open(
+        caller: VfsOperationContext,
         inode: Inode,
         options: OpenOptions
     ): VfsResult<OpenFileBackend> =

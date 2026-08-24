@@ -4,11 +4,13 @@ package org.plos_clan.cpos.syscall.fs
 
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.vfs.AccessMode
+import org.plos_clan.cpos.fs.vfs.AccessPermissions
 import org.plos_clan.cpos.fs.vfs.EXTENDED_ATTRIBUTE_VALUE_MAX
 import org.plos_clan.cpos.fs.vfs.ExtendedAttributeMode
 import org.plos_clan.cpos.fs.vfs.ExtendedAttributeName
 import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPath
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
@@ -20,7 +22,6 @@ import org.plos_clan.cpos.syscall.fs.FsConstants.AT_FDCWD
 import org.plos_clan.cpos.syscall.fs.FsConstants.XATTR_CREATE
 import org.plos_clan.cpos.syscall.fs.FsConstants.XATTR_REPLACE
 import org.plos_clan.cpos.syscall.fs.FsPathResolver.resolveAt
-import org.plos_clan.cpos.syscall.fs.FsPermissions.mayWrite
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
@@ -69,6 +70,7 @@ private object ExtendedAttributes {
     }
 
     fun set(regs: PtraceRegisters, process: Process, target: Target): Long {
+        val caller = process.vfsOperationContext
         val size = regs[PtraceRegisters.IDX_R10]
         if (size > EXTENDED_ATTRIBUTE_VALUE_MAX.toULong()) return errno(Errno.E2BIG)
         val mode = when (regs[PtraceRegisters.IDX_R8]) {
@@ -83,9 +85,17 @@ private object ExtendedAttributes {
         }
         val value = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDX])
             .copyFromUser(size.toInt()) ?: return errno(Errno.EFAULT)
-        return withNode(regs, process, target) { path, inode ->
-            if (!process.mayWrite(inode.metadata())) return@withNode errno(Errno.EACCES)
+        return withNode(regs, process, caller, target) { path, inode ->
+            when (val access = FileSystemManager.vfs.checkAccess(
+                caller,
+                inode,
+                AccessPermissions.WRITE,
+            )) {
+                is VfsResult.Ok -> Unit
+                is VfsResult.Err -> return@withNode errno(access.error.errno)
+            }
             when (val result = FileSystemManager.vfs.setExtendedAttribute(
+                caller,
                 path.mount,
                 inode,
                 name,
@@ -99,12 +109,17 @@ private object ExtendedAttributes {
     }
 
     fun get(regs: PtraceRegisters, process: Process, target: Target): Long {
+        val caller = process.vfsOperationContext
         val name = when (val result = name(process, regs[PtraceRegisters.IDX_RSI])) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return errno(result.error.errno)
         }
-        return withNode(regs, process, target) { _, inode ->
-            when (val result = FileSystemManager.vfs.getExtendedAttribute(inode, name)) {
+        return withNode(regs, process, caller, target) { _, inode ->
+            when (val result = FileSystemManager.vfs.getExtendedAttribute(
+                caller,
+                inode,
+                name,
+            )) {
                 is VfsResult.Ok -> copyResult(
                     process,
                     regs[PtraceRegisters.IDX_RDX],
@@ -116,9 +131,13 @@ private object ExtendedAttributes {
         }
     }
 
-    fun list(regs: PtraceRegisters, process: Process, target: Target): Long =
-        withNode(regs, process, target) { _, inode ->
-            when (val result = FileSystemManager.vfs.listExtendedAttributes(inode)) {
+    fun list(regs: PtraceRegisters, process: Process, target: Target): Long {
+        val caller = process.vfsOperationContext
+        return withNode(regs, process, caller, target) { _, inode ->
+            when (val result = FileSystemManager.vfs.listExtendedAttributes(
+                caller,
+                inode,
+            )) {
                 is VfsResult.Ok -> copyResult(
                     process,
                     regs[PtraceRegisters.IDX_RSI],
@@ -128,15 +147,25 @@ private object ExtendedAttributes {
                 is VfsResult.Err -> errno(result.error.errno)
             }
         }
+    }
 
     fun remove(regs: PtraceRegisters, process: Process, target: Target): Long {
+        val caller = process.vfsOperationContext
         val name = when (val result = name(process, regs[PtraceRegisters.IDX_RSI])) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return errno(result.error.errno)
         }
-        return withNode(regs, process, target) { path, inode ->
-            if (!process.mayWrite(inode.metadata())) return@withNode errno(Errno.EACCES)
+        return withNode(regs, process, caller, target) { path, inode ->
+            when (val access = FileSystemManager.vfs.checkAccess(
+                caller,
+                inode,
+                AccessPermissions.WRITE,
+            )) {
+                is VfsResult.Ok -> Unit
+                is VfsResult.Err -> return@withNode errno(access.error.errno)
+            }
             when (val result = FileSystemManager.vfs.removeExtendedAttribute(
+                caller,
                 path.mount,
                 inode,
                 name,
@@ -178,6 +207,7 @@ private object ExtendedAttributes {
     private inline fun withNode(
         regs: PtraceRegisters,
         process: Process,
+        caller: VfsOperationContext,
         target: Target,
         operation: (VfsPath, Inode) -> Long,
     ): Long {
@@ -198,6 +228,7 @@ private object ExtendedAttributes {
             AT_FDCWD,
             VfsPathname.fromBytes(pathname),
             followFinalSymlink = target == Target.PATH,
+            caller = caller,
         )) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return errno(result.error.errno)

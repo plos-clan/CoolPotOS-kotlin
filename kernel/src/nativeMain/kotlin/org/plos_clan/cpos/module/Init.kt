@@ -18,6 +18,7 @@ object Init {
 
         val console = when (
             val result = FileSystemManager.vfs.open(
+                caller = process.vfsOperationContext,
                 context = context,
                 pathname = VfsPathname.fromString("/dev/tty0"),
                 options = OpenOptions(access = AccessMode.READ_WRITE),
@@ -36,17 +37,18 @@ object Init {
             return false
         }
 
-        if (!process.fdTable.dup2(0, 1) || !process.fdTable.dup2(0, 2)) {
-            process.fdTable.close(0)
-            process.fdTable.close(1)
-            process.fdTable.close(2)
+        val caller = process.vfsOperationContext
+        if (!process.fdTable.dup2(caller, 0, 1) || !process.fdTable.dup2(caller, 0, 2)) {
+            process.fdTable.close(caller, 0)
+            process.fdTable.close(caller, 1)
+            process.fdTable.close(caller, 2)
             return false
         }
 
         if (!TtyManager.attachProcessToVT(0, process)) {
-            process.fdTable.close(0)
-            process.fdTable.close(1)
-            process.fdTable.close(2)
+            process.fdTable.close(caller, 0)
+            process.fdTable.close(caller, 1)
+            process.fdTable.close(caller, 2)
             return false
         }
 

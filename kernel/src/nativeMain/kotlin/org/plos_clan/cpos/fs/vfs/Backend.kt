@@ -6,17 +6,32 @@ import org.plos_clan.cpos.mem.PageCacheSource
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.utils.PollEvents
 
 abstract class FileSystemType(
     val name: String,
     val magic: ULong,
     val requiresDevice: Boolean = false,
 ) {
-    open fun parseOptions(source: String?, data: ByteArray?): VfsResult<FileSystemOptions> =
+    open fun accepts(fileSystemName: String): Boolean = fileSystemName == name
+
+    protected open fun configure(
+        source: String?,
+        data: ByteArray?,
+    ): VfsResult<FileSystemOptions> =
         if (data == null || data.isEmpty()) VfsResult.Ok(
             EmptyFileSystemOptions
         )
         else VfsResult.Err(VfsError.INVALID_ARGUMENT)
+
+    protected open fun createMountedBackend(
+        request: MountRequest,
+    ): VfsResult<SuperBlockBackend> = when (
+        val options = configure(request.source, request.data)
+    ) {
+        is VfsResult.Ok -> createBackend(options.value)
+        is VfsResult.Err -> options
+    }
 
     internal fun createSuperBlock(
         source: String?,
@@ -31,6 +46,16 @@ abstract class FileSystemType(
         }
     }
 
+    internal fun createSuperBlock(request: MountRequest): VfsResult<SuperBlock> {
+        if (requiresDevice && request.source == null) {
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+        return when (val result = createMountedBackend(request)) {
+            is VfsResult.Ok -> VfsResult.Ok(SuperBlock(this, result.value))
+            is VfsResult.Err -> result
+        }
+    }
+
     protected abstract fun createBackend(options: FileSystemOptions): VfsResult<SuperBlockBackend>
 }
 
@@ -38,6 +63,7 @@ interface SuperBlockBackend {
     fun createRoot(superBlock: SuperBlock): Inode
 
     fun updateTimestamps(
+        caller: VfsOperationContext,
         inode: Inode,
         update: InodeTimestampUpdate,
     ): VfsResult<Unit> {
@@ -45,9 +71,23 @@ interface SuperBlockBackend {
         return VfsResult.Ok(Unit)
     }
 
-    fun sync(): VfsResult<Unit> = VfsResult.Ok(Unit)
+    fun sync(caller: VfsOperationContext): VfsResult<Unit> = VfsResult.Ok(Unit)
+
+    fun prepareUnmount(
+        caller: VfsOperationContext,
+        mode: UnmountMode,
+    ): VfsResult<Unit> = sync(caller)
+
+    fun statistics(caller: VfsOperationContext): VfsResult<FileSystemStatistics> =
+        VfsResult.Ok(FileSystemStatistics(blockSize = 4096uL))
 
     fun release() {}
+}
+
+interface MountResource
+
+interface MountResourceProvider {
+    val mountResource: MountResource?
 }
 
 class SuperBlock internal constructor(
@@ -65,33 +105,87 @@ class SuperBlock internal constructor(
 interface InodeBackend {
     val type: InodeType
 
-    fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend>
+    fun open(
+        caller: VfsOperationContext,
+        inode: Inode,
+        options: OpenOptions,
+    ): VfsResult<OpenFileBackend>
 
-    fun setMode(inode: Inode, mode: FileMode): VfsResult<Unit> =
+    fun setMode(caller: VfsOperationContext, inode: Inode, mode: FileMode): VfsResult<Unit> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
 
-    fun setOwner(inode: Inode, uid: UInt?, gid: UInt?): VfsResult<Unit> =
+    fun setOwner(
+        caller: VfsOperationContext,
+        inode: Inode,
+        uid: UInt?,
+        gid: UInt?,
+    ): VfsResult<Unit> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
 
-    fun sync(inode: Inode, dataOnly: Boolean): VfsResult<Unit> =
-        inode.superBlock.backend.sync()
+    fun sync(
+        caller: VfsOperationContext,
+        inode: Inode,
+        dataOnly: Boolean,
+    ): VfsResult<Unit> = inode.superBlock.backend.sync(caller)
 
-    fun allocatedBlocks(inode: Inode): ULong {
-        val size = inode.metadata().size
-        return size / ALLOCATION_BLOCK_SIZE +
-            if (size % ALLOCATION_BLOCK_SIZE == 0uL) 0uL else 1uL
+    fun loadAttributes(
+        caller: VfsOperationContext,
+        inode: Inode,
+    ): VfsResult<InodeAttributeSnapshot> = VfsResult.Ok(
+        InodeAttributeSnapshot(
+            InodeAttributes(inode.metadata()),
+            CacheValidity.Persistent,
+        ),
+    )
+
+    fun checkAccess(
+        caller: VfsOperationContext,
+        inode: Inode,
+        requested: AccessPermissions,
+    ): VfsResult<Unit> {
+        if (requested == AccessPermissions.NONE) return VfsResult.Ok(Unit)
+        val metadata = when (val result = inode.attributes(caller)) {
+            is VfsResult.Ok -> result.value.metadata
+            is VfsResult.Err -> return result
+        }
+        if (caller.privileged) {
+            val executable = metadata.mode.bits and 0x49u != 0u
+            return if (AccessPermission.EXECUTE !in requested ||
+                inode.type == InodeType.DIRECTORY || executable
+            ) {
+                VfsResult.Ok(Unit)
+            } else {
+                VfsResult.Err(VfsError.PERMISSION_DENIED)
+            }
+        }
+
+        val shift = when {
+            caller.uid == metadata.uid -> 6
+            caller.gid == metadata.gid -> 3
+            else -> 0
+        }
+        val allowed = metadata.mode.bits shr shift and 0x7u
+        return if (allowed and requested.bits == requested.bits) VfsResult.Ok(Unit)
+        else VfsResult.Err(VfsError.PERMISSION_DENIED)
     }
 
+    fun pageCacheIdentity(inode: Inode): Any = inode
+
     fun getExtendedAttribute(
+        caller: VfsOperationContext,
         inode: Inode,
         name: ExtendedAttributeName,
     ): VfsResult<ByteArray> = VfsResult.Err(
         VfsError.NOT_SUPPORTED)
 
-    fun listExtendedAttributes(inode: Inode): VfsResult<ByteArray> =
+    fun listExtendedAttributes(
+        caller: VfsOperationContext,
+        inode: Inode,
+    ): VfsResult<ByteArray> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
 
     fun setExtendedAttribute(
+        caller: VfsOperationContext,
         inode: Inode,
         name: ExtendedAttributeName,
         value: ByteArray,
@@ -100,6 +194,7 @@ interface InodeBackend {
         VfsError.NOT_SUPPORTED)
 
     fun removeExtendedAttribute(
+        caller: VfsOperationContext,
         inode: Inode,
         name: ExtendedAttributeName,
     ): VfsResult<Unit> = VfsResult.Err(
@@ -109,12 +204,21 @@ interface InodeBackend {
 }
 
 interface MutableInodeBackend : InodeBackend {
-    override fun setMode(inode: Inode, mode: FileMode): VfsResult<Unit> {
+    override fun setMode(
+        caller: VfsOperationContext,
+        inode: Inode,
+        mode: FileMode,
+    ): VfsResult<Unit> {
         inode.updateMetadata(InodeTimestampEvent.STATUS_CHANGED) { it.copy(mode = mode) }
         return VfsResult.Ok(Unit)
     }
 
-    override fun setOwner(inode: Inode, uid: UInt?, gid: UInt?): VfsResult<Unit> {
+    override fun setOwner(
+        caller: VfsOperationContext,
+        inode: Inode,
+        uid: UInt?,
+        gid: UInt?,
+    ): VfsResult<Unit> {
         inode.updateMetadata(InodeTimestampEvent.STATUS_CHANGED) {
             it.copy(uid = uid ?: it.uid, gid = gid ?: it.gid)
         }
@@ -122,14 +226,19 @@ interface MutableInodeBackend : InodeBackend {
     }
 
     override fun getExtendedAttribute(
+        caller: VfsOperationContext,
         inode: Inode,
         name: ExtendedAttributeName,
     ): VfsResult<ByteArray> = inode.getExtendedAttribute(name)
 
-    override fun listExtendedAttributes(inode: Inode): VfsResult<ByteArray> =
+    override fun listExtendedAttributes(
+        caller: VfsOperationContext,
+        inode: Inode,
+    ): VfsResult<ByteArray> =
         inode.listExtendedAttributes()
 
     override fun setExtendedAttribute(
+        caller: VfsOperationContext,
         inode: Inode,
         name: ExtendedAttributeName,
         value: ByteArray,
@@ -137,6 +246,7 @@ interface MutableInodeBackend : InodeBackend {
     ): VfsResult<Unit> = inode.setExtendedAttribute(name, value, mode)
 
     override fun removeExtendedAttribute(
+        caller: VfsOperationContext,
         inode: Inode,
         name: ExtendedAttributeName,
     ): VfsResult<Unit> = inode.removeExtendedAttribute(name)
@@ -151,10 +261,15 @@ abstract class RegularFileBackend : InodeBackend {
     final override val type: InodeType
         get() = InodeType.REGULAR
 
-    open fun resize(inode: Inode, size: ULong): VfsResult<Unit> =
+    open fun resize(
+        caller: VfsOperationContext,
+        inode: Inode,
+        size: ULong,
+    ): VfsResult<Unit> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
 
     open fun allocate(
+        caller: VfsOperationContext,
         inode: Inode,
         offset: ULong,
         length: ULong,
@@ -168,7 +283,7 @@ interface ContentBackedFile {
 }
 
 interface SymlinkBackend : InodeBackend {
-    fun readLink(inode: Inode): VfsResult<VfsPathname>
+    fun readLink(caller: VfsOperationContext, inode: Inode): VfsResult<VfsPathname>
 }
 
 sealed class NodeKind {
@@ -203,18 +318,30 @@ enum class RenameMode {
 }
 
 interface DirectoryBackend : InodeBackend {
-    /** Whether this result, including a negative result, may satisfy a later lookup. */
-    fun isLookupStable(name: VfsName, inode: Inode?): Boolean = true
+    fun lookup(
+        caller: VfsOperationContext,
+        directory: Inode,
+        name: VfsName,
+    ): VfsResult<DirectoryLookup>
 
-    fun lookup(directory: Inode, name: VfsName): VfsResult<Inode?>
-
-    fun create(directory: Inode, name: VfsName, node: NodeCreation): VfsResult<Inode> =
+    fun create(
+        caller: VfsOperationContext,
+        directory: Inode,
+        name: VfsName,
+        node: NodeCreation,
+    ): VfsResult<Inode> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
 
-    fun link(directory: Inode, name: VfsName, target: Inode): VfsResult<Unit> =
+    fun link(
+        caller: VfsOperationContext,
+        directory: Inode,
+        name: VfsName,
+        target: Inode,
+    ): VfsResult<Unit> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
 
     fun rename(
+        caller: VfsOperationContext,
         sourceDirectory: Inode,
         sourceName: VfsName,
         source: Inode,
@@ -226,6 +353,7 @@ interface DirectoryBackend : InodeBackend {
         VfsError.NOT_SUPPORTED)
 
     fun remove(
+        caller: VfsOperationContext,
         directory: Inode,
         name: VfsName,
         target: Inode,
@@ -255,6 +383,7 @@ interface FileContent {
 
 interface OpenFileBackend {
     fun read(
+        caller: VfsOperationContext,
         inode: Inode,
         destination: PreparedBufferDestination,
         destinationOffset: Int,
@@ -264,6 +393,7 @@ interface OpenFileBackend {
         VfsError.NOT_SUPPORTED)
 
     fun write(
+        caller: VfsOperationContext,
         inode: Inode,
         source: PreparedBufferSource,
         sourceOffset: Int,
@@ -274,23 +404,42 @@ interface OpenFileBackend {
         VfsError.NOT_SUPPORTED)
 
     fun iterate(
+        caller: VfsOperationContext,
         inode: Inode,
         position: FilePosition,
         emit: (entry: DirectoryEntry, nextOffset: Long) -> Boolean,
     ): VfsResult<Unit> = VfsResult.Err(
         VfsError.NOT_DIRECTORY)
 
-    fun ioctl(inode: Inode, command: Int, args: UserMemory): Long =
+    fun ioctl(
+        caller: VfsOperationContext,
+        inode: Inode,
+        command: Int,
+        args: UserMemory,
+    ): Long =
         -VfsError.NOT_SUPPORTED.errno.toLong()
 
-    fun poll(inode: Inode, events: Int): Long =
-        -VfsError.NOT_SUPPORTED.errno.toLong()
+    fun poll(caller: VfsOperationContext, inode: Inode, events: Int): Long =
+        if (inode.type == InodeType.REGULAR || inode.type == InodeType.DIRECTORY) {
+            (events and PollEvents.DEFAULT_FILE_EVENTS).toLong()
+        } else {
+            -VfsError.NOT_SUPPORTED.errno.toLong()
+        }
+
+    fun flush(caller: VfsOperationContext, inode: Inode): VfsResult<Unit> = VfsResult.Ok(Unit)
+
+    fun syncHandle(
+        caller: VfsOperationContext,
+        inode: Inode,
+        dataOnly: Boolean,
+    ): VfsResult<Unit> = inode.backend.sync(caller, inode, dataOnly)
 
     fun release() {}
 }
 
 internal interface CachedFileBackend : OpenFileBackend, PageCacheSource {
     override fun read(
+        caller: VfsOperationContext,
         inode: Inode,
         destination: PreparedBufferDestination,
         destinationOffset: Int,
@@ -299,7 +448,10 @@ internal interface CachedFileBackend : OpenFileBackend, PageCacheSource {
     ): IoResult {
         if (count == 0 || position.value < 0) return IoResult.success(0)
         val sourceOffset = position.value.toULong()
-        val fileSize = inode.metadata().size
+        val fileSize = when (val result = inode.attributes(caller)) {
+            is VfsResult.Ok -> result.value.metadata.size
+            is VfsResult.Err -> return IoResult.failure(result.error)
+        }
         if (sourceOffset >= fileSize) return IoResult.success(0)
 
         val available = minOf(count.toULong(), fileSize - sourceOffset).toInt()
@@ -328,6 +480,7 @@ enum class IoMode {
 
 interface PositionlessOpenFileBackend : OpenFileBackend {
     fun read(
+        caller: VfsOperationContext,
         inode: Inode,
         destination: PreparedBufferDestination,
         destinationOffset: Int,
@@ -336,6 +489,7 @@ interface PositionlessOpenFileBackend : OpenFileBackend {
         VfsError.NOT_SUPPORTED)
 
     fun write(
+        caller: VfsOperationContext,
         inode: Inode,
         source: PreparedBufferSource,
         sourceOffset: Int,
@@ -344,26 +498,28 @@ interface PositionlessOpenFileBackend : OpenFileBackend {
         VfsError.NOT_SUPPORTED)
 
     override fun read(
+        caller: VfsOperationContext,
         inode: Inode,
         destination: PreparedBufferDestination,
         destinationOffset: Int,
         count: Int,
         position: FilePosition,
-    ): IoResult = read(inode, destination, destinationOffset, count)
+    ): IoResult = read(caller, inode, destination, destinationOffset, count)
 
     override fun write(
+        caller: VfsOperationContext,
         inode: Inode,
         source: PreparedBufferSource,
         sourceOffset: Int,
         count: Int,
         position: FilePosition,
         append: Boolean,
-    ): IoResult = write(inode, source, sourceOffset, count)
+    ): IoResult = write(caller, inode, source, sourceOffset, count)
 }
 
-/** A positionless backend that owns the complete blocking operation. */
 interface ModeAwareOpenFileBackend : PositionlessOpenFileBackend {
     fun read(
+        caller: VfsOperationContext,
         inode: Inode,
         destination: PreparedBufferDestination,
         destinationOffset: Int,
@@ -372,6 +528,7 @@ interface ModeAwareOpenFileBackend : PositionlessOpenFileBackend {
     ): IoResult
 
     fun write(
+        caller: VfsOperationContext,
         inode: Inode,
         source: PreparedBufferSource,
         sourceOffset: Int,
@@ -380,24 +537,27 @@ interface ModeAwareOpenFileBackend : PositionlessOpenFileBackend {
     ): IoResult
 
     override fun read(
+        caller: VfsOperationContext,
         inode: Inode,
         destination: PreparedBufferDestination,
         destinationOffset: Int,
         count: Int,
-    ): IoResult = read(inode, destination, destinationOffset, count, IoMode.BLOCKING)
+    ): IoResult = read(caller, inode, destination, destinationOffset, count, IoMode.BLOCKING)
 
     override fun write(
+        caller: VfsOperationContext,
         inode: Inode,
         source: PreparedBufferSource,
         sourceOffset: Int,
         count: Int,
-    ): IoResult = write(inode, source, sourceOffset, count, IoMode.BLOCKING)
+    ): IoResult = write(caller, inode, source, sourceOffset, count, IoMode.BLOCKING)
 }
 
 interface DiscardingOpenFileBackend : PositionlessOpenFileBackend {
     fun discard(inode: Inode, count: Int): IoResult
 
     override fun write(
+        caller: VfsOperationContext,
         inode: Inode,
         source: PreparedBufferSource,
         sourceOffset: Int,
@@ -407,6 +567,7 @@ interface DiscardingOpenFileBackend : PositionlessOpenFileBackend {
 
 interface WaitableOpenFileBackend : PositionlessOpenFileBackend {
     fun write(
+        caller: VfsOperationContext,
         inode: Inode,
         source: PreparedBufferSource,
         sourceOffset: Int,
@@ -415,11 +576,12 @@ interface WaitableOpenFileBackend : PositionlessOpenFileBackend {
     ): IoResult
 
     override fun write(
+        caller: VfsOperationContext,
         inode: Inode,
         source: PreparedBufferSource,
         sourceOffset: Int,
         count: Int,
-    ): IoResult = write(inode, source, sourceOffset, count, IoMode.BLOCKING)
+    ): IoResult = write(caller, inode, source, sourceOffset, count, IoMode.BLOCKING)
 
     fun await(event: IoEvent, count: Int): Boolean
 }

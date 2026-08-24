@@ -23,12 +23,15 @@ import org.plos_clan.cpos.fs.vfs.IoEvent
 import org.plos_clan.cpos.fs.vfs.IoMode
 import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.MutableInodeBackend
+import org.plos_clan.cpos.fs.vfs.MountResource
+import org.plos_clan.cpos.fs.vfs.MountResourceProvider
 import org.plos_clan.cpos.fs.vfs.OpenFileBackend
 import org.plos_clan.cpos.fs.vfs.OpenOptions
 import org.plos_clan.cpos.fs.vfs.PositionlessOpenFileBackend
 import org.plos_clan.cpos.fs.vfs.SuperBlock
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.fs.vfs.WaitableOpenFileBackend
 import org.plos_clan.cpos.mem.PreparedBufferDestination
@@ -95,7 +98,11 @@ internal class DeviceNode(
         require(type == InodeType.CHARACTER_DEVICE || type == InodeType.BLOCK_DEVICE)
     }
 
-    override fun open(inode: Inode, options: OpenOptions): VfsResult<OpenFileBackend> {
+    override fun open(
+        caller: VfsOperationContext,
+        inode: Inode,
+        options: OpenOptions,
+    ): VfsResult<OpenFileBackend> {
         val deviceType = if (type == InodeType.BLOCK_DEVICE) DeviceType.BLOCK else DeviceType.CHARACTER
         val device = DeviceManager.find(deviceType, number)
             ?: return VfsResult.Err(VfsError.NO_SUCH_DEVICE_OR_ADDRESS)
@@ -112,7 +119,7 @@ internal class DeviceNode(
 internal sealed class DeviceOpenFile(
     protected val device: Device,
     protected val backend: DeviceBackend,
-) : OpenFileBackend {
+) : OpenFileBackend, MountResourceProvider {
     companion object {
         fun open(device: Device, backend: DeviceBackend): DeviceOpenFile = when (backend) {
             is DiscardingDeviceBackend -> Discarding(device, backend)
@@ -122,13 +129,26 @@ internal sealed class DeviceOpenFile(
         }
     }
 
-    override fun ioctl(inode: Inode, command: Int, args: UserMemory): Long =
+    override fun ioctl(
+        caller: VfsOperationContext,
+        inode: Inode,
+        command: Int,
+        args: UserMemory,
+    ): Long =
         backend.ioctl(device, command, args)
 
-    override fun poll(inode: Inode, events: Int): Long =
+    override fun poll(
+        caller: VfsOperationContext,
+        inode: Inode,
+        events: Int,
+    ): Long =
         backend.poll(device, events)
 
     override fun release() = backend.close(device)
+
+    override val mountResource: MountResource?
+        get() = backend as? MountResource
+            ?: (backend as? MountResourceProvider)?.mountResource
 
     protected fun Long.toIoResult(requested: Int): IoResult {
         if (this < 0) {
@@ -148,6 +168,7 @@ internal sealed class DeviceOpenFile(
         backend: DeviceBackend,
     ) : DeviceOpenFile(device, backend) {
         override fun read(
+            caller: VfsOperationContext,
             inode: Inode,
             destination: PreparedBufferDestination,
             destinationOffset: Int,
@@ -169,6 +190,7 @@ internal sealed class DeviceOpenFile(
         }
 
         override fun write(
+            caller: VfsOperationContext,
             inode: Inode,
             source: PreparedBufferSource,
             sourceOffset: Int,
@@ -199,6 +221,7 @@ internal sealed class DeviceOpenFile(
         protected val positionlessBackend: PositionlessDeviceBackend,
     ) : DeviceOpenFile(device, positionlessBackend), PositionlessOpenFileBackend {
         override fun read(
+            caller: VfsOperationContext,
             inode: Inode,
             destination: PreparedBufferDestination,
             destinationOffset: Int,
@@ -215,6 +238,7 @@ internal sealed class DeviceOpenFile(
         }
 
         override fun write(
+            caller: VfsOperationContext,
             inode: Inode,
             source: PreparedBufferSource,
             sourceOffset: Int,
@@ -236,19 +260,21 @@ internal sealed class DeviceOpenFile(
         private val waitableBackend: WaitablePositionlessDeviceBackend,
     ) : Positionless(device, waitableBackend), WaitableOpenFileBackend {
         override fun write(
+            caller: VfsOperationContext,
             inode: Inode,
             source: PreparedBufferSource,
             sourceOffset: Int,
             count: Int,
-        ): IoResult = super<Positionless>.write(inode, source, sourceOffset, count)
+        ): IoResult = super<Positionless>.write(caller, inode, source, sourceOffset, count)
 
         override fun write(
+            caller: VfsOperationContext,
             inode: Inode,
             source: PreparedBufferSource,
             sourceOffset: Int,
             count: Int,
             mode: IoMode,
-        ): IoResult = super<Positionless>.write(inode, source, sourceOffset, count)
+        ): IoResult = super<Positionless>.write(caller, inode, source, sourceOffset, count)
 
         override fun await(event: IoEvent, count: Int) = waitableBackend.await(
             device,
@@ -265,6 +291,7 @@ internal sealed class DeviceOpenFile(
         private val discardingBackend: DiscardingDeviceBackend,
     ) : Positionless(device, discardingBackend), DiscardingOpenFileBackend {
         override fun write(
+            caller: VfsOperationContext,
             inode: Inode,
             source: PreparedBufferSource,
             sourceOffset: Int,

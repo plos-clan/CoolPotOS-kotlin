@@ -105,7 +105,6 @@ private const val USER_DATA_SELECTOR = 0x1buL
 private const val PATH_MAX = 4096
 
 private typealias SyscallHandler = (PtraceRegisters, Process) -> Long
-// The syscall epilogue selects IRET for VM and clears it before constructing the user frame.
 private const val FORCE_IRET_FLAG = 0x0002_0000uL
 
 private enum class LinuxSyscall(

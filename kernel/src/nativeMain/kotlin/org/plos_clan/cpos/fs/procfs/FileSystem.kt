@@ -59,7 +59,7 @@ object MountsFile {
                 append(' ')
                 appendField(displayPath)
                 append(' ')
-                append(mount.superBlock.type.name)
+                append(mount.fileSystemName)
                 append(' ')
                 appendOptions(mount.flags)
                 append(" 0 0\n")

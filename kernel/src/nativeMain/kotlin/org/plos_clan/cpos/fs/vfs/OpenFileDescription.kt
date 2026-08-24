@@ -7,13 +7,13 @@ import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import org.plos_clan.cpos.fs.OpenFlags
 import org.plos_clan.cpos.mem.BufferDestination
 import org.plos_clan.cpos.mem.BufferSource
+import org.plos_clan.cpos.mem.PageCache
 import org.plos_clan.cpos.mem.PageCacheProvider
 import org.plos_clan.cpos.mem.PageCacheSource
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
-import org.plos_clan.cpos.utils.IrqSpinLock
-import org.plos_clan.cpos.utils.PollEvents
+import org.plos_clan.cpos.utils.KernelMutex
 
 enum class SeekOrigin {
     START,
@@ -32,13 +32,14 @@ class OpenFileDescription private constructor(
     internal val backend: OpenFileBackend,
 ) {
     private val references = AtomicInt(1)
-    private val positionLock = IrqSpinLock()
+    private val positionLock = KernelMutex()
     private val position = FilePosition()
     private val positionlessBackend = backend as? PositionlessOpenFileBackend
     private val statusFlags = AtomicInt(initialStatusFlags)
 
     companion object {
         internal fun open(
+            caller: VfsOperationContext,
             path: VfsPath,
             inode: Inode,
             options: OpenOptions,
@@ -53,7 +54,7 @@ class OpenFileDescription private constructor(
             val backend = if (options.access == AccessMode.PATH) {
                 PathOnlyHandle
             } else {
-                when (val result = inode.backend.open(inode, options)) {
+                when (val result = inode.backend.open(caller, inode, options)) {
                     is VfsResult.Ok -> result.value
                     is VfsResult.Err -> {
                         inode.releaseOpenReference()
@@ -63,7 +64,7 @@ class OpenFileDescription private constructor(
                 }
             }
             if (truncate && inode.type == InodeType.REGULAR) {
-                val result = (inode.backend as? RegularFileBackend)?.resize(inode, 0uL)
+                val result = (inode.backend as? RegularFileBackend)?.resize(caller, inode, 0uL)
                     ?: VfsResult.Err(VfsError.INVALID_ARGUMENT)
                 if (result is VfsResult.Err) {
                     backend.release()
@@ -92,6 +93,10 @@ class OpenFileDescription private constructor(
     internal val cacheSource: PageCacheSource?
         get() = (backend as? PageCacheProvider)?.cacheSource
 
+    internal val mountResource: MountResource?
+        get() = backend as? MountResource
+            ?: (backend as? MountResourceProvider)?.mountResource
+
     fun getStatusFlags(): Int = statusFlags.load()
 
     fun setStatusFlags(flags: Int) {
@@ -100,16 +105,23 @@ class OpenFileDescription private constructor(
         )
     }
 
-    internal fun recordAccess() {
-        if (statusFlags.load() and OpenFlags.O_NOATIME == 0) path.mount.recordAccess(inode)
+    internal fun recordAccess(caller: VfsOperationContext) {
+        if (statusFlags.load() and OpenFlags.O_NOATIME == 0) {
+            path.mount.recordAccess(caller, inode)
+        }
     }
 
-    fun sync(dataOnly: Boolean): VfsResult<Unit> = when {
+    fun sync(caller: VfsOperationContext, dataOnly: Boolean): VfsResult<Unit> = when {
         references.load() == 0 || access == AccessMode.PATH ->
             VfsResult.Err(VfsError.BAD_DESCRIPTOR)
         inode.type == InodeType.PIPE || inode.type == InodeType.SOCKET ->
             VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        else -> inode.backend.sync(inode, dataOnly)
+        else -> backend.syncHandle(caller, inode, dataOnly)
+    }
+
+    internal fun flush(caller: VfsOperationContext): VfsResult<Unit> = when {
+        references.load() == 0 || access == AccessMode.PATH -> VfsResult.Ok(Unit)
+        else -> backend.flush(caller, inode)
     }
 
     fun retain(): Boolean {
@@ -130,23 +142,30 @@ class OpenFileDescription private constructor(
         }
     }
 
-    fun read(destination: BufferDestination, offset: Int, count: Int): IoResult {
+    fun read(
+        caller: VfsOperationContext,
+        destination: BufferDestination,
+        offset: Int,
+        count: Int,
+    ): IoResult {
         readError(offset, count)?.let { return IoResult.failure(it) }
         val prepared = destination.prepareWrite(offset, count)
             ?: return IoResult.failure(VfsError.FAULT)
-        return readBackend(prepared, offset, count, position)
+        return readBackend(caller, prepared, offset, count, position)
     }
 
     internal fun read(
+        caller: VfsOperationContext,
         destination: PreparedBufferDestination,
         offset: Int,
         count: Int,
     ): IoResult {
         readError(offset, count)?.let { return IoResult.failure(it) }
-        return readBackend(destination, offset, count, position)
+        return readBackend(caller, destination, offset, count, position)
     }
 
     fun readAt(
+        caller: VfsOperationContext,
         fileOffset: ULong,
         destination: BufferDestination,
         offset: Int,
@@ -159,24 +178,35 @@ class OpenFileDescription private constructor(
         if (positionlessBackend != null) return IoResult.failure(VfsError.ILLEGAL_SEEK)
         val prepared = destination.prepareWrite(offset, count)
             ?: return IoResult.failure(VfsError.FAULT)
-        return readBackend(prepared, offset, count, FilePosition(fileOffset.toLong()))
+        return readBackend(caller, prepared, offset, count, FilePosition(fileOffset.toLong()))
     }
 
-    fun write(source: BufferSource, offset: Int, count: Int): IoResult {
+    fun write(
+        caller: VfsOperationContext,
+        source: BufferSource,
+        offset: Int,
+        count: Int,
+    ): IoResult {
         writeError(offset, count)?.let { return IoResult.failure(it) }
         val discard = positionlessBackend as? DiscardingOpenFileBackend
         if (discard != null) return discard.discard(inode, count)
         val prepared = source.prepareRead(offset, count)
             ?: return IoResult.failure(VfsError.FAULT)
-        return writeBackend(prepared, offset, count, position)
+        return writeBackend(caller, prepared, offset, count, position)
     }
 
-    internal fun write(source: PreparedBufferSource, offset: Int, count: Int): IoResult {
+    internal fun write(
+        caller: VfsOperationContext,
+        source: PreparedBufferSource,
+        offset: Int,
+        count: Int,
+    ): IoResult {
         writeError(offset, count)?.let { return IoResult.failure(it) }
-        return writeBackend(source, offset, count, position)
+        return writeBackend(caller, source, offset, count, position)
     }
 
     fun writeAt(
+        caller: VfsOperationContext,
         fileOffset: ULong,
         source: BufferSource,
         offset: Int,
@@ -189,10 +219,13 @@ class OpenFileDescription private constructor(
         if (positionlessBackend != null) return IoResult.failure(VfsError.ILLEGAL_SEEK)
         val prepared = source.prepareRead(offset, count)
             ?: return IoResult.failure(VfsError.FAULT)
-        return writeBackend(prepared, offset, count, FilePosition(fileOffset.toLong()))
+        return writeBackend(caller, prepared, offset, count, FilePosition(fileOffset.toLong()))
     }
 
-    fun iterate(emit: (entry: DirectoryEntry, nextOffset: Long) -> Boolean): VfsResult<Unit> {
+    fun iterate(
+        caller: VfsOperationContext,
+        emit: (entry: DirectoryEntry, nextOffset: Long) -> Boolean,
+    ): VfsResult<Unit> {
         if (!access.canRead || references.load() == 0) {
             return VfsResult.Err(VfsError.BAD_DESCRIPTOR)
         }
@@ -203,17 +236,17 @@ class OpenFileDescription private constructor(
             if (references.load() == 0) {
                 return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
             }
-            backend.iterate(inode, position, emit)
+            backend.iterate(caller, inode, position, emit)
         }
-        if (result is VfsResult.Ok) recordAccess()
+        if (result is VfsResult.Ok) recordAccess(caller)
         return result
     }
 
-    fun ioctl(command: Int, args: UserMemory): Long = positionLock.withLock {
+    fun ioctl(caller: VfsOperationContext, command: Int, args: UserMemory): Long {
         if (references.load() == 0) {
-            -VfsError.BAD_DESCRIPTOR.errno.toLong()
+            return -VfsError.BAD_DESCRIPTOR.errno.toLong()
         } else if (command == FIONBIO) {
-            val enabled = args.readUIntLE() ?: return@withLock -VfsError.FAULT.errno.toLong()
+            val enabled = args.readUIntLE() ?: return -VfsError.FAULT.errno.toLong()
             while (true) {
                 val observed = statusFlags.load()
                 val updated = if (enabled == 0u) {
@@ -223,23 +256,17 @@ class OpenFileDescription private constructor(
                 }
                 if (statusFlags.compareAndSet(observed, updated)) break
             }
-            0L
+            return 0L
         } else {
-            backend.ioctl(inode, command, args)
+            return backend.ioctl(caller, inode, command, args)
         }
     }
 
-    fun poll(events: Int): Long = positionLock.withLock {
-        if (references.load() == 0) {
-            -VfsError.BAD_DESCRIPTOR.errno.toLong()
-        } else if (inode.type == InodeType.REGULAR || inode.type == InodeType.DIRECTORY) {
-            (events and PollEvents.DEFAULT_FILE_EVENTS).toLong()
-        } else {
-            backend.poll(inode, events)
-        }
-    }
+    fun poll(caller: VfsOperationContext, events: Int): Long =
+        if (references.load() == 0) -VfsError.BAD_DESCRIPTOR.errno.toLong()
+        else backend.poll(caller, inode, events)
 
-    fun seek(offset: Long, origin: SeekOrigin): VfsResult<Long> {
+    fun seek(caller: VfsOperationContext, offset: Long, origin: SeekOrigin): VfsResult<Long> {
         if (references.load() == 0) {
             return VfsResult.Err(VfsError.BAD_DESCRIPTOR)
         }
@@ -250,8 +277,14 @@ class OpenFileDescription private constructor(
             val base = when (origin) {
                 SeekOrigin.START -> 0L
                 SeekOrigin.CURRENT -> position.value
-                SeekOrigin.END -> inode.metadata().size.takeIf { it <= Long.MAX_VALUE.toULong() }?.toLong()
-                    ?: return@withLock VfsResult.Err(VfsError.FILE_TOO_LARGE)
+                SeekOrigin.END -> {
+                    val attributes = when (val result = inode.attributes(caller)) {
+                        is VfsResult.Ok -> result.value
+                        is VfsResult.Err -> return@withLock result
+                    }
+                    attributes.metadata.size.takeIf { it <= Long.MAX_VALUE.toULong() }?.toLong()
+                        ?: return@withLock VfsResult.Err(VfsError.FILE_TOO_LARGE)
+                }
             }
             if ((offset > 0 && base > Long.MAX_VALUE - offset) ||
                 (offset < 0 && base < Long.MIN_VALUE - offset)
@@ -268,6 +301,7 @@ class OpenFileDescription private constructor(
     }
 
     private fun readBackend(
+        caller: VfsOperationContext,
         destination: PreparedBufferDestination,
         offset: Int,
         count: Int,
@@ -276,24 +310,25 @@ class OpenFileDescription private constructor(
         val positionless = positionlessBackend
         if (positionless == null) {
             if (filePosition !== position) {
-                return backend.read(inode, destination, offset, count, filePosition)
-                    .recordAccess(count)
+                return backend.read(caller, inode, destination, offset, count, filePosition)
+                    .recordAccess(caller, count)
             }
             return positionLock.withLock {
-                backend.read(inode, destination, offset, count, filePosition)
-            }.recordAccess(count)
+                backend.read(caller, inode, destination, offset, count, filePosition)
+            }.recordAccess(caller, count)
         }
         if (positionless is ModeAwareOpenFileBackend) {
-            return positionless.read(inode, destination, offset, count, currentIoMode())
-                .recordAccess(count)
+            return positionless.read(caller, inode, destination, offset, count, currentIoMode())
+                .recordAccess(caller, count)
         }
         val waitable = positionless as? WaitableOpenFileBackend
-            ?: return positionless.read(inode, destination, offset, count).recordAccess(count)
+            ?: return positionless.read(caller, inode, destination, offset, count)
+                .recordAccess(caller, count)
         while (true) {
             val mode = currentIoMode()
-            val result = waitable.read(inode, destination, offset, count)
+            val result = waitable.read(caller, inode, destination, offset, count)
             if (result.error != VfsError.WOULD_BLOCK || mode == IoMode.NON_BLOCKING) {
-                return result.recordAccess(count)
+                return result.recordAccess(caller, count)
             }
             if (!waitable.await(IoEvent.READABLE, count)) {
                 return IoResult.failure(VfsError.INTERRUPTED)
@@ -302,6 +337,7 @@ class OpenFileDescription private constructor(
     }
 
     private fun writeBackend(
+        caller: VfsOperationContext,
         source: PreparedBufferSource,
         offset: Int,
         count: Int,
@@ -310,23 +346,30 @@ class OpenFileDescription private constructor(
         val positionless = positionlessBackend
         if (positionless == null) {
             if (filePosition !== position) {
-                return backend.write(inode, source, offset, count, filePosition, false)
+                return writePositioned(caller, source, offset, count, filePosition, false)
             }
             return positionLock.withLock {
                 val append = statusFlags.load() and OpenFlags.O_APPEND != 0
-                backend.write(inode, source, offset, count, filePosition, append)
+                writePositioned(caller, source, offset, count, filePosition, append)
             }
         }
         if (positionless is ModeAwareOpenFileBackend) {
-            return positionless.write(inode, source, offset, count, currentIoMode())
+            return positionless.write(caller, inode, source, offset, count, currentIoMode())
         }
         val waitable = positionless as? WaitableOpenFileBackend
-            ?: return positionless.write(inode, source, offset, count)
+            ?: return positionless.write(caller, inode, source, offset, count)
         var transferred = 0
         while (transferred < count) {
             val remaining = count - transferred
             val mode = currentIoMode()
-            val result = waitable.write(inode, source, offset + transferred, remaining, mode)
+            val result = waitable.write(
+                caller,
+                inode,
+                source,
+                offset + transferred,
+                remaining,
+                mode,
+            )
             if (result.isSuccess) {
                 val current = result.bytesTransferred
                 if (current == 0) return IoResult.success(transferred)
@@ -345,6 +388,49 @@ class OpenFileDescription private constructor(
             }
         }
         return IoResult.success(transferred)
+    }
+
+    private fun writePositioned(
+        caller: VfsOperationContext,
+        source: PreparedBufferSource,
+        offset: Int,
+        count: Int,
+        filePosition: FilePosition,
+        append: Boolean,
+    ): IoResult {
+        val initialPosition = filePosition.value
+        val result = backend.write(
+            caller,
+            inode,
+            source,
+            offset,
+            count,
+            filePosition,
+            append,
+        )
+        val transferred = result.bytesTransferred
+        if (!result.isSuccess || transferred == 0) return result
+
+        val end = filePosition.value
+        val start = if (end != initialPosition && end >= transferred.toLong()) {
+            end - transferred
+        } else {
+            initialPosition
+        }
+        if (start >= 0) {
+            PageCache.invalidate(inode, start.toULong(), transferred.toULong())
+            val backendIdentity = inode.backend.pageCacheIdentity(inode)
+            if (backendIdentity != inode) {
+                PageCache.invalidate(backendIdentity, start.toULong(), transferred.toULong())
+            }
+            val handleIdentity = cacheSource?.identity
+            if (handleIdentity != null && handleIdentity != inode &&
+                handleIdentity != backendIdentity
+            ) {
+                PageCache.invalidate(handleIdentity, start.toULong(), transferred.toULong())
+            }
+        }
+        return result
     }
 
     private fun readError(offset: Int, count: Int): VfsError? = when {
@@ -367,8 +453,8 @@ class OpenFileDescription private constructor(
         if (statusFlags.load() and OpenFlags.O_NONBLOCK == 0) IoMode.BLOCKING
         else IoMode.NON_BLOCKING
 
-    private fun IoResult.recordAccess(requested: Int): IoResult {
-        if (isSuccess && requested != 0) this@OpenFileDescription.recordAccess()
+    private fun IoResult.recordAccess(caller: VfsOperationContext, requested: Int): IoResult {
+        if (isSuccess && requested != 0) this@OpenFileDescription.recordAccess(caller)
         return this
     }
 }

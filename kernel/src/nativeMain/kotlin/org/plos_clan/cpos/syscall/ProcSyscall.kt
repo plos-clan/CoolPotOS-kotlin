@@ -354,7 +354,7 @@ internal fun execve(regs: PtraceRegisters, process: Process): Long {
         is VfsResult.Err -> return errno(result.error.errno)
     }
     process.installExecutable(executablePath, arguments.ifEmpty { listOf(executablePath) })
-    process.fdTable.closeOnExec()
+    process.fdTable.closeOnExec(process.vfsOperationContext)
     process.signals.resetForExec()
     ProcessManager.currentThread()?.signals?.replaceStack(SignalStack.DISABLED)
 

@@ -98,18 +98,25 @@ private fun createNodeAt(
     kind: NodeKind,
 ): Long {
     val pathname = copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
-    val target = when (val result = atPath(process, dirFd, VfsPathname.fromBytes(pathname))) {
+    val caller = process.vfsOperationContext
+    val target = when (val result = atPath(
+        process,
+        dirFd,
+        VfsPathname.fromBytes(pathname),
+        caller,
+    )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
-    val mode = rawMode.toUInt() and S_IALLUGO and process.fileCreationMask.inv()
+    val mode = rawMode.toUInt() and S_IALLUGO and caller.fileCreationMask.inv()
     val node = NodeCreation(
         kind,
         FileMode(mode),
-        process.fsuid.toUInt(),
-        process.fsgid.toUInt(),
+        caller.uid,
+        caller.gid,
     )
     return when (val result = FileSystemManager.vfs.createNode(
+        caller,
         target.context,
         target.directory,
         target.pathname,
@@ -152,11 +159,18 @@ private fun removeAt(
     mode: RemoveMode,
 ): Long {
     val pathname = copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
-    val target = when (val result = atPath(process, dirFd, VfsPathname.fromBytes(pathname))) {
+    val caller = process.vfsOperationContext
+    val target = when (val result = atPath(
+        process,
+        dirFd,
+        VfsPathname.fromBytes(pathname),
+        caller,
+    )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
     return when (val result = FileSystemManager.vfs.remove(
+        caller,
         target.context,
         target.directory,
         target.pathname,
@@ -190,17 +204,24 @@ private fun symlinkAt(
     val target = copyPath(process, targetAddress) ?: return errno(Errno.EFAULT)
     if (target.isEmpty()) return errno(Errno.ENOENT)
     val pathname = copyPath(process, pathnameAddress) ?: return errno(Errno.EFAULT)
-    val link = when (val result = atPath(process, dirFd, VfsPathname.fromBytes(pathname))) {
+    val caller = process.vfsOperationContext
+    val link = when (val result = atPath(
+        process,
+        dirFd,
+        VfsPathname.fromBytes(pathname),
+        caller,
+    )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
     val node = NodeCreation(
         NodeKind.SymbolicLink(VfsPathname.fromBytes(target)),
         FileMode(0x1ffu),
-        process.fsuid.toUInt(),
-        process.fsgid.toUInt(),
+        caller.uid,
+        caller.gid,
     )
     return when (val result = FileSystemManager.vfs.createNode(
+        caller,
         link.context,
         link.directory,
         link.pathname,
@@ -264,10 +285,12 @@ private fun renameAt(
 ): Long {
     val sourceBytes = copyPath(process, sourceAddress) ?: return errno(Errno.EFAULT)
     val targetBytes = copyPath(process, targetAddress) ?: return errno(Errno.EFAULT)
+    val caller = process.vfsOperationContext
     val source = when (val result = atPath(
         process,
         sourceDirFd,
         VfsPathname.fromBytes(sourceBytes),
+        caller,
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
@@ -276,11 +299,13 @@ private fun renameAt(
         process,
         targetDirFd,
         VfsPathname.fromBytes(targetBytes),
+        caller,
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
     return when (val result = FileSystemManager.vfs.rename(
+        caller,
         source.context,
         source.directory,
         source.pathname,
@@ -321,12 +346,19 @@ private fun linkAt(
 ): Long {
     val supported = (AT_SYMLINK_FOLLOW or AT_EMPTY_PATH).toULong()
     if (flags and supported.inv() != 0uL) return errno(Errno.EINVAL)
+    val caller = process.vfsOperationContext
     val sourceBytes = copyPath(process, sourceAddress) ?: return errno(Errno.EFAULT)
     val source = if (sourceBytes.isEmpty() && flags and AT_EMPTY_PATH.toULong() != 0uL) {
         if (process.euid != 0) return errno(Errno.EPERM)
         val file = process.fdTable.acquire(sourceDirFd) ?: return errno(Errno.EBADF)
         try {
-            if (file.inode.metadata().linkCount == 0u) return errno(Errno.ENOENT)
+            val metadata = when (
+                val result = file.inode.attributes(caller)
+            ) {
+                is VfsResult.Ok -> result.value.metadata
+                is VfsResult.Err -> return errno(result.error.errno)
+            }
+            if (metadata.linkCount == 0u) return errno(Errno.ENOENT)
             file.path.mount to file.inode
         } finally {
             file.release()
@@ -336,6 +368,7 @@ private fun linkAt(
             process,
             sourceDirFd,
             VfsPathname.fromBytes(sourceBytes),
+            caller,
         )) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return errno(result.error.errno)
@@ -354,11 +387,13 @@ private fun linkAt(
         process,
         targetDirFd,
         VfsPathname.fromBytes(targetBytes),
+        caller,
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
     return when (val result = FileSystemManager.vfs.link(
+        caller,
         target.context,
         source.first,
         source.second,

@@ -3,6 +3,7 @@
 package org.plos_clan.cpos.mem.addressspace
 
 import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
@@ -41,7 +42,51 @@ class AddressSpace internal constructor(
 
     private val regions = MemoryRegionMap(start, end, limit)
     private val lock = IrqSpinLock()
-    private val faultScratch = ByteArray(PAGE_SIZE_BYTES.toInt())
+    private val reusableFaultScratch = AtomicReference<ByteArray?>(null)
+
+    private sealed interface FaultPlan {
+        data class Complete(val result: PageFaultResult) : FaultPlan
+        data class Load(val target: FaultTarget) : FaultPlan
+    }
+
+    private data class FaultTarget(
+        val regionIdentity: Any,
+        val page: ULong,
+        val backingOffset: ULong,
+        val mmioPhysicalAddress: ULong?,
+        val backing: MemoryRegionBacking?,
+    ) {
+        fun release() = backing?.release()
+    }
+
+    private enum class PageOrigin {
+        MMIO,
+        CACHE,
+        ANONYMOUS,
+    }
+
+    private data class PreparedPage(
+        val frame: ULong,
+        val origin: PageOrigin,
+    ) {
+        fun release(consumed: Boolean) {
+            when (origin) {
+                PageOrigin.MMIO -> Unit
+                PageOrigin.CACHE -> PageCache.release(frame)
+                PageOrigin.ANONYMOUS -> if (!consumed) BuddyFrameAllocator.free(frame, 1uL)
+            }
+        }
+    }
+
+    private sealed interface PagePreparation {
+        data class Ready(val page: PreparedPage) : PagePreparation
+        data class Failed(val result: PageFaultResult) : PagePreparation
+    }
+
+    private data class PageCommit(
+        val result: PageFaultResult,
+        val consumed: Boolean = false,
+    )
 
     companion object {
         fun user(pageDirectory: PageDirectory): AddressSpace =
@@ -75,10 +120,12 @@ class AddressSpace internal constructor(
     }
 
     fun clear() {
-        lock.withLock {
-            regions.releaseAll()
+        val backings = lock.withLock {
+            val removed = regions.removeAll()
             pageDirectory.clearUserMappings()
+            removed
         }
+        backings.forEach(MemoryRegionBacking::release)
     }
 
     internal fun release() {
@@ -96,9 +143,8 @@ class AddressSpace internal constructor(
     }
 
     private fun destroyResources() {
-        lock.withLock {
-            regions.releaseAll()
-        }
+        val backings = lock.withLock(regions::removeAll)
+        backings.forEach(MemoryRegionBacking::release)
         pageDirectory.destroyUserDirectory()
     }
 
@@ -140,6 +186,7 @@ class AddressSpace internal constructor(
             return MemoryMapResult.Err(ENOMEM)
         }
 
+        var replacedBackings = emptyList<MemoryRegionBacking>()
         val selection = lock.withLock {
             val selected = if (request.fixed) {
                 if (!request.hint.isPageAligned() ||
@@ -151,7 +198,10 @@ class AddressSpace internal constructor(
                     if (request.noReplace) {
                         return@withLock Pair(ULong.MAX_VALUE, null)
                     }
-                    unmapRangeLocked(request.hint, request.hint + alignedLength)
+                    replacedBackings = unmapRangeLocked(
+                        request.hint,
+                        request.hint + alignedLength,
+                    )
                 }
                 request.hint
             } else {
@@ -183,7 +233,9 @@ class AddressSpace internal constructor(
             } else {
                 Pair(selected, region)
             }
-        } ?: return MemoryMapResult.Err(ENOMEM)
+        }
+        replacedBackings.forEach(MemoryRegionBacking::release)
+        selection ?: return MemoryMapResult.Err(ENOMEM)
 
         if (selection.first == ULong.MAX_VALUE) {
             return MemoryMapResult.Err(EEXIST)
@@ -196,15 +248,10 @@ class AddressSpace internal constructor(
             return MemoryMapResult.Ok(start)
         }
 
-        val populateScratch = if (region.backing != null) {
-            ByteArray(PAGE_SIZE_BYTES.toInt())
-        } else {
-            null
-        }
         var address = start
         var failureErrno = ENOMEM
         while (address < start + alignedLength) {
-            when (materializePage(region, address, write = false, scratch = populateScratch)) {
+            when (faultIn(address, write = false)) {
                 PageFaultResult.RESOLVED -> Unit
                 PageFaultResult.OUT_OF_MEMORY -> break
                 PageFaultResult.IO_ERROR -> {
@@ -229,115 +276,177 @@ class AddressSpace internal constructor(
         address: ULong,
         write: Boolean,
         execute: Boolean = false,
-    ): PageFaultResult = lock.withLock {
+    ): PageFaultResult {
+        val plan = lock.withLock { planFaultLocked(address, write, execute) }
+        val target = when (plan) {
+            is FaultPlan.Complete -> return plan.result
+            is FaultPlan.Load -> plan.target
+        }
+        val page = when (val preparation = preparePage(target)) {
+            is PagePreparation.Ready -> preparation.page
+            is PagePreparation.Failed -> {
+                target.release()
+                return preparation.result
+            }
+        }
+        val commit = lock.withLock { commitPageLocked(target, page, write, execute) }
+        page.release(commit.consumed)
+        target.release()
+        return commit.result
+    }
+
+    private fun planFaultLocked(
+        address: ULong,
+        write: Boolean,
+        execute: Boolean,
+    ): FaultPlan {
         if (address >= limit) {
-            return@withLock PageFaultResult.INVALID_ADDRESS
+            return FaultPlan.Complete(PageFaultResult.INVALID_ADDRESS)
         }
         val region = regions.find(address)
-            ?: return@withLock PageFaultResult.INVALID_ADDRESS
+            ?: return FaultPlan.Complete(PageFaultResult.INVALID_ADDRESS)
         val access = region.access
         if (access == 0uL ||
             write && (access and MEMORY_REGION_WRITABLE) == 0uL ||
             execute && (access and MEMORY_REGION_EXECUTABLE) == 0uL
         ) {
-            return@withLock PageFaultResult.ACCESS_DENIED
+            return FaultPlan.Complete(PageFaultResult.ACCESS_DENIED)
         }
 
         val page = address.alignDown(PAGE_SIZE_BYTES)
-        if (pageDirectory.userPageFrame(page) != null) {
-            if (write) {
-                val resolved = pageDirectory.makeUserPageWritable(
-                    page,
-                    privateMapping = !region.shared,
-                )
-                return@withLock if (resolved) {
-                    PageFaultResult.RESOLVED
-                } else {
-                    PageFaultResult.MAPPING_FAILED
-                }
-            }
-            return@withLock if (pageDirectory.protectUserPage(
-                    virtualAddress = page,
-                    accessible = true,
-                    writable = (access and MEMORY_REGION_WRITABLE) != 0uL,
-                    executable = (access and MEMORY_REGION_EXECUTABLE) != 0uL,
-                    privateMapping = !region.shared,
-                )
-            ) {
-                PageFaultResult.RESOLVED
-            } else {
-                PageFaultResult.MAPPING_FAILED
-            }
+        resolveMappedPage(region, page, write)?.let { return FaultPlan.Complete(it) }
+
+        val backing = region.backing
+        if (backing?.retain() == false) {
+            return FaultPlan.Complete(PageFaultResult.IO_ERROR)
         }
-        materializePage(region, page, write = write, scratch = faultScratch)
+        val backingOffset = region.offset + (page - region.start)
+        val mmioPhysicalAddress = if (region.type == MemoryRegionType.MMIO) {
+            region.offset.alignDown(PAGE_SIZE_BYTES) + (page - region.start)
+        } else {
+            null
+        }
+        return FaultPlan.Load(
+            FaultTarget(
+                regionIdentity = region.identity,
+                page = page,
+                backingOffset = backingOffset,
+                mmioPhysicalAddress = mmioPhysicalAddress,
+                backing = backing,
+            ),
+        )
     }
 
-    private fun materializePage(
+    private fun resolveMappedPage(
         region: MemoryRegion,
         page: ULong,
         write: Boolean,
-        scratch: ByteArray? = null,
-    ): PageFaultResult {
-        if (region.type == MemoryRegionType.MMIO) {
-            val physicalAddress = region.offset.alignDown(PAGE_SIZE_BYTES) +
-                (page - region.start)
-            return if (pageDirectory.mapPage(page, physicalAddress, MMIO_PTE_FLAGS)) {
-                PageFaultResult.RESOLVED
-            } else {
-                PageFaultResult.MAPPING_FAILED
-            }
-        }
-
-        val backing = region.backing
-        val backingOffset = region.offset + (page - region.start)
-        val physicalAddress = if (backing != null) {
-            val cached = PageCache.acquire(
-                backing.cacheSource,
-                backingOffset,
-                scratch ?: faultScratch,
+    ): PageFaultResult? {
+        if (pageDirectory.userPageFrame(page) == null) return null
+        if (write) {
+            val resolved = pageDirectory.makeUserPageWritable(
+                page,
+                privateMapping = !region.shared,
             )
-            if (!cached.isSuccess) {
-                return when (cached.failure) {
-                    PageCacheFailure.OUT_OF_MEMORY -> PageFaultResult.OUT_OF_MEMORY
-                    PageCacheFailure.IO_ERROR -> PageFaultResult.IO_ERROR
-                }
-            }
-            cached.frame
+            return if (resolved) PageFaultResult.RESOLVED else PageFaultResult.MAPPING_FAILED
+        }
+        return if (pageDirectory.protectUserPage(
+                virtualAddress = page,
+                accessible = true,
+                writable = (region.access and MEMORY_REGION_WRITABLE) != 0uL,
+                executable = (region.access and MEMORY_REGION_EXECUTABLE) != 0uL,
+                privateMapping = !region.shared,
+            )
+        ) {
+            PageFaultResult.RESOLVED
         } else {
-            val frame = BuddyFrameAllocator.allocate(1uL)
-            if (frame == INVALID_FRAME) return PageFaultResult.OUT_OF_MEMORY
-            val destination = Hhdm.toVirtualPointer<UByteVar>(frame)
-            if (destination == null) {
-                BuddyFrameAllocator.free(frame, 1uL)
-                return PageFaultResult.MAPPING_FAILED
+            PageFaultResult.MAPPING_FAILED
+        }
+    }
+
+    private fun preparePage(target: FaultTarget): PagePreparation {
+        target.mmioPhysicalAddress?.let {
+            return PagePreparation.Ready(PreparedPage(it, PageOrigin.MMIO))
+        }
+        val backing = target.backing
+        if (backing != null) {
+            val scratch = reusableFaultScratch.exchange(null) ?: try {
+                ByteArray(PAGE_SIZE_BYTES.toInt())
+            } catch (_: OutOfMemoryError) {
+                return PagePreparation.Failed(PageFaultResult.OUT_OF_MEMORY)
             }
-            memset(destination, 0, PAGE_SIZE_BYTES)
-            frame
+            val cached = try {
+                PageCache.acquire(backing.cacheSource, target.backingOffset, scratch)
+            } finally {
+                reusableFaultScratch.compareAndSet(null, scratch)
+            }
+            if (!cached.isSuccess) {
+                return PagePreparation.Failed(
+                    when (cached.failure) {
+                        PageCacheFailure.OUT_OF_MEMORY -> PageFaultResult.OUT_OF_MEMORY
+                        PageCacheFailure.IO_ERROR -> PageFaultResult.IO_ERROR
+                    },
+                )
+            }
+            return PagePreparation.Ready(PreparedPage(cached.frame, PageOrigin.CACHE))
         }
 
+        val frame = BuddyFrameAllocator.allocate(1uL)
+        if (frame == INVALID_FRAME) {
+            return PagePreparation.Failed(PageFaultResult.OUT_OF_MEMORY)
+        }
+        val destination = Hhdm.toVirtualPointer<UByteVar>(frame)
+        if (destination == null) {
+            BuddyFrameAllocator.free(frame, 1uL)
+            return PagePreparation.Failed(PageFaultResult.MAPPING_FAILED)
+        }
+        memset(destination, 0, PAGE_SIZE_BYTES)
+        return PagePreparation.Ready(PreparedPage(frame, PageOrigin.ANONYMOUS))
+    }
+
+    private fun commitPageLocked(
+        target: FaultTarget,
+        prepared: PreparedPage,
+        write: Boolean,
+        execute: Boolean,
+    ): PageCommit {
+        val region = regions.find(target.page)
+            ?.takeIf { it.identity === target.regionIdentity }
+            ?: return PageCommit(PageFaultResult.INVALID_ADDRESS)
         val access = region.access
-        val writable = backing == null &&
-            (access and MEMORY_REGION_WRITABLE) != 0uL
-        val executable = (access and MEMORY_REGION_EXECUTABLE) != 0uL
-        val mapped = pageDirectory.mapUserPage(
-            virtualAddress = page,
-            physicalAddress = physicalAddress,
-            writable = writable,
-            executable = executable,
-        )
-        if (mapped && write && backing != null &&
-            !pageDirectory.makeUserPageWritable(page, privateMapping = !region.shared)
+        if (access == 0uL ||
+            write && (access and MEMORY_REGION_WRITABLE) == 0uL ||
+            execute && (access and MEMORY_REGION_EXECUTABLE) == 0uL
         ) {
-            pageDirectory.releaseUserPage(page)
-            PageCache.release(physicalAddress)
-            return PageFaultResult.MAPPING_FAILED
+            return PageCommit(PageFaultResult.ACCESS_DENIED)
         }
-        if (backing != null) {
-            PageCache.release(physicalAddress)
-        } else if (!mapped) {
-            BuddyFrameAllocator.free(physicalAddress, 1uL)
+        resolveMappedPage(region, target.page, write)?.let { return PageCommit(it) }
+
+        if (prepared.origin == PageOrigin.MMIO) {
+            val mapped = pageDirectory.mapPage(target.page, prepared.frame, MMIO_PTE_FLAGS)
+            return PageCommit(
+                if (mapped) PageFaultResult.RESOLVED else PageFaultResult.MAPPING_FAILED,
+            )
         }
-        return if (mapped) PageFaultResult.RESOLVED else PageFaultResult.MAPPING_FAILED
+
+        val cached = prepared.origin == PageOrigin.CACHE
+        val writable = !cached && (access and MEMORY_REGION_WRITABLE) != 0uL
+        val mapped = pageDirectory.mapUserPage(
+            virtualAddress = target.page,
+            physicalAddress = prepared.frame,
+            writable = writable,
+            executable = (access and MEMORY_REGION_EXECUTABLE) != 0uL,
+        )
+        if (mapped && write && cached &&
+            !pageDirectory.makeUserPageWritable(target.page, privateMapping = !region.shared)
+        ) {
+            pageDirectory.releaseUserPage(target.page)
+            return PageCommit(PageFaultResult.MAPPING_FAILED)
+        }
+        return PageCommit(
+            if (mapped) PageFaultResult.RESOLVED else PageFaultResult.MAPPING_FAILED,
+            consumed = mapped && !cached,
+        )
     }
 
     fun unmap(address: ULong, length: ULong): MemoryMapResult<Unit> {
@@ -346,7 +455,8 @@ class AddressSpace internal constructor(
             return MemoryMapResult.Err(EINVAL)
         }
         if (!validRange(address, alignedLength)) return MemoryMapResult.Err(EFAULT)
-        return lock.withLock {
+        var removedBackings = emptyList<MemoryRegionBacking>()
+        val result = lock.withLock {
             val end = address + alignedLength
             val immutable = regions.any { region ->
                 !region.type.userMutable && region.start < end && region.end > address
@@ -354,9 +464,11 @@ class AddressSpace internal constructor(
             if (immutable) {
                 return@withLock MemoryMapResult.Err(EACCES)
             }
-            unmapRangeLocked(address, end)
+            removedBackings = unmapRangeLocked(address, end)
             MemoryMapResult.Ok(Unit)
         }
+        removedBackings.forEach(MemoryRegionBacking::release)
+        return result
     }
 
     fun protect(address: ULong, length: ULong, access: ULong): MemoryMapResult<Unit> {
@@ -418,24 +530,10 @@ class AddressSpace internal constructor(
     }
 
     private fun rollbackMapping(region: MemoryRegion, start: ULong, end: ULong) {
-        var address = start
-        while (address < end) {
-            if (user) {
-                pageDirectory.releaseUserPage(address)
-            } else {
-                pageDirectory.unmapPage(address)
-            }
-            address += PAGE_SIZE_BYTES
-        }
-        lock.withLock {
-            regions.removeOwned(region)?.backing?.release()
-        }
-    }
-
-    private fun unmapRangeLocked(start: ULong, end: ULong) {
-        regions.removeRange(start, end).forEach { region ->
-            var address = region.start
-            while (address < region.end) {
+        val backing = lock.withLock {
+            val removed = regions.removeOwned(region) ?: return@withLock null
+            var address = start
+            while (address < end) {
                 if (user) {
                     pageDirectory.releaseUserPage(address)
                 } else {
@@ -443,9 +541,26 @@ class AddressSpace internal constructor(
                 }
                 address += PAGE_SIZE_BYTES
             }
-            region.backing?.release()
+            removed.backing
         }
+        backing?.release()
     }
+
+    private fun unmapRangeLocked(start: ULong, end: ULong): List<MemoryRegionBacking> =
+        buildList {
+            regions.removeRange(start, end).forEach { region ->
+                var address = region.start
+                while (address < region.end) {
+                    if (user) {
+                        pageDirectory.releaseUserPage(address)
+                    } else {
+                        pageDirectory.unmapPage(address)
+                    }
+                    address += PAGE_SIZE_BYTES
+                }
+                region.backing?.let(::add)
+            }
+        }
 
     private fun validRange(address: ULong, length: ULong): Boolean =
         address < limit &&
