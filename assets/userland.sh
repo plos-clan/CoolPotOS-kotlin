@@ -11,6 +11,8 @@ packages=(
     cachyos-mirrorlist
     cachyos-v3-mirrorlist
     fuse3
+    util-linux
+    pciutils
 )
 
 rootfs=$(mktemp -d)

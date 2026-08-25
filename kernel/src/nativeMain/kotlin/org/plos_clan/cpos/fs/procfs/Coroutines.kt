@@ -8,6 +8,7 @@ import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.SuperBlock
 import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.utils.decimalInt
 
 internal class ProcCoroutineDirectory(
     fileSystem: ProcfsInstance,

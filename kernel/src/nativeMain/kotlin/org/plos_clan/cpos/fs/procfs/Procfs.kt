@@ -37,6 +37,7 @@ import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
+import org.plos_clan.cpos.utils.decimalInt
 
 object Procfs : FileSystemType("proc", 0x9fa0uL) {
     override fun createBackend(options: FileSystemOptions): VfsResult<SuperBlockBackend> =
@@ -557,17 +558,6 @@ internal object ProcInode {
         require(id >= 0)
         return COROUTINE_PREFIX or id.toUInt().toULong()
     }
-}
-
-internal fun String.decimalInt(): Int? {
-    if (isEmpty() || length > 1 && this[0] == '0') return null
-    var result = 0
-    for (character in this) {
-        val digit = character.code - '0'.code
-        if (digit !in 0..9 || result > (Int.MAX_VALUE - digit) / 10) return null
-        result = result * 10 + digit
-    }
-    return result
 }
 
 private val ROOT_ENTRIES: List<ProcStaticEntry> = RootFile.entries + RootNode.entries

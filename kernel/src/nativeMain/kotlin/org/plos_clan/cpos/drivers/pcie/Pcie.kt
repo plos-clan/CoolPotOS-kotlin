@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.drivers.pcie
 
+import org.plos_clan.cpos.fs.sysfs.SysfsObjectHandle
 import org.plos_clan.cpos.mem.MmioRegion
 import org.plos_clan.cpos.utils.hex
 
@@ -20,11 +21,13 @@ data class PcieEcamRegion(
 object Pcie {
     private val devices = mutableListOf<PciDevice>()
     private val activeRegions = mutableListOf<MappedEcamRegion>()
+    private val sysfs = PciSysfsPublisher()
 
     val enumeratedDevices: List<PciDevice>
         get() = devices.toList()
 
     fun initialize(regions: List<PcieEcamRegion>) {
+        sysfs.reset()
         devices.clear()
         activeRegions.clear()
 
@@ -39,12 +42,20 @@ object Pcie {
             return
         }
 
+        sysfs.initialize()
+
         activeRegions.forEach { region ->
-            PciScanner(region.descriptor.segmentGroup, devices::add)
+            PciScanner(
+                segment = region.descriptor.segmentGroup,
+                onFunction = sysfs::publish,
+                onDevice = devices::add,
+            )
                 .scanRegion(region.descriptor.startBus.toInt(), region.descriptor.endBus.toInt())
         }
         println("PCIe: enumeration complete devices=${devices.size}")
     }
+
+    fun sysfsObject(address: PciAddress): SysfsObjectHandle? = sysfs.handle(address)
 
     fun readConfig(
         segment: UInt,

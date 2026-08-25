@@ -207,6 +207,17 @@ value class LittleEndianBuffer(private val bytes: ByteArray) {
     }
 }
 
+internal fun String.decimalInt(): Int? {
+    if (isEmpty() || length > 1 && this[0] == '0') return null
+    var result = 0
+    for (character in this) {
+        val digit = character.code - '0'.code
+        if (digit !in 0..9 || result > (Int.MAX_VALUE - digit) / 10) return null
+        result = result * 10 + digit
+    }
+    return result
+}
+
 interface NativeStruct {
     fun toNativeBytes(): ByteArray
     fun updateFromNativeBytes(buffer: ByteArray): Boolean = false

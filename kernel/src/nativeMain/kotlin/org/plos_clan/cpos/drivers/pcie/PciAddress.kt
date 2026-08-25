@@ -15,6 +15,12 @@ value class PciAddress(val raw: UInt) {
     val function: UByte
         get() = (raw and 0x7u).toUByte()
 
+    val sysfsName: String
+        get() = segment.toInt().toString(16).padStart(4, '0') + ":" +
+            bus.toInt().toString(16).padStart(2, '0') + ":" +
+            device.toInt().toString(16).padStart(2, '0') + "." +
+            function.toInt().toString(16)
+
     fun mmioAddress(): MmioAddress? = Pcie.configurationSpace(this)?.baseAddress
 
     fun hasMultipleFunctions(): Boolean =

@@ -8,6 +8,7 @@ import org.plos_clan.cpos.drivers.DeviceType
 import org.plos_clan.cpos.drivers.LinuxDeviceMajor
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.char.tty.TtyManager
+import org.plos_clan.cpos.fs.sysfs.SysfsDevicePublication
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 internal enum class KeyModifier(val mask: Int) {
@@ -248,6 +249,7 @@ internal class KeyboardInputDevice(
                 major = LinuxDeviceMajor.INPUT.number,
                 minor = minor.toUInt(),
                 backend = evdev,
+                sysfs = SysfsDevicePublication.virtual("input", "event$eventIndex"),
             ),
         ) != null
     }

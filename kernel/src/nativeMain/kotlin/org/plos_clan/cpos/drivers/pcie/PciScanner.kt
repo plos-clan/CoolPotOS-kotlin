@@ -2,15 +2,16 @@ package org.plos_clan.cpos.drivers.pcie
 
 internal class PciScanner(
     private val segment: UShort,
+    private val onFunction: (PciFunctionInfo, PciAddress?) -> Unit,
     private val onDevice: (PciDevice) -> Unit,
 ) {
     private val scannedBuses = BooleanArray(PCI_BUS_COUNT)
 
     fun scanRegion(startBus: Int, endBus: Int) {
-        for (bus in startBus..endBus) scanBus(bus)
+        for (bus in startBus..endBus) scanBus(bus, null)
     }
 
-    private fun scanBus(bus: Int) {
+    private fun scanBus(bus: Int, parentBridge: PciAddress?) {
         if (bus !in scannedBuses.indices || scannedBuses[bus]) return
         scannedBuses[bus] = true
 
@@ -20,7 +21,7 @@ internal class PciScanner(
             val firstVendorId = firstConfig.readU16(PCI_VENDOR_DEVICE_OFFSET)
             if (firstVendorId == UShort.MAX_VALUE) continue
 
-            scanFunction(firstFunction)
+            scanFunction(firstFunction, parentBridge)
             if (firstFunction.hasMultipleFunctions()) {
                 for (function in 1 until PCI_FUNCTION_COUNT) {
                     val address = PciAddress.of(
@@ -31,17 +32,28 @@ internal class PciScanner(
                     )
                     val config = Pcie.configurationSpace(address) ?: continue
                     if (config.readU16(PCI_VENDOR_DEVICE_OFFSET) != UShort.MAX_VALUE) {
-                        scanFunction(address)
+                        scanFunction(address, parentBridge)
                     }
                 }
             }
         }
     }
 
-    private fun scanFunction(address: PciAddress) {
+    private fun scanFunction(address: PciAddress, parentBridge: PciAddress?) {
         val config = Pcie.configurationSpace(address) ?: return
         val header = PciHeader(config)
         if (header.vendorId == UShort.MAX_VALUE) return
+        val function = PciFunctionInfo(
+            address = address,
+            vendorId = header.vendorId,
+            deviceId = header.deviceId,
+            classCode = header.classCode,
+            subClass = header.subClass,
+            progIf = header.progIf,
+            revision = header.revision,
+            interruptLine = header.interruptLine,
+        )
+        onFunction(function, parentBridge)
 
         when (header.headerType) {
             PciHeaderType.ENDPOINT -> {
@@ -55,16 +67,9 @@ internal class PciScanner(
                 header.updateCommand(PCI_COMMAND_INTX_DISABLE, true)
 
                 val device = PciDevice(
-                    address = address,
-                    vendorId = header.vendorId,
-                    deviceId = header.deviceId,
-                    classCode = header.classCode,
-                    subClass = header.subClass,
-                    progIf = header.progIf,
-                    revision = header.revision,
+                    function = function,
                     bars = endpoint.bars(),
                     interrupt = PciInterrupt.resolve(endpoint),
-                    deviceType = PciDeviceType.parse(header.classCode, header.subClass),
                 )
                 device.printInfo()
                 onDevice(device)
@@ -76,7 +81,7 @@ internal class PciScanner(
                 if (secondaryBus > bridge.primaryBus.toInt() &&
                     secondaryBus <= bridge.subordinateBus.toInt()
                 ) {
-                    scanBus(secondaryBus)
+                    scanBus(secondaryBus, address)
                 }
             }
 

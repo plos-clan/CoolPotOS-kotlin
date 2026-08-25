@@ -11,6 +11,7 @@ import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.utils.decimalInt
 
 internal class ProcDescriptorDirectory(
     fileSystem: ProcfsInstance,

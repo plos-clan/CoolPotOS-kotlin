@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.drivers
 
+import org.plos_clan.cpos.fs.sysfs.SysfsDevicePublication
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.Errno
@@ -117,6 +118,7 @@ internal enum class MemoryDevice(
                     major = LinuxDeviceMajor.MEMORY.number,
                     minor = memoryDevice.minor,
                     backend = memoryDevice,
+                    sysfs = SysfsDevicePublication.virtual("mem", memoryDevice.nodeName),
                 )
                 val device = DeviceManager.register(registration)
                 if (device == null) {

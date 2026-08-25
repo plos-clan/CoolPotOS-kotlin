@@ -7,6 +7,7 @@ import org.plos_clan.cpos.drivers.DeviceType
 import org.plos_clan.cpos.drivers.LinuxDeviceMajor
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
 import org.plos_clan.cpos.drivers.char.TerminalSession
+import org.plos_clan.cpos.fs.sysfs.SysfsDevicePublication
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Cmdline
 import org.plos_clan.cpos.utils.TermiosConstants
@@ -100,6 +101,7 @@ object TtyManager {
                     major = LinuxDeviceMajor.VIRTUAL_TERMINAL.number,
                     minor = index.toUInt(),
                     backend = session,
+                    sysfs = SysfsDevicePublication.virtual("tty", "tty$index"),
                 ),
             )
             if (tty == null) {
@@ -118,6 +120,7 @@ object TtyManager {
                 major = LinuxDeviceMajor.TTY_AUXILIARY.number,
                 minor = 0u,
                 backend = ControllingTty,
+                sysfs = SysfsDevicePublication.virtual("tty", "tty"),
             ),
         )
         if (controllingTty == null) {
@@ -134,6 +137,7 @@ object TtyManager {
                 major = LinuxDeviceMajor.TTY_AUXILIARY.number,
                 minor = 1u,
                 backend = console,
+                sysfs = SysfsDevicePublication.virtual("tty", "console"),
             ),
         )
         if (systemConsole == null) {

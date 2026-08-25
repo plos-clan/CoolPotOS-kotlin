@@ -5,6 +5,7 @@ import org.plos_clan.cpos.fs.erofs.ErofsOptions
 import org.plos_clan.cpos.fs.overlay.Overlayfs
 import org.plos_clan.cpos.fs.overlay.OverlayfsOptions
 import org.plos_clan.cpos.fs.procfs.Procfs
+import org.plos_clan.cpos.fs.sysfs.Sysfs
 import org.plos_clan.cpos.fs.tmpfs.Tmpfs
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FileSystemContext
@@ -33,6 +34,7 @@ object FileSystemManager {
         Procfs,
         Erofs,
         Overlayfs,
+        Sysfs,
     )
 
     var kernelContext: FileSystemContext? = null
