@@ -10,6 +10,7 @@ import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.module.Vdso
 import org.plos_clan.cpos.syscall.fs.access
 import org.plos_clan.cpos.syscall.fs.chdir
+import org.plos_clan.cpos.syscall.fs.chroot
 import org.plos_clan.cpos.syscall.fs.chmod
 import org.plos_clan.cpos.syscall.fs.chown
 import org.plos_clan.cpos.syscall.fs.close
@@ -208,6 +209,7 @@ private enum class LinuxSyscall(
     FSTATFS(138, ::fstatfs),
     PRCTL(157, ::prctl),
     ARCH_PRCTL(158, ::archPrctl),
+    CHROOT(161, ::chroot),
     MOUNT(165, ::mount),
     UMOUNT2(166, ::umount2),
     REBOOT(169, ::reboot),

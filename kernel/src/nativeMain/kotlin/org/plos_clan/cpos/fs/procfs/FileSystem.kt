@@ -44,12 +44,13 @@ object MountsFile {
     fun render(process: Process): ByteArray {
         val context = process.context ?: return ByteArray(0)
         val mounts = context.namespace.snapshotMounts()
+        val root = context.root
 
         return buildString {
             for ((path, mount) in mounts) {
                 val displayPath = when (val result = FileSystemManager.vfs.absolutePath(
                     context = context,
-                    initial = path,
+                    initial = if (mount === root.mount) root else path,
                 )) {
                     is VfsResult.Ok -> result.value.decodeToString()
                     is VfsResult.Err -> continue

@@ -420,6 +420,25 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         return chdir(caller, context, path)
     }
 
+    fun chroot(
+        caller: VfsOperationContext,
+        context: FileSystemContext,
+        pathname: VfsPathname,
+    ): VfsResult<Unit> {
+        val path = when (val result = resolve(caller, context, pathname)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        if (inode.type != InodeType.DIRECTORY) return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        when (val access = inode.backend.checkAccess(caller, inode, AccessPermissions.EXECUTE)) {
+            is VfsResult.Ok -> Unit
+            is VfsResult.Err -> return access
+        }
+        return if (context.changeRoot(path)) VfsResult.Ok(Unit)
+        else VfsResult.Err(VfsError.NOT_FOUND)
+    }
+
     internal fun chdir(
         caller: VfsOperationContext,
         context: FileSystemContext,

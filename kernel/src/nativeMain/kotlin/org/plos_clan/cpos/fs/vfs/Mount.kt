@@ -198,10 +198,11 @@ class MountNamespace internal constructor(val root: Mount) {
 
 class FileSystemContext internal constructor(
     val namespace: MountNamespace,
-    val root: VfsPath = VfsPath(namespace.root, namespace.root.root),
+    root: VfsPath = VfsPath(namespace.root, namespace.root.root),
     workingDirectory: VfsPath = root,
 ) {
     private val lock = IrqSpinLock()
+    private var currentRoot: VfsPath? = root
     private var currentWorkingDirectory: VfsPath? = workingDirectory
 
     init {
@@ -210,8 +211,22 @@ class FileSystemContext internal constructor(
         check(workingDirectory.mount.retain())
     }
 
+    val root: VfsPath
+        get() = lock.withLock { checkNotNull(currentRoot) }
+
     val workingDirectory: VfsPath
         get() = lock.withLock { checkNotNull(currentWorkingDirectory) }
+
+    internal fun changeRoot(path: VfsPath): Boolean {
+        if (!path.mount.retain()) return false
+        val previous = lock.withLock { currentRoot?.also { currentRoot = path } }
+        if (previous == null) {
+            path.mount.release()
+            return false
+        }
+        previous.mount.release()
+        return true
+    }
 
     internal fun changeWorkingDirectory(path: VfsPath): Boolean {
         if (!path.mount.retain()) return false
@@ -227,12 +242,20 @@ class FileSystemContext internal constructor(
     }
 
     internal fun fork(): FileSystemContext = lock.withLock {
-        FileSystemContext(namespace, root, checkNotNull(currentWorkingDirectory))
+        FileSystemContext(
+            namespace,
+            checkNotNull(currentRoot),
+            checkNotNull(currentWorkingDirectory),
+        )
     }
 
     internal fun release() {
-        val workingDirectory = lock.withLock {
-            currentWorkingDirectory?.also { currentWorkingDirectory = null } ?: return
+        val (root, workingDirectory) = lock.withLock {
+            val root = currentRoot ?: return
+            val workingDirectory = checkNotNull(currentWorkingDirectory)
+            currentRoot = null
+            currentWorkingDirectory = null
+            root to workingDirectory
         }
         workingDirectory.mount.release()
         root.mount.release()

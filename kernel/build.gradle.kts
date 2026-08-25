@@ -104,6 +104,7 @@ private class BuildPaths(project: Project) {
     val linkerScript = assets.resolve("linker.ld")
     val bridgeDef = kernelC.resolve("bridge.def")
     val userlandScript = assets.resolve("userland.sh")
+    val initScript = assets.resolve("init")
     val mlibcPatch = assets.resolve("mlibc.patch")
     val mlibcSyscallHeader = mlibc.resolve("sysdeps/template/include/sys/syscall.h")
     val cObjects = root.resolve("c-objects")
@@ -503,6 +504,7 @@ val prepareUserland = tasks.register<Exec>("prepareUserland") {
     inputs.property("image", config.userland.image)
     inputs.property("platform", config.userland.platform)
     inputs.file(config.userland.script).withPathSensitivity(PathSensitivity.NONE)
+    inputs.file(config.paths.initScript).withPathSensitivity(PathSensitivity.NONE)
     outputs.file(config.userland.archive)
 
     commandLine(
@@ -512,6 +514,7 @@ val prepareUserland = tasks.register<Exec>("prepareUserland") {
             "--platform", config.userland.platform,
             "--volume", "${config.userland.archive.parentFile.absolutePath}:/output:rw,Z",
             "--volume", "${config.userland.script.absolutePath}:/usr/local/bin/cpos-userland:ro,Z",
+            "--volume", "${config.paths.initScript.absolutePath}:/usr/local/share/cpos/init:ro,Z",
             config.userland.image,
             "/usr/local/bin/cpos-userland",
             config.userland.name,

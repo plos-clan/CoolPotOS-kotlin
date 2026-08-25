@@ -49,6 +49,22 @@ internal fun chdir(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
+internal fun chroot(regs: PtraceRegisters, process: Process): Long {
+    if (process.euid != 0) return errno(Errno.EPERM)
+    val pathname = copyPath(process, regs[PtraceRegisters.IDX_RDI])
+        ?: return errno(Errno.EFAULT)
+    if (pathname.isEmpty()) return errno(Errno.ENOENT)
+    val context = process.context ?: return errno(Errno.ENOENT)
+    return when (val result = FileSystemManager.vfs.chroot(
+        process.vfsOperationContext,
+        context,
+        VfsPathname.fromBytes(pathname),
+    )) {
+        is VfsResult.Ok -> 0L
+        is VfsResult.Err -> errno(result.error.errno)
+    }
+}
+
 internal fun fchdir(regs: PtraceRegisters, process: Process): Long {
     val descriptor = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)

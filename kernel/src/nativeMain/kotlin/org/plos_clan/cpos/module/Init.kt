@@ -75,7 +75,7 @@ object Init {
                 return
             }
         }
-        process.installExecutable(rdinit, listOf(rdinit))
+        process.installExecutable(image.executablePath, image.arguments)
 
         initializeStdio(process)
 

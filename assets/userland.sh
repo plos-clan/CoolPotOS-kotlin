@@ -18,6 +18,7 @@ packages=(
 )
 
 rootfs=$(mktemp -d)
+chmod 0755 "$rootfs"
 partial="$archive.part"
 
 cleanup() {
@@ -51,6 +52,7 @@ pacman -Sy \
     "${packages[@]}"
 
 install -d -m 0700 "$rootfs/etc/pacman.d/gnupg"
+install -Dm755 /usr/local/share/cpos/init "$rootfs/init"
 pacman-key --gpgdir "$rootfs/etc/pacman.d/gnupg" --init
 pacman-key --gpgdir "$rootfs/etc/pacman.d/gnupg" --populate archlinux cachyos
 

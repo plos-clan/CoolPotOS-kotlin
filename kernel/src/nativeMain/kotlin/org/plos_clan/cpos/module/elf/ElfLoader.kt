@@ -42,6 +42,8 @@ private const val ELF_VERSION_CURRENT = 1u
 private const val ELF_MACHINE_X86_64 = 62u
 private const val ELF_TYPE_EXECUTABLE = 2u
 private const val ELF_TYPE_SHARED_OBJECT = 3u
+private const val SCRIPT_HEADER_SIZE = 256
+private const val MAX_SCRIPT_INTERPRETERS = 4
 
 private const val PROGRAM_TYPE_LOAD = 1u
 private const val PROGRAM_TYPE_INTERPRETER = 3u
@@ -73,6 +75,19 @@ data class ElfInterpreterLoadResult(
 data class UserProcessImage(
     val entryPoint: ULong,
     val stackPointer: ULong,
+    val executablePath: String,
+    val arguments: List<String>,
+)
+
+private data class ResolvedExecutable(
+    val file: ElfFile,
+    val path: String,
+    val arguments: List<String>,
+)
+
+private data class ScriptInterpreter(
+    val path: String,
+    val argument: String?,
 )
 
 object ElfLoader {
@@ -86,20 +101,19 @@ object ElfLoader {
         val addressSpace = AddressSpace.user(userDirectory)
         var installed = false
         try {
-            val executableFile = when (val result = open(process, path)) {
+            val resolved = when (val result = resolveExecutable(process, path, arguments)) {
                 is VfsResult.Ok -> result.value
                 is VfsResult.Err -> return result
             }
-
-
+            val executableFile = resolved.file
             val executable = try {
-                loadImage(executableFile, addressSpace, path, 0uL)
+                loadImage(executableFile, addressSpace, resolved.path, 0uL)
             } finally {
                 executableFile.file.release()
             } ?: return VfsResult.Err(VfsError.EXEC_FORMAT)
 
             val interpreter = executableFile.image.interpreterPath?.let { interpreterPath ->
-                val interpreterFile = when (val result = open(process, interpreterPath)) {
+                val interpreterFile = when (val result = openElf(process, interpreterPath)) {
                     is VfsResult.Ok -> result.value
                     is VfsResult.Err -> return result
                 }
@@ -133,7 +147,7 @@ object ElfLoader {
 
             val stack = UserStackBuilder.build(
                 process = process,
-                arguments = arguments.ifEmpty { listOf(path) },
+                arguments = resolved.arguments,
                 environment = environment,
                 executablePath = path,
                 executable = executable,
@@ -150,6 +164,8 @@ object ElfLoader {
                 UserProcessImage(
                     entryPoint = interpreter?.entryPoint ?: executable.entryPoint,
                     stackPointer = stack.stackPointer,
+                    executablePath = resolved.path,
+                    arguments = resolved.arguments,
                 ),
             )
         } finally {
@@ -157,7 +173,65 @@ object ElfLoader {
         }
     }
 
-    private fun open(process: Process, path: String): VfsResult<ElfFile> {
+    private fun resolveExecutable(
+        process: Process,
+        path: String,
+        arguments: List<String>,
+    ): VfsResult<ResolvedExecutable> {
+        var executablePath = path
+        var executableArguments = arguments.ifEmpty { listOf(path) }
+        repeat(MAX_SCRIPT_INTERPRETERS + 1) { depth ->
+            val file = when (val result = openExecutable(process, executablePath)) {
+                is VfsResult.Ok -> result.value
+                is VfsResult.Err -> return result
+            }
+            val script = when (
+                val result = parseScriptInterpreter(process.vfsOperationContext, file)
+            ) {
+                is VfsResult.Ok -> result.value
+                is VfsResult.Err -> {
+                    file.release()
+                    return result
+                }
+            }
+            if (script == null) {
+                val image = parseImage(process.vfsOperationContext, file, executablePath)
+                if (image != null) {
+                    return VfsResult.Ok(
+                        ResolvedExecutable(ElfFile(file, image), executablePath, executableArguments),
+                    )
+                }
+                file.release()
+                return VfsResult.Err(VfsError.EXEC_FORMAT)
+            }
+
+            file.release()
+            if (depth == MAX_SCRIPT_INTERPRETERS) {
+                return VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
+            }
+            executableArguments = buildList(executableArguments.size + 2) {
+                add(script.path)
+                script.argument?.let(::add)
+                add(executablePath)
+                addAll(executableArguments.drop(1))
+            }
+            executablePath = script.path
+        }
+        error("unreachable")
+    }
+
+    private fun openElf(process: Process, path: String): VfsResult<ElfFile> {
+        val file = when (val result = openExecutable(process, path)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        val image = parseImage(process.vfsOperationContext, file, path)
+        if (image != null) return VfsResult.Ok(ElfFile(file, image))
+        file.release()
+        return VfsResult.Err(VfsError.EXEC_FORMAT)
+    }
+
+    private fun openExecutable(process: Process, path: String): VfsResult<OpenFileDescription> {
         val file = when (
             val result = FileSystemManager.vfs.open(
                 caller = process.vfsOperationContext,
@@ -172,24 +246,71 @@ object ElfLoader {
                 return result
             }
         }
-        if (file.inode.type != InodeType.REGULAR && MountFlag.NO_EXEC in file.path.mount.flags) {
+        if (file.inode.type != InodeType.REGULAR) {
+            file.release()
+            println("ELF: $path is not a regular file")
+            return VfsResult.Err(VfsError.PERMISSION_DENIED)
+        }
+        if (MountFlag.NO_EXEC in file.path.mount.flags) {
             file.release()
             println("ELF: execution is disabled on the mount containing $path")
             return VfsResult.Err(VfsError.PERMISSION_DENIED)
         }
-        when(val result = file.inode.backend.checkAccess(
+        when (val result = file.inode.backend.checkAccess(
             process.vfsOperationContext,
             file.inode,
-            AccessPermissions.EXECUTE
+            AccessPermissions.EXECUTE,
         )) {
-            is VfsResult.Err -> return result
-            is VfsResult.Ok -> {}
+            is VfsResult.Err -> {
+                file.release()
+                return result
+            }
+            is VfsResult.Ok -> Unit
         }
-        val image = parseImage(process.vfsOperationContext, file, path) ?: run {
-            file.release()
+        return VfsResult.Ok(file)
+    }
+
+    private fun parseScriptInterpreter(
+        caller: VfsOperationContext,
+        file: OpenFileDescription,
+    ): VfsResult<ScriptInterpreter?> {
+        val fileSize = file.inode.metadata().size
+        val size = minOf(fileSize, SCRIPT_HEADER_SIZE.toULong()).toInt()
+        if (size < 2) return VfsResult.Ok(null)
+        val header = readExact(caller, file, 0uL, size)
+            ?: return VfsResult.Err(VfsError.IO)
+        if (header[0] != '#'.code.toByte() || header[1] != '!'.code.toByte()) {
+            return VfsResult.Ok(null)
+        }
+
+        var end = 2
+        while (end < header.size && header[end] != '\n'.code.toByte()) end++
+        if (end == header.size && fileSize > header.size.toULong()) {
             return VfsResult.Err(VfsError.EXEC_FORMAT)
         }
-        return VfsResult.Ok(ElfFile(file, image))
+        if (header.copyOfRange(2, end).any { it == 0.toByte() }) {
+            return VfsResult.Err(VfsError.EXEC_FORMAT)
+        }
+
+        fun Byte.isBlank(): Boolean = this == ' '.code.toByte() || this == '\t'.code.toByte()
+
+        var pathStart = 2
+        while (pathStart < end && header[pathStart].isBlank()) pathStart++
+        var lineEnd = end
+        while (lineEnd > pathStart && header[lineEnd - 1].isBlank()) lineEnd--
+        if (pathStart == lineEnd) return VfsResult.Err(VfsError.EXEC_FORMAT)
+
+        var pathEnd = pathStart
+        while (pathEnd < lineEnd && !header[pathEnd].isBlank()) pathEnd++
+        var argumentStart = pathEnd
+        while (argumentStart < lineEnd && header[argumentStart].isBlank()) argumentStart++
+        return VfsResult.Ok(
+            ScriptInterpreter(
+                path = header.decodeToString(pathStart, pathEnd),
+                argument = if (argumentStart == lineEnd) null
+                else header.decodeToString(argumentStart, lineEnd),
+            ),
+        )
     }
 
     private fun loadImage(

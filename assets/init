@@ -1,0 +1,25 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+readonly overlay_state=/run/fuse-overlayfs
+readonly overlay_root=/run/root
+
+printf 'init: preparing overlay layers\n'
+mount -t tmpfs -o mode=0700,nosuid,nodev tmpfs /run
+mount -t proc -o nosuid,nodev,noexec proc /proc
+mkdir -p "$overlay_state/upper" "$overlay_state/work" "$overlay_root"
+
+printf 'init: starting fuse-overlayfs\n'
+fuse-overlayfs \
+    -o "lowerdir=/,upperdir=$overlay_state/upper,workdir=$overlay_state/work" \
+    "$overlay_root"
+
+printf 'init: mounting runtime filesystems\n'
+mkdir -p "$overlay_root"/{dev,proc,sys,run}
+mount -t devtmpfs -o nosuid,noexec devtmpfs "$overlay_root/dev"
+mount -t proc -o nosuid,nodev,noexec proc "$overlay_root/proc"
+mount -t sysfs -o nosuid,nodev,noexec sysfs "$overlay_root/sys"
+mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$overlay_root/run"
+
+printf 'init: mounted fuse-overlayfs root\n'
+exec chroot "$overlay_root" /usr/bin/bash
