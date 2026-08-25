@@ -172,32 +172,32 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         }
 
         val path = opened.path
-        val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val inode = path.inode ?: return opened.reject(VfsError.NOT_FOUND)
         if (options.noAtime && !caller.privileged) {
             val owner = when (val result = inode.attributes(caller)) {
                 is VfsResult.Ok -> result.value.metadata.uid
-                is VfsResult.Err -> return result
+                is VfsResult.Err -> return opened.reject(result.error)
             }
-            if (caller.uid != owner) return VfsResult.Err(VfsError.NOT_PERMITTED)
+            if (caller.uid != owner) return opened.reject(VfsError.NOT_PERMITTED)
         }
         if (inode.type == InodeType.SYMLINK && options.access != AccessMode.PATH) {
-            return VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
+            return opened.reject(VfsError.TOO_MANY_SYMLINKS)
         }
         if (options.directoryOnly && inode.type != InodeType.DIRECTORY) {
-            return VfsResult.Err(VfsError.NOT_DIRECTORY)
+            return opened.reject(VfsError.NOT_DIRECTORY)
         }
         if (options.access.canWrite && inode.type == InodeType.DIRECTORY) {
-            return VfsResult.Err(VfsError.IS_DIRECTORY)
+            return opened.reject(VfsError.IS_DIRECTORY)
         }
         if (options.access.canWrite && inode.type == InodeType.REGULAR &&
             MountFlag.READ_ONLY in path.mount.flags
         ) {
-            return VfsResult.Err(VfsError.READ_ONLY)
+            return opened.reject(VfsError.READ_ONLY)
         }
         if (MountFlag.NO_DEVICE in path.mount.flags &&
             (inode.type == InodeType.CHARACTER_DEVICE || inode.type == InodeType.BLOCK_DEVICE)
         ) {
-            return VfsResult.Err(VfsError.PERMISSION_DENIED)
+            return opened.reject(VfsError.PERMISSION_DENIED)
         }
         val requestedAccess = when (options.access) {
             AccessMode.READ -> AccessPermissions.READ
@@ -208,7 +208,7 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         if (!opened.created) {
             when (val result = inode.backend.checkAccess(caller, inode, requestedAccess)) {
                 is VfsResult.Ok -> Unit
-                is VfsResult.Err -> return result
+                is VfsResult.Err -> return opened.reject(result.error)
             }
         }
         return OpenFileDescription.open(
@@ -217,6 +217,7 @@ class Vfs(maxSymlinkDepth: Int = 40) {
             inode,
             options,
             truncate = options.truncate && !opened.created,
+            openedBackend = opened.backend,
         )
     }
 
@@ -245,6 +246,12 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         inode: Inode,
         requested: AccessPermissions,
     ): VfsResult<Unit> = inode.backend.checkAccess(caller, inode, requested)
+
+    fun access(
+        caller: VfsOperationContext,
+        inode: Inode,
+        requested: AccessPermissions,
+    ): VfsResult<Unit> = inode.backend.access(caller, inode, requested)
 
     fun allocate(
         caller: VfsOperationContext,

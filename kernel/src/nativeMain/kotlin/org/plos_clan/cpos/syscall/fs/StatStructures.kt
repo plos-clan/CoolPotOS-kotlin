@@ -185,7 +185,7 @@ internal class LinuxDirent64(
             writeU64(8, nextOffset.toULong())
             writeU16(16, recordSize.toUShort())
         }
-        buffer[18] = entry.type.directoryEntryType
+        buffer[18] = entry.type?.directoryEntryType ?: 0
         name.copyInto(buffer, DIRENT64_HEADER_SIZE)
     }
 

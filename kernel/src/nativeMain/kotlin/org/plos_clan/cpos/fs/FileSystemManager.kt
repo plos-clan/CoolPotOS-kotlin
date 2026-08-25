@@ -2,6 +2,7 @@ package org.plos_clan.cpos.fs
 
 import org.plos_clan.cpos.fs.erofs.Erofs
 import org.plos_clan.cpos.fs.erofs.ErofsOptions
+import org.plos_clan.cpos.fs.fuse.Fuse
 import org.plos_clan.cpos.fs.overlay.Overlayfs
 import org.plos_clan.cpos.fs.overlay.OverlayfsOptions
 import org.plos_clan.cpos.fs.procfs.Procfs
@@ -33,6 +34,7 @@ object FileSystemManager {
         Devtmpfs,
         Procfs,
         Erofs,
+        Fuse,
         Overlayfs,
         Sysfs,
     )

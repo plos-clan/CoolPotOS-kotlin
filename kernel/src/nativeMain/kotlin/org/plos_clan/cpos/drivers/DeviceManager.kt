@@ -23,6 +23,7 @@ enum class LinuxDeviceMajor(val number: UInt) {
     MEMORY(1u),
     VIRTUAL_TERMINAL(4u),
     TTY_AUXILIARY(5u),
+    MISC(10u),
     INPUT(13u),
 }
 

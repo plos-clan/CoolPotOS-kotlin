@@ -54,6 +54,7 @@ import org.plos_clan.cpos.syscall.fs.mkdirAt
 import org.plos_clan.cpos.syscall.fs.mknod
 import org.plos_clan.cpos.syscall.fs.mknodAt
 import org.plos_clan.cpos.syscall.fs.mount
+import org.plos_clan.cpos.syscall.fs.nameToHandleAt
 import org.plos_clan.cpos.syscall.fs.newFstatAt
 import org.plos_clan.cpos.syscall.fs.open
 import org.plos_clan.cpos.syscall.fs.openAt
@@ -256,6 +257,7 @@ private enum class LinuxSyscall(
     RT_TGSIGQUEUEINFO(297, SignalSyscalls::rtTgsigqueueinfo),
     RECVMMSG(299, SocketSyscalls::recvmmsg, restartable = true),
     PRLIMIT64(302, ::prlimit64),
+    NAME_TO_HANDLE_AT(303, ::nameToHandleAt),
     SENDMMSG(307, SocketSyscalls::sendmmsg, restartable = true),
     GETCPU(309, ::getCPU),
     RENAMEAT2(316, ::renameAt2),

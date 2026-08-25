@@ -66,6 +66,19 @@ class Inode internal constructor(
         return VfsResult.Ok(snapshot)
     }
 
+    internal fun installAttributeSnapshot(snapshot: InodeAttributeSnapshot) = lock.withLock {
+        if (evicted) return@withLock
+        currentMetadata = snapshot.attributes.metadata
+        attributeSnapshot = snapshot
+        attributeGeneration++
+    }
+
+    internal fun invalidateAttributes() = lock.withLock {
+        if (evicted) return@withLock
+        attributeSnapshot = null
+        attributeGeneration++
+    }
+
     internal fun updateMetadata(
         timestamps: InodeTimestampUpdate = InodeTimestampEvent.STATUS_CHANGED,
         update: (InodeMetadata) -> InodeMetadata = { it },

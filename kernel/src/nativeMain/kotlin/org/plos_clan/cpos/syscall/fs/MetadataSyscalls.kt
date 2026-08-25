@@ -470,7 +470,7 @@ internal fun access(regs: PtraceRegisters, process: Process): Long {
     }
     val inode = path.inode ?: return errno(Errno.ENOENT)
     val requested = AccessPermissions.fromBits(mode.toUInt()) ?: return errno(Errno.EINVAL)
-    return when (val result = FileSystemManager.vfs.checkAccess(caller, inode, requested)) {
+    return when (val result = FileSystemManager.vfs.access(caller, inode, requested)) {
         is VfsResult.Ok -> 0L
         is VfsResult.Err -> errno(result.error.errno)
     }
@@ -517,7 +517,7 @@ private fun accessAt(
     }
     val inode = target.inode ?: return errno(Errno.ENOENT)
     val requested = AccessPermissions.fromBits(mode.toUInt()) ?: return errno(Errno.EINVAL)
-    return when (val result = FileSystemManager.vfs.checkAccess(caller, inode, requested)) {
+    return when (val result = FileSystemManager.vfs.access(caller, inode, requested)) {
         is VfsResult.Ok -> 0L
         is VfsResult.Err -> errno(result.error.errno)
     }

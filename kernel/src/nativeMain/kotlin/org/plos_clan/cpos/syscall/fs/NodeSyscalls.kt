@@ -108,12 +108,14 @@ private fun createNodeAt(
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
-    val mode = rawMode.toUInt() and S_IALLUGO and caller.fileCreationMask.inv()
+    val requestedMode = rawMode.toUInt() and S_IALLUGO
     val node = NodeCreation(
         kind,
-        FileMode(mode),
+        FileMode(requestedMode and caller.fileCreationMask.inv()),
         caller.uid,
         caller.gid,
+        FileMode(requestedMode),
+        caller.fileCreationMask,
     )
     return when (val result = FileSystemManager.vfs.createNode(
         caller,

@@ -44,14 +44,19 @@ class OpenFileDescription private constructor(
             inode: Inode,
             options: OpenOptions,
             truncate: Boolean = options.truncate,
+            openedBackend: OpenFileBackend? = null,
         ): VfsResult<OpenFileDescription> {
-            if (!path.mount.retain()) return VfsResult.Err(VfsError.NOT_FOUND)
+            if (!path.mount.retain()) {
+                openedBackend?.release()
+                return VfsResult.Err(VfsError.NOT_FOUND)
+            }
             if (!inode.acquireOpenReference()) {
+                openedBackend?.release()
                 path.mount.release()
                 return VfsResult.Err(VfsError.NOT_FOUND)
             }
 
-            val backend = if (options.access == AccessMode.PATH) {
+            val backend = openedBackend ?: if (options.access == AccessMode.PATH) {
                 PathOnlyHandle
             } else {
                 when (val result = inode.backend.open(caller, inode, options)) {
@@ -117,6 +122,42 @@ class OpenFileDescription private constructor(
         inode.type == InodeType.PIPE || inode.type == InodeType.SOCKET ->
             VfsResult.Err(VfsError.INVALID_ARGUMENT)
         else -> backend.syncHandle(caller, inode, dataOnly)
+    }
+
+    fun allocate(
+        caller: VfsOperationContext,
+        offset: ULong,
+        length: ULong,
+        mode: FileAllocationMode,
+    ): VfsResult<Unit> {
+        if (references.load() == 0 || !access.canWrite) {
+            return VfsResult.Err(VfsError.BAD_DESCRIPTOR)
+        }
+        val result = (backend as? AllocatingOpenFileBackend)?.allocate(
+            caller,
+            inode,
+            offset,
+            length,
+            mode,
+        ) ?: (inode.backend as? RegularFileBackend)?.allocate(
+            caller,
+            inode,
+            offset,
+            length,
+            mode,
+        ) ?: VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        if (result is VfsResult.Ok) {
+            PageCache.invalidate(inode, offset, length)
+            val backendIdentity = inode.backend.pageCacheIdentity(inode)
+            if (backendIdentity != inode) PageCache.invalidate(backendIdentity, offset, length)
+            val handleIdentity = cacheSource?.identity
+            if (handleIdentity != null && handleIdentity != inode &&
+                handleIdentity != backendIdentity
+            ) {
+                PageCache.invalidate(handleIdentity, offset, length)
+            }
+        }
+        return result
     }
 
     internal fun flush(caller: VfsOperationContext): VfsResult<Unit> = when {
@@ -270,6 +311,7 @@ class OpenFileDescription private constructor(
         if (references.load() == 0) {
             return VfsResult.Err(VfsError.BAD_DESCRIPTOR)
         }
+        if (!backend.seekable) return VfsResult.Err(VfsError.ILLEGAL_SEEK)
         return positionLock.withLock {
             if (references.load() == 0) {
                 return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)

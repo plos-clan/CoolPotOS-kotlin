@@ -139,10 +139,13 @@ private fun open(
     val context = process.context
         ?: return errno(VfsError.NOT_FOUND.errno)
     val vfsPathname = VfsPathname.fromBytes(pathname)
+    val requestedMode = rawMode.toUInt() and S_IALLUGO
     val options = OpenOptions(
         access = access,
         create = create,
-        createMode = FileMode(rawMode.toUInt() and S_IALLUGO and caller.fileCreationMask.inv()),
+        createMode = FileMode(requestedMode and caller.fileCreationMask.inv()),
+        requestedCreateMode = FileMode(requestedMode),
+        creationMask = caller.fileCreationMask,
         truncate = !pathOnly && flags and OpenFlags.O_TRUNC != 0,
         append = !pathOnly && flags and OpenFlags.O_APPEND != 0,
         directoryOnly = flags and OpenFlags.O_DIRECTORY != 0,
@@ -356,10 +359,8 @@ internal fun fallocate(regs: PtraceRegisters, process: Process): Long {
             InodeType.REGULAR -> Unit
             else -> return errno(Errno.ENODEV)
         }
-        when (val result = FileSystemManager.vfs.allocate(
+        when (val result = file.allocate(
             process.vfsOperationContext,
-            file.path.mount,
-            file.inode,
             offset,
             length,
             mode,

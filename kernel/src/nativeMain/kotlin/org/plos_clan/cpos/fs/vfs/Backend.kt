@@ -169,6 +169,12 @@ interface InodeBackend {
         else VfsResult.Err(VfsError.PERMISSION_DENIED)
     }
 
+    fun access(
+        caller: VfsOperationContext,
+        inode: Inode,
+        requested: AccessPermissions,
+    ): VfsResult<Unit> = checkAccess(caller, inode, requested)
+
     fun pageCacheIdentity(inode: Inode): Any = inode
 
     fun getExtendedAttribute(
@@ -304,6 +310,8 @@ data class NodeCreation(
     val mode: FileMode,
     val uid: UInt = 0u,
     val gid: UInt = 0u,
+    val requestedMode: FileMode = mode,
+    val creationMask: UInt = 0u,
 )
 
 enum class RemoveMode {
@@ -332,6 +340,16 @@ interface DirectoryBackend : InodeBackend {
     ): VfsResult<Inode> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
 
+    fun createEntry(
+        caller: VfsOperationContext,
+        directory: Inode,
+        name: VfsName,
+        node: NodeCreation,
+    ): VfsResult<DirectoryLookup> = when (val result = create(caller, directory, name, node)) {
+        is VfsResult.Ok -> VfsResult.Ok(DirectoryLookup(result.value))
+        is VfsResult.Err -> result
+    }
+
     fun link(
         caller: VfsOperationContext,
         directory: Inode,
@@ -339,6 +357,16 @@ interface DirectoryBackend : InodeBackend {
         target: Inode,
     ): VfsResult<Unit> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
+
+    fun linkEntry(
+        caller: VfsOperationContext,
+        directory: Inode,
+        name: VfsName,
+        target: Inode,
+    ): VfsResult<DirectoryLookup> = when (val result = link(caller, directory, name, target)) {
+        is VfsResult.Ok -> VfsResult.Ok(DirectoryLookup(target))
+        is VfsResult.Err -> result
+    }
 
     fun rename(
         caller: VfsOperationContext,
@@ -362,12 +390,31 @@ interface DirectoryBackend : InodeBackend {
         VfsResult.Err(VfsError.NOT_SUPPORTED)
 }
 
+data class AtomicOpenResult(
+    val entry: DirectoryLookup,
+    val backend: OpenFileBackend,
+) {
+    init {
+        require(entry.inode != null)
+    }
+}
+
+interface AtomicCreateDirectoryBackend : DirectoryBackend {
+    fun createAndOpen(
+        caller: VfsOperationContext,
+        directory: Inode,
+        name: VfsName,
+        node: NodeCreation,
+        options: OpenOptions,
+    ): VfsResult<AtomicOpenResult>?
+}
+
 class FilePosition(var value: Long = 0)
 
 data class DirectoryEntry(
     val name: VfsName,
     val inodeId: InodeId,
-    val type: InodeType,
+    val type: InodeType?,
 )
 
 interface FileContent {
@@ -382,6 +429,9 @@ interface FileContent {
 }
 
 interface OpenFileBackend {
+    val seekable: Boolean
+        get() = true
+
     fun read(
         caller: VfsOperationContext,
         inode: Inode,
@@ -435,6 +485,16 @@ interface OpenFileBackend {
     ): VfsResult<Unit> = inode.backend.sync(caller, inode, dataOnly)
 
     fun release() {}
+}
+
+interface AllocatingOpenFileBackend : OpenFileBackend {
+    fun allocate(
+        caller: VfsOperationContext,
+        inode: Inode,
+        offset: ULong,
+        length: ULong,
+        mode: FileAllocationMode,
+    ): VfsResult<Unit>
 }
 
 internal interface CachedFileBackend : OpenFileBackend, PageCacheSource {

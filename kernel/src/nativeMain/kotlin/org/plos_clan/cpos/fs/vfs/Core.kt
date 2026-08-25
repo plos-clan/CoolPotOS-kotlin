@@ -185,6 +185,8 @@ class ExtendedAttributeName private constructor(private val bytes: ByteArray) {
     val size: Int
         get() = bytes.size
 
+    fun copyBytes(): ByteArray = bytes.copyOf()
+
     internal fun copyInto(destination: ByteArray, offset: Int) {
         bytes.copyInto(destination, offset)
     }
@@ -261,6 +263,8 @@ data class OpenOptions(
     val access: AccessMode = AccessMode.READ,
     val create: CreateDisposition = CreateDisposition.OPEN_EXISTING,
     val createMode: FileMode = FileMode(0x1A4u),
+    val requestedCreateMode: FileMode = createMode,
+    val creationMask: UInt = 0u,
     val truncate: Boolean = false,
     val append: Boolean = false,
     val directoryOnly: Boolean = false,

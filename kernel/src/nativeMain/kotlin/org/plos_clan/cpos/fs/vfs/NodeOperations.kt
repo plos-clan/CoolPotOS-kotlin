@@ -3,7 +3,13 @@ package org.plos_clan.cpos.fs.vfs
 internal data class OpenedPath(
     val path: VfsPath,
     val created: Boolean,
-)
+    val backend: OpenFileBackend? = null,
+) {
+    fun reject(error: VfsError): VfsResult<Nothing> {
+        backend?.release()
+        return VfsResult.Err(error)
+    }
+}
 
 internal class VfsNodeOperations(
     private val paths: VfsPathResolver,
@@ -200,11 +206,14 @@ internal class VfsNodeOperations(
             is VfsResult.Ok -> Unit
             is VfsResult.Err -> return access
         }
-        val result = backend.link(caller, parentInode, parent.name, sourceInode)
+        val result = backend.linkEntry(caller, parentInode, parent.name, sourceInode)
         if (result is VfsResult.Ok) {
-            parent.path.dentry.cacheChild(parent.name, DirectoryLookup(sourceInode))
+            parent.path.dentry.cacheChild(parent.name, result.value)
         }
-        return result
+        return when (result) {
+            is VfsResult.Ok -> VfsResult.Ok(Unit)
+            is VfsResult.Err -> result
+        }
     }
 
     fun rename(
@@ -410,8 +419,33 @@ internal class VfsNodeOperations(
             mode = options.createMode,
             uid = caller.uid,
             gid = caller.gid,
+            requestedMode = options.requestedCreateMode,
+            creationMask = options.creationMask,
         )
-        val inode = when (val created = backend.create(caller, parentInode, parent.name, node)) {
+        val atomic = (backend as? AtomicCreateDirectoryBackend)?.createAndOpen(
+            caller,
+            parentInode,
+            parent.name,
+            node,
+            options,
+        )
+        if (atomic != null) {
+            return when (atomic) {
+                is VfsResult.Ok -> {
+                    val dentry = parent.path.dentry.cacheChild(parent.name, atomic.value.entry)
+                    VfsResult.Ok(
+                        OpenedPath(
+                            VfsPath(parent.path.mount, dentry),
+                            created = true,
+                            backend = atomic.value.backend,
+                        ),
+                    )
+                }
+                is VfsResult.Err -> atomic
+            }
+        }
+
+        val lookup = when (val created = backend.createEntry(caller, parentInode, parent.name, node)) {
             is VfsResult.Ok -> created.value
             is VfsResult.Err -> {
                 if (created.error == VfsError.ALREADY_EXISTS &&
@@ -429,7 +463,7 @@ internal class VfsNodeOperations(
                 return created
             }
         }
-        val dentry = parent.path.dentry.cacheChild(parent.name, DirectoryLookup(inode))
+        val dentry = parent.path.dentry.cacheChild(parent.name, lookup)
         return VfsResult.Ok(OpenedPath(VfsPath(parent.path.mount, dentry), created = true))
     }
 
@@ -469,12 +503,12 @@ internal class VfsNodeOperations(
             is VfsResult.Ok -> Unit
             is VfsResult.Err -> return access
         }
-        val inode = when (val result = backend.create(caller, parent, name, node)) {
+        val lookup = when (val result = backend.createEntry(caller, parent, name, node)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
         return VfsResult.Ok(
-            VfsPath(directory.mount, directory.dentry.cacheChild(name, DirectoryLookup(inode))),
+            VfsPath(directory.mount, directory.dentry.cacheChild(name, lookup)),
         )
     }
 }

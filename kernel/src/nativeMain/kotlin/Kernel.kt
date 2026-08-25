@@ -12,6 +12,7 @@ import org.plos_clan.cpos.drivers.char.tty.TtyManager
 import org.plos_clan.cpos.drivers.usb.Usb
 import org.plos_clan.cpos.fault.ErrorHandler
 import org.plos_clan.cpos.fs.FileSystemManager
+import org.plos_clan.cpos.fs.fuse.FuseDevice
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.page.KernelPageDirectory
@@ -76,6 +77,9 @@ fun kernelMain() {
         return
     }
     if (!MemoryDevice.initialize()) {
+        return
+    }
+    if (!FuseDevice.initialize()) {
         return
     }
     if (!KernelCoroutines.initialize()) {

@@ -10,7 +10,9 @@ packages=(
     cachyos-keyring
     cachyos-mirrorlist
     cachyos-v3-mirrorlist
+    fuse2fs
     fuse3
+    fuse-overlayfs
     util-linux
     pciutils
 )

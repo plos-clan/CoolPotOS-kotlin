@@ -1,4 +1,8 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package org.plos_clan.cpos.fs.vfs
+
+import kotlin.concurrent.atomics.AtomicBoolean
 
 sealed interface CacheValidity {
     fun isValid(nowNanoseconds: ULong): Boolean
@@ -14,6 +18,15 @@ sealed interface CacheValidity {
     data class Until(val deadlineNanoseconds: ULong) : CacheValidity {
         override fun isValid(nowNanoseconds: ULong): Boolean =
             nowNanoseconds < deadlineNanoseconds
+    }
+
+    class Invalidatable(private val validity: CacheValidity) : CacheValidity {
+        private val valid = AtomicBoolean(true)
+
+        override fun isValid(nowNanoseconds: ULong): Boolean =
+            valid.load() && validity.isValid(nowNanoseconds)
+
+        fun invalidate() = valid.store(false)
     }
 
     companion object {

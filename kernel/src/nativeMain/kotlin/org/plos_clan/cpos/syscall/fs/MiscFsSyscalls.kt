@@ -31,6 +31,9 @@ internal fun ioctl(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
+internal fun nameToHandleAt(regs: PtraceRegisters, process: Process): Long =
+    errno(Errno.EOPNOTSUPP)
+
 internal fun chdir(regs: PtraceRegisters, process: Process): Long {
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EFAULT)
