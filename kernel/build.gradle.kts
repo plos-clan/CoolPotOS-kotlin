@@ -258,7 +258,7 @@ private class KernelConfig(
         "-z", "max-page-size=0x1000", "--gc-sections",
         "-u", "sched_yield", "-u", "frg_panic",
         "-T", paths.linkerScript.absolutePath,
-    )
+    ) + if (debug) emptyList() else listOf("--strip-all")
     val linker = tools.linker
 }
 
