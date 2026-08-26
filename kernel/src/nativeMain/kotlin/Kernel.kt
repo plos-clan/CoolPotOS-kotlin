@@ -9,6 +9,7 @@ import org.plos_clan.cpos.drivers.MemoryDevice
 import org.plos_clan.cpos.drivers.RealtimeClock
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.acpi.Acpi
+import org.plos_clan.cpos.drivers.char.SerialConsole
 import org.plos_clan.cpos.drivers.char.tty.TtyManager
 import org.plos_clan.cpos.drivers.usb.Usb
 import org.plos_clan.cpos.fault.ErrorHandler
@@ -76,6 +77,9 @@ fun kernelMain() {
     }
     FrameBuffer.initialize()
     if (!KernelCoroutines.initialize()) {
+        return
+    }
+    if (!SerialConsole.install()) {
         return
     }
     if (!TtyManager.initialize()) {

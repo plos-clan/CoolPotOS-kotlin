@@ -19,11 +19,12 @@ import org.plos_clan.cpos.utils.PollEvents
 import org.plos_clan.cpos.utils.TermiosConstants
 
 internal class TerminalInput(
-    private val echo: (ByteArray, Int, Int) -> Unit,
+    private val echo: (TtySession, ByteArray, Int, Int) -> Unit,
 ) {
     private val input = ByteRingBuffer(INPUT_BUFFER_SIZE)
     private val canonicalData = ByteArray(INPUT_BUFFER_SIZE)
     private val canonicalRecords = IntArray(MAX_CANONICAL_RECORDS)
+    private val echoByte = ByteArray(1)
     private var canonicalCount = 0
     private var canonicalRecordHead = 0
     private var canonicalRecordTail = 0
@@ -32,12 +33,17 @@ internal class TerminalInput(
     val availableBytes: Int
         get() = input.available
 
-    fun receive(session: TtySession, data: CharArray) {
-        if (data.isEmpty()) return
+    fun receive(
+        session: TtySession,
+        data: ByteArray,
+        offset: Int,
+        count: Int,
+    ) {
+        if (count == 0 || offset < 0 || count < 0 || offset > data.size - count) return
         var generatedSignals = 0uL
         input.transaction {
-            for (character in data) {
-                val value = session.translateInput(character.code and 0xff) ?: continue
+            for (index in offset until offset + count) {
+                val value = session.translateInput(data[index].toUByte().toInt()) ?: continue
                 val signal = session.inputSignal(value)
                 if (signal == null) {
                     receiveInput(session, value)
@@ -137,7 +143,8 @@ internal class TerminalInput(
             if (session.hasLocalFlag(TermiosConstants.ECHO) &&
                 session.hasLocalFlag(TermiosConstants.ECHOK)
             ) {
-                echo(ASCII_BYTES, '\n'.code, 1)
+                echoByte[0] = '\n'.code.toByte()
+                echo(session, echoByte, 0, 1)
             }
             return
         }
@@ -303,7 +310,8 @@ internal class TerminalInput(
         if (session.hasLocalFlag(TermiosConstants.ECHO) ||
             value == '\n'.code && session.hasLocalFlag(TermiosConstants.ECHONL)
         ) {
-            echo(ASCII_BYTES, value and 0x7F, 1)
+            echoByte[0] = value.toByte()
+            echo(session, echoByte, 0, 1)
         }
     }
 
@@ -311,7 +319,7 @@ internal class TerminalInput(
         if (session.hasLocalFlag(TermiosConstants.ECHO) &&
             session.hasLocalFlag(TermiosConstants.ECHOE)
         ) {
-            echo(ERASE_BYTES, 0, ERASE_BYTES.size)
+            echo(session, ERASE_BYTES, 0, ERASE_BYTES.size)
         }
     }
 
@@ -367,7 +375,6 @@ internal class TerminalInput(
         const val MAX_CANONICAL_RECORDS = 1024
         const val NANOSECONDS_PER_DECISECOND = 100_000_000uL
 
-        val ASCII_BYTES = ByteArray(128) { it.toByte() }
         val ERASE_BYTES = byteArrayOf(
             '\b'.code.toByte(),
             ' '.code.toByte(),

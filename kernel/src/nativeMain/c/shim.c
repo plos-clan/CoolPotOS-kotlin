@@ -84,12 +84,6 @@ void wrmsr(uint32_t msr, uint64_t value) {
         "d"((uint32_t)(value >> 32)), "c"(msr) : "memory");
 }
 
-enum {
-    serial_com1 = 0x3F8,
-    serial_line_status = 5,
-    serial_tx_empty = 0x20
-};
-
 uint8_t io_in8(uint16_t port) {
     uint8_t value;
     __asm__ volatile("inb %1, %0" : "=a"(value) : "Nd"(port) : "memory");
@@ -197,22 +191,6 @@ static __attribute__((naked, noreturn)) void kernel_clone_thread_entry(void) {
 uint64_t get_kernel_clone_thread_entry_address(void) { return (uintptr_t)&kernel_clone_thread_entry; }
 int __pthread_key_create(uint32_t *key, void (*destructor)(void *)) { return pthread_key_create(key, destructor); }
 
-// 波特率 38400
-static void serial_init(void) {
-    io_out8(serial_com1 + 1, 0x00);
-    io_out8(serial_com1 + 3, 0x80);
-    io_out8(serial_com1 + 0, 0x03);
-    io_out8(serial_com1 + 1, 0x00);
-    io_out8(serial_com1 + 3, 0x03);
-    io_out8(serial_com1 + 2, 0xC7);
-    io_out8(serial_com1 + 4, 0x0B);
-}
-
-static void serial_write_byte(uint8_t value) {
-    while (!(io_in8(serial_com1 + serial_line_status) & serial_tx_empty)) {}
-    io_out8(serial_com1, value);
-}
-
 void asm_pause(void) { __asm__ volatile("pause" : : : "memory"); }
 
 uint64_t irq_save(void) {
@@ -223,21 +201,6 @@ uint64_t irq_save(void) {
 
 void irq_restore(uint64_t flags) {
     if (flags & (1u << 9)) __asm__ volatile("sti" : : : "memory");
-}
-
-void serial_print(const char *buffer, size_t size) {
-    static bool initialized;
-
-    if (!buffer) return;
-    if (!initialized) {
-        serial_init();
-        initialized = true;
-    }
-
-    for (size_t i = 0; i < size; i++) {
-        if (buffer[i] == '\n') serial_write_byte('\r');
-        serial_write_byte((uint8_t)buffer[i]);
-    }
 }
 
 void setup_syscall_cpu(uint64_t lapic_id, uint8_t is_bsp) {

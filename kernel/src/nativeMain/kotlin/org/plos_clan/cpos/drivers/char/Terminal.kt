@@ -14,58 +14,66 @@ import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Errno
+import org.plos_clan.cpos.utils.KernelMutex
 import org.plos_clan.cpos.utils.LittleEndianBuffer
+import org.plos_clan.cpos.utils.TermiosConstants
 
-class TerminalSession private constructor(
-    private val terminal: NativeTerminal,
-) : TtySessionBackend {
-    private val input = TerminalInput(terminal::process)
+abstract class TerminalBackend : TtySessionBackend {
+    private val input = TerminalInput(::echo)
+    private val outputLock = KernelMutex()
+    private val transferBuffer = ByteArray(OUTPUT_CHUNK_SIZE)
+    private val processedOutput = ByteArray(OUTPUT_CHUNK_SIZE * 2)
+    private var outputColumn = 0
 
-    override fun keyboardInput(session: TtySession, data: CharArray) =
-        input.receive(session, data)
+    final override fun receiveInput(
+        session: TtySession,
+        data: ByteArray,
+        offset: Int,
+        count: Int,
+    ) = input.receive(session, data, offset, count)
 
-    override fun write(
+    final override fun write(
         session: TtySession,
         buffer: PreparedBufferSource,
         offset: Int,
-        count: ULong
+        count: ULong,
     ): Long {
-        val length = count.toInt()
-        val bytes = ByteArray(length)
-        val copied = buffer.copyTo(offset, bytes, 0, length)
-        if (copied == 0 && length != 0) return -Errno.EFAULT.toLong()
-        terminal.process(bytes, 0, copied)
-        return copied.toLong()
+        if (offset < 0 || count > Int.MAX_VALUE.toULong()) return -Errno.EINVAL.toLong()
+        val requested = count.toInt()
+        return outputLock.withLock {
+            var transferred = 0
+            while (transferred < requested) {
+                val chunkSize = minOf(requested - transferred, transferBuffer.size)
+                val copied = buffer.copyTo(offset + transferred, transferBuffer, 0, chunkSize)
+                if (copied == 0) {
+                    return@withLock if (transferred == 0) {
+                        -Errno.EFAULT.toLong()
+                    } else {
+                        transferred.toLong()
+                    }
+                }
+                processOutput(session, transferBuffer, 0, copied)
+                transferred += copied
+                if (copied < chunkSize) break
+            }
+            transferred.toLong()
+        }
     }
 
-    override fun read(
+    final override fun read(
         session: TtySession,
         buffer: PreparedBufferDestination,
         offset: Int,
         count: ULong,
     ): Long = input.read(session, buffer, offset, count)
 
-    override fun ioctl(
+    final override fun ioctl(
         session: TtySession,
         command: Int,
-        args: UserMemory
+        args: UserMemory,
     ): Int = when (command) {
-        IoctlConstants.TIOCGWINSZ -> {
-            val dimensions = terminal.dimensions()
-
-            val size = WinSize(
-                wsRow = minOf(dimensions.rows, UShort.MAX_VALUE.toULong()).toShort(),
-                wsCol = minOf(dimensions.columns, UShort.MAX_VALUE.toULong()).toShort(),
-                wsXpixel = 0,
-                wsYpixel = 0,
-            )
-
-            if (args.copyToUser(size.toNativeBytes())) {
-                Errno.EOK
-            } else {
-                -Errno.EFAULT
-            }
-        }
+        IoctlConstants.TIOCGWINSZ ->
+            if (args.copyToUser(windowSize().toNativeBytes())) Errno.EOK else -Errno.EFAULT
 
         IoctlConstants.TIOCSCTTY ->
             if (session.attachCurrentProcess()) Errno.EOK else -Errno.ENOTTY
@@ -94,27 +102,17 @@ class TerminalSession private constructor(
             if (session.detachCurrentProcess()) Errno.EOK else -Errno.ENOTTY
 
         IoctlConstants.TCGETS ->
-            if (args.copyToUser(session.termios.toNativeBytes())) {
-                Errno.EOK
-            } else {
-                -Errno.EFAULT
-            }
+            if (args.copyToUser(session.termios.toNativeBytes())) Errno.EOK else -Errno.EFAULT
 
         IoctlConstants.TCGETS2.toInt() ->
-            if (args.copyToUser(session.termios2.toNativeBytes())) {
-                Errno.EOK
-            } else {
-                -Errno.EFAULT
-            }
+            if (args.copyToUser(session.termios2.toNativeBytes())) Errno.EOK else -Errno.EFAULT
 
         IoctlConstants.TCSETS,
         IoctlConstants.TCSETSW -> updateTermiosFromUser(session, args)
 
         IoctlConstants.TCSETSF -> {
             val result = updateTermiosFromUser(session, args)
-            if (result == Errno.EOK) {
-                input.flush()
-            }
+            if (result == Errno.EOK) input.flush()
             result
         }
 
@@ -123,9 +121,7 @@ class TerminalSession private constructor(
 
         IoctlConstants.TCSETSF2 -> {
             val result = updateTermios2FromUser(session, args)
-            if (result == Errno.EOK) {
-                input.flush()
-            }
+            if (result == Errno.EOK) input.flush()
             result
         }
 
@@ -147,20 +143,98 @@ class TerminalSession private constructor(
         }
     }
 
-    override fun poll(session: TtySession, events: Int): Int =
+    final override fun poll(session: TtySession, events: Int): Int =
         input.poll(session, events)
 
-    override fun flushIfDirty() = terminal.flushIfDirty()
+    final override fun flushIfDirty() = outputLock.withLock(::flushOutput)
 
-    override fun destroy() = terminal.destroy()
+    final override fun destroy() = outputLock.withLock(::closeOutput)
+
+    protected abstract fun writeOutput(data: ByteArray, offset: Int, count: Int)
+
+    protected abstract fun windowSize(): WinSize
+
+    protected open fun flushOutput() {}
+
+    protected open fun closeOutput() {}
+
+    private fun echo(session: TtySession, data: ByteArray, offset: Int, count: Int) =
+        outputLock.withLock { processOutput(session, data, offset, count) }
+
+    private fun processOutput(
+        session: TtySession,
+        data: ByteArray,
+        offset: Int,
+        count: Int,
+    ) {
+        val flags = session.termios.cOflag
+        if (flags and TermiosConstants.OPOST == 0) {
+            writeOutput(data, offset, count)
+            return
+        }
+
+        var outputCount = 0
+        for (index in offset until offset + count) {
+            val original = data[index].toUByte().toInt()
+            when (original) {
+                '\n'.code -> {
+                    if (flags and TermiosConstants.ONLCR != 0) {
+                        processedOutput[outputCount++] = '\r'.code.toByte()
+                        outputColumn = 0
+                    }
+                    processedOutput[outputCount++] = original.toByte()
+                    if (flags and (TermiosConstants.ONLCR or TermiosConstants.ONLRET) != 0) {
+                        outputColumn = 0
+                    }
+                }
+
+                '\r'.code -> {
+                    if (flags and TermiosConstants.ONOCR != 0 && outputColumn == 0) continue
+                    val value = if (flags and TermiosConstants.OCRNL != 0) '\n'.code else original
+                    processedOutput[outputCount++] = value.toByte()
+                    if (value == '\r'.code ||
+                        value == '\n'.code && flags and TermiosConstants.ONLRET != 0
+                    ) {
+                        outputColumn = 0
+                    }
+                }
+
+                '\t'.code -> {
+                    processedOutput[outputCount++] = original.toByte()
+                    outputColumn = (outputColumn + TAB_WIDTH) and -TAB_WIDTH
+                }
+
+                '\b'.code -> {
+                    processedOutput[outputCount++] = original.toByte()
+                    if (outputColumn != 0) outputColumn--
+                }
+
+                else -> {
+                    val value = if (flags and TermiosConstants.OLCUC != 0 &&
+                        original in 'a'.code..'z'.code
+                    ) {
+                        original - ('a'.code - 'A'.code)
+                    } else {
+                        original
+                    }
+                    processedOutput[outputCount++] = value.toByte()
+                    if (value >= ' '.code && value != 0x7F) outputColumn++
+                }
+            }
+        }
+        if (outputCount != 0) writeOutput(processedOutput, 0, outputCount)
+    }
 
     private fun updateTermiosFromUser(session: TtySession, args: UserMemory): Int {
         val data = args.copyFromUser(Termios.NATIVE_SIZE)
-        return if (data != null && session.termios.updateFromNativeBytes(data)) {
-            Errno.EOK
-        } else {
-            -Errno.EFAULT
-        }
+        if (data == null || !session.termios.updateFromNativeBytes(data)) return -Errno.EFAULT
+        session.termios2.cIflag = session.termios.cIflag
+        session.termios2.cOflag = session.termios.cOflag
+        session.termios2.cCflag = session.termios.cCflag
+        session.termios2.cLflag = session.termios.cLflag
+        session.termios2.cLine = session.termios.cLine
+        session.termios2.cCc = session.termios.cCc.copyOf()
+        return Errno.EOK
     }
 
     private fun updateTermios2FromUser(session: TtySession, args: UserMemory): Int {
@@ -188,10 +262,36 @@ class TerminalSession private constructor(
         return if (args.copyToUser(data)) Errno.EOK else -Errno.EFAULT
     }
 
+    private companion object {
+        const val OUTPUT_CHUNK_SIZE = 4096
+        const val TAB_WIDTH = 8
+    }
+}
+
+internal class FrameBufferTerminal private constructor(
+    private val terminal: NativeTerminal,
+) : TerminalBackend() {
+    override fun writeOutput(data: ByteArray, offset: Int, count: Int) =
+        terminal.process(data, offset, count)
+
+    override fun windowSize(): WinSize {
+        val dimensions = terminal.dimensions()
+        return WinSize(
+            wsRow = minOf(dimensions.rows, UShort.MAX_VALUE.toULong()).toShort(),
+            wsCol = minOf(dimensions.columns, UShort.MAX_VALUE.toULong()).toShort(),
+            wsXpixel = 0,
+            wsYpixel = 0,
+        )
+    }
+
+    override fun flushOutput() = terminal.flushIfDirty()
+
+    override fun closeOutput() = terminal.destroy()
+
     companion object {
-        internal fun create(
+        fun create(
             device: TtyGraphicsDevice,
             invalidate: () -> Unit,
-        ): TerminalSession? = NativeTerminal.create(device, invalidate)?.let(::TerminalSession)
+        ): FrameBufferTerminal? = NativeTerminal.create(device, invalidate)?.let(::FrameBufferTerminal)
     }
 }

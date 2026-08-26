@@ -4,7 +4,23 @@ import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 
-data class TtyDevice(val name: String, val device: TtyPhysicalDevice, val type: TtyDeviceType)
+internal abstract class TtyDriver(
+    val consoleName: String,
+    val terminalType: String,
+    val bufferedOutput: Boolean,
+) {
+    abstract fun createEndpoints(invalidate: () -> Unit): List<TtyEndpoint>?
+}
+
+internal data class TtyEndpoint(
+    val name: String,
+    val major: UInt,
+    val minor: UInt,
+    val backend: TtySessionBackend,
+    val virtualTerminalIndex: Int? = null,
+    val inputSpeed: Int = 0,
+    val outputSpeed: Int = inputSpeed,
+)
 
 data class ProcessTerminal(
     val deviceNumber: ULong,
@@ -12,18 +28,12 @@ data class ProcessTerminal(
 )
 
 interface TtySessionBackend {
-    fun keyboardInput(session: TtySession, data: CharArray)
+    fun start(session: TtySession): Boolean = true
+    fun receiveInput(session: TtySession, data: ByteArray, offset: Int, count: Int)
     fun write(session: TtySession, buffer: PreparedBufferSource, offset: Int, count: ULong): Long
     fun read(session: TtySession, buffer: PreparedBufferDestination, offset: Int, count: ULong): Long
     fun ioctl(session: TtySession, command: Int, args: UserMemory): Int
     fun poll(session: TtySession, events: Int): Int
-    fun flushIfDirty()
-    fun destroy()
-}
-
-interface TtyPhysicalDevice {
-    fun write(session: TtySession, buffer: PreparedBufferSource, offset: Int, count: ULong): Long
-    fun read(session: TtySession, buffer: PreparedBufferDestination, offset: Int, count: ULong): Long
-    fun flush(session: TtySession)
-    fun ioctl(session: TtySession, command: Int, args: UserMemory): Int
+    fun flushIfDirty() {}
+    fun destroy() {}
 }

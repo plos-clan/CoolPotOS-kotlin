@@ -59,6 +59,18 @@ Release mode is the default; the commands below specify it explicitly.
 
 Use `./gradlew run -PdebugMode=true` to start QEMU paused with its GDB server enabled.
 
+The default console is the framebuffer-backed `fb0` in QEMU's GTK window.
+The `console` value is passed verbatim to Limine; QEMU's display frontend is an
+independent setting. For example, a headless COM1 console can be started with:
+
+```shell
+./gradlew run -Pconsole=ttyS0,115200n8 -PqemuDisplay=none
+CONSOLE=ttyS0,115200n8 QEMU_DISPLAY=none ./gradlew run
+```
+
+QEMU's serial port is always connected to the current terminal. Its stdio
+multiplexer uses `Ctrl-A X` to exit and `Ctrl-A H` to show shortcut help.
+
 You need to install:
 - Kotlin/Native (`konanc`, `cinterop`)
 - Clang (`clang`, `clang++`)
@@ -77,12 +89,14 @@ value for a build.
 | Environment variable                              | Purpose                                |
 |---------------------------------------------------|----------------------------------------|
 | `DEBUG_MODE=false`                                | Build a debug kernel and wait for gdb. |
+| `CONSOLE=fb0`                                     | Kernel console passed to Limine.       |
 | `CROSS_CC=clang`                                  | C compiler executable.                 |
 | `CROSS_CXX=clang++`                               | C++ compiler executable.               |
 | `LINKER=ld.lld`                                   | Kernel linker executable.              |
 | `OBJCOPY=llvm-objcopy`                            | Object-copy executable.                |
 | `XORRISO=xorriso`                                 | ISO creation executable.               |
 | `QEMU=qemu-system-x86_64`                         | QEMU executable.                       |
+| `QEMU_DISPLAY=gtk`                                | QEMU display frontend.                 |
 | `KONAN_TOOLROOT=~/.konan/dependencies/xxx`        | Kotlin/Native GNU toolchain root.      |
 | `MLIBC_PREFIX=kernel/build/mlibc-x86_64/prefix`   | mlibc installation prefix.             |
 | `USERLAND_IMAGE=docker.io/cachyos/cachyos:latest` | OCI image used to build the rootfs.    |

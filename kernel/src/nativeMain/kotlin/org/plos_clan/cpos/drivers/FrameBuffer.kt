@@ -9,95 +9,78 @@ import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.get
 import kotlinx.cinterop.pointed
-import org.plos_clan.cpos.drivers.char.tty.TtyDevice
-import org.plos_clan.cpos.drivers.char.tty.TtyDeviceType
+import org.plos_clan.cpos.drivers.char.FrameBufferTerminal
+import org.plos_clan.cpos.drivers.char.tty.TtyDriver
+import org.plos_clan.cpos.drivers.char.tty.TtyEndpoint
 import org.plos_clan.cpos.drivers.char.tty.TtyManager
-import org.plos_clan.cpos.drivers.char.tty.TtyPhysicalDevice
-import org.plos_clan.cpos.drivers.char.tty.TtySession
-import org.plos_clan.cpos.mem.PreparedBufferDestination
-import org.plos_clan.cpos.mem.PreparedBufferSource
-import org.plos_clan.cpos.mem.UserMemory
 
 class TtyGraphicsDevice(
     val address: CPointer<out CPointed>?,
     val width: ULong,
     val height: ULong,
     val pitch: ULong,
-    val bpp: UShort,
-    val memory_model: UByte,
-    val red_mask_size: UByte,
-    val red_mask_shift: UByte,
-    val green_mask_size: UByte,
-    val green_mask_shift: UByte,
-    val blue_mask_size: UByte,
-    val blue_mask_shift: UByte
-) : TtyPhysicalDevice {
-    override fun write(
-        session: TtySession,
-        buffer: PreparedBufferSource,
-        offset: Int,
-        count: ULong
-    ): Long {
-        return 0
+    val redMaskSize: UByte,
+    val redMaskShift: UByte,
+    val greenMaskSize: UByte,
+    val greenMaskShift: UByte,
+    val blueMaskSize: UByte,
+    val blueMaskShift: UByte,
+)
+
+private class FrameBufferTtyDriver(
+    consoleName: String,
+    private val device: TtyGraphicsDevice,
+) : TtyDriver(consoleName, terminalType = "linux", bufferedOutput = true) {
+    override fun createEndpoints(invalidate: () -> Unit): List<TtyEndpoint>? {
+        val endpoints = ArrayList<TtyEndpoint>(VIRTUAL_TERMINAL_COUNT)
+        repeat(VIRTUAL_TERMINAL_COUNT) { index ->
+            val backend = FrameBufferTerminal.create(device, invalidate) ?: run {
+                endpoints.asReversed().forEach { it.backend.destroy() }
+                return null
+            }
+            endpoints += TtyEndpoint(
+                name = "tty$index",
+                major = LinuxDeviceMajor.TTY.number,
+                minor = index.toUInt(),
+                backend = backend,
+                virtualTerminalIndex = index,
+            )
+        }
+        return endpoints
     }
 
-    override fun read(
-        session: TtySession,
-        buffer: PreparedBufferDestination,
-        offset: Int,
-        count: ULong
-    ): Long {
-        return 0
+    private companion object {
+        const val VIRTUAL_TERMINAL_COUNT = 7
     }
-
-    override fun flush(session: TtySession) {}
-
-    override fun ioctl(
-        session: TtySession,
-        command: Int,
-        args: UserMemory
-    ): Int {
-        return 0
-    }
-
 }
 
 object FrameBuffer {
-
-    private fun installTtyDevice(index: Long,entry: limine_framebuffer) {
-        val physicalDevice = TtyGraphicsDevice(
-            entry.address,
-            entry.width,
-            entry.height,
-            entry.pitch,
-            entry.bpp,
-            entry.memory_model,
-            entry.red_mask_size,
-            entry.red_mask_shift,
-            entry.green_mask_size,
-            entry.green_mask_shift,
-            entry.blue_mask_size,
-            entry.blue_mask_shift
-        )
-        TtyManager.installTtyDevice(
-            TtyDevice(
-                "fb$index",
-                physicalDevice,
-                TtyDeviceType.TTY_GRAPHY_DEVICE
-            )
-        )
-    }
-
     fun initialize() {
-        val framebuffer = framebuffer_request.response?.pointed ?: run {
-            println("error: cannot find framebuffer.")
+        val response = framebuffer_request.response?.pointed
+        val framebuffers = response?.framebuffers ?: run {
+            println("Framebuffer: no display was provided")
             return
         }
 
-        val count = framebuffer.framebuffer_count
-        for (index in 0..count.toLong()) {
-            val entry = (framebuffer.framebuffers?.get(index) ?: continue).pointed
-            installTtyDevice(index,entry)
+        for (index in 0L until response.framebuffer_count.toLong()) {
+            val entry = framebuffers[index]?.pointed ?: continue
+            val consoleName = "fb$index"
+            if (!TtyManager.install(FrameBufferTtyDriver(consoleName, entry.toGraphicsDevice()))) {
+                println("Framebuffer: duplicate console $consoleName")
+            }
         }
     }
+
+    private fun limine_framebuffer.toGraphicsDevice() = TtyGraphicsDevice(
+        address = address,
+        width = width,
+        height = height,
+        pitch = pitch,
+        redMaskSize = red_mask_size,
+        redMaskShift = red_mask_shift,
+        greenMaskSize = green_mask_size,
+        greenMaskShift = green_mask_shift,
+        blueMaskSize = blue_mask_size,
+        blueMaskShift = blue_mask_shift,
+    )
 }

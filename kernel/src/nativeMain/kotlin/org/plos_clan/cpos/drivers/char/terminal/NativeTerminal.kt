@@ -96,12 +96,12 @@ internal class NativeTerminal private constructor(
                 height = device.height
                 buffer = device.address?.reinterpret()
                 pitch = device.pitch
-                red_mask_size = device.red_mask_size
-                red_mask_shift = device.red_mask_shift
-                green_mask_size = device.green_mask_size
-                green_mask_shift = device.green_mask_shift
-                blue_mask_size = device.blue_mask_size
-                blue_mask_shift = device.blue_mask_shift
+                red_mask_size = device.redMaskSize
+                red_mask_shift = device.redMaskShift
+                green_mask_size = device.greenMaskSize
+                green_mask_shift = device.greenMaskShift
+                blue_mask_size = device.blueMaskSize
+                blue_mask_shift = device.blueMaskShift
             }
             val handle = bridge.terminal_new(
                 display = display.ptr,
@@ -119,7 +119,7 @@ internal class NativeTerminal private constructor(
                 }
             }
             bridge.terminal_set_custom_color_scheme(handle, palette.ptr)
-            bridge.terminal_set_crnl_mapping(handle, true)
+            bridge.terminal_set_crnl_mapping(handle, false)
             NativeTerminal(handle, invalidate)
         }
     }

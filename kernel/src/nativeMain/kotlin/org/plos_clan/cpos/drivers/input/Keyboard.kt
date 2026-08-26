@@ -136,7 +136,7 @@ internal enum class KeyCode(
     APPLICATION(127u, 0x65, 0x5D, extendedSet1 = true, repeatable = false),
     ;
 
-    val sequence: CharArray? = sequence?.toCharArray()
+    val sequence: ByteArray? = sequence?.encodeToByteArray()
 
     companion object {
         internal val stateSize = entries.maxOf { it.linuxCode.toInt() } + 1
@@ -458,14 +458,14 @@ private class ConsoleKeyboard : InputEventSink {
             if (action == KeyAction.PRESSED) capsLock = !capsLock
             return
         }
-        if (action == KeyAction.RELEASED || TtyManager.vts.isEmpty()) return
+        if (action == KeyAction.RELEASED) return
 
         val input = key.sequence ?: key.character(modifiers, capsLock)?.let { character ->
             ASCII_INPUT.getOrNull(character.code)
         } ?: return
-        val terminal = TtyManager.getActiveVT()
-        if (modifiers and KeyModifier.ALT.mask != 0) terminal.keyboardInput(ESCAPE_PREFIX)
-        terminal.keyboardInput(input)
+        val terminal = TtyManager.activeVirtualTerminal() ?: return
+        if (modifiers and KeyModifier.ALT.mask != 0) terminal.receiveInput(ESCAPE_PREFIX)
+        terminal.receiveInput(input)
     }
 
     private fun KeyCode.character(modifiers: Int, capsLock: Boolean): Char? {
@@ -480,7 +480,7 @@ private class ConsoleKeyboard : InputEventSink {
     }
 
     private companion object {
-        val ASCII_INPUT = Array(128) { charArrayOf(it.toChar()) }
-        val ESCAPE_PREFIX = charArrayOf('\u001B')
+        val ASCII_INPUT = Array(128) { byteArrayOf(it.toByte()) }
+        val ESCAPE_PREFIX = byteArrayOf(0x1B)
     }
 }

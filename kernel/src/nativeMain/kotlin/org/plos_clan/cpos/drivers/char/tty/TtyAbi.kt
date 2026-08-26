@@ -96,19 +96,6 @@ object IoctlConstants {
     const val TIOCGEXCL = 0x80045440
 }
 
-enum class TtyDeviceType {
-    TTY_SERIAL_DEVICE,
-    TTY_GRAPHY_DEVICE;
-
-    override fun toString(): String {
-        return if (this == TTY_GRAPHY_DEVICE) {
-            "Graphics"
-        } else {
-            "Serial"
-        }
-    }
-}
-
 data class WinSize(
     var wsRow: Short,
     var wsCol: Short,

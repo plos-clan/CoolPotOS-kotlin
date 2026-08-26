@@ -20,7 +20,7 @@ object Init {
             val result = FileSystemManager.vfs.open(
                 caller = process.vfsOperationContext,
                 context = context,
-                pathname = VfsPathname.fromString("/dev/tty0"),
+                pathname = VfsPathname.fromString("/dev/console"),
                 options = OpenOptions(access = AccessMode.READ_WRITE),
             )
         ) {
@@ -45,7 +45,7 @@ object Init {
             return false
         }
 
-        if (!TtyManager.attachProcessToVT(0, process)) {
+        if (!TtyManager.attachProcessToConsole(process)) {
             process.fdTable.close(caller, 0)
             process.fdTable.close(caller, 1)
             process.fdTable.close(caller, 2)
@@ -65,7 +65,7 @@ object Init {
             environment = listOf(
                 "PWD=/",
                 "HOME=/root",
-                "TERM=linux",
+                "TERM=${TtyManager.terminalType}",
                 "PATH=/bin:/sbin:/usr/bin:/usr/sbin",
             ),
         )) {

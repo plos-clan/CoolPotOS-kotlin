@@ -4,6 +4,7 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.util.zip.Deflater
 import java.util.zip.GZIPOutputStream
+import org.apache.tools.ant.filters.ReplaceTokens
 import org.gradle.api.Project
 
 @DisableCachingByDefault(because = "Downloads third-party artifacts")
@@ -306,6 +307,7 @@ private val SSDT_FILE_PATTERN = Regex("ssdt\\d+\\.dat", RegexOption.IGNORE_CASE)
 private class BuildConfig(private val project: Project) {
     val arch = "x86_64"
     val debug = settingBoolean("debugMode", "DEBUG_MODE", false)
+    val console = setting("console", "CONSOLE", "fb0")
     val paths = BuildPaths(project)
     val tools = ToolSettings(
         cc = setting("crossCc", "CROSS_CC", "clang"),
@@ -357,10 +359,16 @@ private class BuildConfig(private val project: Project) {
             "-no-reboot", "-smp", "4",
             "-device", "qemu-xhci,id=xhci",
             "-device", "usb-kbd,bus=xhci.0", "-device", "usb-mouse,bus=xhci.0",
+            "-display", setting("qemuDisplay", "QEMU_DISPLAY", "gtk"),
+            "-chardev", "stdio,id=console,mux=on,signal=off",
+            "-serial", "chardev:console",
             "-drive",
             "if=pflash,format=raw,readonly=on,file=${paths.assets.resolve("ovmf-code.fd")}",
         ) + qemuAcpiTableFlags(optionalSetting("qemuAcpiTableDir", "QEMU_ACPI_TABLE_DIR")) +
-            if (debug) listOf("-s", "-S") else emptyList(),
+            (if (debug) listOf("-s", "-S") else emptyList()) + listOf(
+                "-drive",
+                "file=${paths.isoImage.absolutePath},format=raw,snapshot=on",
+            ),
     )
 
     private fun setting(prop: String, env: String, default: String): String = listOfNotNull(
@@ -782,9 +790,15 @@ val stageIso = tasks.register<Sync>("stageIso") {
     group = "build"
     description = "Stages the compressed kernel, EROFS root filesystem, and Limine assets."
     dependsOn(compressKernel, prepareLimine, prepareUserland)
+    inputs.property("console", config.console)
 
     into(config.paths.iso)
-    from(config.paths.assets.resolve("limine.conf")) { into("limine") }
+    from(config.paths.assets.resolve("limine.conf")) {
+        into("limine")
+        filter<ReplaceTokens>(
+            "tokens" to mapOf("CONSOLE" to config.console),
+        )
+    }
     from(config.paths.limineUefi) { into("limine") }
     from(config.paths.limineEfi) { into("EFI/BOOT") }
     from(listOf(config.userland.archive, config.paths.kernelGzip)) { into("boot") }
@@ -821,11 +835,9 @@ tasks.register<Exec>("run") {
         addAll(listOf("taskset", "--cpu-list", config.qemu.cpuSet))
         add(config.qemu.executable)
         addAll(config.qemu.flags)
-        add("-serial")
-        add("stdio")
-        add(config.paths.isoImage.absolutePath)
     }
     commandLine(runCommand)
+    standardInput = System.`in`
 }
 
 tasks.named<Delete>("clean") {

@@ -20,7 +20,8 @@ class TtySession(
     var ttyMode: Int,
     var ttyKbMode: Int,
     val backend: TtySessionBackend,
-    val device: TtyDevice,
+    inputSpeed: Int = 0,
+    outputSpeed: Int = inputSpeed,
 ) : PositionlessDeviceBackend {
     val termios2 = Termios2(
         termios.cIflag,
@@ -29,8 +30,8 @@ class TtySession(
         termios.cLflag,
         termios.cLine,
         termios.cCc.copyOf(),
-        0,
-        0,
+        inputSpeed,
+        outputSpeed,
     )
     private val stateLock = IrqSpinLock()
     private var controllingSessionId = 0
@@ -65,7 +66,10 @@ class TtySession(
         size: ULong
     ): Long = backend.write(this, buffer, bufferOffset, size)
 
-    fun keyboardInput(data: CharArray) = backend.keyboardInput(this, data)
+    fun receiveInput(data: ByteArray, offset: Int = 0, count: Int = data.size - offset) {
+        if (offset < 0 || count < 0 || offset > data.size - count) return
+        backend.receiveInput(this, data, offset, count)
+    }
 
     internal fun flushIfDirty() = backend.flushIfDirty()
 
@@ -159,6 +163,6 @@ internal object ControllingTty : PositionlessDeviceBackend {
 
     private fun currentSession(): TtySession? {
         val sessionId = ProcessManager.currentProcess()?.sessionId?.takeIf { it != 0 } ?: return null
-        return TtyManager.vts.firstOrNull { it.sessionId == sessionId }
+        return TtyManager.sessions.firstOrNull { it.sessionId == sessionId }
     }
 }

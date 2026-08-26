@@ -176,8 +176,6 @@ void _start(void) {
     boot_uptr_t entry_stack[22] __attribute__((aligned(16)));
 
     if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision) ||
-        !framebuffer_request.response ||
-        framebuffer_request.response->framebuffer_count < 1 ||
         !setup_entry_stack(entry_stack)) {
         halt_forever();
     }
