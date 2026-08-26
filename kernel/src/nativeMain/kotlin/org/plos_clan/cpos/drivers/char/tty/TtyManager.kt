@@ -1,5 +1,8 @@
 package org.plos_clan.cpos.drivers.char.tty
 
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceManager
 import org.plos_clan.cpos.drivers.DeviceRegistration
@@ -14,6 +17,8 @@ import org.plos_clan.cpos.utils.TermiosConstants
 import org.plos_clan.cpos.utils.VTModeConstants
 
 object TtyManager {
+    private const val FRAME_INTERVAL_MILLIS = 1_000L / 60L
+
     val devices = mutableListOf<TtyDevice>()
     val vts = ArrayList<TtySession>()
 
@@ -26,8 +31,6 @@ object TtyManager {
         activeVT = index
         return true
     }
-
-    fun setActiveTV(index: Int): Boolean = setActiveVT(index)
 
     fun getActiveVT(): TtySession = vts[activeVT]
 
@@ -83,14 +86,19 @@ object TtyManager {
     fun initialize(): Boolean {
         val devName = Cmdline["console"] ?: "fb0"
         val device = devices.find { it.name == devName } ?: return false
+        val graphics = device.device as? TtyGraphicsDevice ?: return false
+        val flushRequested = KernelCoroutines.dispatcher.createEvent()
+        val invalidate = flushRequested::signal
         val registered = mutableListOf<Device>()
         for (index in 0..6) {
+            val backend = TerminalSession.create(graphics, invalidate)
+                ?: return rollbackInitialization(registered)
             val session = TtySession(
                 createDefaultTermios(),
                 createDefaultVtMode(),
                 VTModeConstants.KD_TEXT,
                 VTModeConstants.K_XLATE,
-                TerminalSession(device.device as TtyGraphicsDevice),
+                backend,
                 device,
             )
             vts += session
@@ -105,9 +113,7 @@ object TtyManager {
                 ),
             )
             if (tty == null) {
-                registered.forEach(DeviceManager::unregister)
-                vts.clear()
-                return false
+                return rollbackInitialization(registered)
             }
             registered += tty
         }
@@ -124,9 +130,7 @@ object TtyManager {
             ),
         )
         if (controllingTty == null) {
-            registered.forEach(DeviceManager::unregister)
-            vts.clear()
-            return false
+            return rollbackInitialization(registered)
         }
         registered += controllingTty
 
@@ -141,10 +145,23 @@ object TtyManager {
             ),
         )
         if (systemConsole == null) {
-            registered.forEach(DeviceManager::unregister)
-            vts.clear()
-            return false
+            return rollbackInitialization(registered)
+        }
+        KernelCoroutines.launch("terminal-flush") {
+            while (isActive) {
+                flushRequested.await()
+                delay(FRAME_INTERVAL_MILLIS)
+                vts.forEach(TtySession::flushIfDirty)
+            }
         }
         return true
+    }
+
+    private fun rollbackInitialization(registered: List<Device>): Boolean {
+        registered.asReversed().forEach(DeviceManager::unregister)
+        vts.asReversed().forEach(TtySession::destroy)
+        vts.clear()
+        activeVT = 0
+        return false
     }
 }

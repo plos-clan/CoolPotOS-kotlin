@@ -19,7 +19,7 @@ import org.plos_clan.cpos.utils.PollEvents
 import org.plos_clan.cpos.utils.TermiosConstants
 
 internal class TerminalInput(
-    private val echo: (String) -> Unit,
+    private val echo: (ByteArray, Int, Int) -> Unit,
 ) {
     private val input = ByteRingBuffer(INPUT_BUFFER_SIZE)
     private val canonicalData = ByteArray(INPUT_BUFFER_SIZE)
@@ -137,7 +137,7 @@ internal class TerminalInput(
             if (session.hasLocalFlag(TermiosConstants.ECHO) &&
                 session.hasLocalFlag(TermiosConstants.ECHOK)
             ) {
-                echo(NEWLINE_TEXT)
+                echo(ASCII_BYTES, '\n'.code, 1)
             }
             return
         }
@@ -303,7 +303,7 @@ internal class TerminalInput(
         if (session.hasLocalFlag(TermiosConstants.ECHO) ||
             value == '\n'.code && session.hasLocalFlag(TermiosConstants.ECHONL)
         ) {
-            echo(ASCII_TEXT[value and 0x7F])
+            echo(ASCII_BYTES, value and 0x7F, 1)
         }
     }
 
@@ -311,7 +311,7 @@ internal class TerminalInput(
         if (session.hasLocalFlag(TermiosConstants.ECHO) &&
             session.hasLocalFlag(TermiosConstants.ECHOE)
         ) {
-            echo(ERASE_TEXT)
+            echo(ERASE_BYTES, 0, ERASE_BYTES.size)
         }
     }
 
@@ -367,8 +367,11 @@ internal class TerminalInput(
         const val MAX_CANONICAL_RECORDS = 1024
         const val NANOSECONDS_PER_DECISECOND = 100_000_000uL
 
-        const val NEWLINE_TEXT = "\n"
-        const val ERASE_TEXT = "\b \b"
-        val ASCII_TEXT = Array(128) { code -> code.toChar().toString() }
+        val ASCII_BYTES = ByteArray(128) { it.toByte() }
+        val ERASE_BYTES = byteArrayOf(
+            '\b'.code.toByte(),
+            ' '.code.toByte(),
+            '\b'.code.toByte(),
+        )
     }
 }

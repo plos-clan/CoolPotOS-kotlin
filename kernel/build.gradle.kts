@@ -231,7 +231,7 @@ private class KernelConfig(
         "bin/native/${if (debug) "debugStatic" else "releaseStatic"}/libkernel.a",
     )
     val staticLibraries = listOf(
-        "libos_terminal-embedfont.a",
+        "libos_terminal.a",
         "libzstd-decompress.a",
     ).map(paths.libraries::resolve)
     val runtimeLibraries = mlibc.libraries + listOf(
@@ -692,6 +692,7 @@ val compileC = tasks.register("compileC") {
         .withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.files(
         config.paths.kernelC.resolve("bridge.h"),
+        config.paths.kernelC.resolve("os_terminal.h"),
         config.vdso.header,
         config.paths.limineHeader,
         config.paths.mlibcSyscallHeader,

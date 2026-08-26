@@ -1,18 +1,7 @@
-@file:OptIn(ExperimentalForeignApi::class)
-
 package org.plos_clan.cpos.drivers.char
 
-import bridge.TerminalDisplay
-import bridge.TerminalPalette
-import kotlinx.cinterop.COpaquePointer
-import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.alloc
-import kotlinx.cinterop.memScoped
-import kotlinx.cinterop.ptr
-import kotlinx.cinterop.reinterpret
-import kotlinx.cinterop.set
-import kotlinx.cinterop.staticCFunction
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
+import org.plos_clan.cpos.drivers.char.terminal.NativeTerminal
 import org.plos_clan.cpos.drivers.char.terminal.TerminalInput
 import org.plos_clan.cpos.drivers.char.tty.IoctlConstants
 import org.plos_clan.cpos.drivers.char.tty.Termios
@@ -25,78 +14,12 @@ import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Errno
-import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 
-private fun allocateTerminalMemory(size: ULong): COpaquePointer? = bridge.malloc(size)
-
-private fun releaseTerminalMemory(pointer: COpaquePointer?) {
-    bridge.free(pointer)
-}
-
-private val terminalMallocCallback = staticCFunction(::allocateTerminalMemory)
-private val terminalFreeCallback = staticCFunction(::releaseTerminalMemory)
-
-private val terminalAnsiColors = uintArrayOf(
-    0x0d0d1au,
-    0xe84a5fu,
-    0x50fa7bu,
-    0xfacc60u,
-    0x61aeeeu,
-    0xc074ecu,
-    0x40e0d0u,
-    0xbebec2u,
-    0x2f2f38u,
-    0xff6f91u,
-    0x8affc1u,
-    0xffe99bu,
-    0x9ddfffu,
-    0xd69fffu,
-    0xb2ffffu,
-    0xffffffu,
-)
-
-class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
-
-    private val terminal: COpaquePointer? = memScoped {
-        val display = alloc<TerminalDisplay> {
-            width = device.width
-            height = device.height
-            buffer = device.address?.reinterpret()
-            pitch = device.pitch
-            red_mask_size = device.red_mask_size
-            red_mask_shift = device.red_mask_shift
-            green_mask_size = device.green_mask_size
-            green_mask_shift = device.green_mask_shift
-            blue_mask_size = device.blue_mask_size
-            blue_mask_shift = device.blue_mask_shift
-        }
-
-        bridge.terminal_new(
-            display = display.ptr,
-            font_size_bits = 10.0f.toRawBits().toUInt(),
-            malloc = terminalMallocCallback,
-            free = terminalFreeCallback,
-        )
-    }.also { terminal ->
-        if (terminal == null) {
-            return@also
-        }
-        memScoped {
-            val palette = alloc<TerminalPalette> {
-                background = 0x0d0d1au
-                foreground = 0xeaeaeau
-                terminalAnsiColors.forEachIndexed { index, color ->
-                    ansi_colors[index] = color
-                }
-            }
-            bridge.terminal_set_custom_color_scheme(terminal, palette.ptr)
-            bridge.terminal_set_crnl_mapping(terminal, true)
-        }
-    }
-
-    private val lock = IrqSpinLock()
-    private val input = TerminalInput(::echoText)
+class TerminalSession private constructor(
+    private val terminal: NativeTerminal,
+) : TtySessionBackend {
+    private val input = TerminalInput(terminal::process)
 
     override fun keyboardInput(session: TtySession, data: CharArray) =
         input.receive(session, data)
@@ -111,9 +34,7 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         val bytes = ByteArray(length)
         val copied = buffer.copyTo(offset, bytes, 0, length)
         if (copied == 0 && length != 0) return -Errno.EFAULT.toLong()
-        lock.withLock {
-            bridge.terminal_process(terminal, bytes.decodeToString(0, copied))
-        }
+        terminal.process(bytes, 0, copied)
         return copied.toLong()
     }
 
@@ -124,24 +45,17 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         count: ULong,
     ): Long = input.read(session, buffer, offset, count)
 
-    override fun flush(session: TtySession) {
-        lock.withLock {
-            bridge.terminal_flush(terminal)
-        }
-    }
-
     override fun ioctl(
         session: TtySession,
         command: Int,
         args: UserMemory
     ): Int = when (command) {
         IoctlConstants.TIOCGWINSZ -> {
-            val rows = 61UL// bridge.terminal_rows(terminal)
-            val columns = 116UL// bridge.terminal_columns(terminal)
+            val dimensions = terminal.dimensions()
 
             val size = WinSize(
-                wsRow = minOf(rows, UShort.MAX_VALUE.toULong()).toShort(),
-                wsCol = minOf(columns, UShort.MAX_VALUE.toULong()).toShort(),
+                wsRow = minOf(dimensions.rows, UShort.MAX_VALUE.toULong()).toShort(),
+                wsCol = minOf(dimensions.columns, UShort.MAX_VALUE.toULong()).toShort(),
                 wsXpixel = 0,
                 wsYpixel = 0,
             )
@@ -236,6 +150,10 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
     override fun poll(session: TtySession, events: Int): Int =
         input.poll(session, events)
 
+    override fun flushIfDirty() = terminal.flushIfDirty()
+
+    override fun destroy() = terminal.destroy()
+
     private fun updateTermiosFromUser(session: TtySession, args: UserMemory): Int {
         val data = args.copyFromUser(Termios.NATIVE_SIZE)
         return if (data != null && session.termios.updateFromNativeBytes(data)) {
@@ -270,20 +188,10 @@ class TerminalSession(device: TtyGraphicsDevice) : TtySessionBackend {
         return if (args.copyToUser(data)) Errno.EOK else -Errno.EFAULT
     }
 
-    private fun echoText(text: String) {
-        lock.withLock {
-            bridge.terminal_process(terminal, text)
-        }
+    companion object {
+        internal fun create(
+            device: TtyGraphicsDevice,
+            invalidate: () -> Unit,
+        ): TerminalSession? = NativeTerminal.create(device, invalidate)?.let(::TerminalSession)
     }
-
-    private companion object {
-        const val INPUT_BUFFER_SIZE = 4096
-        const val MAX_CANONICAL_RECORDS = 1024
-        const val NANOSECONDS_PER_DECISECOND = 100_000_000uL
-
-        const val NEWLINE_TEXT = "\n"
-        const val ERASE_TEXT = "\b \b"
-        val ASCII_TEXT = Array(128) { code -> code.toChar().toString() }
-    }
-
 }

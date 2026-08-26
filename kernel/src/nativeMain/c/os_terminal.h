@@ -28,11 +28,16 @@ extern "C" {
 #endif
 
 void *terminal_new(const TerminalDisplay *display,
-                   uint32_t font_size_bits,
+                   float font_size,
                    void *(*malloc)(size_t),
                    void (*free)(void *));
+
+void terminal_destroy(void *terminal);
+size_t terminal_rows(void *terminal);
+size_t terminal_columns(void *terminal);
 void terminal_flush(void *terminal);
-void terminal_process(void *terminal, const char *s);
+void terminal_process(void *terminal, const uint8_t *data, size_t len);
+void terminal_set_auto_flush(void *terminal, bool auto_flush);
 void terminal_set_crnl_mapping(void *terminal, bool auto_crnl);
 void terminal_set_custom_color_scheme(void *terminal, const TerminalPalette *palette);
 

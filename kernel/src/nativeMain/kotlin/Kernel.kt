@@ -75,6 +75,9 @@ fun kernelMain() {
         return
     }
     FrameBuffer.initialize()
+    if (!KernelCoroutines.initialize()) {
+        return
+    }
     if (!TtyManager.initialize()) {
         return
     }
@@ -82,9 +85,6 @@ fun kernelMain() {
         return
     }
     if (!FuseDevice.initialize()) {
-        return
-    }
-    if (!KernelCoroutines.initialize()) {
         return
     }
     Acpi.enumerateDevices()

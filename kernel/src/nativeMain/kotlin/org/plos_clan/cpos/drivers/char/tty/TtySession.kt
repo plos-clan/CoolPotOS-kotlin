@@ -67,6 +67,10 @@ class TtySession(
 
     fun keyboardInput(data: CharArray) = backend.keyboardInput(this, data)
 
+    internal fun flushIfDirty() = backend.flushIfDirty()
+
+    internal fun destroy() = backend.destroy()
+
     internal fun signalForeground(signal: Signal) {
         val processGroup = foregroundProcessGroup
         if (processGroup == 0) return

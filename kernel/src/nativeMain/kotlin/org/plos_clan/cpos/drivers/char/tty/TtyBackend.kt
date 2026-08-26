@@ -15,9 +15,10 @@ interface TtySessionBackend {
     fun keyboardInput(session: TtySession, data: CharArray)
     fun write(session: TtySession, buffer: PreparedBufferSource, offset: Int, count: ULong): Long
     fun read(session: TtySession, buffer: PreparedBufferDestination, offset: Int, count: ULong): Long
-    fun flush(session: TtySession)
     fun ioctl(session: TtySession, command: Int, args: UserMemory): Int
     fun poll(session: TtySession, events: Int): Int
+    fun flushIfDirty()
+    fun destroy()
 }
 
 interface TtyPhysicalDevice {
