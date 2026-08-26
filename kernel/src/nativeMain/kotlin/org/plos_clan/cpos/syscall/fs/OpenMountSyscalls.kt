@@ -29,6 +29,7 @@ import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.syscall.fs.FsConstants.AT_FDCWD
 import org.plos_clan.cpos.syscall.fs.FsConstants.FALLOC_FL_KEEP_SIZE
 import org.plos_clan.cpos.syscall.fs.FsConstants.MS_SILENT
+import org.plos_clan.cpos.syscall.fs.FsConstants.MS_MOVE
 import org.plos_clan.cpos.syscall.fs.FsConstants.O_CLOEXEC
 import org.plos_clan.cpos.syscall.fs.FsConstants.O_NONBLOCK
 import org.plos_clan.cpos.syscall.fs.FsConstants.SUPPORTED_OPEN_FLAGS
@@ -194,29 +195,46 @@ internal fun mount(regs: PtraceRegisters, process: Process): Long {
     val target = copyPath(process, regs[PtraceRegisters.IDX_RSI])
         ?: return errno(Errno.EFAULT)
     if (target.isEmpty()) return errno(Errno.ENOENT)
-    val fileSystemName = copyPath(process, regs[PtraceRegisters.IDX_RDX])
-        ?: return errno(Errno.EFAULT)
+    val rawFlags = regs[PtraceRegisters.IDX_R10]
     val sourceAddress = regs[PtraceRegisters.IDX_RDI]
     val source = if (sourceAddress == 0uL) null else {
-        copyPath(process, sourceAddress)?.decodeToString()
-            ?: return errno(Errno.EFAULT)
+        copyPath(process, sourceAddress) ?: return errno(Errno.EFAULT)
     }
+    val context = process.context ?: return errno(Errno.ENOENT)
+    if (rawFlags and MS_MOVE != 0uL) {
+        if (rawFlags and (MS_MOVE or MS_SILENT).inv() != 0uL) {
+            return errno(Errno.EINVAL)
+        }
+        val moveSource = source?.takeIf(ByteArray::isNotEmpty)
+            ?: return errno(Errno.ENOENT)
+        return when (val result = FileSystemManager.vfs.moveMount(
+            caller = process.vfsOperationContext,
+            context = context,
+            source = VfsPathname.fromBytes(moveSource),
+            target = VfsPathname.fromBytes(target),
+        )) {
+            is VfsResult.Ok -> 0L
+            is VfsResult.Err -> errno(result.error.errno)
+        }
+    }
+
+    val fileSystemName = copyPath(process, regs[PtraceRegisters.IDX_RDX])
+        ?: return errno(Errno.EFAULT)
     val dataAddress = regs[PtraceRegisters.IDX_R8]
     val data = if (dataAddress == 0uL) null else {
         UserMemory(process.addressSpace, dataAddress).copyCStringFromUser(PAGE_SIZE_BYTES.toInt())
             ?: return errno(Errno.EFAULT)
     }
 
-    val flags = MountFlags.fromBits(regs[PtraceRegisters.IDX_R10] and MS_SILENT.inv())
+    val flags = MountFlags.fromBits(rawFlags and MS_SILENT.inv())
         ?: return errno(Errno.EOPNOTSUPP)
-    val context = process.context ?: return errno(Errno.ENOENT)
     return when (val result = FileSystemManager.vfs.mount(
         caller = process.vfsOperationContext,
         context = context,
         target = VfsPathname.fromBytes(target),
         request = MountRequest(
             fileSystemName = fileSystemName.decodeToString(),
-            source = source,
+            source = source?.decodeToString(),
             flags = flags,
             data = data,
             resources = MountResources(process.fdTable::acquire),

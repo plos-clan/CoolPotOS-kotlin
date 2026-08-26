@@ -47,10 +47,10 @@ object Vdso : MemoryRegionBacking() {
         true
     }
 
-    fun install(addressSpace: AddressSpace): ULong? {
-        if (image.isEmpty()) return null
-        val length = image.size.toULong().alignUp(PAGE_SIZE_BYTES) ?: return null
-        val installed = addressSpace.insert(
+    fun install(addressSpace: AddressSpace): Boolean {
+        if (image.isEmpty()) return false
+        val length = image.size.toULong().alignUp(PAGE_SIZE_BYTES) ?: return false
+        return addressSpace.insert(
             MemoryRegion(
                 start = USER_MMAP_END,
                 end = USER_MMAP_END + length,
@@ -63,7 +63,6 @@ object Vdso : MemoryRegionBacking() {
                 sharedIdentity = this,
             ),
         )
-        return USER_MMAP_END.takeIf { installed }
     }
 
     override fun read(offset: ULong, destination: ByteArray): Int {

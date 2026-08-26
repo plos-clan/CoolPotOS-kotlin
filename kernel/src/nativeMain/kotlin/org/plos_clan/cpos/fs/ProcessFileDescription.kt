@@ -51,6 +51,11 @@ data class FileDescriptor(
 )
 
 class FileDescriptorTable {
+    enum class CloseRangeAction {
+        CLOSE,
+        MARK_CLOSE_ON_EXEC,
+    }
+
     private val entries = DescriptorEntries(LIMIT)
     private val lock = IrqSpinLock()
 
@@ -156,6 +161,30 @@ class FileDescriptorTable {
         } ?: return VfsResult.Err(VfsError.BAD_DESCRIPTOR)
 
         return file.closeDescriptor(caller)
+    }
+
+    fun closeRange(
+        caller: VfsOperationContext,
+        first: UInt,
+        last: UInt,
+        action: CloseRangeAction,
+    ) {
+        if (first >= LIMIT.toUInt()) return
+
+        val end = minOf(last.toULong() + 1uL, LIMIT.toULong()).toInt()
+        val descriptors = lock.withLock {
+            entries.replaceRange(first.toInt(), end) { descriptor ->
+                when (action) {
+                    CloseRangeAction.CLOSE -> null
+                    CloseRangeAction.MARK_CLOSE_ON_EXEC ->
+                        if (descriptor.flags and FileDescriptorFlags.FD_CLOEXEC != 0uL) descriptor
+                        else descriptor.copy(
+                            flags = descriptor.flags or FileDescriptorFlags.FD_CLOEXEC,
+                        )
+                }
+            }
+        }
+        descriptors.forEach { it.file.closeDescriptor(caller) }
     }
 
     fun copyInto(destination: FileDescriptorTable): Boolean {
@@ -307,6 +336,31 @@ class FileDescriptorTable {
                     add(descriptor)
                 }
                 updated?.let(segment::store)
+            }
+        }
+
+        fun replaceRange(
+            first: Int,
+            end: Int,
+            replacement: (FileDescriptor) -> FileDescriptor?,
+        ): List<FileDescriptor> = buildList {
+            var index = first
+            while (index < end) {
+                val segmentIndex = index / SEGMENT_SIZE
+                val segment = segments[segmentIndex]
+                val snapshot = segment.load()
+                val segmentEnd = minOf(end - segmentIndex * SEGMENT_SIZE, snapshot.size)
+                var updated: Array<FileDescriptor?>? = null
+                for (offset in index % SEGMENT_SIZE until segmentEnd) {
+                    val descriptor = snapshot[offset] ?: continue
+                    val result = replacement(descriptor)
+                    if (result === descriptor) continue
+                    val target = updated ?: snapshot.copyOf().also { updated = it }
+                    target[offset] = result
+                    if (result == null) add(descriptor)
+                }
+                updated?.let(segment::store)
+                index = (segmentIndex + 1) * SEGMENT_SIZE
             }
         }
 

@@ -6,6 +6,7 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.FrameBuffer
 import org.plos_clan.cpos.drivers.MemoryDevice
+import org.plos_clan.cpos.drivers.RealtimeClock
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.acpi.Acpi
 import org.plos_clan.cpos.drivers.char.tty.TtyManager
@@ -58,6 +59,7 @@ fun kernelMain() {
     if (!Acpi.initialize()) {
         return
     }
+    RealtimeClock.initialize()
     SMProcessor.initialize()
     SMProcessor.currentLocal().also { local ->
         Syscall.initialize(local.lapicId.toULong(), local.isBsp)

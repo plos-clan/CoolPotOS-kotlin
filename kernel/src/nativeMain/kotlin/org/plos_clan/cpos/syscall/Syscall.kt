@@ -14,6 +14,8 @@ import org.plos_clan.cpos.syscall.fs.chroot
 import org.plos_clan.cpos.syscall.fs.chmod
 import org.plos_clan.cpos.syscall.fs.chown
 import org.plos_clan.cpos.syscall.fs.close
+import org.plos_clan.cpos.syscall.fs.closeRange
+import org.plos_clan.cpos.syscall.fs.copyFileRange
 import org.plos_clan.cpos.syscall.fs.dup
 import org.plos_clan.cpos.syscall.fs.dup2
 import org.plos_clan.cpos.syscall.fs.faccessAt
@@ -264,9 +266,11 @@ private enum class LinuxSyscall(
     GETCPU(309, ::getCPU),
     RENAMEAT2(316, ::renameAt2),
     GETRANDOM(318, ::getRandom, restartable = true),
+    COPY_FILE_RANGE(326, ::copyFileRange, restartable = true),
     STATX(332, ::statx),
     RSEQ(334, ::rseq),
     CLONE3(435, ::clone3),
+    CLOSE_RANGE(436, ::closeRange),
     FACCESSAT2(439, ::faccessAt2),
     FCHMODAT2(452, ::fchmodAt2),
 }

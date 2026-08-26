@@ -16,10 +16,10 @@ fuse-overlayfs \
 
 printf 'init: mounting runtime filesystems\n'
 mkdir -p "$overlay_root"/{dev,proc,sys,run}
-mount -t devtmpfs -o nosuid,noexec devtmpfs "$overlay_root/dev"
 mount -t proc -o nosuid,nodev,noexec proc "$overlay_root/proc"
 mount -t sysfs -o nosuid,nodev,noexec sysfs "$overlay_root/sys"
 mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$overlay_root/run"
+mount --move /dev "$overlay_root/dev"
 
 printf 'init: mounted fuse-overlayfs root\n'
 exec chroot "$overlay_root" /usr/bin/bash

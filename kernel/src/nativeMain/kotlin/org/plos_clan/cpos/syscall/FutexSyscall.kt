@@ -4,6 +4,7 @@ package org.plos_clan.cpos.syscall
 
 import kotlinx.coroutines.DisposableHandle
 import org.plos_clan.cpos.coroutines.KernelCoroutines
+import org.plos_clan.cpos.drivers.RealtimeClock
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.Process
@@ -103,6 +104,7 @@ object Futex {
                 expected = regs[PtraceRegisters.IDX_RDX].toUInt(),
                 timeoutAddress = regs[PtraceRegisters.IDX_R10],
                 absoluteTimeout = false,
+                realtime = false,
                 bitset = FUTEX_MATCH_ANY,
             )
             FutexOperation.WAIT_BITSET -> {
@@ -113,6 +115,7 @@ object Futex {
                     expected = regs[PtraceRegisters.IDX_RDX].toUInt(),
                     timeoutAddress = regs[PtraceRegisters.IDX_R10],
                     absoluteTimeout = true,
+                    realtime = realtime,
                     bitset = bitset,
                 )
             }
@@ -152,10 +155,11 @@ object Futex {
         expected: UInt,
         timeoutAddress: ULong,
         absoluteTimeout: Boolean,
+        realtime: Boolean,
         bitset: UInt,
     ): Long {
         val expiresAt = when (
-            val result = timeoutDeadline(process, timeoutAddress, absoluteTimeout)
+            val result = timeoutDeadline(process, timeoutAddress, absoluteTimeout, realtime)
         ) {
             is TimeoutResult.Value -> result.deadline
             is TimeoutResult.Error -> return error(result.errno)
@@ -308,6 +312,7 @@ object Futex {
         process: Process,
         address: ULong,
         absolute: Boolean,
+        realtime: Boolean,
     ): TimeoutResult {
         if (address == 0uL) return TimeoutResult.Value(null)
         val bytes = UserMemory(process.addressSpace, address).copyFromUser(TimeSpec.NATIVE_SIZE)
@@ -320,6 +325,13 @@ object Futex {
         }
         val seconds = time.sec.toULong()
         val nanoseconds = time.nsec.toULong()
+        if (absolute && realtime) {
+            val remaining = RealtimeClock.now().durationUntil(time.sec, time.nsec.toUInt())
+            val now = TscClock.nanoTime()
+            return TimeoutResult.Value(
+                if (remaining > ULong.MAX_VALUE - now) ULong.MAX_VALUE else now + remaining,
+            )
+        }
         val value = if (seconds > (ULong.MAX_VALUE - nanoseconds) / NANOSECONDS_PER_SECOND) {
             ULong.MAX_VALUE
         } else {

@@ -5,6 +5,7 @@ package org.plos_clan.cpos.syscall.fs
 import bridge.wait_for_interrupt
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.TscClock
+import org.plos_clan.cpos.fs.FileDescriptorTable
 import org.plos_clan.cpos.fs.OpenFlags
 import org.plos_clan.cpos.fs.vfs.AccessMode
 import org.plos_clan.cpos.fs.vfs.InodeType
@@ -17,6 +18,7 @@ import org.plos_clan.cpos.syscall.SignalDelivery
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.syscall.TimeSpec
+import org.plos_clan.cpos.syscall.fs.FsConstants.CLOSE_RANGE_CLOEXEC
 import org.plos_clan.cpos.syscall.fs.FsConstants.F_DUPFD
 import org.plos_clan.cpos.syscall.fs.FsConstants.F_DUPFD_CLOEXEC
 import org.plos_clan.cpos.syscall.fs.FsConstants.F_GETFD
@@ -95,6 +97,23 @@ internal fun dup2(regs: PtraceRegisters, process: Process): Long {
     } else {
         errno(Errno.EBADF)
     }
+}
+
+internal fun closeRange(regs: PtraceRegisters, process: Process): Long {
+    val first = regs[PtraceRegisters.IDX_RDI].toUInt()
+    val last = regs[PtraceRegisters.IDX_RSI].toUInt()
+    val flags = regs[PtraceRegisters.IDX_RDX].toUInt()
+    if (first > last || flags and CLOSE_RANGE_CLOEXEC.inv() != 0u) {
+        return errno(Errno.EINVAL)
+    }
+
+    val action = if (flags and CLOSE_RANGE_CLOEXEC == 0u) {
+        FileDescriptorTable.CloseRangeAction.CLOSE
+    } else {
+        FileDescriptorTable.CloseRangeAction.MARK_CLOSE_ON_EXEC
+    }
+    process.fdTable.closeRange(process.vfsOperationContext, first, last, action)
+    return 0L
 }
 
 internal fun fcntl(regs: PtraceRegisters, process: Process): Long {

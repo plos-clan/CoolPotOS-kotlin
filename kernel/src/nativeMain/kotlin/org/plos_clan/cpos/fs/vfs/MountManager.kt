@@ -77,6 +77,35 @@ internal class VfsMountManager(
         }
     }
 
+    fun move(
+        caller: VfsOperationContext,
+        context: FileSystemContext,
+        source: VfsPathname,
+        target: VfsPathname,
+    ): VfsResult<Unit> {
+        val mounted = when (val result = paths.resolve(caller, context, source)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        if (mounted.mount === context.namespace.root || mounted.dentry !== mounted.mount.root) {
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+
+        val mountpoint = when (val result = paths.resolve(
+            caller,
+            context,
+            target,
+            followFinalMount = false,
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        if (mounted.inode?.type != mountpoint.inode?.type) {
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+        return context.namespace.move(mounted.mount, mountpoint)
+    }
+
     private fun findFileSystem(name: String): FileSystemType? {
         lock.withLock { fileSystems[name] }?.let { return it }
         val candidates = lock.withLock { fileSystems.values.toList() }

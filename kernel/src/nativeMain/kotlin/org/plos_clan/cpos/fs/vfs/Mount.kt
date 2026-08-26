@@ -56,6 +56,13 @@ class Mount internal constructor(
         attachmentReference.exchange(null)?.mount?.release()
     }
 
+    internal fun moveTo(target: VfsPath): VfsPath? {
+        if (!target.mount.retain()) return null
+        return attachmentReference.exchange(target).also {
+            if (it == null) target.mount.release()
+        }
+    }
+
     internal fun isDescendantOf(ancestor: Mount): Boolean {
         var current: Mount? = this
         while (current != null && current !== ancestor) current = current.attachment?.mount
@@ -150,6 +157,33 @@ class MountNamespace internal constructor(val root: Mount) {
         if (!detached) return VfsResult.Err(VfsError.BUSY)
         mount.completeUnmount()
         return VfsResult.Ok(Unit)
+    }
+
+    internal fun move(mount: Mount, target: VfsPath): VfsResult<Unit> {
+        val previous = lock.withLock {
+            val source = attachedAt(mount)
+                ?: return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            if (!contains(target.mount)) {
+                return@withLock VfsResult.Err(VfsError.NOT_FOUND)
+            }
+            if (mounts.containsKey(target)) return@withLock VfsResult.Err(VfsError.BUSY)
+            if (target.mount.isDescendantOf(mount)) {
+                return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            }
+
+            val attachment = mount.moveTo(target)
+                ?: return@withLock VfsResult.Err(VfsError.NOT_FOUND)
+            mounts.remove(source)
+            mounts[target] = mount
+            VfsResult.Ok(attachment)
+        }
+        return when (previous) {
+            is VfsResult.Ok -> {
+                previous.value.mount.release()
+                VfsResult.Ok(Unit)
+            }
+            is VfsResult.Err -> previous
+        }
     }
 
     internal fun detach(mount: Mount): VfsResult<Unit> {

@@ -384,7 +384,9 @@ class AddressSpace internal constructor(
                 return PagePreparation.Failed(
                     when (cached.failure) {
                         PageCacheFailure.OUT_OF_MEMORY -> PageFaultResult.OUT_OF_MEMORY
-                        PageCacheFailure.IO_ERROR -> PageFaultResult.IO_ERROR
+                        PageCacheFailure.IO_ERROR,
+                        PageCacheFailure.INTERRUPTED,
+                        -> PageFaultResult.IO_ERROR
                     },
                 )
             }

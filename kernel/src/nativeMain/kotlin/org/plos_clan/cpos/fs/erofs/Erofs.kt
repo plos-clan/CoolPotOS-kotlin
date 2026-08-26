@@ -1,5 +1,7 @@
 package org.plos_clan.cpos.fs.erofs
 
+import org.plos_clan.cpos.fs.DeviceNode
+import org.plos_clan.cpos.fs.sock.SocketNodeBackend
 import org.plos_clan.cpos.fs.vfs.CachedFileBackend
 import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.DirectoryBackend
@@ -8,9 +10,11 @@ import org.plos_clan.cpos.fs.vfs.DirectoryLookup
 import org.plos_clan.cpos.fs.vfs.FilePosition
 import org.plos_clan.cpos.fs.vfs.FileSystemOptions
 import org.plos_clan.cpos.fs.vfs.FileSystemType
+import org.plos_clan.cpos.fs.vfs.FifoBackend
 import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.vfs.InodeAttributes
 import org.plos_clan.cpos.fs.vfs.InodeAttributeSnapshot
+import org.plos_clan.cpos.fs.vfs.InodeBackend
 import org.plos_clan.cpos.fs.vfs.InodeId
 import org.plos_clan.cpos.fs.vfs.InodeMetadata
 import org.plos_clan.cpos.fs.vfs.InodeTimestampUpdate
@@ -84,6 +88,7 @@ private class ErofsInstance private constructor(
             is DirectoryNode -> ErofsDirectoryBackend(this, superBlock, node)
             is FileNode -> RegularBackend(this, node)
             is SymlinkNode -> ErofsSymlinkBackend(node.target)
+            is SpecialNode -> node.backend
         }
         val attributes = InodeAttributeSnapshot(
             InodeAttributes(node.metadata),
@@ -101,10 +106,18 @@ private class ErofsInstance private constructor(
             DiskFileType.DIRECTORY -> flatData(inode)?.let {
                 DirectoryNode(inode.metadata, it)
             }
+            DiskFileType.REGULAR -> fileNode(inode)
             DiskFileType.SYMLINK -> flatData(inode)?.readAll()?.let {
                 SymlinkNode(inode.metadata, VfsPathname.fromBytes(it))
             }
-            DiskFileType.REGULAR -> fileNode(inode)
+            DiskFileType.CHARACTER_DEVICE,
+            DiskFileType.BLOCK_DEVICE,
+            -> SpecialNode(
+                inode.metadata,
+                DeviceNode(inode.type.inodeType, inode.metadata.deviceNumber),
+            )
+            DiskFileType.PIPE -> SpecialNode(inode.metadata, FifoBackend())
+            DiskFileType.SOCKET -> SpecialNode(inode.metadata, SocketNodeBackend)
         }
     }
 
@@ -170,8 +183,10 @@ private class ErofsInstance private constructor(
                 if (nameStart !in firstName..<nameEnd || nameEnd > blockLength ||
                     nameEnd - nameStart > Header.MAX_NAME_LENGTH
                 ) return null
-                val type = inodeType(bytes[entryOffset + 10].toInt() and 0xff)
-                    ?: return null
+                val diskType = bytes[entryOffset + 10].toInt() and 0xff
+                val type = if (diskType == 0) null else {
+                    DiskFileType.fromDirectoryType(diskType)?.inodeType ?: return null
+                }
                 entries += Entry(
                     VfsName.fromPath(bytes, blockStart + nameStart, blockStart + nameEnd),
                     input.readU64(entryOffset),
@@ -186,13 +201,6 @@ private class ErofsInstance private constructor(
         }
     }
 
-    private fun inodeType(type: Int): InodeType? = when (type) {
-        1 -> InodeType.REGULAR
-        2 -> InodeType.DIRECTORY
-        7 -> InodeType.SYMLINK
-        else -> null
-    }
-
     private sealed class Node(val metadata: InodeMetadata)
 
     private class DirectoryNode(metadata: InodeMetadata, val data: FlatData) : Node(metadata) {
@@ -203,12 +211,14 @@ private class ErofsInstance private constructor(
 
     private class SymlinkNode(metadata: InodeMetadata, val target: VfsPathname) : Node(metadata)
 
+    private class SpecialNode(metadata: InodeMetadata, val backend: InodeBackend) : Node(metadata)
+
     private data class Fragment(val offset: ULong, val size: ULong)
 
     private data class Entry(
         val name: VfsName,
         val nid: ULong,
-        val type: InodeType,
+        val type: InodeType?,
     )
 
     private class DirectoryData(entries: List<Entry>) {

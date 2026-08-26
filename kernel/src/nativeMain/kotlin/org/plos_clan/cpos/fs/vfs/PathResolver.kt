@@ -12,12 +12,14 @@ internal class VfsPathResolver(
         context: FileSystemContext,
         pathname: VfsPathname,
         followFinalSymlink: Boolean = true,
+        followFinalMount: Boolean = true,
     ): VfsResult<VfsPath> = resolveAt(
         caller = caller,
         context = context,
         directory = context.workingDirectory,
         pathname = pathname,
         followFinalSymlink = followFinalSymlink,
+        followFinalMount = followFinalMount,
     )
 
     fun resolveAt(
@@ -27,6 +29,7 @@ internal class VfsPathResolver(
         pathname: VfsPathname,
         followFinalSymlink: Boolean = true,
         allowEmpty: Boolean = false,
+        followFinalMount: Boolean = true,
     ): VfsResult<VfsPath> {
         if (pathname.size == 0) {
             return if (allowEmpty) VfsResult.Ok(directory)
@@ -47,6 +50,7 @@ internal class VfsPathResolver(
             start,
             components,
             followFinalSymlink || pathname.requiresDirectory,
+            followFinalMount,
         )
         if (result is VfsResult.Ok && pathname.requiresDirectory &&
             result.value.inode?.type != InodeType.DIRECTORY
@@ -139,8 +143,13 @@ internal class VfsPathResolver(
         start: VfsPath,
         components: List<VfsName>,
         followFinalSymlink: Boolean,
+        followFinalMount: Boolean = true,
     ): VfsResult<VfsPath> {
-        var current = followMounts(context.namespace, start)
+        var current = if (components.isEmpty() && !followFinalMount) {
+            start
+        } else {
+            followMounts(context.namespace, start)
+        }
         var symlinkDepth = 0
         var requireDirectory = false
         val remaining = ArrayDeque(components)
@@ -165,7 +174,13 @@ internal class VfsPathResolver(
             }
 
             val parent = current
-            val next = when (val result = lookupChild(caller, context, parent, name)) {
+            val next = when (val result = lookupChild(
+                caller,
+                context,
+                parent,
+                name,
+                followMount = remaining.isNotEmpty() || followFinalMount,
+            )) {
                 is VfsResult.Ok -> result.value
                 is VfsResult.Err -> return result
             }

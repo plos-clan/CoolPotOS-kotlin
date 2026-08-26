@@ -142,8 +142,7 @@ object ElfLoader {
                 return VfsResult.Err(VfsError.EXEC_FORMAT)
             }
 
-            val vdso = Vdso.install(addressSpace)
-                ?: return VfsResult.Err(VfsError.NO_MEMORY)
+            if (!Vdso.install(addressSpace)) return VfsResult.Err(VfsError.NO_MEMORY)
 
             val stack = UserStackBuilder.build(
                 process = process,
@@ -152,7 +151,6 @@ object ElfLoader {
                 executablePath = path,
                 executable = executable,
                 interpreter = interpreter,
-                systemInfoHeader = vdso,
                 addressSpace = addressSpace,
             ) ?: return VfsResult.Err(VfsError.NO_MEMORY)
 

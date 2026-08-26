@@ -92,6 +92,13 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         request: MountRequest,
     ): VfsResult<Unit> = mounts.mount(caller, context, target, request)
 
+    fun moveMount(
+        caller: VfsOperationContext,
+        context: FileSystemContext,
+        source: VfsPathname,
+        target: VfsPathname,
+    ): VfsResult<Unit> = mounts.move(caller, context, source, target)
+
     fun unmount(
         caller: VfsOperationContext,
         context: FileSystemContext,

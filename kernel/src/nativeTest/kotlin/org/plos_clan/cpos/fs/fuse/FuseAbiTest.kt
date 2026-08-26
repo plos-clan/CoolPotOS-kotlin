@@ -29,7 +29,19 @@ class FuseAbiTest {
     fun advertisesOnlyImplementedCapabilities() {
         assertTrue(FuseFeature.ASYNC_READ.mask and FuseFeature.supportedMask != 0uL)
         assertTrue(FuseFeature.BIG_WRITES.mask and FuseFeature.supportedMask != 0uL)
+        assertTrue(FuseFeature.ATOMIC_O_TRUNC.mask and FuseFeature.supportedMask != 0uL)
+        assertTrue(FuseFeature.AUTO_INVAL_DATA.mask and FuseFeature.supportedMask != 0uL)
+        assertTrue(FuseFeature.DO_READDIRPLUS.mask and FuseFeature.supportedMask != 0uL)
+        assertTrue(FuseFeature.READDIRPLUS_AUTO.mask and FuseFeature.supportedMask != 0uL)
+        assertTrue(FuseFeature.CACHE_SYMLINKS.mask and FuseFeature.supportedMask != 0uL)
         assertTrue(FuseFeature.WRITEBACK_CACHE.mask and FuseFeature.supportedMask == 0uL)
         assertTrue(FuseFeature.PASSTHROUGH.mask and FuseFeature.supportedMask == 0uL)
+    }
+
+    @Test
+    fun usesFuse745OperationAndInterruptIdentifiers() {
+        assertEquals(53u, FuseOpcode.COPY_FILE_RANGE_64.value)
+        assertEquals(1uL, FuseAbi.INTERRUPT_UNIQUE_MASK)
+        assertEquals(0x8000_0000_0000_0000uL, FuseAbi.RESEND_UNIQUE_MASK)
     }
 }

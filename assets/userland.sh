@@ -20,6 +20,7 @@ packages=(
 rootfs=$(mktemp -d)
 chmod 0755 "$rootfs"
 partial="$archive.part"
+keyring="$rootfs/etc/pacman.d/gnupg"
 
 cleanup() {
     rm -rf "$rootfs" "$partial"
@@ -51,10 +52,12 @@ pacman -Sy \
     --disable-sandbox-network \
     "${packages[@]}"
 
-install -d -m 0700 "$rootfs/etc/pacman.d/gnupg"
+install -d -m 0700 "$keyring"
 install -Dm755 /usr/local/share/cpos/init "$rootfs/init"
-pacman-key --gpgdir "$rootfs/etc/pacman.d/gnupg" --init
-pacman-key --gpgdir "$rootfs/etc/pacman.d/gnupg" --populate archlinux cachyos
+pacman-key --gpgdir "$keyring" --init
+pacman-key --gpgdir "$keyring" --populate archlinux cachyos
+gpgconf --homedir "$keyring" --kill all
+find "$keyring" -type s -delete
 
 install -Dm644 /etc/pacman.conf "$rootfs/etc/pacman.conf"
 install -Dm644 /etc/pacman.d/mirrorlist "$rootfs/etc/pacman.d/mirrorlist"

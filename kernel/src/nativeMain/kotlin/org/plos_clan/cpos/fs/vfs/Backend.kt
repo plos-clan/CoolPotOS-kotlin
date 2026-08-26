@@ -415,6 +415,7 @@ data class DirectoryEntry(
     val name: VfsName,
     val inodeId: InodeId,
     val type: InodeType?,
+    internal val lookup: DirectoryLookup? = null,
 )
 
 interface FileContent {
@@ -431,6 +432,9 @@ interface FileContent {
 interface OpenFileBackend {
     val seekable: Boolean
         get() = true
+
+    val handlesOpenTruncate: Boolean
+        get() = false
 
     fun read(
         caller: VfsOperationContext,
@@ -497,6 +501,19 @@ interface AllocatingOpenFileBackend : OpenFileBackend {
     ): VfsResult<Unit>
 }
 
+interface CopyingOpenFileBackend : OpenFileBackend {
+    fun copyFileRange(
+        caller: VfsOperationContext,
+        sourceInode: Inode,
+        sourceOffset: ULong,
+        destinationInode: Inode,
+        destination: OpenFileBackend,
+        destinationOffset: ULong,
+        length: ULong,
+        flags: UInt,
+    ): VfsResult<ULong>
+}
+
 internal interface CachedFileBackend : OpenFileBackend, PageCacheSource {
     override fun read(
         caller: VfsOperationContext,
@@ -520,6 +537,7 @@ internal interface CachedFileBackend : OpenFileBackend, PageCacheSource {
             val error = when (result.failure) {
                 PageCacheFailure.OUT_OF_MEMORY -> VfsError.NO_MEMORY
                 PageCacheFailure.IO_ERROR -> VfsError.IO
+                PageCacheFailure.INTERRUPTED -> VfsError.INTERRUPTED
             }
             return IoResult.failure(error)
         }

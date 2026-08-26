@@ -9,6 +9,7 @@ import org.plos_clan.cpos.fs.vfs.AtomicCreateDirectoryBackend
 import org.plos_clan.cpos.fs.vfs.AtomicOpenResult
 import org.plos_clan.cpos.fs.vfs.AllocatingOpenFileBackend
 import org.plos_clan.cpos.fs.vfs.CacheValidity
+import org.plos_clan.cpos.fs.vfs.CopyingOpenFileBackend
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
 import org.plos_clan.cpos.fs.vfs.DirectoryLookup
 import org.plos_clan.cpos.fs.vfs.DentryReference
@@ -32,6 +33,7 @@ import org.plos_clan.cpos.fs.vfs.InodeTimestampSet
 import org.plos_clan.cpos.fs.vfs.InodeTimestampUpdate
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.IoResult
+import org.plos_clan.cpos.fs.vfs.MountRequest
 import org.plos_clan.cpos.fs.vfs.NodeCreation
 import org.plos_clan.cpos.fs.vfs.NodeKind
 import org.plos_clan.cpos.fs.vfs.OpenFileBackend
@@ -48,8 +50,12 @@ import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.fs.vfs.MountRequest
+import org.plos_clan.cpos.fs.vfs.VfsTimestamp
+import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.PageCache
+import org.plos_clan.cpos.mem.PageCacheFailure
+import org.plos_clan.cpos.mem.PageCacheProvider
+import org.plos_clan.cpos.mem.PageCacheSource
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
@@ -215,7 +221,7 @@ private class FuseInstance(
         update: InodeTimestampUpdate,
     ): VfsResult<Unit> {
         if (update !is InodeTimestampSet) {
-            inode.invalidateAttributes()
+            inode.updateCachedTimestamps(update)
             return VfsResult.Ok(Unit)
         }
         return setAttributes(
@@ -287,10 +293,16 @@ private class FuseInstance(
     override fun invalidateInode(nodeId: ULong, offset: Long, length: Long) {
         val inode = lock.withLock { nodes[nodeId]?.inode } ?: return
         inode.invalidateAttributes()
-        if (offset < 0 || length < 0) {
-            PageCache.invalidate(inode)
-        } else if (length > 0) {
-            PageCache.invalidate(inode, offset.toULong(), length.toULong())
+        if (offset >= 0) {
+            when (val backend = inode.backend) {
+                is FuseDirectoryNode -> backend.invalidateDirectoryCache()
+                is FuseSymlinkNode -> backend.invalidateTarget()
+            }
+            if (length <= 0) {
+                PageCache.invalidate(inode, offset.toULong())
+            } else {
+                PageCache.invalidate(inode, offset.toULong(), length.toULong())
+            }
         }
     }
 
@@ -313,15 +325,17 @@ private class FuseInstance(
     fun submit(caller: VfsOperationContext, request: FuseRequest) = session.submit(caller, request)
 
     fun maxRead(): Int = session.maximumReadSize()
+    fun maxReadAhead(): Int = session.maximumReadAheadSize()
     fun maxWrite(): Int = session.maximumWriteSize()
+    fun protocolMinor(): UInt = session.protocolMinorVersion()
     fun supports(feature: FuseFeature): Boolean = session.supports(feature)
     fun sessionUnsupported(opcode: FuseOpcode): Boolean = session.isUnsupported(opcode)
     fun disable(opcode: FuseOpcode) = session.markUnsupported(opcode)
     fun openFlags(options: OpenOptions, directory: Boolean): UInt =
         linuxOpenFlags(options, directory)
 
-    fun lookup(reply: FuseReply): VfsResult<DirectoryLookup> {
-        val entry = when (val decoded = FuseDecoder.entry(reply)) {
+    fun lookup(reply: FuseReply, offset: Int = 0): VfsResult<DirectoryLookup> {
+        val entry = when (val decoded = FuseDecoder.entry(reply, offset)) {
             is VfsResult.Ok -> decoded.value
             is VfsResult.Err -> return decoded
         }
@@ -353,7 +367,7 @@ private class FuseInstance(
                 ).also { nodes[entry.nodeId] = NodeRecord(it, 1uL) }
             }
         } ?: return VfsResult.Err(VfsError.IO)
-        inode.installAttributeSnapshot(entry.attributes)
+        installAttributes(inode, entry.attributes)
         return VfsResult.Ok(
             DirectoryLookup(
                 inode,
@@ -362,6 +376,8 @@ private class FuseInstance(
             ),
         )
     }
+
+    fun forget(nodeId: ULong) = session.forget(nodeId, 1uL)
 
     fun getAttributes(caller: VfsOperationContext, inode: Inode): VfsResult<InodeAttributeSnapshot> {
         val request = FuseRequest(FuseOpcode.GETATTR, inode.id.value, 16)
@@ -374,6 +390,7 @@ private class FuseInstance(
             is VfsResult.Err -> return decoded
         }
         if (attributes.second != inode.type) return VfsResult.Err(VfsError.IO)
+        invalidateChangedData(inode, attributes.first)
         return VfsResult.Ok(attributes.first)
     }
 
@@ -412,7 +429,7 @@ private class FuseInstance(
             is VfsResult.Err -> return decoded
         }
         if (attributes.second != inode.type) return VfsResult.Err(VfsError.IO)
-        inode.installAttributeSnapshot(attributes.first)
+        installAttributes(inode, attributes.first)
         return VfsResult.Ok(Unit)
     }
 
@@ -426,8 +443,19 @@ private class FuseInstance(
         val noOpenFeature = if (directory) FuseFeature.NO_OPENDIR_SUPPORT
         else FuseFeature.NO_OPEN_SUPPORT
         val flags = linuxOpenFlags(options, directory)
+        val implicitOpenFlags = FuseAbi.FOPEN_KEEP_CACHE or
+            if (directory) FuseAbi.FOPEN_CACHE_DIR else 0u
         if (session.isUnsupported(opcode)) {
-            return VfsResult.Ok(newHandle(inode.id.value, null, 0u, flags, caller, directory))
+            return VfsResult.Ok(
+                newHandle(
+                    inode,
+                    null,
+                    implicitOpenFlags,
+                    flags and OpenFlags.O_TRUNC.toUInt().inv(),
+                    caller,
+                    directory,
+                ),
+            )
         }
         val request = FuseRequest(opcode, inode.id.value, 8).apply { writeU32(0, flags) }
         val reply = when (val result = request(caller, request)) {
@@ -436,7 +464,14 @@ private class FuseInstance(
                 if (result.error.errno == Errno.ENOSYS && supports(noOpenFeature)) {
                     session.markUnsupported(opcode)
                     return VfsResult.Ok(
-                        newHandle(inode.id.value, null, 0u, flags, caller, directory),
+                        newHandle(
+                            inode,
+                            null,
+                            implicitOpenFlags,
+                            flags and OpenFlags.O_TRUNC.toUInt().inv(),
+                            caller,
+                            directory,
+                        ),
                     )
                 }
                 return result
@@ -446,8 +481,17 @@ private class FuseInstance(
             is VfsResult.Ok -> decoded.value
             is VfsResult.Err -> return decoded
         }
+        if (opened.flags and FuseAbi.FOPEN_KEEP_CACHE == 0u) {
+            if (directory) {
+                (inode.backend as? FuseDirectoryNode)?.invalidateDirectoryCache()
+            } else {
+                PageCache.invalidate(inode)
+            }
+        } else if (!directory && flags.toInt() and OpenFlags.O_TRUNC != 0) {
+            PageCache.invalidate(inode)
+        }
         return VfsResult.Ok(
-            newHandle(inode.id.value, opened.handle, opened.flags, flags, caller, directory),
+            newHandle(inode, opened.handle, opened.flags, flags, caller, directory),
         )
     }
 
@@ -596,6 +640,9 @@ private class FuseInstance(
             AccessMode.PATH -> OpenFlags.O_PATH
         }
         if (options.append) flags = flags or OpenFlags.O_APPEND
+        if (options.truncate && supports(FuseFeature.ATOMIC_O_TRUNC)) {
+            flags = flags or OpenFlags.O_TRUNC
+        }
         if (options.nonBlocking) flags = flags or OpenFlags.O_NONBLOCK
         if (options.noAtime) flags = flags or OpenFlags.O_NOATIME
         if (directory) flags = flags or OpenFlags.O_DIRECTORY
@@ -603,16 +650,33 @@ private class FuseInstance(
     }
 
     private fun newHandle(
-        nodeId: ULong,
+        inode: Inode,
         handle: ULong?,
         openFlags: UInt,
         fileFlags: UInt,
         caller: VfsOperationContext,
         directory: Boolean,
     ): FuseHandle = if (directory) {
-        FuseDirectoryHandle(this, nodeId, handle, openFlags, fileFlags, caller)
+        FuseDirectoryHandle(this, inode, handle, openFlags, fileFlags, caller)
     } else {
-        FuseFileHandle(this, nodeId, handle, openFlags, fileFlags, caller)
+        FuseFileHandle(this, inode, handle, openFlags, fileFlags, caller)
+    }
+
+    private fun installAttributes(inode: Inode, snapshot: InodeAttributeSnapshot) {
+        invalidateChangedData(inode, snapshot)
+        inode.installAttributeSnapshot(snapshot)
+    }
+
+    private fun invalidateChangedData(inode: Inode, snapshot: InodeAttributeSnapshot) {
+        if (inode.type != InodeType.REGULAR) return
+        val previous = inode.metadata()
+        val current = snapshot.attributes.metadata
+        if (previous.size != current.size ||
+            supports(FuseFeature.AUTO_INVAL_DATA) &&
+            previous.timestamps.modificationTime != current.timestamps.modificationTime
+        ) {
+            PageCache.invalidate(inode)
+        }
     }
 }
 
@@ -741,15 +805,105 @@ private class FuseDirectoryNode(
     override val instance: FuseInstance,
     override val nodeId: ULong,
 ) : FuseNode, AtomicCreateDirectoryBackend {
+    data class CachedEntry(val entry: DirectoryEntry, val nextOffset: Long)
+
+    private class DirectoryState {
+        private data class CachedRecord(var entry: DirectoryEntry, val nextOffset: Long)
+
+        private val lock = IrqSpinLock()
+        private val entries = mutableMapOf<VfsName, CacheValidity.Invalidatable>()
+        private val listing = mutableMapOf<Long, CachedRecord>()
+        private val ends = mutableSetOf<Long>()
+        private var modificationTime: VfsTimestamp? = null
+        private var readdirPlusAdvised = false
+
+        fun track(name: VfsName, lookup: DirectoryLookup): DirectoryLookup {
+            val validity = CacheValidity.Invalidatable(lookup.validity)
+            lock.withLock { entries.put(name, validity)?.invalidate() }
+            return lookup.copy(validity = validity)
+        }
+
+        fun adviseReaddirPlus() = lock.withLock { readdirPlusAdvised = true }
+
+        fun useReaddirPlus(position: Long, automatic: Boolean): Boolean {
+            if (!automatic) return true
+            return lock.withLock {
+                if (readdirPlusAdvised) {
+                    readdirPlusAdvised = false
+                    true
+                } else {
+                    position == 0L
+                }
+            }
+        }
+
+        fun validateListing(currentModificationTime: VfsTimestamp) {
+            val retired = lock.withLock {
+                if (modificationTime != null && modificationTime != currentModificationTime) {
+                    clearListingLocked()
+                } else {
+                    emptyList()
+                }.also { modificationTime = currentModificationTime }
+            }
+            retired.forEach(DentryReference::release)
+        }
+
+        fun take(position: Long): CachedEntry? = lock.withLock {
+            val record = listing[position] ?: return@withLock null
+            val entry = record.entry
+            record.entry = entry.copy(lookup = null)
+            CachedEntry(entry, record.nextOffset)
+        }
+
+        fun isEnd(position: Long): Boolean = lock.withLock { position in ends }
+
+        fun cache(position: Long, entry: DirectoryEntry, nextOffset: Long) {
+            val retired = lock.withLock {
+                ends.remove(position)
+                listing.put(position, CachedRecord(entry, nextOffset))?.entry?.lookup?.reference
+            }
+            retired?.release()
+        }
+
+        fun cacheEnd(position: Long) {
+            val retired = lock.withLock {
+                ends += position
+                listing.remove(position)?.entry?.lookup?.reference
+            }
+            retired?.release()
+        }
+
+        fun invalidate(name: VfsName) {
+            val retired = lock.withLock {
+                entries.remove(name)?.invalidate()
+                clearListingLocked()
+            }
+            retired.forEach(DentryReference::release)
+        }
+
+        fun invalidateListing() {
+            val retired = lock.withLock { clearListingLocked() }
+            retired.forEach(DentryReference::release)
+        }
+
+        private fun clearListingLocked(): List<DentryReference> {
+            val retired = listing.values.mapNotNull { it.entry.lookup?.reference }
+            listing.clear()
+            ends.clear()
+            modificationTime = null
+            return retired
+        }
+    }
+
     override val type = InodeType.DIRECTORY
-    private val lock = IrqSpinLock()
-    private val entries = mutableMapOf<VfsName, CacheValidity.Invalidatable>()
+    private val state = DirectoryState()
 
     override fun lookup(
         caller: VfsOperationContext,
         directory: Inode,
         name: VfsName,
     ): VfsResult<DirectoryLookup> {
+        state.adviseReaddirPlus()
         val request = FuseRequest(FuseOpcode.LOOKUP, nodeId, name.size + 1).apply {
             writeName(0, name)
         }
@@ -779,7 +933,7 @@ private class FuseDirectoryNode(
     ): VfsResult<DirectoryLookup> {
         val request = when (val kind = node.kind) {
             NodeKind.Directory -> FuseRequest(FuseOpcode.MKDIR, nodeId, 8 + name.size + 1).apply {
-                writeU32(0, FuseAbi.S_IFDIR or creationMode(node).bits)
+                writeU32(0, creationMode(node).bits)
                 writeU32(4, creationMask(node))
                 writeName(8, name)
             }
@@ -799,7 +953,10 @@ private class FuseDirectoryNode(
         }
         return when (val result = instance.request(caller, request)) {
             is VfsResult.Ok -> when (val lookup = instance.lookup(result.value)) {
-                is VfsResult.Ok -> VfsResult.Ok(track(name, lookup.value))
+                is VfsResult.Ok -> {
+                    invalidateDirectoryCache()
+                    VfsResult.Ok(track(name, lookup.value))
+                }
                 is VfsResult.Err -> lookup
             }
             is VfsResult.Err -> result
@@ -836,7 +993,10 @@ private class FuseDirectoryNode(
             }
         }
         val lookup = when (val result = instance.lookup(reply)) {
-            is VfsResult.Ok -> track(name, result.value)
+            is VfsResult.Ok -> {
+                invalidateDirectoryCache()
+                track(name, result.value)
+            }
             is VfsResult.Err -> return result
         }
         val inode = lookup.inode ?: return VfsResult.Err(VfsError.IO)
@@ -858,7 +1018,7 @@ private class FuseDirectoryNode(
                 lookup,
                 FuseFileHandle(
                     instance,
-                    inode.id.value,
+                    inode,
                     opened.handle,
                     opened.flags,
                     flags,
@@ -883,7 +1043,10 @@ private class FuseDirectoryNode(
         }
         return when (val result = instance.request(caller, request)) {
             is VfsResult.Ok -> when (val lookup = instance.lookup(result.value)) {
-                is VfsResult.Ok -> VfsResult.Ok(track(name, lookup.value))
+                is VfsResult.Ok -> {
+                    invalidateDirectoryCache()
+                    VfsResult.Ok(track(name, lookup.value))
+                }
                 is VfsResult.Err -> lookup
             }
             is VfsResult.Err -> result
@@ -959,12 +1122,37 @@ private class FuseDirectoryNode(
         }
     }
 
-    fun invalidate(name: VfsName) = lock.withLock { entries.remove(name)?.invalidate() }
+    fun invalidate(name: VfsName) = state.invalidate(name)
 
-    private fun track(name: VfsName, lookup: DirectoryLookup): DirectoryLookup {
-        val validity = CacheValidity.Invalidatable(lookup.validity)
-        lock.withLock { entries.put(name, validity)?.invalidate() }
-        return lookup.copy(validity = validity)
+    fun invalidateDirectoryCache() = state.invalidateListing()
+
+    fun useReaddirPlus(position: Long): Boolean =
+        !instance.sessionUnsupported(FuseOpcode.READDIRPLUS) &&
+            instance.supports(FuseFeature.DO_READDIRPLUS) && state.useReaddirPlus(
+            position,
+            instance.supports(FuseFeature.READDIRPLUS_AUTO),
+        )
+
+    fun validateDirectoryCache(caller: VfsOperationContext, inode: Inode): VfsResult<Unit> =
+        when (val result = inode.attributes(caller)) {
+            is VfsResult.Ok -> {
+                state.validateListing(result.value.metadata.timestamps.modificationTime)
+                VfsResult.Ok(Unit)
+            }
+            is VfsResult.Err -> result
+        }
+
+    fun cachedDirectoryEntry(position: Long): CachedEntry? = state.take(position)
+
+    fun isDirectoryCacheEnd(position: Long): Boolean = state.isEnd(position)
+
+    fun cacheDirectoryEntry(position: Long, entry: DirectoryEntry, nextOffset: Long) =
+        state.cache(position, entry, nextOffset)
+
+    fun cacheDirectoryEnd(position: Long) = state.cacheEnd(position)
+
+    fun track(name: VfsName, lookup: DirectoryLookup): DirectoryLookup {
+        return state.track(name, lookup)
     }
 
     private fun nodeMode(node: NodeCreation): UInt = creationMode(node).bits or when (node.kind) {
@@ -991,6 +1179,9 @@ private class FuseSymlinkNode(
     override val nodeId: ULong,
 ) : FuseNode, SymlinkBackend {
     override val type = InodeType.SYMLINK
+    private val lock = IrqSpinLock()
+    private var cachedTarget: VfsPathname? = null
+    private var cacheGeneration = 0uL
 
     override fun open(
         caller: VfsOperationContext,
@@ -998,17 +1189,38 @@ private class FuseSymlinkNode(
         options: OpenOptions,
     ): VfsResult<OpenFileBackend> = VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
 
-    override fun readLink(caller: VfsOperationContext, inode: Inode): VfsResult<VfsPathname> =
-        when (val result = instance.request(caller, FuseRequest(FuseOpcode.READLINK, nodeId))) {
-            is VfsResult.Ok -> result.value.bodyBytes().let { target ->
-                if (target.isEmpty() || target.any { it == 0.toByte() }) {
-                    VfsResult.Err(VfsError.IO)
-                } else {
-                    VfsResult.Ok(VfsPathname.fromBytes(target))
-                }
+    override fun readLink(caller: VfsOperationContext, inode: Inode): VfsResult<VfsPathname> {
+        val cacheable = instance.supports(FuseFeature.CACHE_SYMLINKS)
+        val generation = if (cacheable) {
+            lock.withLock {
+                cachedTarget?.let { return VfsResult.Ok(it) }
+                cacheGeneration
             }
-            is VfsResult.Err -> result
+        } else {
+            0uL
         }
+        val reply = when (val result = instance.request(
+            caller,
+            FuseRequest(FuseOpcode.READLINK, nodeId),
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        val bytes = reply.bodyBytes()
+        if (bytes.isEmpty() || bytes.any { it == 0.toByte() }) {
+            return VfsResult.Err(VfsError.IO)
+        }
+        val target = VfsPathname.fromBytes(bytes)
+        if (cacheable) lock.withLock {
+            if (cacheGeneration == generation) cachedTarget = target
+        }
+        return VfsResult.Ok(target)
+    }
+
+    fun invalidateTarget() = lock.withLock {
+        cachedTarget = null
+        cacheGeneration++
+    }
 }
 
 private class FuseSpecialNode(
@@ -1044,15 +1256,21 @@ private class FuseSpecialNode(
 
 private abstract class FuseHandle(
     protected val instance: FuseInstance,
-    protected val nodeId: ULong,
+    protected val fuseInode: Inode,
     protected val handle: ULong?,
     protected val openFlags: UInt,
     protected val fileFlags: UInt,
-    private val opener: VfsOperationContext,
+    protected val opener: VfsOperationContext,
     private val directory: Boolean,
 ) : OpenFileBackend {
+    protected val nodeId: ULong
+        get() = fuseInode.id.value
+
     override val seekable: Boolean
         get() = openFlags and (FuseAbi.FOPEN_NONSEEKABLE or FuseAbi.FOPEN_STREAM) == 0u
+
+    override val handlesOpenTruncate: Boolean
+        get() = !directory && fileFlags and OpenFlags.O_TRUNC.toUInt() != 0u
 
     protected val stream: Boolean
         get() = openFlags and FuseAbi.FOPEN_STREAM != 0u
@@ -1183,13 +1401,53 @@ private abstract class FuseHandle(
 
 private class FuseFileHandle(
     instance: FuseInstance,
-    nodeId: ULong,
+    inode: Inode,
     handle: ULong?,
     openFlags: UInt,
     fileFlags: UInt,
     opener: VfsOperationContext,
-) : FuseHandle(instance, nodeId, handle, openFlags, fileFlags, opener, directory = false),
-    AllocatingOpenFileBackend {
+) : FuseHandle(instance, inode, handle, openFlags, fileFlags, opener, directory = false),
+    AllocatingOpenFileBackend, CopyingOpenFileBackend, PageCacheProvider {
+    private val pageSource = object : PageCacheSource {
+        override val identity: Any
+            get() = fuseInode
+
+        override val readAheadSize: Int
+            get() = instance.maxReadAhead()
+
+        override fun read(offset: ULong, destination: ByteArray): Int {
+            if (offset > Long.MAX_VALUE.toULong()) return -1
+            val attributeVersion = fuseInode.attributeVersion()
+            val buffer = ByteArrayBuffer(destination).prepareWrite(0, destination.size) ?: return -1
+            val result = readDirect(
+                opener,
+                buffer,
+                0,
+                destination.size,
+                FilePosition(offset.toLong()),
+            )
+            return if (result.isSuccess) {
+                result.bytesTransferred.also { transferred ->
+                    if (transferred < destination.size) {
+                        fuseInode.shrinkCachedSize(
+                            offset + transferred.toULong(),
+                            attributeVersion,
+                        )
+                    }
+                }
+            } else if (result.error == VfsError.INTERRUPTED) {
+                PageCacheSource.READ_INTERRUPTED
+            } else {
+                PageCacheSource.READ_ERROR
+            }
+        }
+    }
+
+    override val cacheSource: PageCacheSource?
+        get() = pageSource.takeIf {
+            !stream && openFlags and FuseAbi.FOPEN_DIRECT_IO == 0u
+        }
+
     override fun allocate(
         caller: VfsOperationContext,
         inode: Inode,
@@ -1218,9 +1476,114 @@ private class FuseFileHandle(
         }
     }
 
+    override fun copyFileRange(
+        caller: VfsOperationContext,
+        sourceInode: Inode,
+        sourceOffset: ULong,
+        destinationInode: Inode,
+        destination: OpenFileBackend,
+        destinationOffset: ULong,
+        length: ULong,
+        flags: UInt,
+    ): VfsResult<ULong> {
+        val target = destination as? FuseFileHandle
+            ?: return VfsResult.Err(VfsError.NOT_SUPPORTED)
+        if (target.instance !== instance || sourceInode !== fuseInode ||
+            destinationInode !== target.fuseInode
+        ) {
+            return VfsResult.Err(VfsError.NOT_SUPPORTED)
+        }
+        if (flags != 0u) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+
+        var opcode = if (instance.protocolMinor() >= FuseAbi.MINOR_VERSION &&
+            !instance.sessionUnsupported(FuseOpcode.COPY_FILE_RANGE_64)
+        ) {
+            FuseOpcode.COPY_FILE_RANGE_64
+        } else {
+            FuseOpcode.COPY_FILE_RANGE
+        }
+        while (true) {
+            if (instance.sessionUnsupported(opcode)) {
+                return VfsResult.Err(VfsError.NOT_SUPPORTED)
+            }
+            val requestLength = if (opcode == FuseOpcode.COPY_FILE_RANGE) {
+                minOf(length, UInt.MAX_VALUE.toULong())
+            } else {
+                length
+            }
+            val request = FuseRequest(opcode, nodeId, 56).apply {
+                writeU64(0, handle ?: 0uL)
+                writeU64(8, sourceOffset)
+                writeU64(16, target.nodeId)
+                writeU64(24, target.handle ?: 0uL)
+                writeU64(32, destinationOffset)
+                writeU64(40, requestLength)
+                writeU64(48, flags.toULong())
+            }
+            val reply = when (val result = instance.request(caller, request)) {
+                is VfsResult.Ok -> result.value
+                is VfsResult.Err -> {
+                    if (result.error.errno != Errno.ENOSYS) return result
+                    instance.disable(opcode)
+                    if (opcode == FuseOpcode.COPY_FILE_RANGE_64) {
+                        opcode = FuseOpcode.COPY_FILE_RANGE
+                        continue
+                    }
+                    return VfsResult.Err(VfsError.NOT_SUPPORTED)
+                }
+            }
+            if (reply.bodySize < 8) return VfsResult.Err(VfsError.IO)
+            val copied = if (opcode == FuseOpcode.COPY_FILE_RANGE_64) {
+                reply.readU64(0)
+            } else {
+                reply.readU32(0).toULong()
+            }
+            if (copied > requestLength) return VfsResult.Err(VfsError.IO)
+            destinationInode.invalidateAttributes()
+            return VfsResult.Ok(copied)
+        }
+    }
+
     override fun read(
         caller: VfsOperationContext,
         inode: Inode,
+        destination: PreparedBufferDestination,
+        destinationOffset: Int,
+        count: Int,
+        position: FilePosition,
+    ): IoResult {
+        val cache = cacheSource ?: return readDirect(
+            caller,
+            destination,
+            destinationOffset,
+            count,
+            position,
+        )
+        if (!stream && (position.value < 0 || count.toLong() > Long.MAX_VALUE - position.value)) {
+            return IoResult.failure(VfsError.FILE_TOO_LARGE)
+        }
+        if (count == 0) return IoResult.success(0)
+        val sourceOffset = position.value.toULong()
+        val fileSize = when (val result = inode.attributes(caller)) {
+            is VfsResult.Ok -> result.value.metadata.size
+            is VfsResult.Err -> return IoResult.failure(result.error)
+        }
+        if (sourceOffset >= fileSize) return IoResult.success(0)
+        val available = minOf(count.toULong(), fileSize - sourceOffset).toInt()
+        val cached = PageCache.read(cache, sourceOffset, destination, destinationOffset, available)
+        if (!cached.isSuccess) {
+            return IoResult.failure(when (cached.failure) {
+                PageCacheFailure.OUT_OF_MEMORY -> VfsError.NO_MEMORY
+                PageCacheFailure.IO_ERROR -> VfsError.IO
+                PageCacheFailure.INTERRUPTED -> VfsError.INTERRUPTED
+            })
+        }
+        position.value += cached.bytes
+        return IoResult.success(cached.bytes)
+    }
+
+    private fun readDirect(
+        caller: VfsOperationContext,
         destination: PreparedBufferDestination,
         destinationOffset: Int,
         count: Int,
@@ -1330,55 +1693,130 @@ private class FuseFileHandle(
 
 private class FuseDirectoryHandle(
     instance: FuseInstance,
-    nodeId: ULong,
+    inode: Inode,
     handle: ULong?,
     openFlags: UInt,
     fileFlags: UInt,
     opener: VfsOperationContext,
-) : FuseHandle(instance, nodeId, handle, openFlags, fileFlags, opener, directory = true) {
+) : FuseHandle(instance, inode, handle, openFlags, fileFlags, opener, directory = true) {
     override fun iterate(
         caller: VfsOperationContext,
         inode: Inode,
         position: FilePosition,
         emit: (entry: DirectoryEntry, nextOffset: Long) -> Boolean,
     ): VfsResult<Unit> {
-        val size = minOf(instance.maxRead(), 64 * 1024)
-        val request = FuseRequest(FuseOpcode.READDIR, nodeId, 40).apply {
-            writeU64(0, handle ?: 0uL)
-            writeU64(8, position.value.toULong())
-            writeU32(16, size.toUInt())
-            writeU32(32, fileFlags)
+        if (position.value < 0) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        val directory = inode.backend as? FuseDirectoryNode
+            ?: return VfsResult.Err(VfsError.IO)
+        val cache = openFlags and FuseAbi.FOPEN_CACHE_DIR != 0u
+        if (cache) {
+            when (val validated = directory.validateDirectoryCache(caller, inode)) {
+                is VfsResult.Ok -> Unit
+                is VfsResult.Err -> return validated
+            }
+            while (true) {
+                val cached = directory.cachedDirectoryEntry(position.value) ?: break
+                if (!emit(cached.entry, cached.nextOffset)) return VfsResult.Ok(Unit)
+                if (cached.nextOffset == position.value) return VfsResult.Err(VfsError.IO)
+                position.value = cached.nextOffset
+            }
+            if (directory.isDirectoryCacheEnd(position.value)) return VfsResult.Ok(Unit)
         }
-        val reply = when (val result = instance.request(caller, request)) {
+
+        val size = instance.maxRead()
+        val requestPosition = position.value
+        var plus = directory.useReaddirPlus(requestPosition)
+        var opcode = if (plus) FuseOpcode.READDIRPLUS else FuseOpcode.READDIR
+        var result = requestDirectory(caller, opcode, requestPosition, size)
+        if (result is VfsResult.Err && plus && result.error.errno == Errno.ENOSYS) {
+            instance.disable(FuseOpcode.READDIRPLUS)
+            plus = false
+            opcode = FuseOpcode.READDIR
+            result = requestDirectory(caller, opcode, requestPosition, size)
+        }
+        val reply = when (result) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
         if (reply.bodySize > size) return VfsResult.Err(VfsError.IO)
+        if (reply.bodySize == 0) {
+            if (cache) directory.cacheDirectoryEnd(requestPosition)
+            return VfsResult.Ok(Unit)
+        }
+
+        val entryOffset = if (plus) FuseAbi.ENTRY_OUT_SIZE else 0
+        val minimumSize = entryOffset + FuseAbi.DIRENT_SIZE
         var offset = 0
+        var recordPosition = requestPosition
+        var accepting = true
         while (offset < reply.bodySize) {
-            if (reply.bodySize - offset < 24) return VfsResult.Err(VfsError.IO)
-            val nameLength = reply.readU32(offset + 16).toInt()
-            val recordLength = (24 + nameLength + 7) and -8
+            if (reply.bodySize - offset < minimumSize) return VfsResult.Err(VfsError.IO)
+            val dirent = offset + entryOffset
+            val nameLength = reply.readU32(dirent + 16).toInt()
+            val recordLength = (minimumSize + nameLength + 7) and -8
             if (nameLength !in 1..VfsName.MAX_LENGTH || recordLength > reply.bodySize - offset) {
                 return VfsResult.Err(VfsError.IO)
             }
-            val name = when (val parsed = VfsName.fromBytes(reply.bodyBytes(offset + 24, nameLength))) {
+            val name = when (val parsed = VfsName.fromBytes(
+                reply.bodyBytes(dirent + FuseAbi.DIRENT_SIZE, nameLength),
+            )) {
                 is VfsResult.Ok -> parsed.value
                 is VfsResult.Err -> return VfsResult.Err(VfsError.IO)
             }
-            val next = reply.readU64(offset + 8)
+            val next = reply.readU64(dirent + 8)
             if (next > Long.MAX_VALUE.toULong()) return VfsResult.Err(VfsError.IO)
+            val nextOffset = next.toLong()
+            if (nextOffset == recordPosition) return VfsResult.Err(VfsError.IO)
+            val lookup = if (!plus || name.isDot || name.isDotDot) {
+                null
+            } else {
+                val lookupNodeId = reply.readU64(offset)
+                if (lookupNodeId == 0uL) {
+                    null
+                } else when (val decoded = instance.lookup(reply, offset)) {
+                    is VfsResult.Ok -> directory.track(name, decoded.value)
+                    is VfsResult.Err -> {
+                        instance.forget(lookupNodeId)
+                        return decoded
+                    }
+                }
+            }
             val entry = DirectoryEntry(
                 name,
-                InodeId(reply.readU64(offset)),
-                directoryType(reply.readU32(offset + 20)),
+                InodeId(reply.readU64(dirent)),
+                directoryType(reply.readU32(dirent + 20)),
+                lookup,
             )
-            if (!emit(entry, next.toLong())) break
-            position.value = next.toLong()
+            val accepted = accepting && emit(entry, nextOffset)
+            if (cache) {
+                directory.cacheDirectoryEntry(
+                    recordPosition,
+                    if (accepting) entry.copy(lookup = null) else entry,
+                    nextOffset,
+                )
+            } else if (!accepting) {
+                lookup?.reference?.release()
+            }
+            if (accepting) {
+                if (accepted) position.value = nextOffset else accepting = false
+            }
+            recordPosition = nextOffset
             offset += recordLength
         }
         return VfsResult.Ok(Unit)
     }
+
+    private fun requestDirectory(
+        caller: VfsOperationContext,
+        opcode: FuseOpcode,
+        position: Long,
+        size: Int,
+    ): VfsResult<FuseReply> = instance.request(caller, FuseRequest(opcode, nodeId, 40).apply {
+        writeU64(0, handle ?: 0uL)
+        writeU64(8, position.toULong())
+        writeU32(16, size.toUInt())
+        writeU32(32, fileFlags)
+    })
 
     private fun directoryType(type: UInt): InodeType? = when (type) {
         1u -> InodeType.PIPE

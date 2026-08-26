@@ -2,9 +2,11 @@
 
 package org.plos_clan.cpos.fs.erofs
 
+import org.plos_clan.cpos.drivers.DeviceNumber
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.InodeMetadata
 import org.plos_clan.cpos.fs.vfs.InodeTimestamps
+import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.VfsTimestamp
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.module.ModuleData
@@ -20,6 +22,8 @@ internal data class DiskInode(
     val metadata: InodeMetadata,
 ) {
     companion object {
+        private const val PERMISSION_MASK = 0x0fffu
+
         fun read(image: Image, header: Header, nid: ULong): DiskInode? {
             val location = header.inodeLocation(nid)
             if (!image.contains(location, Header.COMPACT_INODE_SIZE)) return null
@@ -32,6 +36,14 @@ internal data class DiskInode(
             val mode = image.u16(location + 4uL)
             val type = DiskFileType.fromMode(mode) ?: return null
             val size = if (extended) image.u64(location + 8uL) else image.u32(location + 8uL)
+            val rawBlock = image.u32(location + 16uL)
+            val deviceNumber = if (type == DiskFileType.CHARACTER_DEVICE ||
+                type == DiskFileType.BLOCK_DEVICE
+            ) {
+                rawBlock.takeIf { DeviceNumber.fromEncoded(it) != null } ?: return null
+            } else {
+                0uL
+            }
             val links = if (extended) image.u32(location + 44uL).toUInt() else {
                 image.u16(location + 6uL).toUInt()
             }
@@ -49,9 +61,10 @@ internal data class DiskInode(
                 header.buildTime
             }
             val metadata = InodeMetadata(
-                mode = FileMode(mode.toUInt()),
+                mode = FileMode(mode.toUInt() and PERMISSION_MASK),
                 size = size,
                 linkCount = links,
+                deviceNumber = deviceNumber,
                 uid = uid,
                 gid = gid,
                 timestamps = InodeTimestamps.fromModificationTime(modificationTime),
@@ -62,7 +75,7 @@ internal data class DiskInode(
                 layout,
                 type,
                 size,
-                image.u32(location + 16uL),
+                rawBlock,
                 metadata,
             )
         }
@@ -76,23 +89,28 @@ internal enum class DataLayout {
     COMPRESSED_COMPACT,
 }
 
-internal enum class DiskFileType {
-    REGULAR,
-    DIRECTORY,
-    SYMLINK;
+internal enum class DiskFileType(
+    val inodeType: InodeType,
+    private val mode: Int,
+    private val directoryType: Int,
+) {
+    REGULAR(InodeType.REGULAR, 0x8000, 1),
+    DIRECTORY(InodeType.DIRECTORY, 0x4000, 2),
+    CHARACTER_DEVICE(InodeType.CHARACTER_DEVICE, 0x2000, 3),
+    BLOCK_DEVICE(InodeType.BLOCK_DEVICE, 0x6000, 4),
+    PIPE(InodeType.PIPE, 0x1000, 5),
+    SOCKET(InodeType.SOCKET, 0xc000, 6),
+    SYMLINK(InodeType.SYMLINK, 0xa000, 7),
+    ;
 
     companion object {
         private const val MODE_TYPE_MASK = 0xf000
-        private const val MODE_REGULAR = 0x8000
-        private const val MODE_DIRECTORY = 0x4000
-        private const val MODE_SYMLINK = 0xa000
 
-        fun fromMode(mode: Int): DiskFileType? = when (mode and MODE_TYPE_MASK) {
-            MODE_REGULAR -> REGULAR
-            MODE_DIRECTORY -> DIRECTORY
-            MODE_SYMLINK -> SYMLINK
-            else -> null
-        }
+        fun fromMode(mode: Int): DiskFileType? =
+            entries.firstOrNull { it.mode == (mode and MODE_TYPE_MASK) }
+
+        fun fromDirectoryType(type: Int): DiskFileType? =
+            entries.firstOrNull { it.directoryType == type }
     }
 }
 

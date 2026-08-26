@@ -7,6 +7,7 @@ import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import org.plos_clan.cpos.fs.OpenFlags
 import org.plos_clan.cpos.mem.BufferDestination
 import org.plos_clan.cpos.mem.BufferSource
+import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.PageCache
 import org.plos_clan.cpos.mem.PageCacheProvider
 import org.plos_clan.cpos.mem.PageCacheSource
@@ -38,6 +39,9 @@ class OpenFileDescription private constructor(
     private val statusFlags = AtomicInt(initialStatusFlags)
 
     companion object {
+        private const val COPY_BUFFER_SIZE = 1024 * 1024
+        private val copyPositionLock = KernelMutex()
+
         internal fun open(
             caller: VfsOperationContext,
             path: VfsPath,
@@ -68,7 +72,7 @@ class OpenFileDescription private constructor(
                     }
                 }
             }
-            if (truncate && inode.type == InodeType.REGULAR) {
+            if (truncate && !backend.handlesOpenTruncate && inode.type == InodeType.REGULAR) {
                 val result = (inode.backend as? RegularFileBackend)?.resize(caller, inode, 0uL)
                     ?: VfsResult.Err(VfsError.INVALID_ARGUMENT)
                 if (result is VfsResult.Err) {
@@ -77,6 +81,9 @@ class OpenFileDescription private constructor(
                     path.mount.release()
                     return result
                 }
+                PageCache.invalidate(inode)
+                val identity = inode.backend.pageCacheIdentity(inode)
+                if (identity != inode) PageCache.invalidate(identity)
             }
             return VfsResult.Ok(
                 OpenFileDescription(
@@ -147,17 +154,69 @@ class OpenFileDescription private constructor(
             mode,
         ) ?: VfsResult.Err(VfsError.INVALID_ARGUMENT)
         if (result is VfsResult.Ok) {
-            PageCache.invalidate(inode, offset, length)
-            val backendIdentity = inode.backend.pageCacheIdentity(inode)
-            if (backendIdentity != inode) PageCache.invalidate(backendIdentity, offset, length)
-            val handleIdentity = cacheSource?.identity
-            if (handleIdentity != null && handleIdentity != inode &&
-                handleIdentity != backendIdentity
-            ) {
-                PageCache.invalidate(handleIdentity, offset, length)
-            }
+            invalidateCachedRange(offset, length)
         }
         return result
+    }
+
+    fun copyFileRange(
+        caller: VfsOperationContext,
+        destination: OpenFileDescription,
+        sourceOffset: ULong?,
+        destinationOffset: ULong?,
+        length: ULong,
+        flags: UInt,
+    ): VfsResult<ULong> {
+        if (references.load() == 0 || !access.canRead ||
+            destination.references.load() == 0 || !destination.access.canWrite
+        ) {
+            return VfsResult.Err(VfsError.BAD_DESCRIPTOR)
+        }
+        if (inode.type != InodeType.REGULAR || destination.inode.type != InodeType.REGULAR) {
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+        if (MountFlag.READ_ONLY in destination.path.mount.flags) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
+        if (destination.statusFlags.load() and OpenFlags.O_APPEND != 0) {
+            return VfsResult.Err(VfsError.BAD_DESCRIPTOR)
+        }
+        if (length == 0uL) return VfsResult.Ok(0uL)
+        if (sourceOffset != null && destinationOffset != null) {
+            return copyFileRangeAt(
+                caller,
+                destination,
+                sourceOffset,
+                destinationOffset,
+                length,
+                flags,
+            )
+        }
+        return copyPositionLock.withLock {
+            positionLock.withLock {
+                if (this === destination) {
+                    copyFileRangeAtCurrentPositions(
+                        caller,
+                        destination,
+                        sourceOffset,
+                        destinationOffset,
+                        length,
+                        flags,
+                    )
+                } else {
+                    destination.positionLock.withLock {
+                        copyFileRangeAtCurrentPositions(
+                            caller,
+                            destination,
+                            sourceOffset,
+                            destinationOffset,
+                            length,
+                            flags,
+                        )
+                    }
+                }
+            }
+        }
     }
 
     internal fun flush(caller: VfsOperationContext): VfsResult<Unit> = when {
@@ -277,7 +336,10 @@ class OpenFileDescription private constructor(
             if (references.load() == 0) {
                 return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
             }
-            backend.iterate(caller, inode, position, emit)
+            backend.iterate(caller, inode, position) { entry, nextOffset ->
+                entry.lookup?.let { path.dentry.cacheChild(entry.name, it) }
+                emit(entry, nextOffset)
+            }
         }
         if (result is VfsResult.Ok) recordAccess(caller)
         return result
@@ -460,19 +522,149 @@ class OpenFileDescription private constructor(
             initialPosition
         }
         if (start >= 0) {
-            PageCache.invalidate(inode, start.toULong(), transferred.toULong())
-            val backendIdentity = inode.backend.pageCacheIdentity(inode)
-            if (backendIdentity != inode) {
-                PageCache.invalidate(backendIdentity, start.toULong(), transferred.toULong())
-            }
-            val handleIdentity = cacheSource?.identity
-            if (handleIdentity != null && handleIdentity != inode &&
-                handleIdentity != backendIdentity
+            invalidateCachedRange(start.toULong(), transferred.toULong())
+        }
+        return result
+    }
+
+    private fun copyFileRangeAtCurrentPositions(
+        caller: VfsOperationContext,
+        destination: OpenFileDescription,
+        sourceOffset: ULong?,
+        destinationOffset: ULong?,
+        length: ULong,
+        flags: UInt,
+    ): VfsResult<ULong> {
+        val sourcePosition = sourceOffset ?: position.value.toULong()
+        val destinationPosition = destinationOffset ?: destination.position.value.toULong()
+        val result = copyFileRangeAt(
+            caller,
+            destination,
+            sourcePosition,
+            destinationPosition,
+            length,
+            flags,
+        )
+        if (result is VfsResult.Ok) {
+            val copied = result.value.toLong()
+            if (sourceOffset == null) position.value += copied
+            if (destinationOffset == null) destination.position.value += copied
+        }
+        return result
+    }
+
+    private fun copyFileRangeAt(
+        caller: VfsOperationContext,
+        destination: OpenFileDescription,
+        sourceOffset: ULong,
+        destinationOffset: ULong,
+        length: ULong,
+        flags: UInt,
+    ): VfsResult<ULong> {
+        if (sourceOffset > Long.MAX_VALUE.toULong() ||
+            destinationOffset > Long.MAX_VALUE.toULong() ||
+            length > Long.MAX_VALUE.toULong() - sourceOffset ||
+            length > Long.MAX_VALUE.toULong() - destinationOffset
+        ) {
+            return VfsResult.Err(VfsError.FILE_TOO_LARGE)
+        }
+        if (inode.superBlock === destination.inode.superBlock &&
+            inode.id == destination.inode.id && inode.generation == destination.inode.generation &&
+            sourceOffset < destinationOffset + length &&
+            destinationOffset < sourceOffset + length
+        ) {
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+
+        val accelerated = (backend as? CopyingOpenFileBackend)?.copyFileRange(
+            caller,
+            inode,
+            sourceOffset,
+            destination.inode,
+            destination.backend,
+            destinationOffset,
+            length,
+            flags,
+        )
+        val result = when (accelerated) {
+            null -> copyFileRangeFallback(
+                caller,
+                destination,
+                sourceOffset,
+                destinationOffset,
+                length,
+            )
+            is VfsResult.Ok -> accelerated
+            is VfsResult.Err -> if (accelerated.error == VfsError.NOT_SUPPORTED ||
+                accelerated.error == VfsError.CROSS_DEVICE
             ) {
-                PageCache.invalidate(handleIdentity, start.toULong(), transferred.toULong())
+                copyFileRangeFallback(caller, destination, sourceOffset, destinationOffset, length)
+            } else {
+                accelerated
+            }
+        }
+
+        if (result is VfsResult.Ok) {
+            if (result.value > length) return VfsResult.Err(VfsError.IO)
+            if (result.value != 0uL && accelerated is VfsResult.Ok) {
+                destination.invalidateCachedRange(destinationOffset, result.value)
+                destination.inode.invalidateAttributes()
+                recordAccess(caller)
             }
         }
         return result
+    }
+
+    private fun copyFileRangeFallback(
+        caller: VfsOperationContext,
+        destination: OpenFileDescription,
+        sourceOffset: ULong,
+        destinationOffset: ULong,
+        length: ULong,
+    ): VfsResult<ULong> {
+        val bytes = try {
+            ByteArray(minOf(length, COPY_BUFFER_SIZE.toULong()).toInt())
+        } catch (_: OutOfMemoryError) {
+            return VfsResult.Err(VfsError.NO_MEMORY)
+        }
+        val buffer = ByteArrayBuffer(bytes)
+        var copied = 0uL
+        while (copied < length) {
+            val count = minOf(bytes.size.toULong(), length - copied).toInt()
+            val read = readAt(caller, sourceOffset + copied, buffer, 0, count)
+            if (!read.isSuccess) {
+                return if (copied == 0uL) VfsResult.Err(checkNotNull(read.error))
+                else VfsResult.Ok(copied)
+            }
+            val available = read.bytesTransferred
+            if (available == 0) break
+            val written = destination.writeAt(
+                caller,
+                destinationOffset + copied,
+                buffer,
+                0,
+                available,
+            )
+            if (!written.isSuccess) {
+                return if (copied == 0uL) VfsResult.Err(checkNotNull(written.error))
+                else VfsResult.Ok(copied)
+            }
+            copied += written.bytesTransferred.toULong()
+            if (written.bytesTransferred < available) break
+        }
+        return VfsResult.Ok(copied)
+    }
+
+    private fun invalidateCachedRange(offset: ULong, length: ULong) {
+        PageCache.invalidate(inode, offset, length)
+        val backendIdentity = inode.backend.pageCacheIdentity(inode)
+        if (backendIdentity != inode) PageCache.invalidate(backendIdentity, offset, length)
+        val handleIdentity = cacheSource?.identity
+        if (handleIdentity != null && handleIdentity != inode &&
+            handleIdentity != backendIdentity
+        ) {
+            PageCache.invalidate(handleIdentity, offset, length)
+        }
     }
 
     private fun readError(offset: Int, count: Int): VfsError? = when {

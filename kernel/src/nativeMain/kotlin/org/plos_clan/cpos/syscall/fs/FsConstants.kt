@@ -42,6 +42,8 @@ internal object FsConstants {
     const val F_DUPFD_CLOEXEC = 1_030
     const val F_GETFD_FLAGS = FileDescriptorFlags.FD_CLOEXEC
 
+    const val CLOSE_RANGE_CLOEXEC = 0x4u
+
     const val STAT_SIZE = 144
     const val STATX_SIZE = 256
     const val STATFS_SIZE = 120
@@ -84,4 +86,5 @@ internal object FsConstants {
     const val ST_RELATIME = 0x1000uL
     const val ST_NOSYMFOLLOW = 0x2000uL
     const val MS_SILENT = 0x8000uL
+    const val MS_MOVE = 0x2000uL
 }

@@ -1,6 +1,6 @@
 package org.plos_clan.cpos.fs.vfs
 
-import org.plos_clan.cpos.drivers.TscClock
+import org.plos_clan.cpos.drivers.RealtimeClock
 
 data class VfsTimestamp(
     val seconds: Long,
@@ -27,10 +27,10 @@ data class VfsTimestamp(
         internal const val NANOSECONDS_PER_SECOND = 1_000_000_000u
 
         fun now(): VfsTimestamp {
-            val nanoseconds = TscClock.nanoTime()
+            val now = RealtimeClock.now()
             return VfsTimestamp(
-                seconds = (nanoseconds / NANOSECONDS_PER_SECOND).toLong(),
-                nanoseconds = (nanoseconds % NANOSECONDS_PER_SECOND).toUInt(),
+                seconds = now.seconds,
+                nanoseconds = now.nanoseconds,
             )
         }
     }

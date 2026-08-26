@@ -4,6 +4,7 @@ package org.plos_clan.cpos.syscall
 
 import KERNEL_NAME
 import kotlinx.cinterop.ExperimentalForeignApi
+import org.plos_clan.cpos.drivers.RealtimeClock
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.acpi.fadt.Fadt
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
@@ -35,9 +36,6 @@ private const val REBOOT_CMD_RESTART2 = 0xA1B2C3D4UL
 private const val REBOOT_CMD_SW_SUSPEND = 0xD000FCE2UL
 private const val REBOOT_CMD_KEXEC = 0x45584543UL
 
-private const val MAX_CLOCK_ID = 7
-private const val SUPPORTED_CLOCKS = 0xf3u
-
 private const val GETRANDOM_MAX = 0x1ff_ffffuL
 private const val GETRANDOM_FLAGS = 0x7uL
 private const val RANDOM_CHUNK_SIZE = 4096
@@ -45,18 +43,30 @@ private const val RANDOM_CHUNK_SIZE = 4096
 private const val NANOSECONDS_PER_SECOND = 1_000_000_000uL
 private const val NANOSECONDS_PER_MICROSECOND = 1_000uL
 
-private const val CLOCK_REALTIME = 0UL
-private const val CLOCK_MONOTONIC = 1UL
-private const val CLOCK_PROCESS_CPUTIME_ID = 2UL
-private const val CLOCK_THREAD_CPUTIME_ID = 3UL
-private const val CLOCK_MONOTONIC_RAW = 4UL
-private const val CLOCK_REALTIME_COARSE = 5UL
-private const val CLOCK_MONOTONIC_COARSE = 6UL
-private const val CLOCK_BOOTTIME = 7UL
-private const val CLOCK_REALTIME_ALARM = 8UL
-private const val CLOCK_BOOTTIME_ALARM = 9UL
-private const val CLOCK_SGI_CYCLE = 10UL
-private const val CLOCK_TAI = 11UL
+private enum class ClockId(val value: ULong, private val realtime: Boolean = false) {
+    REALTIME(0uL, realtime = true),
+    MONOTONIC(1uL),
+    MONOTONIC_RAW(4uL),
+    REALTIME_COARSE(5uL, realtime = true),
+    MONOTONIC_COARSE(6uL),
+    BOOTTIME(7uL),
+    ;
+
+    fun read(): TimeSpec = if (realtime) {
+        RealtimeClock.now().let { TimeSpec(it.seconds, it.nanoseconds.toLong()) }
+    } else {
+        TscClock.nanoTime().let {
+            TimeSpec(
+                sec = (it / NANOSECONDS_PER_SECOND).toLong(),
+                nsec = (it % NANOSECONDS_PER_SECOND).toLong(),
+            )
+        }
+    }
+
+    companion object {
+        fun from(value: ULong): ClockId? = entries.firstOrNull { it.value == value }
+    }
+}
 
 private class LinuxTimeval(val seconds: Long, val microseconds: Long) : NativeStruct {
     override fun toNativeBytes(): ByteArray = ByteArray(Long.SIZE_BYTES * 2).also { buffer ->
@@ -236,32 +246,22 @@ internal fun uname(regs: PtraceRegisters, process: Process): Long {
 
 internal fun time(regs: PtraceRegisters, process: Process): Long {
     if (!TscClock.isReady) return errno(Errno.EIO)
-    val seconds = TscClock.nanoTime() / NANOSECONDS_PER_SECOND
+    val seconds = RealtimeClock.now().seconds
     val outputAddress = regs[PtraceRegisters.IDX_RDI]
     if (outputAddress != 0uL) {
-        val result = Syscall.copyWordToUser(process, outputAddress, seconds)
+        val result = Syscall.copyWordToUser(process, outputAddress, seconds.toULong())
         if (result != 0L) return result
     }
-    return seconds.toLong()
+    return seconds
 }
 
 internal fun clockGetTime(regs: PtraceRegisters, process: Process): Long {
-    val clockId = regs[PtraceRegisters.IDX_RDI]
-    if (clockId > MAX_CLOCK_ID.toULong() ||
-        SUPPORTED_CLOCKS and (1u shl clockId.toInt()) == 0u
-    ) {
-        return errno(Errno.EINVAL)
-    }
+    val clock = ClockId.from(regs[PtraceRegisters.IDX_RDI]) ?: return errno(Errno.EINVAL)
     if (!TscClock.isReady) return errno(Errno.EIO)
-    val now = TscClock.nanoTime()
-    val value = TimeSpec(
-        sec = (now / NANOSECONDS_PER_SECOND).toLong(),
-        nsec = (now % NANOSECONDS_PER_SECOND).toLong(),
-    )
     return if (UserMemory(
             process.addressSpace,
             regs[PtraceRegisters.IDX_RSI],
-        ).copyToUser(value.toNativeBytes())
+        ).copyToUser(clock.read().toNativeBytes())
     ) {
         0L
     } else {
@@ -271,10 +271,10 @@ internal fun clockGetTime(regs: PtraceRegisters, process: Process): Long {
 
 internal fun getTimeOfDay(regs: PtraceRegisters, process: Process): Long {
     if (!TscClock.isReady) return errno(Errno.EIO)
-    val now = TscClock.nanoTime()
+    val now = RealtimeClock.now()
     val time = LinuxTimeval(
-        seconds = (now / NANOSECONDS_PER_SECOND).toLong(),
-        microseconds = ((now % NANOSECONDS_PER_SECOND) / NANOSECONDS_PER_MICROSECOND).toLong(),
+        seconds = now.seconds,
+        microseconds = (now.nanoseconds.toULong() / NANOSECONDS_PER_MICROSECOND).toLong(),
     )
     val timeAddress = regs[PtraceRegisters.IDX_RDI]
     if (timeAddress != 0uL &&
@@ -382,14 +382,10 @@ internal fun sysInfo(regs: PtraceRegisters, process: Process): Long {
 }
 
 internal fun clockGetRes(regs: PtraceRegisters, process: Process): Long {
-    val clockID = regs[PtraceRegisters.IDX_RDI]
-    val userSpec = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
-    return when(clockID) {
-        CLOCK_MONOTONIC or CLOCK_REALTIME or CLOCK_BOOTTIME -> {
-            val spec = TimeSpec(sec = 0, nsec = 1)
-            if(!userSpec.copyToUser(spec.toNativeBytes())) return errno(Errno.EFAULT)
-            errno(Errno.EOK)
-        }
-        else -> errno(Errno.ENOSYS)
-    }
+    ClockId.from(regs[PtraceRegisters.IDX_RDI]) ?: return errno(Errno.EINVAL)
+    val address = regs[PtraceRegisters.IDX_RSI]
+    if (address == 0uL) return 0L
+    val resolution = TimeSpec(sec = 0, nsec = 1).toNativeBytes()
+    return if (UserMemory(process.addressSpace, address).copyToUser(resolution)) 0L
+    else errno(Errno.EFAULT)
 }

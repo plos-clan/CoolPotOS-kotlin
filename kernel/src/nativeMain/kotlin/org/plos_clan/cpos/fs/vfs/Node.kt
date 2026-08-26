@@ -79,6 +79,34 @@ class Inode internal constructor(
         attributeGeneration++
     }
 
+    internal fun updateCachedTimestamps(update: InodeTimestampUpdate) = lock.withLock {
+        if (evicted || !update.requiresCurrentTime) return@withLock
+        val timestamps = update.apply(currentMetadata.timestamps, VfsTimestamp.now())
+        if (timestamps == currentMetadata.timestamps) return@withLock
+        currentMetadata = currentMetadata.copy(timestamps = timestamps)
+        attributeSnapshot = attributeSnapshot?.let { snapshot ->
+            snapshot.copy(
+                attributes = snapshot.attributes.copy(metadata = currentMetadata),
+            )
+        }
+        attributeGeneration++
+    }
+
+    internal fun attributeVersion(): ULong = lock.withLock { attributeGeneration }
+
+    internal fun shrinkCachedSize(size: ULong, expectedVersion: ULong) = lock.withLock {
+        if (evicted || attributeGeneration != expectedVersion || size >= currentMetadata.size) {
+            return@withLock
+        }
+        currentMetadata = currentMetadata.copy(size = size)
+        attributeSnapshot = attributeSnapshot?.let { snapshot ->
+            snapshot.copy(
+                attributes = snapshot.attributes.copy(metadata = currentMetadata),
+            )
+        }
+        attributeGeneration++
+    }
+
     internal fun updateMetadata(
         timestamps: InodeTimestampUpdate = InodeTimestampEvent.STATUS_CHANGED,
         update: (InodeMetadata) -> InodeMetadata = { it },

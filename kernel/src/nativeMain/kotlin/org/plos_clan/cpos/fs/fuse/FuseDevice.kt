@@ -69,6 +69,10 @@ internal interface FuseNotificationSink {
 }
 
 internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
+    private companion object {
+        const val REQUESTS_PER_FORGET_BATCH = 8
+    }
+
     private enum class State {
         NEW,
         INITIALIZING,
@@ -91,8 +95,10 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
     }
 
     private data class Negotiation(
+        val minorVersion: UInt,
         val features: ULong,
         val maxRead: Int,
+        val maxReadAhead: Int,
         val maxWrite: Int,
     )
 
@@ -100,36 +106,45 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
         val kind: PendingKind,
         val thread: Thread?,
     ) {
+        var unique = 0uL
         var state = PendingState.QUEUED
+        var interrupted = false
+        var interruptQueued = false
         var result: VfsResult<FuseReply>? = null
     }
+
+    private data class Forget(val nodeId: ULong, val count: ULong)
 
     private data class OutboundRequest(
         val request: FuseRequest,
         val pending: PendingRequest?,
         val disconnectAfterRead: Boolean = false,
+        val interruptTarget: ULong? = null,
+        val forgets: List<Forget>? = null,
     )
 
     private val lock = IrqSpinLock()
     private val outbound = ArrayDeque<OutboundRequest>()
     private val pending = mutableMapOf<ULong, PendingRequest>()
+    private val forgotten = linkedMapOf<ULong, ULong>()
     private val readWaiters = IoWaitQueue()
     private val stateWaiters = IoWaitQueue()
     private val unsupported = mutableSetOf<FuseOpcode>()
     private var state = State.NEW
-    private var nextUnique = 1uL
+    private var nextUnique = 2uL
     private var maximumRead = FuseAbi.MAX_TRANSFER_SIZE
     private var negotiation: Negotiation? = null
     private var notificationSink: FuseNotificationSink? = null
     private var disconnectionError = VfsError.NOT_CONNECTED
     private var deviceDisconnectionErrno = Errno.ENODEV
+    private var requestsSinceForget = 0
 
     fun attach(maxRead: Int, sink: FuseNotificationSink): VfsResult<Unit> {
         require(maxRead in 1..FuseAbi.MAX_TRANSFER_SIZE)
         val request = FuseRequest(FuseOpcode.INIT, FuseAbi.ROOT_ID, 64).apply {
             writeU32(0, FuseAbi.VERSION)
             writeU32(4, FuseAbi.MINOR_VERSION)
-            writeU32(8, 0u)
+            writeU32(8, maxRead.toUInt())
             writeU32(12, FuseFeature.supportedMask.toUInt())
             writeU32(16, (FuseFeature.supportedMask shr 32).toUInt())
         }
@@ -166,15 +181,15 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
         while (true) {
             val result = lock.withLock {
                 queued.result?.let { return@withLock it }
-                if (thread.hasPendingSignal() && queued.state == PendingState.QUEUED) {
-                    val iterator = outbound.iterator()
-                    while (iterator.hasNext()) {
-                        if (iterator.next().pending !== queued) continue
-                        iterator.remove()
-                        pending.entries.removeAll { it.value === queued }
+                if (thread.hasPendingSignal() && !queued.interrupted) {
+                    if (queued.state == PendingState.QUEUED) {
+                        outbound.removeAll { it.pending === queued }
+                        pending.remove(queued.unique)
                         queued.state = PendingState.FINISHED
                         return@withLock VfsResult.Err(VfsError.INTERRUPTED)
                     }
+                    queued.interrupted = true
+                    if (queued.state == PendingState.SENT) queueInterruptLocked(queued)
                 }
                 null
             }
@@ -191,12 +206,10 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
 
     fun forget(nodeId: ULong, count: ULong) {
         if (nodeId == FuseAbi.ROOT_ID || count == 0uL) return
-        val request = FuseRequest(FuseOpcode.FORGET, nodeId, ULong.SIZE_BYTES).apply {
-            writeU64(0, count)
-        }
         lock.withLock {
             if (state == State.ACTIVE || state == State.DESTROYING) {
-                enqueueOneWayLocked(request)
+                forgotten[nodeId] = (forgotten[nodeId] ?: 0uL) + count
+                readWaiters.wakeOne()
             }
         }
     }
@@ -222,8 +235,16 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
         negotiation?.maxRead ?: maximumRead
     }
 
+    fun maximumReadAheadSize(): Int = lock.withLock {
+        negotiation?.maxReadAhead ?: 4096
+    }
+
     fun maximumWriteSize(): Int = lock.withLock {
         negotiation?.maxWrite ?: 4096
+    }
+
+    fun protocolMinorVersion(): UInt = lock.withLock {
+        negotiation?.minorVersion ?: 0u
     }
 
     fun isUnsupported(opcode: FuseOpcode): Boolean = lock.withLock { opcode in unsupported }
@@ -255,27 +276,38 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
                 error = -Errno.EINVAL.toLong()
                 return@withLock null
             }
-            val next = outbound.firstOrNull() ?: run {
+            val next = nextOutboundLocked(capacity) ?: run {
                 error = -Errno.EAGAIN.toLong()
                 return@withLock null
             }
             if (next.request.bytes.size > capacity) {
+                restoreOutboundLocked(next)
                 error = -Errno.EINVAL.toLong()
                 return@withLock null
             }
-            outbound.removeFirst().also { it.pending?.state = PendingState.CLAIMED }
+            next.also { it.pending?.state = PendingState.CLAIMED }
         }
         if (message == null) return error
 
         val bytes = message.request.bytes
         if (buffer.copyFrom(bufferOffset, bytes, 0, bytes.size) != bytes.size) {
+            var wake: Thread? = null
             lock.withLock {
                 if (state != State.DISCONNECTED) {
-                    message.pending?.state = PendingState.QUEUED
-                    outbound.addFirst(message)
-                    readWaiters.wakeOne()
+                    val request = message.pending
+                    if (request?.interrupted == true) {
+                        pending.remove(request.unique)
+                        request.state = PendingState.FINISHED
+                        request.result = VfsResult.Err(VfsError.INTERRUPTED)
+                        wake = request.thread
+                    } else {
+                        request?.state = PendingState.QUEUED
+                        restoreOutboundLocked(message)
+                        readWaiters.wakeOne()
+                    }
                 }
             }
+            wake?.let(Scheduler::wake)
             return -Errno.EFAULT.toLong()
         }
 
@@ -283,11 +315,12 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
         lock.withLock {
             message.pending?.also {
                 it.state = PendingState.SENT
+                if (it.interrupted) queueInterruptLocked(it)
                 wake = it.thread
             }
             if (message.disconnectAfterRead) {
                 disconnectLocked(VfsError.NOT_CONNECTED)
-            } else if (outbound.isNotEmpty()) {
+            } else if (hasOutboundLocked()) {
                 readWaiters.wakeOne()
             }
         }
@@ -317,7 +350,7 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
     override fun poll(device: Device, events: Int): Long = lock.withLock {
         val available = when {
             state == State.NEW || state == State.DISCONNECTED -> PollEvents.POLLERR
-            outbound.isNotEmpty() -> PollEvents.NORMAL_INPUT or PollEvents.NORMAL_OUTPUT
+            hasOutboundLocked() -> PollEvents.NORMAL_INPUT or PollEvents.NORMAL_OUTPUT
             else -> PollEvents.NORMAL_OUTPUT
         }
         (available and (events or PollEvents.UNCONDITIONALLY_REPORTED)).toLong()
@@ -327,7 +360,7 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
         if (event == DeviceIoEvent.WRITABLE) return lock.withLock { state != State.DISCONNECTED }
         val thread = checkNotNull(ProcessManager.currentThread())
         val waiter = lock.withLock {
-            if (outbound.isNotEmpty() || state == State.DISCONNECTED || state == State.NEW) {
+            if (hasOutboundLocked() || state == State.DISCONNECTED || state == State.NEW) {
                 return@withLock null
             }
             readWaiters.add(thread)
@@ -363,25 +396,26 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
         val unique = allocateUniqueLocked()
         request.prepare(unique, caller)
         val requestState = PendingRequest(kind, thread)
+        requestState.unique = unique
         pending[unique] = requestState
         outbound.addLast(OutboundRequest(request, requestState))
         readWaiters.wakeOne()
         return requestState
     }
 
-    private fun enqueueOneWayLocked(request: FuseRequest) {
-        request.prepare(0uL, VfsOperationContext.KERNEL)
-        outbound.addLast(OutboundRequest(request, null))
-        readWaiters.wakeOne()
-    }
-
     private fun allocateUniqueLocked(): ULong {
-        while (nextUnique == 0uL || nextUnique and (1uL shl 63) != 0uL ||
-            pending.containsKey(nextUnique)
-        ) {
-            nextUnique++
+        while (pending.containsKey(nextUnique)) {
+            nextUnique += 2uL
+            if (nextUnique == 0uL || nextUnique and FuseAbi.RESEND_UNIQUE_MASK != 0uL) {
+                nextUnique = 2uL
+            }
         }
-        return nextUnique++
+        val unique = nextUnique
+        nextUnique += 2uL
+        if (nextUnique == 0uL || nextUnique and FuseAbi.RESEND_UNIQUE_MASK != 0uL) {
+            nextUnique = 2uL
+        }
+        return unique
     }
 
     private fun acceptResponse(bytes: ByteArray): Int {
@@ -393,8 +427,12 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
             if (error <= 0) return Errno.EINVAL
             return acceptNotification(error, FuseReply(bytes))
         }
-        if (error > 0 || error < -4095 || error != 0 && bytes.size != FuseAbi.OUT_HEADER_SIZE) {
+        if (error > 0 || error <= -512 || error != 0 && bytes.size != FuseAbi.OUT_HEADER_SIZE) {
             return Errno.EINVAL
+        }
+        if (unique and FuseAbi.INTERRUPT_UNIQUE_MASK != 0uL) {
+            if (bytes.size != FuseAbi.OUT_HEADER_SIZE) return Errno.EINVAL
+            return acceptInterruptResponse(unique xor FuseAbi.INTERRUPT_UNIQUE_MASK, error)
         }
 
         val request = lock.withLock {
@@ -403,6 +441,8 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
                 pending[unique] = found
                 return@withLock null
             }
+            outbound.removeAll { it.interruptTarget == unique }
+            found.interruptQueued = false
             found.state = PendingState.FINISHED
             found.result = if (error == 0) {
                 VfsResult.Ok(FuseReply(bytes))
@@ -454,8 +494,14 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
                         val reported = reply.readU32(20).toULong().takeIf { it != 0uL }
                             ?: 4096uL
                         Negotiation(
+                            minorVersion = minor,
                             features = features,
                             maxRead = minOf(maximumRead, pageLimit, FuseAbi.MAX_TRANSFER_SIZE),
+                            maxReadAhead = minOf(
+                                reply.readU32(8).toULong(),
+                                maximumRead.toULong(),
+                                pageLimit.toULong(),
+                            ).toInt().let { it / 4096 * 4096 }.coerceAtLeast(4096),
                             maxWrite = minOf(
                                 reported,
                                 pageLimit.toULong(),
@@ -530,6 +576,85 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
         return maxOf(FuseAbi.MIN_READ_BUFFER, FuseAbi.IN_HEADER_SIZE + 40 + maxWrite)
     }
 
+    private fun nextOutboundLocked(capacity: Int): OutboundRequest? {
+        val next = outbound.firstOrNull()
+        val urgent = next?.let {
+            it.disconnectAfterRead || it.interruptTarget != null ||
+                it.pending?.kind == PendingKind.INITIALIZATION
+        } == true
+        if (next != null && (forgotten.isEmpty() || urgent ||
+                requestsSinceForget < REQUESTS_PER_FORGET_BATCH)
+        ) {
+            if (forgotten.isNotEmpty()) requestsSinceForget++
+            return outbound.removeFirst()
+        }
+        if (forgotten.isEmpty()) return null
+        requestsSinceForget = 0
+
+        val limit = minOf(
+            (capacity - FuseAbi.IN_HEADER_SIZE - 8) / 16,
+            (FuseAbi.MAX_PACKET_SIZE - FuseAbi.IN_HEADER_SIZE - 8) / 16,
+        )
+        if (limit <= 0) return null
+        val entries = buildList(minOf(limit, forgotten.size)) {
+            val iterator = forgotten.iterator()
+            repeat(minOf(limit, forgotten.size)) {
+                val entry = iterator.next()
+                add(Forget(entry.key, entry.value))
+                iterator.remove()
+            }
+        }
+        val request = FuseRequest(FuseOpcode.BATCH_FORGET, 0uL, 8 + entries.size * 16).apply {
+            writeU32(0, entries.size.toUInt())
+            entries.forEachIndexed { index, forget ->
+                val offset = 8 + index * 16
+                writeU64(offset, forget.nodeId)
+                writeU64(offset + 8, forget.count)
+            }
+            prepare(0uL, VfsOperationContext.KERNEL)
+        }
+        return OutboundRequest(request, null, forgets = entries)
+    }
+
+    private fun queueInterruptLocked(request: PendingRequest) {
+        if (request.interruptQueued || FuseOpcode.INTERRUPT in unsupported ||
+            request.state != PendingState.SENT
+        ) {
+            return
+        }
+        val target = request.unique
+        val interrupt = FuseRequest(FuseOpcode.INTERRUPT, 0uL, ULong.SIZE_BYTES).apply {
+            writeU64(0, target)
+            prepare(target or FuseAbi.INTERRUPT_UNIQUE_MASK, VfsOperationContext.KERNEL)
+        }
+        request.interruptQueued = true
+        outbound.addFirst(OutboundRequest(interrupt, null, interruptTarget = target))
+        readWaiters.wakeOne()
+    }
+
+    private fun acceptInterruptResponse(target: ULong, error: Int): Int = lock.withLock {
+        val request = pending[target] ?: return@withLock Errno.ENOENT
+        request.interruptQueued = false
+        when (error) {
+            -Errno.ENOSYS -> unsupported += FuseOpcode.INTERRUPT
+            -Errno.EAGAIN -> queueInterruptLocked(request)
+        }
+        0
+    }
+
+    private fun hasOutboundLocked(): Boolean = outbound.isNotEmpty() || forgotten.isNotEmpty()
+
+    private fun restoreOutboundLocked(message: OutboundRequest) {
+        val entries = message.forgets
+        if (entries == null) {
+            outbound.addFirst(message)
+            return
+        }
+        entries.forEach { forget ->
+            forgotten[forget.nodeId] = (forgotten[forget.nodeId] ?: 0uL) + forget.count
+        }
+    }
+
     private fun disconnectLocked(error: VfsError, aborted: Boolean = false) {
         if (state == State.DISCONNECTED) return
         state = State.DISCONNECTED
@@ -542,6 +667,7 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
             Errno.ENODEV
         }
         outbound.clear()
+        forgotten.clear()
         pending.values.forEach { request ->
             request.state = PendingState.FINISHED
             request.result = VfsResult.Err(error)

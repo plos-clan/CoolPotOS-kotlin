@@ -35,6 +35,10 @@ internal object FuseAbi {
     const val MAX_TRANSFER_SIZE = 1024 * 1024
     const val MAX_PACKET_SIZE = IN_HEADER_SIZE + 4096 + MAX_TRANSFER_SIZE
     const val MAX_PAGES = MAX_TRANSFER_SIZE / 4096
+    const val INTERRUPT_UNIQUE_MASK = 1uL
+    const val RESEND_UNIQUE_MASK = 0x8000_0000_0000_0000uL
+    const val DIRENT_SIZE = 24
+    const val DIRENTPLUS_SIZE = ENTRY_OUT_SIZE + DIRENT_SIZE
 
     const val FOPEN_DIRECT_IO = 0x01u
     const val FOPEN_KEEP_CACHE = 0x02u
@@ -135,7 +139,7 @@ internal enum class FuseFeature(val bit: Int, val supported: Boolean) {
     ASYNC_READ(0, true),
     POSIX_LOCKS(1, false),
     FILE_OPS(2, false),
-    ATOMIC_O_TRUNC(3, false),
+    ATOMIC_O_TRUNC(3, true),
     EXPORT_SUPPORT(4, false),
     BIG_WRITES(5, true),
     DONT_MASK(6, true),
@@ -144,9 +148,9 @@ internal enum class FuseFeature(val bit: Int, val supported: Boolean) {
     SPLICE_READ(9, false),
     FLOCK_LOCKS(10, false),
     HAS_IOCTL_DIR(11, true),
-    AUTO_INVAL_DATA(12, false),
-    DO_READDIRPLUS(13, false),
-    READDIRPLUS_AUTO(14, false),
+    AUTO_INVAL_DATA(12, true),
+    DO_READDIRPLUS(13, true),
+    READDIRPLUS_AUTO(14, true),
     ASYNC_DIO(15, true),
     WRITEBACK_CACHE(16, false),
     NO_OPEN_SUPPORT(17, true),
@@ -155,7 +159,7 @@ internal enum class FuseFeature(val bit: Int, val supported: Boolean) {
     POSIX_ACL(20, false),
     ABORT_ERROR(21, true),
     MAX_PAGES(22, true),
-    CACHE_SYMLINKS(23, false),
+    CACHE_SYMLINKS(23, true),
     NO_OPENDIR_SUPPORT(24, true),
     EXPLICIT_INVAL_DATA(25, false),
     MAP_ALIGNMENT(26, false),

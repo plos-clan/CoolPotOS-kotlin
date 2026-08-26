@@ -25,17 +25,29 @@ interface PageCacheSource : PageCacheProvider {
     val identity: Any
         get() = this
 
+    val readAheadSize: Int
+        get() = PAGE_SIZE_BYTES.toInt()
+
     fun read(offset: ULong, destination: ByteArray): Int
+
+    companion object {
+        internal const val READ_ERROR = Int.MIN_VALUE
+        internal const val READ_INTERRUPTED = Int.MIN_VALUE + 1
+    }
 }
 
 internal enum class PageCacheFailure {
     OUT_OF_MEMORY,
     IO_ERROR,
+    INTERRUPTED,
 }
 
-internal value class PageCacheAcquireResult private constructor(private val value: ULong) {
+internal class PageCacheAcquireResult private constructor(
+    private val value: ULong,
+    val validBytes: Int,
+) {
     val isSuccess: Boolean
-        get() = value < OUT_OF_MEMORY
+        get() = value < INTERRUPTED
 
     val frame: ULong
         get() {
@@ -46,19 +58,23 @@ internal value class PageCacheAcquireResult private constructor(private val valu
     val failure: PageCacheFailure
         get() = when (value) {
             OUT_OF_MEMORY -> PageCacheFailure.OUT_OF_MEMORY
+            INTERRUPTED -> PageCacheFailure.INTERRUPTED
             else -> PageCacheFailure.IO_ERROR
         }
 
     companion object {
         private const val IO_ERROR = 0xffff_ffff_ffff_ffffuL
         private const val OUT_OF_MEMORY = 0xffff_ffff_ffff_fffeuL
+        private const val INTERRUPTED = 0xffff_ffff_ffff_fffduL
 
-        fun acquired(frame: ULong) = PageCacheAcquireResult(frame)
+        fun acquired(frame: ULong, validBytes: Int) = PageCacheAcquireResult(frame, validBytes)
         fun failed(failure: PageCacheFailure) = PageCacheAcquireResult(
             when (failure) {
                 PageCacheFailure.OUT_OF_MEMORY -> OUT_OF_MEMORY
                 PageCacheFailure.IO_ERROR -> IO_ERROR
+                PageCacheFailure.INTERRUPTED -> INTERRUPTED
             },
+            0,
         )
     }
 }
@@ -71,21 +87,23 @@ internal value class PageCacheReadResult private constructor(private val value: 
         get() = value.coerceAtLeast(0)
 
     val failure: PageCacheFailure
-        get() = if (value == OUT_OF_MEMORY) {
-            PageCacheFailure.OUT_OF_MEMORY
-        } else {
-            PageCacheFailure.IO_ERROR
+        get() = when (value) {
+            OUT_OF_MEMORY -> PageCacheFailure.OUT_OF_MEMORY
+            INTERRUPTED -> PageCacheFailure.INTERRUPTED
+            else -> PageCacheFailure.IO_ERROR
         }
 
     companion object {
         private const val OUT_OF_MEMORY = -1
         private const val IO_ERROR = -2
+        private const val INTERRUPTED = -3
 
         fun completed(bytes: Int) = PageCacheReadResult(bytes)
         fun failed(failure: PageCacheFailure) = PageCacheReadResult(
             when (failure) {
                 PageCacheFailure.OUT_OF_MEMORY -> OUT_OF_MEMORY
                 PageCacheFailure.IO_ERROR -> IO_ERROR
+                PageCacheFailure.INTERRUPTED -> INTERRUPTED
             },
         )
     }
@@ -104,15 +122,20 @@ private data class PageCacheKey(
 private class CachedPage(
     val key: PageCacheKey,
     val frame: ULong,
+    val validBytes: Int,
     var referenced: Boolean = true,
-)
+) {
+    init {
+        require(validBytes in 0..PAGE_SIZE_BYTES.toInt())
+    }
+}
 
 private class PageLoad(val key: PageCacheKey) {
     var valid = true
 }
 
 private sealed interface PageLookup {
-    data class Cached(val frame: ULong) : PageLookup
+    data class Cached(val page: CachedPage) : PageLookup
     data class Missing(val load: PageLoad) : PageLookup
 }
 
@@ -140,7 +163,10 @@ internal object PageCache : FrameReclaimer {
         require(offset.isPageAligned() && scratch.size >= PAGE_SIZE_BYTES.toInt())
         val key = PageCacheKey(source.identity, offset)
         return when (val lookup = lookup(key)) {
-            is PageLookup.Cached -> PageCacheAcquireResult.acquired(lookup.frame)
+            is PageLookup.Cached -> PageCacheAcquireResult.acquired(
+                lookup.page.frame,
+                lookup.page.validBytes,
+            )
             is PageLookup.Missing -> load(source, lookup.load, scratch)
         }
     }
@@ -165,17 +191,23 @@ internal object PageCache : FrameReclaimer {
             val position = sourceOffset + copied.toULong()
             val pageOffset = position.alignDown(PAGE_SIZE_BYTES)
             val key = PageCacheKey(identity, pageOffset)
-            val frame = when (val lookup = lookup(key)) {
-                is PageLookup.Cached -> lookup.frame
+            val page = when (val lookup = lookup(key)) {
+                is PageLookup.Cached -> lookup.page
                 is PageLookup.Missing -> {
                     val buffer = scratch ?: try {
-                        ByteArray(PAGE_SIZE_BYTES.toInt()).also { scratch = it }
+                        ByteArray(maxOf(PAGE_SIZE_BYTES.toInt(), source.readAheadSize)).also {
+                            scratch = it
+                        }
                     } catch (_: OutOfMemoryError) {
-                        cancel(lookup.load)
-                        return if (copied == 0) {
-                            PageCacheReadResult.failed(PageCacheFailure.OUT_OF_MEMORY)
-                        } else {
-                            PageCacheReadResult.completed(copied)
+                        try {
+                            ByteArray(PAGE_SIZE_BYTES.toInt()).also { scratch = it }
+                        } catch (_: OutOfMemoryError) {
+                            cancel(lookup.load)
+                            return if (copied == 0) {
+                                PageCacheReadResult.failed(PageCacheFailure.OUT_OF_MEMORY)
+                            } else {
+                                PageCacheReadResult.completed(copied)
+                            }
                         }
                     }
                     val loaded = load(source, lookup.load, buffer)
@@ -186,13 +218,13 @@ internal object PageCache : FrameReclaimer {
                             PageCacheReadResult.completed(copied)
                         }
                     }
-                    loaded.frame
+                    CachedPage(key, loaded.frame, loaded.validBytes)
                 }
             }
 
-            val sourcePointer = Hhdm.toVirtualPointer<UByteVar>(frame)
+            val sourcePointer = Hhdm.toVirtualPointer<UByteVar>(page.frame)
             if (sourcePointer == null) {
-                release(frame)
+                release(page.frame)
                 return if (copied == 0) {
                     PageCacheReadResult.failed(PageCacheFailure.IO_ERROR)
                 } else {
@@ -200,13 +232,18 @@ internal object PageCache : FrameReclaimer {
                 }
             }
             val pageIndex = (position - pageOffset).toInt()
-            val chunk = minOf(count - copied, PAGE_SIZE_BYTES.toInt() - pageIndex)
+            val available = page.validBytes - pageIndex
+            if (available <= 0) {
+                release(page.frame)
+                break
+            }
+            val chunk = minOf(count - copied, available)
             val transferred = destination.copyFrom(
                 destinationOffset + copied,
                 checkNotNull(sourcePointer + pageIndex),
                 chunk,
             )
-            release(frame)
+            release(page.frame)
             copied += transferred
             if (transferred < chunk) break
         }
@@ -272,7 +309,7 @@ internal object PageCache : FrameReclaimer {
         if (page != null) {
             page.referenced = true
             UserFrameReferences.retain(page.frame)
-            PageLookup.Cached(page.frame)
+            PageLookup.Cached(page)
         } else {
             PageLookup.Missing(PageLoad(key).also(loads::add))
         }
@@ -295,44 +332,120 @@ internal object PageCache : FrameReclaimer {
             return PageCacheAcquireResult.failed(PageCacheFailure.IO_ERROR)
         }
 
-        scratch.fill(0, 0, PAGE_SIZE_BYTES.toInt())
+        val requestedSize = maxOf(PAGE_SIZE_BYTES.toInt(), source.readAheadSize)
+        val buffer = if (scratch.size >= requestedSize) {
+            scratch
+        } else {
+            try {
+                ByteArray(requestedSize)
+            } catch (_: OutOfMemoryError) {
+                scratch
+            }
+        }
+        val readAhead = reserveReadAhead(load.key, buffer.size)
+        buffer.fill(0)
         val count = try {
-            source.read(load.key.offset, scratch)
+            source.read(load.key.offset, buffer)
         } catch (_: Throwable) {
             cancel(load)
+            readAhead.forEach(::cancel)
             BuddyFrameAllocator.free(frame, 1uL)
             return PageCacheAcquireResult.failed(PageCacheFailure.IO_ERROR)
         }
-        if (count !in 0..PAGE_SIZE_BYTES.toInt()) {
+        if (count !in 0..buffer.size) {
+            val failure = if (count == PageCacheSource.READ_INTERRUPTED) {
+                PageCacheFailure.INTERRUPTED
+            } else {
+                PageCacheFailure.IO_ERROR
+            }
             cancel(load)
+            readAhead.forEach(::cancel)
             BuddyFrameAllocator.free(frame, 1uL)
-            return PageCacheAcquireResult.failed(PageCacheFailure.IO_ERROR)
+            return PageCacheAcquireResult.failed(failure)
         }
-        scratch.usePinned { data ->
+        buffer.usePinned { data ->
             memcpy(destination, data.addressOf(0), PAGE_SIZE_BYTES)
         }
-        return PageCacheAcquireResult.acquired(publish(CachedPage(load.key, frame), load))
+        readAhead.forEachIndexed { index, pending ->
+            val sourceOffset = (index + 1) * PAGE_SIZE_BYTES.toInt()
+            if (sourceOffset < count) {
+                publishReadAhead(
+                    pending,
+                    buffer,
+                    sourceOffset,
+                    minOf(PAGE_SIZE_BYTES.toInt(), count - sourceOffset),
+                )
+            } else {
+                cancel(pending)
+            }
+        }
+        val page = publish(
+            CachedPage(load.key, frame, minOf(count, PAGE_SIZE_BYTES.toInt())),
+            load,
+        )
+        return PageCacheAcquireResult.acquired(page.frame, page.validBytes)
     }
 
-    private fun publish(candidate: CachedPage, load: PageLoad): ULong {
+    private fun reserveReadAhead(key: PageCacheKey, size: Int): List<PageLoad> =
+        lock.withLock {
+            buildList((size - 1) / PAGE_SIZE_BYTES.toInt()) {
+                var offset = PAGE_SIZE_BYTES
+                while (offset <= size.toULong() - PAGE_SIZE_BYTES &&
+                    key.offset <= ULong.MAX_VALUE - offset
+                ) {
+                    add(PageLoad(PageCacheKey(key.identity, key.offset + offset)).also(loads::add))
+                    offset += PAGE_SIZE_BYTES
+                }
+            }
+        }
+
+    private fun publishReadAhead(
+        load: PageLoad,
+        source: ByteArray,
+        offset: Int,
+        validBytes: Int,
+    ) {
+        val frame = BuddyFrameAllocator.allocate(1uL)
+        val destination = if (frame == INVALID_FRAME) null else Hhdm.toVirtualPointer<UByteVar>(frame)
+        if (destination == null) {
+            cancel(load)
+            if (frame != INVALID_FRAME) BuddyFrameAllocator.free(frame, 1uL)
+            return
+        }
+        source.usePinned { data ->
+            memcpy(destination, data.addressOf(offset), PAGE_SIZE_BYTES)
+        }
+        val published = lock.withLock {
+            check(loads.remove(load))
+            if (!load.valid || pages.containsKey(load.key)) return@withLock false
+            UserFrameReferences.retain(frame)
+            val page = CachedPage(load.key, frame, validBytes)
+            pages[load.key] = page
+            clock.addLast(page)
+            true
+        }
+        if (!published) BuddyFrameAllocator.free(frame, 1uL)
+    }
+
+    private fun publish(candidate: CachedPage, load: PageLoad): CachedPage {
         val frame = candidate.frame
         UserFrameReferences.retain(frame)
         val acquired = lock.withLock {
             check(loads.remove(load))
-            if (!load.valid) return@withLock frame
+            if (!load.valid) return@withLock candidate
             val existing = pages[candidate.key]
             if (existing != null) {
                 existing.referenced = true
                 UserFrameReferences.retain(existing.frame)
-                existing.frame
+                existing
             } else {
                 pages[candidate.key] = candidate
                 clock.addLast(candidate)
                 UserFrameReferences.retain(frame)
-                frame
+                candidate
             }
         }
-        if (acquired != frame) UserFrameReferences.release(frame)
+        if (acquired !== candidate) UserFrameReferences.release(frame)
         return acquired
     }
 
