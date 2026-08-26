@@ -1,6 +1,9 @@
+import java.io.OutputStream
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.util.zip.Deflater
+import java.util.zip.GZIPOutputStream
 import org.gradle.api.Project
 
 @DisableCachingByDefault(because = "Downloads third-party artifacts")
@@ -47,6 +50,34 @@ abstract class DownloadFileTask : DefaultTask() {
     }
 }
 
+@CacheableTask
+abstract class GzipFileTask : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val sourceFile: RegularFileProperty
+
+    @get:OutputFile
+    abstract val destinationFile: RegularFileProperty
+
+    @TaskAction
+    fun compress() {
+        val source = sourceFile.get().asFile
+        val target = destinationFile.get().asFile
+        target.parentFile.mkdirs()
+
+        source.inputStream().buffered().use { input ->
+            BestCompressionGzipStream(target.outputStream().buffered()).use(input::copyTo)
+        }
+    }
+
+    private class BestCompressionGzipStream(output: OutputStream) :
+        GZIPOutputStream(output, DEFAULT_BUFFER_SIZE) {
+        init {
+            def.setLevel(Deflater.BEST_COMPRESSION)
+        }
+    }
+}
+
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.kotlinxBenchmark)
@@ -61,7 +92,7 @@ private data class ToolSettings(
     val qemu: String,
 )
 
-private data class Archive(
+private data class RemoteArtifact(
     val url: String,
     val file: File,
 )
@@ -85,18 +116,18 @@ private class BuildPaths(project: Project) {
     val limineHeader = limineInclude.resolve("limine.h")
     val limineUefi = limine.resolve("boot/limine-uefi-cd.bin")
     val limineEfi = limine.resolve("boot/BOOTX64.EFI")
-    val limineArchive = Archive(
-        "https://github.com/limine-bootloader/limine/archive/refs/heads/v11.x-binary.tar.gz",
-        downloads.resolve("limine-v11.x-binary.tar.gz"),
+    val liminePrebuilt = RemoteArtifact(
+        "https://github.com/Limine-Bootloader/Limine/releases/latest/download/limine-binary.tar.gz",
+        downloads.resolve("limine-12.x-binary.tar.gz"),
     )
-    val limineProtocol = Archive(
-        "https://github.com/limine-bootloader/limine-protocol/archive/refs/heads/trunk.tar.gz",
-        downloads.resolve("limine-protocol-trunk.tar.gz"),
+    val limineProtocolHeader = RemoteArtifact(
+        "https://raw.githubusercontent.com/Limine-Bootloader/limine-protocol/trunk/include/limine.h",
+        downloads.resolve("limine-protocol-trunk.h"),
     )
 
     val freestanding = root.resolve("freestnd-c-hdrs")
     val freestandingInclude = freestanding.resolve("include")
-    val freestandingArchive = Archive(
+    val freestandingArchive = RemoteArtifact(
         "https://github.com/osdev0/freestnd-c-hdrs-0bsd/archive/refs/heads/trunk.tar.gz",
         downloads.resolve("freestnd-c-hdrs-0bsd-trunk.tar.gz"),
     )
@@ -110,6 +141,7 @@ private class BuildPaths(project: Project) {
     val cObjects = root.resolve("c-objects")
     val vdso = root.resolve("vdso")
     val kernelElf = root.resolve("kernel.elf")
+    val kernelGzip = root.resolve("kernel.elf.gz")
     val isoImage = root.resolve("${project.rootProject.name}.iso")
 }
 
@@ -478,16 +510,16 @@ benchmark {
 
 val downloadLimine = tasks.register<DownloadFileTask>("downloadLimine") {
     group = "build"
-    description = "Downloads Limine bootloader assets."
-    sourceUrl.set(config.paths.limineArchive.url)
-    destinationFile.set(config.paths.limineArchive.file)
+    description = "Downloads the official prebuilt Limine release."
+    sourceUrl.set(config.paths.liminePrebuilt.url)
+    destinationFile.set(config.paths.liminePrebuilt.file)
 }
 
-val downloadLimineProtocol = tasks.register<DownloadFileTask>("downloadLimineProtocol") {
+val downloadLimineHeader = tasks.register<DownloadFileTask>("downloadLimineHeader") {
     group = "build"
-    description = "Downloads limine-protocol headers."
-    sourceUrl.set(config.paths.limineProtocol.url)
-    destinationFile.set(config.paths.limineProtocol.file)
+    description = "Downloads the Limine protocol header matching the bootloader release."
+    sourceUrl.set(config.paths.limineProtocolHeader.url)
+    destinationFile.set(config.paths.limineProtocolHeader.file)
 }
 
 val downloadFreestndHeaders = tasks.register<DownloadFileTask>("downloadFreestndHeaders") {
@@ -541,27 +573,20 @@ val prepareFreestndHeaders = tasks.register<Sync>("prepareFreestndHeaders") {
 
 val prepareLimine = tasks.register<Sync>("prepareLimine") {
     group = "build"
-    description = "Extracts Limine boot binary and protocol header."
-    dependsOn(downloadLimine, downloadLimineProtocol)
+    description = "Extracts official prebuilt Limine boot assets and its matching protocol header."
+    dependsOn(downloadLimine, downloadLimineHeader)
 
     into(config.paths.limine)
     from({
-        tarTree(resources.gzip(config.paths.limineArchive.file))
+        tarTree(resources.gzip(config.paths.liminePrebuilt.file))
     }) {
         include("*/limine-uefi-cd.bin", "*/BOOTX64.EFI")
         eachFile { path = "boot/$name" }
         includeEmptyDirs = false
     }
-    from({
-        tarTree(resources.gzip(config.paths.limineProtocol.file))
-    }) {
-        include("*/include/limine.h")
-        eachFile {
-            if (name == "limine.h") {
-                path = "include/limine.h"
-            }
-        }
-        includeEmptyDirs = false
+    from(config.paths.limineProtocolHeader.file) {
+        into("include")
+        rename { "limine.h" }
     }
 }
 
@@ -745,17 +770,24 @@ tasks.named("build") {
     dependsOn(linkKernel)
 }
 
+val compressKernel = tasks.register<GzipFileTask>("compressKernel") {
+    group = "build"
+    description = "Compresses the kernel with the highest gzip compression level."
+    dependsOn(linkKernel)
+    sourceFile.set(config.paths.kernelElf)
+    destinationFile.set(config.paths.kernelGzip)
+}
+
 val stageIso = tasks.register<Sync>("stageIso") {
     group = "build"
-    description = "Stages the kernel, EROFS root filesystem, and Limine assets into the ISO directory."
-    dependsOn(linkKernel, prepareLimine, prepareUserland)
+    description = "Stages the compressed kernel, EROFS root filesystem, and Limine assets."
+    dependsOn(compressKernel, prepareLimine, prepareUserland)
 
     into(config.paths.iso)
     from(config.paths.assets.resolve("limine.conf")) { into("limine") }
     from(config.paths.limineUefi) { into("limine") }
     from(config.paths.limineEfi) { into("EFI/BOOT") }
-    from(config.userland.archive) { into("boot") }
-    from(config.paths.kernelElf)
+    from(listOf(config.userland.archive, config.paths.kernelGzip)) { into("boot") }
 }
 
 val buildIso = tasks.register<Exec>("buildIso") {

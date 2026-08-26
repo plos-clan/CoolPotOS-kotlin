@@ -26,6 +26,8 @@
 This project uses Gradle for kernel build, ISO packaging, and QEMU run.
 
 - Supports kernel build, ISO packaging, and QEMU run
+- Uses the official Limine 12.x prebuilt release and transparent loading
+  of a maximum-compression gzip kernel
 - Cross-platform compatible (Linux/macOS/Windows)
 
 **Available Gradle tasks:**

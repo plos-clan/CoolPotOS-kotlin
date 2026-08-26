@@ -15,6 +15,8 @@ packages=(
     fuse-overlayfs
     util-linux
     pciutils
+    python
+    procps-ng
 )
 
 rootfs=$(mktemp -d)
