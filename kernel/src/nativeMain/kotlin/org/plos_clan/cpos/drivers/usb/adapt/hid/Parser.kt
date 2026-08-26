@@ -146,7 +146,7 @@ class HidParser(
     private val local = LocalState()
     private val descriptor = HidDescriptor()
 
-    fun parse(): HidDescriptor? {
+    fun parse(): HidDescriptor {
         while (offset < length) {
             val header = data[offset.toInt()]
             offset++

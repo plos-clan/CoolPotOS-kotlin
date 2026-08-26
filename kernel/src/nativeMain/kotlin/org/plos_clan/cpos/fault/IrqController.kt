@@ -1,10 +1,10 @@
 package org.plos_clan.cpos.fault
 
-import kotlin.experimental.ExperimentalNativeApi
 import org.plos_clan.cpos.drivers.acpi.apic.IoApic
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlin.experimental.ExperimentalNativeApi
 
 internal const val IRQ_BASE_VECTOR = 0x20u
 internal const val IRQ_LAST_DEVICE_VECTOR = 0xEFu

@@ -6,12 +6,12 @@ import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.EmptyFileSystemOptions
 import org.plos_clan.cpos.fs.vfs.FifoBackend
 import org.plos_clan.cpos.fs.vfs.FileMode
-import org.plos_clan.cpos.fs.vfs.FileSystemStatistics
 import org.plos_clan.cpos.fs.vfs.FileSystemOptions
+import org.plos_clan.cpos.fs.vfs.FileSystemStatistics
 import org.plos_clan.cpos.fs.vfs.FileSystemType
 import org.plos_clan.cpos.fs.vfs.Inode
-import org.plos_clan.cpos.fs.vfs.InodeAttributes
 import org.plos_clan.cpos.fs.vfs.InodeAttributeSnapshot
+import org.plos_clan.cpos.fs.vfs.InodeAttributes
 import org.plos_clan.cpos.fs.vfs.InodeBackend
 import org.plos_clan.cpos.fs.vfs.InodeId
 import org.plos_clan.cpos.fs.vfs.InodeMetadata

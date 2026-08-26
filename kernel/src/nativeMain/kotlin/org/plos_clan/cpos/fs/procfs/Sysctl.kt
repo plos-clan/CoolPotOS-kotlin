@@ -2,13 +2,13 @@
 
 package org.plos_clan.cpos.fs.procfs
 
-import kotlin.concurrent.atomics.AtomicInt
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.SuperBlock
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 internal object ProcSysTree {
     private val rootEntries = listOf<ProcStaticEntry>(KernelDirectory)

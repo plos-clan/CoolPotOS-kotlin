@@ -2,10 +2,6 @@
 
 package org.plos_clan.cpos.tasks
 
-import kotlin.concurrent.atomics.AtomicInt
-import kotlin.concurrent.atomics.AtomicLong
-import kotlin.concurrent.atomics.AtomicReference
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.drivers.TscClock
@@ -22,6 +18,10 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PtraceRegisters
 import org.plos_clan.cpos.utils.alignDown
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.AtomicLong
+import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 private const val DEFAULT_THREAD_STACK_PAGES = 64uL
 

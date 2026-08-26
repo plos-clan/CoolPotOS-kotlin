@@ -28,8 +28,8 @@ import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.syscall.fs.FsConstants.AT_FDCWD
 import org.plos_clan.cpos.syscall.fs.FsConstants.FALLOC_FL_KEEP_SIZE
-import org.plos_clan.cpos.syscall.fs.FsConstants.MS_SILENT
 import org.plos_clan.cpos.syscall.fs.FsConstants.MS_MOVE
+import org.plos_clan.cpos.syscall.fs.FsConstants.MS_SILENT
 import org.plos_clan.cpos.syscall.fs.FsConstants.O_CLOEXEC
 import org.plos_clan.cpos.syscall.fs.FsConstants.O_NONBLOCK
 import org.plos_clan.cpos.syscall.fs.FsConstants.SUPPORTED_OPEN_FLAGS

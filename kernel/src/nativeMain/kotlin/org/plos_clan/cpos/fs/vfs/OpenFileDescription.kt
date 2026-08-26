@@ -2,8 +2,6 @@
 
 package org.plos_clan.cpos.fs.vfs
 
-import kotlin.concurrent.atomics.AtomicInt
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import org.plos_clan.cpos.fs.OpenFlags
 import org.plos_clan.cpos.mem.BufferDestination
 import org.plos_clan.cpos.mem.BufferSource
@@ -15,6 +13,8 @@ import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.KernelMutex
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 enum class SeekOrigin {
     START,

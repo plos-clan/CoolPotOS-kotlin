@@ -2,9 +2,6 @@
 
 package org.plos_clan.cpos.drivers.acpi.aml
 
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.toKString
 import kotlinx.cinterop.usePinned
@@ -15,6 +12,9 @@ import platform.posix.fread
 import platform.posix.fseek
 import platform.posix.ftell
 import platform.posix.rewind
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class AmlFirmwareTableTest {
     @Test

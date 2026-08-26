@@ -1,15 +1,15 @@
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.fs.vfs.InodeTimestampEvent
+import org.plos_clan.cpos.fs.vfs.InodeTimestampSet
+import org.plos_clan.cpos.fs.vfs.InodeTimestamps
+import org.plos_clan.cpos.fs.vfs.VfsTimestamp
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
-import org.plos_clan.cpos.fs.vfs.InodeTimestampEvent
-import org.plos_clan.cpos.fs.vfs.InodeTimestampSet
-import org.plos_clan.cpos.fs.vfs.InodeTimestamps
-import org.plos_clan.cpos.fs.vfs.VfsTimestamp
 
 class VfsTimestampTest {
     private val original = InodeTimestamps(

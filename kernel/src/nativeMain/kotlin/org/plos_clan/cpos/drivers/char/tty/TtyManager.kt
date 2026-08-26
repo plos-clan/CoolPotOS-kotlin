@@ -150,7 +150,7 @@ object TtyManager {
             KernelCoroutines.launch("terminal-flush") {
                 while (isActive) {
                     flushRequested.await()
-                    delay(FRAME_INTERVAL_MILLIS)
+                    delay(FRAME_INTERVAL_MILLIS) // 该语句如果优化成 milliseconds 会导致协程报错
                     sessions.forEach(TtySession::flushIfDirty)
                 }
             }

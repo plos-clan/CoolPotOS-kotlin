@@ -1,10 +1,5 @@
 package org.plos_clan.cpos.syscall
 
-import kotlin.test.Test
-import kotlin.test.assertContentEquals
-import kotlin.test.assertEquals
-import kotlin.test.assertIs
-import kotlin.test.assertTrue
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FileSystemStatistics
@@ -24,6 +19,11 @@ import org.plos_clan.cpos.syscall.fs.LinuxStat
 import org.plos_clan.cpos.syscall.fs.LinuxStatFs
 import org.plos_clan.cpos.syscall.fs.LinuxStatx
 import org.plos_clan.cpos.utils.LittleEndianBuffer
+import kotlin.test.Test
+import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertTrue
 
 class StatStructuresTest {
     private val status = LinuxFileStatus(

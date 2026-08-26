@@ -62,10 +62,6 @@ suspend fun Xhci.addressDevice(portId: Int, slotId: UByte, speedId: UInt): Unit?
 
         val command = Trb.newAddressDevice(inContext.physicalAddress, slotId)
         val (code, _) = sendCommand(command)
-            ?: run {
-                println("Address Device command timeout")
-                return null
-            }
 
         if (code != 1u) {
             println("Address Device failed code: $code")
@@ -96,10 +92,6 @@ suspend fun Xhci.configureEndpoints(slotId: UByte, endpoints: List<UsbEndpoint>)
 
         val command = Trb.newConfigureEndpoint(inContext.physicalAddress, slotId)
         val (code, _) = sendCommand(command)
-            ?: run {
-                println("Configure endpoint command timeout")
-                return null
-            }
 
         if (code != 1u) {
             println("Configure endpoint failed: $code")
@@ -130,7 +122,7 @@ suspend fun Xhci.updateEp0Mps(slotId: UByte, mps: UInt): Unit? {
         ep0Context.info2 = (ep0Context.info2 and 0xffff0000u.inv()) or ((mps and 0xffffu) shl 16)
 
         val command = Trb.newEvaluateContext(inContext.physicalAddress, slotId)
-        val (code, _) = sendCommand(command) ?: return null
+        val (code, _) = sendCommand(command)
 
         if (code != 1u) {
             println("Evaluate Context failed: $code")

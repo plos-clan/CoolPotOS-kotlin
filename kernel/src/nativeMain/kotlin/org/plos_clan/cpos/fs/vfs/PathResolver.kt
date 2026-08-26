@@ -236,8 +236,7 @@ internal class VfsPathResolver(
             is VfsResult.Err -> return access
         }
         parent.dentry.cachedChild(name)?.let { cached ->
-            val inode = cached.inode()
-            if (inode == null) return VfsResult.Err(VfsError.NOT_FOUND)
+            cached.inode() ?: return VfsResult.Err(VfsError.NOT_FOUND)
             val path = VfsPath(parent.mount, cached)
             return VfsResult.Ok(
                 if (followMount) followMounts(context.namespace, path) else path,

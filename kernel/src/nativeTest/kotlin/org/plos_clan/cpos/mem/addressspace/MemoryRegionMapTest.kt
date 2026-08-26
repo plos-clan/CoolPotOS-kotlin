@@ -1,12 +1,12 @@
 package org.plos_clan.cpos.mem.addressspace
 
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
-import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 
 class MemoryRegionMapTest {
     @Test

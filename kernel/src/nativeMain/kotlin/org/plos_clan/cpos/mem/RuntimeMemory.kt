@@ -8,7 +8,6 @@ package org.plos_clan.cpos.mem
 
 import bridge.runtime_vm_install
 import bridge.runtime_vm_take_released
-import kotlin.native.runtime.GC
 import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
@@ -18,6 +17,7 @@ import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.staticCFunction
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.toPointer
+import kotlin.native.runtime.GC
 import kotlin.native.runtime.NativeRuntimeApi
 
 internal data class GarbageCollectionStatistics(

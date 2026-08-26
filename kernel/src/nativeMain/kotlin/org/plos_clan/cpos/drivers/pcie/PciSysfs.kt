@@ -9,8 +9,8 @@ import org.plos_clan.cpos.fs.sysfs.SysfsObjectHandle
 import org.plos_clan.cpos.fs.sysfs.SysfsObjectSpec
 import org.plos_clan.cpos.fs.sysfs.SysfsParent
 import org.plos_clan.cpos.fs.sysfs.SysfsTextAttribute
-import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.IoResult
+import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource

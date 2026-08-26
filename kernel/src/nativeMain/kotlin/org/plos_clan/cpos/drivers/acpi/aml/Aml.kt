@@ -90,7 +90,7 @@ object Aml {
         devices = namespace.allNodes()
             .asSequence()
             .filter { it.value === AmlDevice }
-            .mapNotNull(::describeDevice)
+            .map(::describeDevice)
             .toList()
         enumerated = true
 
@@ -166,7 +166,7 @@ object Aml {
         }
     }
 
-    private fun describeDevice(node: AmlNamespaceNode): AmlDeviceInfo? {
+    private fun describeDevice(node: AmlNamespaceNode): AmlDeviceInfo {
         val status = evaluateChild(node, "_STA")?.integerValue() ?: 0x0FuL
         if ((status and 0x01uL) == 0uL) {
             return AmlDeviceInfo(node.name, null, emptyList(), status, emptyList())

@@ -2,10 +2,10 @@
 
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.utils.IrqSpinLock
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
-import org.plos_clan.cpos.utils.IrqSpinLock
 
 class Mount internal constructor(
     val superBlock: SuperBlock,

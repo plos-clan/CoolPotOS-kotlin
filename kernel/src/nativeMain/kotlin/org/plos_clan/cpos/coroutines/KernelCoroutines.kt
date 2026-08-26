@@ -2,8 +2,6 @@
 
 package org.plos_clan.cpos.coroutines
 
-import kotlin.concurrent.atomics.AtomicInt
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
@@ -17,6 +15,8 @@ import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.acpi.aml.Aml
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 private const val AML_EVENT_BATCH_SIZE = 64
 private const val NOT_INITIALIZED_MESSAGE = "Kernel coroutines are not initialized"

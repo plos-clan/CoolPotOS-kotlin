@@ -2,9 +2,6 @@
 
 package org.plos_clan.cpos.mem.addressspace
 
-import kotlin.concurrent.atomics.AtomicInt
-import kotlin.concurrent.atomics.AtomicReference
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
@@ -21,6 +18,9 @@ import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.alignUp
 import org.plos_clan.cpos.utils.isPageAligned
 import platform.posix.memset
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 private const val MMIO_VIRTUAL_BASE = 0xffff_ff00_0000_0000uL
 private const val MMIO_VIRTUAL_END = 0xffff_ff80_0000_0000uL

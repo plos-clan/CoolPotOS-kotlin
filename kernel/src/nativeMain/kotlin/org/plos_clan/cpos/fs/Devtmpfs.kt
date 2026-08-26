@@ -22,9 +22,9 @@ import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.IoEvent
 import org.plos_clan.cpos.fs.vfs.IoMode
 import org.plos_clan.cpos.fs.vfs.IoResult
-import org.plos_clan.cpos.fs.vfs.MutableInodeBackend
 import org.plos_clan.cpos.fs.vfs.MountResource
 import org.plos_clan.cpos.fs.vfs.MountResourceProvider
+import org.plos_clan.cpos.fs.vfs.MutableInodeBackend
 import org.plos_clan.cpos.fs.vfs.OpenFileBackend
 import org.plos_clan.cpos.fs.vfs.OpenOptions
 import org.plos_clan.cpos.fs.vfs.PositionlessOpenFileBackend

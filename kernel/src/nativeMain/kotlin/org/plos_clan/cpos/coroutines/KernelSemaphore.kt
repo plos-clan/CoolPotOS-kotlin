@@ -3,10 +3,9 @@
 package org.plos_clan.cpos.coroutines
 
 import kotlinx.coroutines.suspendCancellableCoroutine
+import org.plos_clan.cpos.utils.IrqSpinLock
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
-import org.plos_clan.cpos.utils.IrqSpinLock
 
 class KernelSemaphore(initialPermits: Int) {
     private val lock = IrqSpinLock()

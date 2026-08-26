@@ -1,18 +1,20 @@
 @file:OptIn(
-    kotlin.concurrent.atomics.ExperimentalAtomicApi::class,
-    kotlinx.cinterop.ExperimentalForeignApi::class,
+    ExperimentalAtomicApi::class,
+    ExperimentalForeignApi::class,
 )
 
 package org.plos_clan.cpos.drivers
 
-import kotlin.concurrent.atomics.AtomicBoolean
-import org.plos_clan.cpos.mem.PreparedBufferDestination
-import org.plos_clan.cpos.mem.PreparedBufferSource
-import org.plos_clan.cpos.mem.UserMemory
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.sysfs.Sysfs
 import org.plos_clan.cpos.fs.sysfs.SysfsDevicePublication
 import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.mem.PreparedBufferDestination
+import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlin.concurrent.atomics.AtomicBoolean
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 enum class DeviceType {
     CHARACTER,
@@ -41,8 +43,8 @@ value class DeviceNumber private constructor(val value: ULong) {
         fun create(major: UInt, minor: UInt): DeviceNumber? {
             if (major > MAX_MAJOR || minor > MAX_MINOR) return null
             val encoded = (major.toULong() shl 8) or
-                (minor.toULong() and 0xffuL) or
-                ((minor.toULong() and 0xfffff00uL) shl 12)
+                    (minor.toULong() and 0xffuL) or
+                    ((minor.toULong() and 0xfffff00uL) shl 12)
             return DeviceNumber(encoded)
         }
 

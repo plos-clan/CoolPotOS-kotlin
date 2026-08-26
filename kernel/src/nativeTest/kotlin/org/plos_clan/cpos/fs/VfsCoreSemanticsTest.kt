@@ -1,17 +1,17 @@
 package org.plos_clan.cpos.fs
 
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
-import kotlin.test.assertFalse
-import kotlin.test.assertSame
-import kotlin.test.assertTrue
 import org.plos_clan.cpos.fs.vfs.AccessPermission
 import org.plos_clan.cpos.fs.vfs.AccessPermissions
 import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.DirectoryLookup
 import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.VfsError
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 class VfsCoreSemanticsTest {
     @Test

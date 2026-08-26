@@ -1,11 +1,10 @@
+import org.apache.tools.ant.filters.ReplaceTokens
 import java.io.OutputStream
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.util.zip.Deflater
 import java.util.zip.GZIPOutputStream
-import org.apache.tools.ant.filters.ReplaceTokens
-import org.gradle.api.Project
 
 @DisableCachingByDefault(because = "Downloads third-party artifacts")
 abstract class DownloadFileTask : DefaultTask() {

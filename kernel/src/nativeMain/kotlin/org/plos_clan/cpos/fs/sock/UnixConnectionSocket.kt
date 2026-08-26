@@ -395,7 +395,7 @@ internal class UnixConnectionSocket(
         val options = socketOptions()
         val deadline = if (request.nonBlocking) null
         else UnixSocketDeadline.after(options.sendTimeoutNanos)
-        val ancillary: UnixAncillaryData? = request.ancillary
+        val ancillary: UnixAncillaryData = request.ancillary
         while (true) {
             val result = endpoint.connection.send(
                 endpoint.side,
@@ -405,9 +405,9 @@ internal class UnixConnectionSocket(
                 ancillary,
                 request.credentials,
             )
-            if (result.isSuccess && ancillary?.isEmpty == false) return result
+            if (result.isSuccess && !ancillary.isEmpty) return result
             if (result.error != VfsError.WOULD_BLOCK || request.nonBlocking) {
-                ancillary?.release()
+                ancillary.release()
                 if (result.error == VfsError.BROKEN_PIPE) {
                     signalBrokenPipe(request.noSignal)
                 }
@@ -420,7 +420,7 @@ internal class UnixConnectionSocket(
                 deadline,
             )
             if (waitError != null) {
-                ancillary?.release()
+                ancillary.release()
                 return IoResult.failure(waitError)
             }
         }
@@ -807,6 +807,26 @@ private class UnixPacketBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
     ) {
         val accountedSize: Int
             get() = maxOf(1, bytes.size)
+
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other == null || this::class != other::class) return false
+
+            other as Packet
+
+            if (!bytes.contentEquals(other.bytes)) return false
+            if (ancillary != other.ancillary) return false
+            if (accountedSize != other.accountedSize) return false
+
+            return true
+        }
+
+        override fun hashCode(): Int {
+            var result = bytes.contentHashCode()
+            result = 31 * result + (ancillary?.hashCode() ?: 0)
+            result = 31 * result + accountedSize
+            return result
+        }
     }
 
     private val packets = ArrayDeque<Packet>()

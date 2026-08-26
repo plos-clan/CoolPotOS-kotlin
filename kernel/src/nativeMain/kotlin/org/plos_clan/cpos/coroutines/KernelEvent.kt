@@ -1,9 +1,9 @@
 package org.plos_clan.cpos.coroutines
 
-import kotlin.coroutines.Continuation
-import kotlin.coroutines.resume
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.resume
 
 class KernelEvent internal constructor(
     private val wakeup: () -> Unit,

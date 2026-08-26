@@ -1,12 +1,12 @@
 package org.plos_clan.cpos.syscall
 
+import org.plos_clan.cpos.fs.sock.UnixSocketAddress
+import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.utils.LittleEndianBuffer
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
-import org.plos_clan.cpos.fs.sock.UnixSocketAddress
-import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.utils.LittleEndianBuffer
 
 class SocketAbiTest {
     @Test

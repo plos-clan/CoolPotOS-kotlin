@@ -44,10 +44,6 @@ class Xhci(baseAddress: MmioAddress) {
     suspend fun testCommandRing(): Unit? {
         val command = Trb.newNoOpCmd()
         val (code, _) = sendCommand(command)
-            ?: run {
-                println("No op command timeout or error")
-                return null
-            }
 
         if (code == 1u) {
             println("xHCI command ring verified")
@@ -59,7 +55,7 @@ class Xhci(baseAddress: MmioAddress) {
     }
 
     internal suspend fun enableSlot(): UByte? {
-        val (code, slotId) = sendCommand(Trb.newEnableSlot()) ?: return null
+        val (code, slotId) = sendCommand(Trb.newEnableSlot())
 
         if (code != 1u) {
             println("Failed to enable slot: $code")
@@ -71,13 +67,9 @@ class Xhci(baseAddress: MmioAddress) {
 
     internal suspend fun disableSlot(slotId: UByte) {
         sendCommand(Trb.newDisableSlot(slotId))
-            ?: run {
-                println("Failed to disable slot: $slotId")
-                return
-            }
     }
 
-    suspend fun sendCommand(trb: Trb): Pair<UInt, UByte>? {
+    suspend fun sendCommand(trb: Trb): Pair<UInt, UByte> {
         commandSemaphore.acquire()
         val index = commandRing.enqueueIndex
         commandPromises[index].reset()

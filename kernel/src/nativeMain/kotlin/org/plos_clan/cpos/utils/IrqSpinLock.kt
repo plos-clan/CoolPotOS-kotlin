@@ -2,9 +2,9 @@
 
 package org.plos_clan.cpos.utils
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
-import kotlinx.cinterop.ExperimentalForeignApi
 
 class IrqSpinLock {
     @PublishedApi

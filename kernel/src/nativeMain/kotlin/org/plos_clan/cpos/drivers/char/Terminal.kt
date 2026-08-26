@@ -175,8 +175,7 @@ abstract class TerminalBackend : TtySessionBackend {
 
         var outputCount = 0
         for (index in offset until offset + count) {
-            val original = data[index].toUByte().toInt()
-            when (original) {
+            when (val original = data[index].toUByte().toInt()) {
                 '\n'.code -> {
                     if (flags and TermiosConstants.ONLCR != 0) {
                         processedOutput[outputCount++] = '\r'.code.toByte()

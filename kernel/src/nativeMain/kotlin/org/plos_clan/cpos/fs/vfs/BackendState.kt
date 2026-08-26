@@ -91,6 +91,6 @@ data class FileSystemStatistics(
 ) {
     init {
         require(blockSize > 0uL && fragmentSize > 0uL && maximumNameLength > 0uL)
-        require(freeBlocks <= blocks && availableBlocks <= freeBlocks && freeFiles <= files)
+        require(freeBlocks in availableBlocks..blocks && freeFiles <= files)
     }
 }

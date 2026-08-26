@@ -17,8 +17,8 @@ import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.fuse.FuseDevice
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
-import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.mem.RuntimeMemory
+import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.module.Init
 import org.plos_clan.cpos.module.ModuleManager
 import org.plos_clan.cpos.module.Vdso

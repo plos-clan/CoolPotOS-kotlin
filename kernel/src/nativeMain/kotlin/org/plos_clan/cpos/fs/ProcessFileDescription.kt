@@ -2,12 +2,12 @@
 
 package org.plos_clan.cpos.fs
 
-import kotlin.concurrent.atomics.AtomicReference
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlin.concurrent.atomics.AtomicReference
 
 object OpenFlags {
     const val O_ACCMODE = 0x000003

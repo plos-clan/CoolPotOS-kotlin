@@ -1,7 +1,7 @@
 package org.plos_clan.cpos.fs.fuse
 
-import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.DeviceNumber
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.InodeAttributeSnapshot
@@ -192,8 +192,8 @@ internal enum class FuseFeature(val bit: Int, val supported: Boolean) {
 }
 
 internal class FuseRequest(
-    val opcode: FuseOpcode,
-    val nodeId: ULong,
+    opcode: FuseOpcode,
+    nodeId: ULong,
     bodySize: Int = 0,
 ) {
     val bytes = ByteArray(FuseAbi.IN_HEADER_SIZE + bodySize)

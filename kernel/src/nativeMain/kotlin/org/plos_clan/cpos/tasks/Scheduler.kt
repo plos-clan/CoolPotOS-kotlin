@@ -2,10 +2,10 @@
 
 package org.plos_clan.cpos.tasks
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
-import kotlinx.cinterop.ExperimentalForeignApi
 
 class PerCpuScheduler {
     var bootstrapThread: Thread? = null

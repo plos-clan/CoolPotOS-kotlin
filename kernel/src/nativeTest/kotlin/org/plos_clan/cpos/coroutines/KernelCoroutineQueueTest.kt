@@ -1,11 +1,11 @@
 package org.plos_clan.cpos.coroutines
 
+import kotlinx.coroutines.Runnable
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
-import kotlinx.coroutines.Runnable
 
 class KernelCoroutineQueueTest {
     @Test

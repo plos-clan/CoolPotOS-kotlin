@@ -1,11 +1,11 @@
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.fs.vfs.ByteCircularBuffer
+import org.plos_clan.cpos.mem.ByteArrayBuffer
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
-import org.plos_clan.cpos.fs.vfs.ByteCircularBuffer
-import org.plos_clan.cpos.mem.ByteArrayBuffer
 
 class PipeBufferTest {
     @Test

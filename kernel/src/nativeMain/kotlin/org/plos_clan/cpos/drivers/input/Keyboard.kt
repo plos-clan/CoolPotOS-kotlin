@@ -346,7 +346,7 @@ internal class KeyboardInputDevice(
         KernelCoroutines.launch("event$eventIndex-repeat") {
             var waitMillis = lock.withLock { repeatDelayMillis }
             while (true) {
-                delay(waitMillis.toLong())
+                delay(waitMillis.toLong()) // 该语句不应被优化成 milliseconds 调用形式
                 val period = lock.withLock {
                     if (repeatGeneration != generation || repeatKey != key ||
                         !pressed[key.linuxCode.toInt()] || repeatPeriodMillis == 0

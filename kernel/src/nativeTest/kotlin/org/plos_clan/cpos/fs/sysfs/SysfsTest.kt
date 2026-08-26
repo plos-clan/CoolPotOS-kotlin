@@ -1,24 +1,25 @@
 package org.plos_clan.cpos.fs.sysfs
 
+import org.plos_clan.cpos.drivers.Device
+import org.plos_clan.cpos.drivers.DeviceBackend
+import org.plos_clan.cpos.drivers.DeviceNumber
+import org.plos_clan.cpos.drivers.DeviceType
+import org.plos_clan.cpos.fs.vfs.IoResult
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.fs.vfs.VfsTimestamp
+import org.plos_clan.cpos.mem.PreparedBufferDestination
+import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.mem.UserMemory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
-import org.plos_clan.cpos.drivers.Device
-import org.plos_clan.cpos.drivers.DeviceBackend
-import org.plos_clan.cpos.drivers.DeviceNumber
-import org.plos_clan.cpos.drivers.DeviceType
-import org.plos_clan.cpos.fs.vfs.VfsError
-import org.plos_clan.cpos.fs.vfs.VfsName
-import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.fs.vfs.VfsTimestamp
-import org.plos_clan.cpos.fs.vfs.IoResult
-import org.plos_clan.cpos.mem.PreparedBufferDestination
-import org.plos_clan.cpos.mem.PreparedBufferSource
-import org.plos_clan.cpos.mem.UserMemory
 
 class SysfsTest {
     @Test
@@ -179,7 +180,7 @@ class SysfsTest {
         val attributeNode = assertIs<SysfsNode.Attribute>(registry.child(objectNode.id, "config"))
 
         assertEquals(4096uL, attributeNode.attribute.size)
-        assertTrue(attributeNode.attribute === binary)
+        assertSame(attributeNode.attribute, binary)
         registry.unregisterObject(objectHandle).value()
     }
 

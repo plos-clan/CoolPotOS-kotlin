@@ -12,8 +12,8 @@ import org.plos_clan.cpos.fs.vfs.FilePosition
 import org.plos_clan.cpos.fs.vfs.FileSystemOptions
 import org.plos_clan.cpos.fs.vfs.FileSystemType
 import org.plos_clan.cpos.fs.vfs.Inode
-import org.plos_clan.cpos.fs.vfs.InodeAttributes
 import org.plos_clan.cpos.fs.vfs.InodeAttributeSnapshot
+import org.plos_clan.cpos.fs.vfs.InodeAttributes
 import org.plos_clan.cpos.fs.vfs.InodeId
 import org.plos_clan.cpos.fs.vfs.InodeMetadata
 import org.plos_clan.cpos.fs.vfs.InodeTimestampEvent

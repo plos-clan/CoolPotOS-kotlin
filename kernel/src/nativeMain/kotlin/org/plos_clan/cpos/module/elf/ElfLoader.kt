@@ -1,6 +1,5 @@
 package org.plos_clan.cpos.module.elf
 
-import kotlin.collections.iterator
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.vfs.AccessMode
 import org.plos_clan.cpos.fs.vfs.AccessPermissions

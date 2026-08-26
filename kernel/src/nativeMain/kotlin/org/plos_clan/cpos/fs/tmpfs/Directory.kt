@@ -1,9 +1,9 @@
 package org.plos_clan.cpos.fs.tmpfs
 
+import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.DirectoryBackend
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
 import org.plos_clan.cpos.fs.vfs.DirectoryLookup
-import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FilePosition
 import org.plos_clan.cpos.fs.vfs.Inode

@@ -5,7 +5,6 @@ package org.plos_clan.cpos.drivers.char
 import bridge.asm_pause
 import bridge.io_in8
 import bridge.io_out8
-import kotlin.experimental.ExperimentalNativeApi
 import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.get
@@ -23,6 +22,7 @@ import org.plos_clan.cpos.fault.IrqController
 import org.plos_clan.cpos.utils.ByteRingBuffer
 import org.plos_clan.cpos.utils.Cmdline
 import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlin.experimental.ExperimentalNativeApi
 
 @ExperimentalNativeApi
 @Suppress("unused")

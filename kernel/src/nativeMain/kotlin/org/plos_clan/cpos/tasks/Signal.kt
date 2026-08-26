@@ -2,11 +2,11 @@
 
 package org.plos_clan.cpos.tasks
 
+import org.plos_clan.cpos.utils.IrqSpinLock
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
-import org.plos_clan.cpos.utils.IrqSpinLock
 
 internal value class Signal private constructor(val number: Int) {
     val bit: ULong

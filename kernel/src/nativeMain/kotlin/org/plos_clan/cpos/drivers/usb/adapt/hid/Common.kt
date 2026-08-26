@@ -3,7 +3,6 @@
 package org.plos_clan.cpos.drivers.usb.adapt.hid
 
 import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.UByteVar
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.coroutines.KernelSemaphore
 import org.plos_clan.cpos.drivers.usb.bus.ControlTransferArgs
@@ -123,11 +122,7 @@ class HidDevice(
             }
 
             val parser = HidParser(descBuffer.view(), descLength)
-            val parsedDescriptor = parser.parse() ?: run {
-                println("HID: Failed to parse descriptor")
-                descBuffer.free()
-                return null
-            }
+            val parsedDescriptor = parser.parse()
             device.descriptor = parsedDescriptor
 
             var maxReportSize = 0u

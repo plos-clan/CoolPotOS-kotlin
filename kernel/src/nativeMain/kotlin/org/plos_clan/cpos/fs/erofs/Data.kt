@@ -9,7 +9,7 @@ internal class FlatData(
     private val inodeSize: Int,
     private val rawBlock: ULong,
     private val size: ULong,
-    private val inline: Boolean,
+    inline: Boolean,
 ) {
     private val externalSize = if (inline && size != 0uL) {
         ((size + blockSize.toULong() - 1uL) / blockSize.toULong() - 1uL) * blockSize.toULong()

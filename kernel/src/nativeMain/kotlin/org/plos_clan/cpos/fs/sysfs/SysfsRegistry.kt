@@ -2,7 +2,6 @@
 
 package org.plos_clan.cpos.fs.sysfs
 
-import kotlin.concurrent.atomics.AtomicBoolean
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceNumber
 import org.plos_clan.cpos.drivers.DeviceType
@@ -17,6 +16,7 @@ import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.fs.vfs.VfsTimestamp
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
+import kotlin.concurrent.atomics.AtomicBoolean
 
 value class SysfsObjectHandle internal constructor(val id: ULong)
 

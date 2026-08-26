@@ -1,14 +1,14 @@
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsName
+import org.plos_clan.cpos.fs.vfs.VfsPathname
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
-import org.plos_clan.cpos.fs.vfs.VfsError
-import org.plos_clan.cpos.fs.vfs.VfsName
-import org.plos_clan.cpos.fs.vfs.VfsPathname
-import org.plos_clan.cpos.fs.vfs.VfsResult
 
 class VfsPathTest {
     @Test

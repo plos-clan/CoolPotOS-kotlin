@@ -5,24 +5,24 @@ import org.plos_clan.cpos.fs.OpenFlags
 import org.plos_clan.cpos.fs.vfs.AccessMode
 import org.plos_clan.cpos.fs.vfs.AccessPermission
 import org.plos_clan.cpos.fs.vfs.AccessPermissions
+import org.plos_clan.cpos.fs.vfs.AllocatingOpenFileBackend
 import org.plos_clan.cpos.fs.vfs.AtomicCreateDirectoryBackend
 import org.plos_clan.cpos.fs.vfs.AtomicOpenResult
-import org.plos_clan.cpos.fs.vfs.AllocatingOpenFileBackend
 import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.CopyingOpenFileBackend
+import org.plos_clan.cpos.fs.vfs.DentryReference
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
 import org.plos_clan.cpos.fs.vfs.DirectoryLookup
-import org.plos_clan.cpos.fs.vfs.DentryReference
 import org.plos_clan.cpos.fs.vfs.EXTENDED_ATTRIBUTE_VALUE_MAX
 import org.plos_clan.cpos.fs.vfs.ExtendedAttributeMode
 import org.plos_clan.cpos.fs.vfs.ExtendedAttributeName
+import org.plos_clan.cpos.fs.vfs.FifoBackend
 import org.plos_clan.cpos.fs.vfs.FileAllocationMode
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FilePosition
 import org.plos_clan.cpos.fs.vfs.FileSystemOptions
 import org.plos_clan.cpos.fs.vfs.FileSystemStatistics
 import org.plos_clan.cpos.fs.vfs.FileSystemType
-import org.plos_clan.cpos.fs.vfs.FifoBackend
 import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.vfs.InodeAttributeSnapshot
 import org.plos_clan.cpos.fs.vfs.InodeAttributes
@@ -372,8 +372,7 @@ private class FuseInstance(
             DirectoryLookup(
                 inode,
                 entry.entryValidity,
-                DentryReference { releaseLookup(entry.nodeId) },
-            ),
+            ) { releaseLookup(entry.nodeId) },
         )
     }
 
@@ -699,10 +698,10 @@ private sealed interface FuseNode : InodeBackend {
             is VfsResult.Err -> return allowed
         }
         if (instance.options.defaultPermissions) {
-            return super<InodeBackend>.checkAccess(caller, inode, requested)
+            return super.checkAccess(caller, inode, requested)
         }
         return if (AccessPermission.EXECUTE in requested && inode.type == InodeType.REGULAR) {
-            super<InodeBackend>.checkAccess(caller, inode, AccessPermissions.EXECUTE)
+            super.checkAccess(caller, inode, AccessPermissions.EXECUTE)
         } else {
             VfsResult.Ok(Unit)
         }

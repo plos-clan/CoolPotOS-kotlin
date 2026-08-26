@@ -6,7 +6,6 @@
 
 package org.plos_clan.cpos.coroutines
 
-import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Delay
@@ -14,6 +13,7 @@ import kotlinx.coroutines.DisposableHandle
 import kotlinx.coroutines.Runnable
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlin.coroutines.CoroutineContext
 
 private const val MAX_TASKS_PER_BATCH = 64
 

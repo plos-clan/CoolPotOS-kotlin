@@ -1,10 +1,10 @@
 package org.plos_clan.cpos.fs.fuse
 
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
+import org.plos_clan.cpos.utils.LittleEndianBuffer
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import org.plos_clan.cpos.fs.vfs.VfsOperationContext
-import org.plos_clan.cpos.utils.LittleEndianBuffer
 
 class FuseAbiTest {
     @Test
@@ -34,8 +34,8 @@ class FuseAbiTest {
         assertTrue(FuseFeature.DO_READDIRPLUS.mask and FuseFeature.supportedMask != 0uL)
         assertTrue(FuseFeature.READDIRPLUS_AUTO.mask and FuseFeature.supportedMask != 0uL)
         assertTrue(FuseFeature.CACHE_SYMLINKS.mask and FuseFeature.supportedMask != 0uL)
-        assertTrue(FuseFeature.WRITEBACK_CACHE.mask and FuseFeature.supportedMask == 0uL)
-        assertTrue(FuseFeature.PASSTHROUGH.mask and FuseFeature.supportedMask == 0uL)
+        assertEquals(FuseFeature.WRITEBACK_CACHE.mask and FuseFeature.supportedMask, 0uL)
+        assertEquals(FuseFeature.PASSTHROUGH.mask and FuseFeature.supportedMask, 0uL)
     }
 
     @Test
