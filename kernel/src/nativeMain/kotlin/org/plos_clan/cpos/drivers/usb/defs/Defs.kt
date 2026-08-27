@@ -22,6 +22,8 @@ const val DESC_PHYSICAL: UByte = 0x23u
 const val DESC_CS_INTERFACE: UByte = 0x24u
 const val DESC_CS_ENDPOINT: UByte = 0x25u
 
+const val CDC_UNION_FUNCTIONAL_DESCRIPTOR: UByte = 0x06u
+
 const val REQ_GET_STATUS: UByte = 0u
 const val REQ_CLEAR_FEATURE: UByte = 1u
 const val REQ_SET_FEATURE: UByte = 3u

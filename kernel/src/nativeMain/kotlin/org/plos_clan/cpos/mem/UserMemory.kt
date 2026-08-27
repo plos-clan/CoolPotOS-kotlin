@@ -12,6 +12,7 @@ import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.mem.addressspace.PageFaultResult
 import org.plos_clan.cpos.mem.page.PageDirectory
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
+import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.toVirtualPointer
@@ -204,6 +205,35 @@ class UserMemory private constructor(
         bridge.open_smap()
         return null
     }
+
+    fun copyNativeStructArrayToUser(
+        values: Array<out NativeStruct>,
+    ): Boolean {
+        val chunks = Array(values.size) { values[it].toNativeBytes() }
+
+        var totalSize = 0
+        for (chunk in chunks) {
+            if (chunk.size > Int.MAX_VALUE - totalSize) return false
+            totalSize += chunk.size
+        }
+
+        val destination = prepareWrite(0, totalSize) ?: return false
+
+        var offset = 0
+        for (chunk in chunks) {
+            val copied = destination.copyFrom(
+                destinationOffset = offset,
+                source = chunk,
+                sourceOffset = 0,
+                count = chunk.size,
+            )
+            if (copied != chunk.size) return false
+            offset += chunk.size
+        }
+
+        return true
+    }
+
 
     fun getAddress(): ULong = address
 

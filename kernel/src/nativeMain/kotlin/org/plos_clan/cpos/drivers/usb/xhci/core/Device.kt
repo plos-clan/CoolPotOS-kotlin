@@ -233,14 +233,18 @@ internal fun Xhci.setupOneEndpoint(
     return dci
 }
 
-suspend fun Xhci.cleanupSlotOnFailure(slotId: UByte) {
+suspend fun Xhci.cleanupSlot(slotId: UByte) {
     println("Cleaning up resources for slot $slotId")
 
     val slot = slots[slotId.toInt()]
+    slot.usbDevice?.quiesce()
     if (slot.active) {
         disableSlot(slotId)
     }
     slot.active = false
+
+    slot.usbDevice?.free()
+    slot.usbDevice = null
 
     slot.outContext?.free()
     slot.outContext = null

@@ -13,7 +13,22 @@ class UsbDevice(
     val interfaces = mutableListOf<UsbInterface>()
     val endpointMap = UsbEndpointMap()
 
-    fun free() {}
+    fun quiesce() {
+        boundDrivers().forEach(UsbDriver::quiesce)
+    }
+
+    suspend fun free() {
+        val drivers = boundDrivers()
+        interfaces.forEach { iface ->
+            iface.driver = null
+        }
+        for (driver in drivers) driver.disconnect()
+        interfaces.clear()
+    }
+
+    private fun boundDrivers(): Set<UsbDriver> = interfaces.mapNotNullTo(mutableSetOf()) {
+        it.driver
+    }
 }
 
 class UsbEndpointMap {

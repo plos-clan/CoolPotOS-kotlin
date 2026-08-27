@@ -11,6 +11,10 @@ enum class TransferStatus {
     TIMEOUT,
     DRIVER_ERROR,
     UNKNOWN,
+    ;
+
+    val successful: Boolean
+        get() = this == COMPLETED || this == SHORT_PACKET
 }
 
 data class CompletionEvent(
@@ -20,7 +24,8 @@ data class CompletionEvent(
 )
 
 interface UsbDriver {
-    fun disconnect()
+    fun quiesce() {}
+    suspend fun disconnect()
     fun handleCompletion(event: CompletionEvent)
 }
 

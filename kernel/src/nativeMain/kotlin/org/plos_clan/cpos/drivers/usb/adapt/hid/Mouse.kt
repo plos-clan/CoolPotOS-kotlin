@@ -52,7 +52,7 @@ class Mouse(
         }
     }
 
-    override fun disconnect() {
+    override suspend fun disconnect() {
         println("Mouse: disconnected")
         hid.free()
     }

@@ -201,6 +201,8 @@ private enum class LinuxSyscall(
     SETFSUID(122, ::setFsUid),
     SETFSGID(123, ::setFsGid),
     GETSID(124, ::getSid),
+    CAPGET(125, ::capGet),
+    CAPSET(126, ::capSet),
     RT_SIGPENDING(127, SignalSyscalls::rtSigpending),
     RT_SIGTIMEDWAIT(128, SignalSyscalls::rtSigtimedwait),
     RT_SIGQUEUEINFO(129, SignalSyscalls::rtSigqueueinfo),

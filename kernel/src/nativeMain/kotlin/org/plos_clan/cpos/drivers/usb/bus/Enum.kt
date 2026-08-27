@@ -6,7 +6,9 @@ import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.plus
 import org.plos_clan.cpos.drivers.usb.defs.ConfigurationDescriptor
+import org.plos_clan.cpos.drivers.usb.defs.CDC_UNION_FUNCTIONAL_DESCRIPTOR
 import org.plos_clan.cpos.drivers.usb.defs.DESC_CONFIGURATION
+import org.plos_clan.cpos.drivers.usb.defs.DESC_CS_INTERFACE
 import org.plos_clan.cpos.drivers.usb.defs.DESC_DEVICE
 import org.plos_clan.cpos.drivers.usb.defs.DESC_ENDPOINT
 import org.plos_clan.cpos.drivers.usb.defs.DESC_HID
@@ -167,15 +169,18 @@ private fun UsbDevice.parseConfigTree(configRaw: CPointer<UByteVar>, totalLength
         val descLength = ptr.readU8(0)
         val descType = ptr.readU8(1)
 
-        if (offset.toUInt() + descLength.toUInt() > totalLength.toUInt()) {
+        if (descLength < 2u || offset.toUInt() + descLength.toUInt() > totalLength.toUInt()) {
             break
         }
 
         when (descType) {
-            DESC_INTERFACE -> parseInterfaceDescriptor(ptr)
-            DESC_HID -> parseHidDescriptor(ptr)
-            DESC_ENDPOINT -> parseEndpointDescriptor(ptr)
-            DESC_SS_EP_COMPANION -> parseSsCompanion(ptr)
+            DESC_INTERFACE -> if (descLength >= 9u) parseInterfaceDescriptor(ptr)
+            DESC_HID -> if (descLength >= HidDescriptorHeader.SIZE_BYTES.toUInt()) {
+                parseHidDescriptor(ptr, descLength.toInt())
+            }
+            DESC_ENDPOINT -> if (descLength >= 7u) parseEndpointDescriptor(ptr)
+            DESC_SS_EP_COMPANION -> if (descLength >= 6u) parseSsCompanion(ptr)
+            DESC_CS_INTERFACE -> parseCdcUnionDescriptor(ptr, descLength.toInt())
             else -> {}
         }
 
@@ -196,12 +201,13 @@ private fun UsbDevice.parseInterfaceDescriptor(ptr: CPointer<UByteVar>) {
     interfaces.add(UsbInterface(device = this, desc = descriptor))
 }
 
-private fun UsbDevice.parseHidDescriptor(ptr: CPointer<UByteVar>) {
+private fun UsbDevice.parseHidDescriptor(ptr: CPointer<UByteVar>, length: Int) {
     val iface = interfaces.lastOrNull() ?: return
     val numDescriptors = ptr.readU8(5)
     var pos = HidDescriptorHeader.SIZE_BYTES
 
     repeat(numDescriptors.toInt()) {
+        if (pos > length - 3) return
         val descType = ptr.readU8(pos)
         val descLength =
             (ptr.readU8(pos + 1).toUInt() or (ptr.readU8(pos + 2).toUInt() shl 8)).toUShort()
@@ -211,6 +217,19 @@ private fun UsbDevice.parseHidDescriptor(ptr: CPointer<UByteVar>) {
             return
         }
         pos += 3
+    }
+}
+
+private fun UsbDevice.parseCdcUnionDescriptor(ptr: CPointer<UByteVar>, length: Int) {
+    if (length < 5 || ptr.readU8(2) != CDC_UNION_FUNCTIONAL_DESCRIPTOR) return
+    val iface = interfaces.lastOrNull() ?: return
+    if (ptr.readU8(3) != iface.desc.interfaceNumber) return
+
+    for (offset in 4 until length) {
+        val interfaceNumber = ptr.readU8(offset)
+        if (interfaceNumber !in iface.extraData.associatedInterfaceNumbers) {
+            iface.extraData.associatedInterfaceNumbers.add(interfaceNumber)
+        }
     }
 }
 

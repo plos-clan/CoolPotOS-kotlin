@@ -358,6 +358,8 @@ private class BuildConfig(private val project: Project) {
             "-no-reboot", "-smp", "4",
             "-device", "qemu-xhci,id=xhci",
             "-device", "usb-kbd,bus=xhci.0", "-device", "usb-mouse,bus=xhci.0",
+            "-netdev", "user,id=usbnet",
+            "-device", "usb-net,id=rndis,bus=xhci.0,netdev=usbnet",
             "-display", setting("qemuDisplay", "QEMU_DISPLAY", "gtk"),
             "-chardev", "stdio,id=console,mux=on,signal=off",
             "-serial", "chardev:console",

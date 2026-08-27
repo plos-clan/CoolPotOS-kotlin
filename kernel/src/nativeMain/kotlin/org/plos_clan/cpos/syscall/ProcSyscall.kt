@@ -9,7 +9,10 @@ import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.module.elf.ElfLoader
 import org.plos_clan.cpos.syscall.Syscall.copyWordToUser
 import org.plos_clan.cpos.syscall.Syscall.errno
+import org.plos_clan.cpos.tasks.CapHeader
+import org.plos_clan.cpos.tasks.Capabilities
 import org.plos_clan.cpos.tasks.ChildEventKind
+import org.plos_clan.cpos.tasks.LINUX_CAPABILITY_VERSION_3
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessGroupResult
 import org.plos_clan.cpos.tasks.ProcessManager
@@ -19,6 +22,8 @@ import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.SignalStack
 import org.plos_clan.cpos.tasks.Thread
+import org.plos_clan.cpos.tasks.capabilityApply
+import org.plos_clan.cpos.tasks.capabilityCount
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct
@@ -423,18 +428,95 @@ internal fun getCPU(regs: PtraceRegisters, process: Process): Long {
     val cpup = regs[PtraceRegisters.IDX_RDI]
     val nodep = regs[PtraceRegisters.IDX_RSI]
 
-    if(cpup != 0UL) {
+    if (cpup != 0UL) {
         val userCpup = UserMemory(process.addressSpace, cpup)
         val local = SMProcessor.currentLocal()
-        if(!userCpup.copyToUser(local.cpuid.toByteArray())) return errno(Errno.EFAULT)
+        if (!userCpup.copyToUser(local.cpuid.toByteArray())) return errno(Errno.EFAULT)
     }
 
-    if(nodep != 0UL) {
+    if (nodep != 0UL) {
         val userNodep = UserMemory(process.addressSpace, nodep)
-        if(!userNodep.copyToUser(0L.toByteArray())) return errno(Errno.EFAULT)
+        if (!userNodep.copyToUser(0L.toByteArray())) return errno(Errno.EFAULT)
     }
 
     return errno(Errno.EOK)
+}
+
+internal fun capGet(regs: PtraceRegisters, process: Process): Long {
+    val headMem = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI])
+    val headByte = headMem.copyFromUser(
+        CapHeader.NATIVE_SIZE
+    ) ?: return errno(Errno.EFAULT)
+    val dataMem = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
+
+    val header = CapHeader(0u, 0).apply { updateFromNativeBytes(headByte) }
+    val task =
+        if (header.pid == 0) ProcessManager.currentThread()!!
+        else (ProcessManager.findThread(header.pid)
+            ?: return errno(Errno.ESRCH))
+    val count = capabilityCount(header.version)
+    if (count == errno(Errno.EINVAL).toInt()) {
+        header.version = LINUX_CAPABILITY_VERSION_3
+        if(!headMem.copyToUser(header.toNativeBytes())) return errno(Errno.EFAULT)
+        return count.toLong()
+    }
+
+    val array = Array(count) {
+        Capabilities(0u, 0u, 0u)
+    }
+
+    array[0].effective = (task.effective and UInt.MAX_VALUE.toULong()).toUInt()
+    array[0].permitted = (task.permitted and UInt.MAX_VALUE.toULong()).toUInt()
+    array[0].inheritable = (task.inheritable and UInt.MAX_VALUE.toULong()).toUInt()
+
+    if (count > 1) {
+        array[1].effective = (task.effective shr 32).toUInt()
+        array[1].permitted = (task.permitted shr 32).toUInt()
+        array[1].inheritable = (task.inheritable shr 32).toUInt()
+    }
+
+    if (!dataMem.copyNativeStructArrayToUser(array)) return errno(Errno.EFAULT)
+
+    return errno(Errno.EOK)
+}
+
+internal fun capSet(regs: PtraceRegisters, process: Process): Long {
+    val headMem = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI])
+    val headByte = headMem.copyFromUser(
+        CapHeader.NATIVE_SIZE
+    ) ?: return errno(Errno.EFAULT)
+    val dataMem = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
+
+    val header = CapHeader(0u, 0).apply { updateFromNativeBytes(headByte) }
+    val task =
+        if (header.pid == 0) ProcessManager.currentThread()!!
+        else (ProcessManager.findThread(header.pid)
+            ?: return errno(Errno.ESRCH))
+    val count = capabilityCount(header.version)
+    if (count == errno(Errno.EINVAL).toInt()) {
+        header.version = LINUX_CAPABILITY_VERSION_3
+        if(!headMem.copyToUser(header.toNativeBytes())) return errno(Errno.EFAULT)
+        return count.toLong()
+    }
+
+    val byteCount = count * Capabilities.NATIVE_SIZE
+    val input = dataMem.copyFromUser(byteCount)
+        ?: return errno(Errno.EFAULT)
+
+    val array = Array(count) {
+        Capabilities(0u, 0u, 0u)
+    }
+
+    for (index in array.indices) {
+        val offset = index * Capabilities.NATIVE_SIZE
+        val elementBytes = input.copyOfRange(
+            offset,
+            offset + Capabilities.NATIVE_SIZE,
+        )
+        if (!array[index].updateFromNativeBytes(elementBytes)) return errno(Errno.EINVAL)
+    }
+
+    return capabilityApply(array, task)
 }
 
 private fun readStringVector(process: Process, address: ULong): List<String>? {

@@ -12,7 +12,7 @@
 - Symmetric multiprocessing
 - Buddy allocator & 4-level page table
 - TSC-deadline apic timer
-- USB subsystem (XHCI, HID)
+- USB subsystem (XHCI, HID, RNDIS Ethernet)
 - RRS-handoff scheduler
 - VDSO
 - ACPI AML
@@ -70,6 +70,8 @@ CONSOLE=ttyS0,115200n8 QEMU_DISPLAY=none ./gradlew run
 
 QEMU's serial port is always connected to the current terminal. Its stdio
 multiplexer uses `Ctrl-A X` to exit and `Ctrl-A H` to show shortcut help.
+The default QEMU machine also exposes an RNDIS USB Ethernet adapter backed by
+QEMU user networking.
 
 You need to install:
 - Kotlin/Native (`konanc`, `cinterop`)

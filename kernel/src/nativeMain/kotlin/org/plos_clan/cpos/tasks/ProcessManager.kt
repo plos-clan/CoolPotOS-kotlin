@@ -147,6 +147,12 @@ class Thread internal constructor(
     internal val signals: ThreadSignalState = process.signals.newThread(),
     var name: String = "",
     val affinityMask: ULong = 0UL,
+
+    // cap
+    var effective: ULong = TASK_CAP_FULL_MASK,
+    var permitted: ULong = TASK_CAP_FULL_MASK,
+    var inheritable: ULong = 0UL,
+    var ambient: ULong = 0UL,
 ) {
     private val scheduledCpu = AtomicLong(-1)
 
@@ -156,8 +162,9 @@ class Thread internal constructor(
     internal fun bindToCpu(lapicId: UInt) {
         val requested = lapicId.toLong()
         val assigned = scheduledCpu.load()
-        check(assigned == requested || assigned == -1L &&
-            scheduledCpu.compareAndSet(-1L, requested)
+        check(
+            assigned == requested || assigned == -1L &&
+                    scheduledCpu.compareAndSet(-1L, requested)
         ) {
             "thread $id cannot migrate from LAPIC $assigned to $lapicId"
         }
@@ -472,6 +479,7 @@ object ProcessManager {
         val addressSpace = when {
             parent == null ->
                 AddressSpace.user(KernelPageDirectory.getDirectory().createUserDirectory())
+
             memory == MemoryCloneMode.SHARE -> parent.addressSpace.share()
             else -> parent.addressSpace.fork()
         }
@@ -683,7 +691,7 @@ object ProcessManager {
         var parent: Process? = null
         val reaped = processLock.withLock {
             val removable = child.parentId == parentId &&
-                child.state == ProcessState.ZOMBIE && processes.remove(child)
+                    child.state == ProcessState.ZOMBIE && processes.remove(child)
             if (removable) parent = processes.firstOrNull { it.id == parentId }
             removable
         }

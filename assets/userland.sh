@@ -17,6 +17,7 @@ packages=(
     pciutils
     python
     procps-ng
+    iputils
 )
 
 rootfs=$(mktemp -d)
@@ -53,6 +54,9 @@ pacman -Sy \
     --noconfirm \
     --disable-sandbox-network \
     "${packages[@]}"
+
+sed -i 's/^root:[^:]*:/root::/' "$rootfs/etc/shadow"
+grep -q '^root::' "$rootfs/etc/shadow"
 
 install -d -m 0700 "$keyring"
 install -Dm755 /usr/local/share/cpos/init "$rootfs/init"

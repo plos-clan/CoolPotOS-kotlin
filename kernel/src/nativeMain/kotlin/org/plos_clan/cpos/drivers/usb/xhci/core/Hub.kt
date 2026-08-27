@@ -56,7 +56,7 @@ internal suspend fun Xhci.handlePort(port: Port) {
         val slotId = portToSlot[port.id]
 
         if (slotId != 0u.toUByte()) {
-            cleanupSlotOnFailure(slotId)
+            cleanupSlot(slotId)
             portToSlot[port.id] = 0u
         }
     }
@@ -80,7 +80,7 @@ internal suspend fun Xhci.attachDevice(port: Port) {
 
     setupSlotDevice(port, slotId) ?: run {
         println("Device init failed for slot $slotId")
-        cleanupSlotOnFailure(slotId)
+        cleanupSlot(slotId)
     }
 }
 

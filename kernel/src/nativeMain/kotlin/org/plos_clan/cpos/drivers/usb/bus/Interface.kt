@@ -12,6 +12,7 @@ data class UsbEndpoint(
 
 class UsbExtraData {
     var hidReportDescriptorLength: UShort = 0u
+    val associatedInterfaceNumbers = mutableListOf<UByte>()
 }
 
 class UsbInterface(
@@ -22,11 +23,13 @@ class UsbInterface(
     val endpoints = mutableListOf<UsbEndpoint>()
     val extraData = UsbExtraData()
 
-    fun matches(classCode: UByte, subClass: UByte, protocol: UByte): Boolean {
-        return (classCode == 0xffu.toUByte() || desc.interfaceClass == classCode) &&
-            (subClass == 0xffu.toUByte() || desc.interfaceSubclass == subClass) &&
-            (protocol == 0xffu.toUByte() || desc.interfaceProtocol == protocol)
-    }
+    fun matches(
+        classCode: UByte,
+        subClass: UByte? = null,
+        protocol: UByte? = null,
+    ): Boolean = desc.interfaceClass == classCode &&
+        (subClass == null || desc.interfaceSubclass == subClass) &&
+        (protocol == null || desc.interfaceProtocol == protocol)
 
     fun findEndpoint(endpointType: UByte, isIn: Boolean): UsbEndpoint? {
         val endpointDirection = if (isIn) REQ_DIR_IN else 0u.toUByte()
@@ -43,15 +46,12 @@ class UsbInterface(
         return null
     }
 
-    fun findSibling(classCode: UByte, subClass: UByte, protocol: UByte): UsbInterface? {
-        for (iface in device.interfaces) {
-            if (iface.desc.interfaceNumber != desc.interfaceNumber &&
-                iface.matches(classCode, subClass, protocol)
-            ) {
-                return iface
-            }
-        }
-
-        return null
+    fun findAssociatedInterface(
+        classCode: UByte,
+        subClass: UByte? = null,
+        protocol: UByte? = null,
+    ): UsbInterface? = device.interfaces.firstOrNull { iface ->
+        iface.desc.interfaceNumber in extraData.associatedInterfaceNumbers &&
+            iface.matches(classCode, subClass, protocol)
     }
 }

@@ -19,11 +19,15 @@ class KernelOneShot<T> {
         hasValue = false
     }
 
-    fun send(value: T) {
+    fun trySend(value: T): Boolean {
+        var accepted = true
         val continuation = lock.withLock {
             val current = waiter
             if (current == null) {
-                check(!hasValue) { "One-shot already contains a value" }
+                if (hasValue) {
+                    accepted = false
+                    return@withLock null
+                }
                 this.value = value
                 hasValue = true
             } else {
@@ -32,6 +36,11 @@ class KernelOneShot<T> {
             current
         }
         continuation?.resume(value)
+        return accepted
+    }
+
+    fun send(value: T) {
+        check(trySend(value)) { "One-shot already contains a value" }
     }
 
     suspend fun recv(): T = suspendCancellableCoroutine { continuation ->
