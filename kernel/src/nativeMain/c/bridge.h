@@ -131,6 +131,8 @@ typedef struct {
 } cpuid_result_t;
 
 void x86_cpuid(uint32_t leaf,uint32_t subleaf,cpuid_result_t *result);
+bool rdrand64_step(uint64_t *out);
+bool rdseed64_step(uint64_t *out);
 
 #ifdef __cplusplus
 }

@@ -203,6 +203,44 @@ void irq_restore(uint64_t flags) {
     if (flags & (1u << 9)) __asm__ volatile("sti" : : : "memory");
 }
 
+bool rdrand64_step(uint64_t *out) {
+    uint64_t value;
+    unsigned char success;
+
+    __asm__ volatile(
+            "rdrand %0\n\t"
+            "setc %1"
+            : "=r"(value), "=qm"(success)
+            :
+            : "cc", "memory"
+            );
+
+    if (!success)
+        return false;
+
+    *out = value;
+    return true;
+}
+
+bool rdseed64_step(uint64_t *out) {
+    uint64_t value;
+    unsigned char success;
+
+    __asm__ volatile(
+            "rdseed %0\n\t"
+            "setc %1"
+            : "=r"(value), "=qm"(success)
+            :
+            : "cc", "memory"
+            );
+
+    if (!success)
+        return false;
+
+    *out = value;
+    return true;
+}
+
 void setup_syscall_cpu(uint64_t lapic_id, uint8_t is_bsp) {
     cpu_local_t *local = &locals[lapic_id % cpu_slot_count];
     syscall_cpu_state_t *state = &local->syscall;

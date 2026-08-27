@@ -10,6 +10,7 @@ import org.plos_clan.cpos.module.elf.ElfLoader
 import org.plos_clan.cpos.syscall.Syscall.copyWordToUser
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.tasks.CapHeader
+import org.plos_clan.cpos.tasks.CapManager
 import org.plos_clan.cpos.tasks.Capabilities
 import org.plos_clan.cpos.tasks.ChildEventKind
 import org.plos_clan.cpos.tasks.LINUX_CAPABILITY_VERSION_3
@@ -22,8 +23,6 @@ import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.SignalStack
 import org.plos_clan.cpos.tasks.Thread
-import org.plos_clan.cpos.tasks.capabilityApply
-import org.plos_clan.cpos.tasks.capabilityCount
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct
@@ -454,7 +453,7 @@ internal fun capGet(regs: PtraceRegisters, process: Process): Long {
         if (header.pid == 0) ProcessManager.currentThread()!!
         else (ProcessManager.findThread(header.pid)
             ?: return errno(Errno.ESRCH))
-    val count = capabilityCount(header.version)
+    val count = CapManager.capabilityCount(header.version)
     if (count == errno(Errno.EINVAL).toInt()) {
         header.version = LINUX_CAPABILITY_VERSION_3
         if(!headMem.copyToUser(header.toNativeBytes())) return errno(Errno.EFAULT)
@@ -492,7 +491,7 @@ internal fun capSet(regs: PtraceRegisters, process: Process): Long {
         if (header.pid == 0) ProcessManager.currentThread()!!
         else (ProcessManager.findThread(header.pid)
             ?: return errno(Errno.ESRCH))
-    val count = capabilityCount(header.version)
+    val count = CapManager.capabilityCount(header.version)
     if (count == errno(Errno.EINVAL).toInt()) {
         header.version = LINUX_CAPABILITY_VERSION_3
         if(!headMem.copyToUser(header.toNativeBytes())) return errno(Errno.EFAULT)
@@ -516,7 +515,7 @@ internal fun capSet(regs: PtraceRegisters, process: Process): Long {
         if (!array[index].updateFromNativeBytes(elementBytes)) return errno(Errno.EINVAL)
     }
 
-    return capabilityApply(array, task)
+    return CapManager.capabilityApply(array, task)
 }
 
 private fun readStringVector(process: Process, address: ULong): List<String>? {

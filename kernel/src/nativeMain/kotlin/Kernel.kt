@@ -27,6 +27,7 @@ import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.Cmdline
+import org.plos_clan.cpos.utils.KernelRandom
 import org.plos_clan.cpos.utils.hex
 import kotlin.experimental.ExperimentalNativeApi
 
@@ -72,6 +73,7 @@ fun kernelMain() {
     startCapturedCloneThreads()
     Scheduler.enableScheduler()
     Cmdline.initialize()
+    KernelRandom.initialize()
     if (!FileSystemManager.initialize()) {
         return
     }

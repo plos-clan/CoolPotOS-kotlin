@@ -12,6 +12,12 @@ const val LINUX_CAPABILITY_VERSION_3 = 0x20080522U
 const val TASK_CAP_LAST_CAP = 40U
 const val TASK_CAP_FULL_MASK = 0x1FFFFFFFFFFu
 
+enum class CapEnum(val id: ULong) {
+    CAP_NET_BIND_SERVICE(10UL),
+    CAP_NET_ADMIN(12UL),
+    CAP_NET_RAW(13UL),
+}
+
 data class CapHeader(
     var version: UInt,
     var pid: Int,
@@ -63,33 +69,44 @@ data class Capabilities(
     }
 }
 
-fun capabilityCount(version: UInt): Int = when (version) {
-    LINUX_CAPABILITY_VERSION_1 -> 1
-    LINUX_CAPABILITY_VERSION_2, LINUX_CAPABILITY_VERSION_3 -> 2
-    else -> errno(Errno.EINVAL).toInt()
-}
+object CapManager {
 
-fun capabilityApply(array: Array<Capabilities>, task: Thread): Long {
-    var effective = array[0].effective.toULong()
-    var permitted = array[0].permitted.toULong()
-    var inheritable = array[0].inheritable.toULong()
-
-    if (array.size > 1) {
-        effective = effective or (array[1].effective.toULong() shl 32)
-        permitted = permitted or (array[1].permitted.toULong() shl 32)
-        inheritable = inheritable or (array[1].inheritable.toULong() shl 32)
+    fun hasAllCapability(thread: Thread, vararg caps: CapEnum) : Boolean{
+        for (cap in caps) {
+            if(thread.effective and (1uL shl (cap.id.toInt())) == 0uL) return false
+        }
+        return true
     }
 
-    effective = effective and TASK_CAP_FULL_MASK
-    permitted = permitted and TASK_CAP_FULL_MASK
-    inheritable = inheritable and TASK_CAP_FULL_MASK
+    fun capabilityCount(version: UInt): Int = when (version) {
+        LINUX_CAPABILITY_VERSION_1 -> 1
+        LINUX_CAPABILITY_VERSION_2, LINUX_CAPABILITY_VERSION_3 -> 2
+        else -> errno(Errno.EINVAL).toInt()
+    }
 
-    if ((effective and permitted.inv()) != 0UL) return errno(Errno.EPERM)
+    fun capabilityApply(array: Array<Capabilities>, task: Thread): Long {
+        var effective = array[0].effective.toULong()
+        var permitted = array[0].permitted.toULong()
+        var inheritable = array[0].inheritable.toULong()
 
-    task.effective = effective
-    task.permitted = permitted
-    task.inheritable = inheritable
-    task.ambient = task.ambient and (permitted and inheritable)
+        if (array.size > 1) {
+            effective = effective or (array[1].effective.toULong() shl 32)
+            permitted = permitted or (array[1].permitted.toULong() shl 32)
+            inheritable = inheritable or (array[1].inheritable.toULong() shl 32)
+        }
 
-    return errno(Errno.EOK)
+        effective = effective and TASK_CAP_FULL_MASK
+        permitted = permitted and TASK_CAP_FULL_MASK
+        inheritable = inheritable and TASK_CAP_FULL_MASK
+
+        if ((effective and permitted.inv()) != 0UL) return errno(Errno.EPERM)
+
+        task.effective = effective
+        task.permitted = permitted
+        task.inheritable = inheritable
+        task.ambient = task.ambient and (permitted and inheritable)
+
+        return errno(Errno.EOK)
+    }
+
 }
