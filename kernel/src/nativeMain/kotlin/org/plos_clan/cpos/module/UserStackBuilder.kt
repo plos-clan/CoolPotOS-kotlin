@@ -8,6 +8,7 @@ import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_WRITABLE
 import org.plos_clan.cpos.mem.addressspace.MemoryRegion
 import org.plos_clan.cpos.mem.addressspace.MemoryRegionType
+import org.plos_clan.cpos.mem.addressspace.USER_MMAP_END
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.module.elf.ElfInterpreterLoadResult
 import org.plos_clan.cpos.module.elf.ElfLoadResult
@@ -37,6 +38,7 @@ private const val AT_EGID = 14uL
 private const val AT_SECURE = 23uL
 private const val AT_RANDOM = 25uL
 private const val AT_EXECFN = 31uL
+private const val AT_SYSINFO_EHDR = 33uL
 
 data class UserStackResult(
     val stackPointer: ULong,
@@ -147,6 +149,7 @@ object UserStackBuilder {
         auxiliary(AT_SECURE, 0uL)
         auxiliary(AT_RANDOM, randomAddress)
         auxiliary(AT_EXECFN, execfnAddress)
+        auxiliary(AT_SYSINFO_EHDR, USER_MMAP_END)
         auxiliary(AT_NULL, 0uL)
 
         val stackPointer = writer.pushAlignedWords(words) ?: run {

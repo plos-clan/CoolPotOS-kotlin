@@ -122,20 +122,7 @@ object Scheduler {
             return SMProcessor.currentLocal()
         }
 
-        val start = (nextCpuIndex.fetchAndAdd(1).toUInt() % schedulingCpus.size.toUInt()).toInt()
-        var selected = schedulingCpus[start]
-        var selectedLoad = bridge.fast_handoff_cpu_load(selected.lapicId.toULong())
-        if (selectedLoad == 0uL) return selected
-
-        for (offset in 1 until schedulingCpus.size) {
-            val candidate = schedulingCpus[(start + offset) % schedulingCpus.size]
-            val load = bridge.fast_handoff_cpu_load(candidate.lapicId.toULong())
-            if (load < selectedLoad) {
-                selected = candidate
-                selectedLoad = load
-                if (load == 0uL) break
-            }
-        }
-        return selected
+        val index = nextCpuIndex.fetchAndAdd(1).toUInt() % schedulingCpus.size.toUInt()
+        return schedulingCpus[index.toInt()]
     }
 }

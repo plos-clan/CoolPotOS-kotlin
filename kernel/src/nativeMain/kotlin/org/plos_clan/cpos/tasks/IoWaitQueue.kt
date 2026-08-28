@@ -17,9 +17,9 @@ internal class IoWaitQueue {
             ready = false
         }
 
-        internal fun wake() {
+        internal fun markReady(): Thread {
             ready = true
-            Scheduler.wake(checkNotNull(thread))
+            return checkNotNull(thread)
         }
 
         internal fun recycle() {
@@ -58,16 +58,23 @@ internal class IoWaitQueue {
     }
 
     fun wakeReady(available: Int) {
-        val waiter = waiting.firstOrNull() ?: return
-        if (available < waiter.minimum) return
-        waiting.removeFirst().wake()
+        takeReady(available)?.let(Scheduler::wake)
     }
 
     fun wakeOne() {
-        waiting.removeFirstOrNull()?.wake()
+        takeOne()?.let(Scheduler::wake)
     }
 
     fun wakeAll() {
-        while (waiting.isNotEmpty()) waiting.removeFirst().wake()
+        while (true) Scheduler.wake(takeOne() ?: return)
     }
+
+    fun takeReady(available: Int): Thread? {
+        val waiter = waiting.firstOrNull() ?: return null
+        if (available < waiter.minimum) return null
+        waiting.removeFirst()
+        return waiter.markReady()
+    }
+
+    fun takeOne(): Thread? = waiting.removeFirstOrNull()?.markReady()
 }

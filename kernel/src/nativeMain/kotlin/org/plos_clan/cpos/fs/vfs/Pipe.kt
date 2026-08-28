@@ -4,9 +4,11 @@ import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.IoWaitQueue
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.Signal
 import org.plos_clan.cpos.tasks.SignalInfo
 import org.plos_clan.cpos.tasks.SignalRouter
+import org.plos_clan.cpos.tasks.Thread
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PollEvents
@@ -106,11 +108,13 @@ private class PipeState(
         val thread = ProcessManager.currentThread()
         var waiter: IoWaitQueue.Waiter? = null
         var waitQueue: IoWaitQueue? = null
+        var wakeReaders = false
+        var wakeWriters = false
         val error = lock.withLock {
             when (access) {
                 AccessMode.READ -> {
                     readers++
-                    writerOpenWaiters.wakeAll()
+                    wakeWriters = true
                     if (!nonBlocking && writers == 0) {
                         waitQueue = readerOpenWaiters
                         waiter = readerOpenWaiters.add(checkNotNull(thread))
@@ -119,7 +123,7 @@ private class PipeState(
                 AccessMode.WRITE -> {
                     if (nonBlocking && readers == 0) return@withLock VfsError.NO_SUCH_DEVICE_OR_ADDRESS
                     writers++
-                    readerOpenWaiters.wakeAll()
+                    wakeReaders = true
                     if (readers == 0) {
                         waitQueue = writerOpenWaiters
                         waiter = writerOpenWaiters.add(checkNotNull(thread))
@@ -128,13 +132,15 @@ private class PipeState(
                 AccessMode.READ_WRITE -> {
                     readers++
                     writers++
-                    readerOpenWaiters.wakeAll()
-                    writerOpenWaiters.wakeAll()
+                    wakeReaders = true
+                    wakeWriters = true
                 }
                 AccessMode.PATH -> return@withLock VfsError.BAD_DESCRIPTOR
             }
             null
         }
+        if (wakeReaders) wakeAllOutsideLock(readerOpenWaiters)
+        if (wakeWriters) wakeAllOutsideLock(writerOpenWaiters)
         if (error != null) return VfsResult.Err(error)
         val queued = waiter ?: return VfsResult.Ok(PipeEndpoint(this, access))
         if (!checkNotNull(waitQueue).await(lock, queued)) {
@@ -146,17 +152,24 @@ private class PipeState(
         return VfsResult.Ok(PipeEndpoint(this, access))
     }
 
-    fun read(destination: PreparedBufferDestination, offset: Int, count: Int): IoResult = lock.withLock {
-        if (count == 0) return@withLock IoResult.success(0)
-        if (buffer.size == 0) {
-            return@withLock if (writers == 0) IoResult.success(0)
-            else IoResult.failure(VfsError.WOULD_BLOCK)
+    fun read(destination: PreparedBufferDestination, offset: Int, count: Int): IoResult {
+        var writerToWake: Thread? = null
+        var readerToWake: Thread? = null
+        val result = lock.withLock {
+            if (count == 0) return@withLock IoResult.success(0)
+            if (buffer.size == 0) {
+                return@withLock if (writers == 0) IoResult.success(0)
+                else IoResult.failure(VfsError.WOULD_BLOCK)
+            }
+            val transferred = buffer.read(destination, offset, count)
+            if (transferred == 0) return@withLock IoResult.failure(VfsError.FAULT)
+            writerToWake = writeWaiters.takeReady(buffer.remaining)
+            if (buffer.size != 0) readerToWake = readWaiters.takeReady(buffer.size)
+            IoResult.success(transferred)
         }
-        val transferred = buffer.read(destination, offset, count)
-        if (transferred == 0) return@withLock IoResult.failure(VfsError.FAULT)
-        writeWaiters.wakeReady(buffer.remaining)
-        if (buffer.size != 0) readWaiters.wakeReady(buffer.size)
-        IoResult.success(transferred)
+        writerToWake?.let(Scheduler::wake)
+        readerToWake?.let(Scheduler::wake)
+        return result
     }
 
     fun write(
@@ -164,9 +177,30 @@ private class PipeState(
         offset: Int,
         count: Int,
         mode: IoMode,
-    ): IoResult = lock.withLock {
-        if (count == 0) return@withLock IoResult.success(0)
-        if (readers == 0) {
+    ): IoResult {
+        var readerToWake: Thread? = null
+        var brokenPipe = false
+        val result = lock.withLock {
+            if (count == 0) return@withLock IoResult.success(0)
+            if (readers == 0) {
+                brokenPipe = true
+                return@withLock IoResult.failure(VfsError.BROKEN_PIPE)
+            }
+            val available = buffer.remaining
+            val minimumWriteSize = when {
+                mode == IoMode.BLOCKING -> minOf(count, buffer.capacity)
+                count <= ATOMIC_WRITE_BYTES -> count
+                else -> 1
+            }
+            if (available < minimumWriteSize) {
+                return@withLock IoResult.failure(VfsError.WOULD_BLOCK)
+            }
+            val transferred = buffer.write(source, offset, count)
+            if (transferred == 0) return@withLock IoResult.failure(VfsError.FAULT)
+            readerToWake = readWaiters.takeReady(buffer.size)
+            IoResult.success(transferred)
+        }
+        if (brokenPipe) {
             ProcessManager.currentThread()?.let { thread ->
                 SignalRouter.sendThread(
                     sender = thread.process,
@@ -174,21 +208,9 @@ private class PipeState(
                     info = SignalInfo.fromSender(Signal.PIPE, thread.process),
                 )
             }
-            return@withLock IoResult.failure(VfsError.BROKEN_PIPE)
         }
-        val available = buffer.remaining
-        val minimumWriteSize = when {
-            mode == IoMode.BLOCKING -> minOf(count, buffer.capacity)
-            count <= ATOMIC_WRITE_BYTES -> count
-            else -> 1
-        }
-        if (available < minimumWriteSize) {
-            return@withLock IoResult.failure(VfsError.WOULD_BLOCK)
-        }
-        val transferred = buffer.write(source, offset, count)
-        if (transferred == 0) return@withLock IoResult.failure(VfsError.FAULT)
-        readWaiters.wakeReady(buffer.size)
-        IoResult.success(transferred)
+        readerToWake?.let(Scheduler::wake)
+        return result
     }
 
     fun await(event: IoEvent, count: Int): Boolean {
@@ -232,16 +254,29 @@ private class PipeState(
         (available and events).toLong()
     }
 
-    fun close(access: AccessMode) = lock.withLock {
-        if (access.canWrite) {
-            check(writers > 0)
-            writers--
-            if (writers == 0) readWaiters.wakeAll()
+    fun close(access: AccessMode) {
+        var wakeReaders = false
+        var wakeWriters = false
+        lock.withLock {
+            if (access.canWrite) {
+                check(writers > 0)
+                writers--
+                if (writers == 0) wakeReaders = true
+            }
+            if (access.canRead) {
+                check(readers > 0)
+                readers--
+                if (readers == 0) wakeWriters = true
+            }
         }
-        if (access.canRead) {
-            check(readers > 0)
-            readers--
-            if (readers == 0) writeWaiters.wakeAll()
+        if (wakeReaders) wakeAllOutsideLock(readWaiters)
+        if (wakeWriters) wakeAllOutsideLock(writeWaiters)
+    }
+
+    private fun wakeAllOutsideLock(queue: IoWaitQueue) {
+        while (true) {
+            val thread = lock.withLock { queue.takeOne() } ?: return
+            Scheduler.wake(thread)
         }
     }
 }

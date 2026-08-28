@@ -8,6 +8,7 @@ enum {
     device_vector_limit = 0xef,
     scheduler_vector = 0xfe,
     device_irq_limit = device_vector_limit - irq_vector_base + 1,
+    device_irq_service_budget = 64,
     timer_irq = scheduler_vector - irq_vector_base + 1,
     spurious_irq = 0xff - irq_vector_base + 1,
     lapic_id_register = 0x20,
@@ -249,19 +250,23 @@ static void dispatch_device_irqs(void) {
     const uint32_t last_register = device_vector_limit / 32;
     const uint32_t last_mask = UINT32_MAX >>
         (31 - device_vector_limit % 32);
+    uint32_t serviced = 0;
 
     for (uint32_t index = last_register; index > 0; index--) {
         const uint32_t register_address =
             lapic_isr_base_register + index * lapic_register_stride;
         const uint32_t mask = index == last_register
             ? last_mask : UINT32_MAX;
-        for (uint32_t pending = lapic_read(register_address) & mask;
-             pending;
-             pending = lapic_read(register_address) & mask) {
-            const uint32_t vector = index * 32 + 31 - __builtin_clz(pending);
+        uint32_t pending = lapic_read(register_address) & mask;
+        while (pending && serviced < device_irq_service_budget) {
+            const uint32_t bit = 31 - __builtin_clz(pending);
+            const uint32_t vector = index * 32 + bit;
+            pending &= ~(1u << bit);
             do_irq(vector - irq_vector_base + 1);
             lapic_eoi();
+            serviced++;
         }
+        if (serviced == device_irq_service_budget) break;
     }
 }
 

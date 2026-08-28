@@ -13,6 +13,8 @@ SECTIONS
     .hash : { *(.hash) } :image
     .dynsym : { *(.dynsym) } :image
     .dynstr : { *(.dynstr) } :image
+    .gnu.version : { *(.gnu.version) } :image
+    .gnu.version_d : { *(.gnu.version_d) } :image
     .text : { *(.text .text.*) } :image
     .rodata : { *(.rodata .rodata.*) } :image
     .dynamic : { *(.dynamic) } :image :dynamic
@@ -30,4 +32,13 @@ SECTIONS
         *(.note .note.*)
         *(.gnu.hash)
     }
+}
+
+VERSION
+{
+    LINUX_2.6
+    {
+        global: __vdso_clock_gettime;
+        local: *;
+    };
 }
