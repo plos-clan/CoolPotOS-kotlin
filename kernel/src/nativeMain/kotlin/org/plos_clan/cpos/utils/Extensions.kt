@@ -173,6 +173,11 @@ value class LittleEndianBuffer(private val bytes: ByteArray) {
         }
     }
 
+    fun writeU8(offset: Int, value: UByte) {
+        requireRange(offset, UByte.SIZE_BYTES)
+        bytes[offset] = value.toByte()
+    }
+
     fun writeU16(offset: Int, value: UShort) {
         requireRange(offset, UShort.SIZE_BYTES)
         val bits = value.toUInt()

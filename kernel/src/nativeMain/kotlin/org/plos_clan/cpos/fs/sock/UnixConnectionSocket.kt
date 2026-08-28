@@ -13,7 +13,7 @@ import org.plos_clan.cpos.utils.PollEvents
 
 internal class UnixConnectionSocket(
     subsystem: UnixSocketSubsystem,
-    type: UnixSocketType,
+    type: SocketType,
 ) : UnixSocket(subsystem, type) {
     private sealed interface State {
         data object Initial : State
@@ -31,7 +31,7 @@ internal class UnixConnectionSocket(
 
     private data class ConnectStart(
         val localAddress: UnixSocketAddress,
-        val options: UnixSocketOptions,
+        val options: SocketOptions,
     )
 
     private var state: State = State.Initial
@@ -117,7 +117,7 @@ internal class UnixConnectionSocket(
             credentials,
             start.options,
             nonBlocking,
-            if (nonBlocking) null else UnixSocketDeadline.after(start.options.sendTimeoutNanos),
+            if (nonBlocking) null else SocketDeadline.after(start.options.sendTimeoutNanos),
         )
         return lock.withLock {
             if (connected is VfsResult.Ok) {
@@ -145,12 +145,12 @@ internal class UnixConnectionSocket(
         val listener = listeningEndpoint()
             ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         val deadline = if (nonBlocking) null else {
-            UnixSocketDeadline.after(socketOptions().receiveTimeoutNanos)
+            SocketDeadline.after(socketOptions().receiveTimeoutNanos)
         }
         return listener.accept(nonBlocking, deadline)
     }
 
-    override fun shutdown(mode: UnixShutdownMode): VfsResult<Unit> {
+    override fun shutdown(mode: SocketShutdownMode): VfsResult<Unit> {
         val endpoint = connectedEndpoint() ?: return VfsResult.Err(VfsError.NOT_CONNECTED)
         endpoint.connection.shutdown(endpoint.side, mode)?.invoke()
         return VfsResult.Ok(Unit)
@@ -180,7 +180,7 @@ internal class UnixConnectionSocket(
             request.ancillary.release()
             return IoResult.failure(VfsError.ALREADY_CONNECTED)
         }
-        if (socketType == UnixSocketType.SEQUENCED_PACKET) {
+        if (socketType == SocketType.SEQUENCED_PACKET) {
             return sendPacket(endpoint, request)
         }
         if (request.count == 0) {
@@ -193,7 +193,7 @@ internal class UnixConnectionSocket(
         var ancillary: UnixAncillaryData? = request.ancillary
         val options = socketOptions()
         val deadline = if (request.nonBlocking) null
-        else UnixSocketDeadline.after(options.sendTimeoutNanos)
+        else SocketDeadline.after(options.sendTimeoutNanos)
         while (transferred < request.count) {
             val result = endpoint.connection.send(
                 endpoint.side,
@@ -231,7 +231,7 @@ internal class UnixConnectionSocket(
     override fun receive(request: UnixReceiveRequest): VfsResult<UnixReceiveResult> {
         val endpoint = connectedEndpoint()
             ?: return VfsResult.Err(VfsError.NOT_CONNECTED)
-        if (request.count == 0 && socketType == UnixSocketType.STREAM) {
+        if (request.count == 0 && socketType == SocketType.STREAM) {
             return VfsResult.Ok(
                 UnixReceiveResult(
                     bytes = 0,
@@ -248,12 +248,12 @@ internal class UnixConnectionSocket(
         var truncated = false
         var endOfRecord = false
         val options = socketOptions()
-        val deadline = if (request.nonBlocking) null else UnixSocketDeadline.earliest(
+        val deadline = if (request.nonBlocking) null else SocketDeadline.earliest(
             request.deadline,
-            UnixSocketDeadline.after(options.receiveTimeoutNanos),
+            SocketDeadline.after(options.receiveTimeoutNanos),
         )
         while (copied < request.count ||
-            socketType == UnixSocketType.SEQUENCED_PACKET && !endOfRecord
+            socketType == SocketType.SEQUENCED_PACKET && !endOfRecord
         ) {
             val minimum = minOf(
                 request.count - copied,
@@ -342,7 +342,7 @@ internal class UnixConnectionSocket(
         }
     }
 
-    override fun closeLocked(): (() -> Unit)? {
+    override fun closeUnixLocked(): (() -> Unit)? {
         val cleanup = when (val current = state) {
             is State.Listening -> current.listener.close()
             is State.Connected -> current.connection.close(current.side)
@@ -394,7 +394,7 @@ internal class UnixConnectionSocket(
     private fun sendPacket(endpoint: State.Connected, request: UnixSendRequest): IoResult {
         val options = socketOptions()
         val deadline = if (request.nonBlocking) null
-        else UnixSocketDeadline.after(options.sendTimeoutNanos)
+        else SocketDeadline.after(options.sendTimeoutNanos)
         val ancillary: UnixAncillaryData = request.ancillary
         while (true) {
             val result = endpoint.connection.send(
@@ -432,7 +432,7 @@ internal class UnixConnectionSocket(
         endpoint: State.Connected,
         event: IoEvent,
         count: Int,
-        deadline: UnixSocketDeadline?,
+        deadline: SocketDeadline?,
     ): VfsError? {
         if (deadline == null) {
             return if (endpoint.connection.await(endpoint.side, event, count)) null
@@ -458,22 +458,22 @@ internal class UnixConnectionSocket(
         (state as? State.Connected)?.let { it.connection.resizeReceiveBuffer(it.side, size) }
     }
 
-    override fun optionsChangedLocked() {
+    override fun optionsChangedLocked(options: SocketOptions) {
         when (val current = state) {
             is State.Connected -> current.connection.setReceivePassCredentials(
                 current.side,
-                optionsLocked().passCredentials,
+                options.passCredentials,
             )
-            is State.Listening -> current.listener.updateOptions(optionsLocked())
+            is State.Listening -> current.listener.updateOptions(options)
             else -> Unit
         }
     }
 
     private constructor(
         subsystem: UnixSocketSubsystem,
-        type: UnixSocketType,
+        type: SocketType,
         connected: State.Connected,
-        options: UnixSocketOptions,
+        options: SocketOptions,
     ) : this(subsystem, type) {
         state = connected
         inheritOptions(options)
@@ -482,12 +482,12 @@ internal class UnixConnectionSocket(
     companion object {
         private fun accepted(
             subsystem: UnixSocketSubsystem,
-            type: UnixSocketType,
+            type: SocketType,
             connection: UnixDuplexConnection,
             localAddress: UnixSocketAddress,
             peerAddress: UnixSocketAddress,
             peerCredentials: UnixCredentials,
-            options: UnixSocketOptions,
+            options: SocketOptions,
         ): UnixConnectionSocket = UnixConnectionSocket(
             subsystem,
             type,
@@ -504,10 +504,10 @@ internal class UnixConnectionSocket(
 
     private class UnixSocketListener(
         private val subsystem: UnixSocketSubsystem,
-        private val type: UnixSocketType,
+        private val type: SocketType,
         private val localAddress: UnixSocketAddress,
         private val credentials: UnixCredentials,
-        private var options: UnixSocketOptions,
+        private var options: SocketOptions,
         backlog: Int,
     ) {
         data class ClientEndpoint(
@@ -527,14 +527,14 @@ internal class UnixConnectionSocket(
         fun connect(
             clientAddress: UnixSocketAddress,
             clientCredentials: UnixCredentials,
-            clientOptions: UnixSocketOptions,
+            clientOptions: SocketOptions,
             nonBlocking: Boolean,
-            deadline: UnixSocketDeadline?,
+            deadline: SocketDeadline?,
         ): VfsResult<ClientEndpoint> {
             val thread = ProcessManager.currentThread()
             while (true) {
                 var waiter: IoWaitQueue.Waiter? = null
-                var serverOptions: UnixSocketOptions? = null
+                var serverOptions: SocketOptions? = null
                 val error = lock.withLock {
                     if (closed) return@withLock VfsError.CONNECTION_REFUSED
                     if (pending.size + reservations < capacity) {
@@ -591,7 +591,7 @@ internal class UnixConnectionSocket(
 
         fun accept(
             nonBlocking: Boolean,
-            deadline: UnixSocketDeadline?,
+            deadline: SocketDeadline?,
         ): VfsResult<UnixSocket> {
             val thread = ProcessManager.currentThread()
             while (true) {
@@ -625,7 +625,7 @@ internal class UnixConnectionSocket(
             }
         }
 
-        fun updateOptions(options: UnixSocketOptions) {
+        fun updateOptions(options: SocketOptions) {
             lock.withLock { this.options = options }
         }
 
@@ -903,9 +903,9 @@ private class UnixPacketBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
 }
 
 private class UnixDuplexConnection(
-    type: UnixSocketType,
-    firstOptions: UnixSocketOptions,
-    secondOptions: UnixSocketOptions,
+    type: SocketType,
+    firstOptions: SocketOptions,
+    secondOptions: SocketOptions,
 ) {
     enum class Side {
         FIRST,
@@ -1055,7 +1055,7 @@ private class UnixDuplexConnection(
         incoming(side).passCredentials = enabled
     }
 
-    fun updateOptions(side: Side, options: UnixSocketOptions) = lock.withLock {
+    fun updateOptions(side: Side, options: SocketOptions) = lock.withLock {
         val outgoing = outgoing(side)
         outgoing.sendBufferSize = options.sendBufferSize
         outgoing.resize()
@@ -1088,7 +1088,7 @@ private class UnixDuplexConnection(
         available and (events or PollEvents.UNCONDITIONALLY_REPORTED)
     }
 
-    fun shutdown(side: Side, mode: UnixShutdownMode): (() -> Unit)? {
+    fun shutdown(side: Side, mode: SocketShutdownMode): (() -> Unit)? {
         val discarded = lock.withLock {
             var ancillary: List<UnixAncillaryData> = emptyList()
             if (mode.reads) {
@@ -1114,18 +1114,20 @@ private class UnixDuplexConnection(
         return { discarded.forEach(UnixAncillaryData::release) }
     }
 
-    fun close(side: Side): (() -> Unit)? = shutdown(side, UnixShutdownMode.BOTH)
+    fun close(side: Side): (() -> Unit)? = shutdown(side, SocketShutdownMode.BOTH)
 
     private fun outgoing(side: Side): Direction = directions[side.ordinal]
 
     private fun incoming(side: Side): Direction = directions[side.opposite.ordinal]
 
     companion object {
-        private fun newBuffer(type: UnixSocketType, capacity: Int): UnixConnectionBuffer =
+        private fun newBuffer(type: SocketType, capacity: Int): UnixConnectionBuffer =
             when (type) {
-                UnixSocketType.STREAM -> UnixStreamBuffer(capacity)
-                UnixSocketType.SEQUENCED_PACKET -> UnixPacketBuffer(capacity)
-                UnixSocketType.DATAGRAM -> error("Datagram sockets do not use duplex streams")
+                SocketType.STREAM -> UnixStreamBuffer(capacity)
+                SocketType.SEQUENCED_PACKET -> UnixPacketBuffer(capacity)
+                SocketType.DATAGRAM,
+                SocketType.RAW,
+                -> error("This socket type does not use duplex streams")
             }
     }
 }

@@ -9,7 +9,7 @@ import org.plos_clan.cpos.utils.PollEvents
 internal class UnixDatagramSocket(
     subsystem: UnixSocketSubsystem,
     private val identity: UnixCredentials,
-) : UnixSocket(subsystem, UnixSocketType.DATAGRAM) {
+) : UnixSocket(subsystem, SocketType.DATAGRAM) {
     private data class Peer(
         val socket: UnixDatagramSocket,
         val address: UnixSocketAddress,
@@ -56,7 +56,7 @@ internal class UnixDatagramSocket(
         VfsResult.Ok(Unit)
     }
 
-    override fun shutdown(mode: UnixShutdownMode): VfsResult<Unit> {
+    override fun shutdown(mode: SocketShutdownMode): VfsResult<Unit> {
         val replacement = if (mode.reads) ArrayDeque<Datagram>() else null
         var discarded: ArrayDeque<Datagram>? = null
         var sendTarget: UnixDatagramSocket? = null
@@ -135,7 +135,7 @@ internal class UnixDatagramSocket(
             request.ancillary.takeUnless { it.isEmpty },
         )
         val deadline = if (request.nonBlocking) null else {
-            UnixSocketDeadline.after(options.sendTimeoutNanos)
+            SocketDeadline.after(options.sendTimeoutNanos)
         }
         val result = selected.socket.enqueue(message, request.nonBlocking, deadline)
         if (result is VfsResult.Err) {
@@ -149,9 +149,9 @@ internal class UnixDatagramSocket(
     override fun receive(request: UnixReceiveRequest): VfsResult<UnixReceiveResult> {
         val thread = ProcessManager.currentThread()
         val options = socketOptions()
-        val deadline = if (request.nonBlocking) null else UnixSocketDeadline.earliest(
+        val deadline = if (request.nonBlocking) null else SocketDeadline.earliest(
             request.deadline,
-            UnixSocketDeadline.after(options.receiveTimeoutNanos),
+            SocketDeadline.after(options.receiveTimeoutNanos),
         )
         while (true) {
             var waiter: IoWaitQueue.Waiter? = null
@@ -244,7 +244,7 @@ internal class UnixDatagramSocket(
         writeWaiters.wakeAll()
     }
 
-    override fun closeLocked(): (() -> Unit)? {
+    override fun closeUnixLocked(): (() -> Unit)? {
         val discarded = messages
         val sendTarget = peer?.socket
         messages = ArrayDeque()
@@ -278,7 +278,7 @@ internal class UnixDatagramSocket(
     private fun enqueue(
         message: Datagram,
         nonBlocking: Boolean,
-        deadline: UnixSocketDeadline?,
+        deadline: SocketDeadline?,
     ): VfsResult<Unit> {
         val thread = ProcessManager.currentThread()
         while (true) {

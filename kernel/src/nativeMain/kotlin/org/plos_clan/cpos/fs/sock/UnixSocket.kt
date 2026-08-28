@@ -2,19 +2,14 @@
 
 package org.plos_clan.cpos.fs.sock
 
-import bridge.wait_for_interrupt
-import org.plos_clan.cpos.drivers.TscClock
-import org.plos_clan.cpos.fs.vfs.AccessMode
 import org.plos_clan.cpos.fs.vfs.AccessPermissions
+import org.plos_clan.cpos.fs.vfs.AccessMode
 import org.plos_clan.cpos.fs.vfs.AnonymousFileFactory
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FileSystemContext
 import org.plos_clan.cpos.fs.vfs.Inode
-import org.plos_clan.cpos.fs.vfs.InodeBackend
 import org.plos_clan.cpos.fs.vfs.InodeType
-import org.plos_clan.cpos.fs.vfs.IoMode
 import org.plos_clan.cpos.fs.vfs.IoResult
-import org.plos_clan.cpos.fs.vfs.ModeAwareOpenFileBackend
 import org.plos_clan.cpos.fs.vfs.MutableInodeBackend
 import org.plos_clan.cpos.fs.vfs.NodeCreation
 import org.plos_clan.cpos.fs.vfs.NodeKind
@@ -29,27 +24,8 @@ import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
-import org.plos_clan.cpos.mem.UserMemory
-import org.plos_clan.cpos.tasks.ProcessManager
-import org.plos_clan.cpos.tasks.Scheduler
-import org.plos_clan.cpos.tasks.Signal
-import org.plos_clan.cpos.tasks.SignalInfo
-import org.plos_clan.cpos.tasks.SignalRouter
+import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.IrqSpinLock
-import org.plos_clan.cpos.utils.LittleEndianBuffer
-
-private const val DEFAULT_SOCKET_BUFFER_SIZE = 212_992
-
-internal enum class UnixSocketType(val abiValue: Int, val connectionOriented: Boolean) {
-    STREAM(1, true),
-    DATAGRAM(2, false),
-    SEQUENCED_PACKET(5, true),
-    ;
-
-    companion object {
-        fun fromAbi(value: Int): UnixSocketType? = entries.firstOrNull { it.abiValue == value }
-    }
-}
 
 internal class UnixSocketName private constructor(private val bytes: ByteArray) {
     private val hash = bytes.contentHashCode()
@@ -79,7 +55,10 @@ internal class UnixSocketName private constructor(private val bytes: ByteArray) 
     }
 }
 
-internal sealed interface UnixSocketAddress {
+internal sealed interface UnixSocketAddress : SocketAddress {
+    override val domain: SocketDomain
+        get() = SocketDomain.UNIX
+
     data object Unnamed : UnixSocketAddress
     data class Pathname(val pathname: VfsPathname) : UnixSocketAddress
     data class Abstract(val name: UnixSocketName) : UnixSocketAddress
@@ -90,55 +69,6 @@ internal data class UnixCredentials(
     val userId: UInt,
     val groupId: UInt,
 )
-
-internal class UnixSocketDeadline private constructor(
-    private val expirationNanos: ULong,
-) {
-    fun expired(): Boolean = !TscClock.isReady || TscClock.nanoTime() >= expirationNanos
-
-    fun remainingNanos(): ULong {
-        if (!TscClock.isReady) return 0uL
-        val now = TscClock.nanoTime()
-        return if (now >= expirationNanos) 0uL else expirationNanos - now
-    }
-
-    fun await(ready: () -> Boolean): VfsError? {
-        val thread = ProcessManager.currentThread() ?: return VfsError.NOT_FOUND
-        while (!ready()) {
-            if (thread.hasPendingSignal()) return VfsError.INTERRUPTED
-            if (expired()) return VfsError.WOULD_BLOCK
-            Scheduler.yieldCurrent()
-            wait_for_interrupt()
-        }
-        return null
-    }
-
-    companion object {
-        fun after(timeoutNanos: ULong?): UnixSocketDeadline? {
-            if (timeoutNanos == null) return null
-            val now = TscClock.nanoTime()
-            val expiration = if (timeoutNanos > ULong.MAX_VALUE - now) ULong.MAX_VALUE
-            else now + timeoutNanos
-            return UnixSocketDeadline(expiration)
-        }
-
-        fun earliest(
-            first: UnixSocketDeadline?,
-            second: UnixSocketDeadline?,
-        ): UnixSocketDeadline? = when {
-            first == null -> second
-            second == null -> first
-            first.expirationNanos <= second.expirationNanos -> first
-            else -> second
-        }
-    }
-}
-
-internal enum class UnixShutdownMode(val reads: Boolean, val writes: Boolean) {
-    READ(reads = true, writes = false),
-    WRITE(reads = false, writes = true),
-    BOTH(reads = true, writes = true),
-}
 
 internal class UnixAncillaryData(
     private val files: MutableList<OpenFileDescription> = mutableListOf(),
@@ -214,7 +144,7 @@ internal data class UnixReceiveRequest(
     val peek: Boolean = false,
     val waitAll: Boolean = false,
     val returnFullLength: Boolean = false,
-    val deadline: UnixSocketDeadline? = null,
+    val deadline: SocketDeadline? = null,
 )
 
 internal data class UnixReceiveResult(
@@ -225,15 +155,6 @@ internal data class UnixReceiveResult(
     val senderCredentials: UnixCredentials? = null,
     val truncated: Boolean = false,
     val endOfRecord: Boolean = false,
-)
-
-internal data class UnixSocketOptions(
-    val sendBufferSize: Int = DEFAULT_SOCKET_BUFFER_SIZE,
-    val receiveBufferSize: Int = DEFAULT_SOCKET_BUFFER_SIZE,
-    val passCredentials: Boolean = false,
-    val receiveLowWatermark: Int = 1,
-    val sendTimeoutNanos: ULong? = null,
-    val receiveTimeoutNanos: ULong? = null,
 )
 
 internal sealed interface UnixSocketBinding {
@@ -257,102 +178,9 @@ private sealed interface UnixSocketBindingState {
 
 internal abstract class UnixSocket(
     protected val subsystem: UnixSocketSubsystem,
-    val socketType: UnixSocketType,
-) : InodeBackend, ModeAwareOpenFileBackend {
-    protected val lock = IrqSpinLock()
-    protected var closed = false
-        private set
+    socketType: SocketType,
+) : AbstractSocket(SocketDomain.UNIX, socketType, 0) {
     private var bindingState: UnixSocketBindingState = UnixSocketBindingState.Unbound
-    private var options = UnixSocketOptions()
-
-    final override val type: InodeType
-        get() = InodeType.SOCKET
-
-    final override fun open(
-        caller: VfsOperationContext,
-        inode: Inode,
-        options: OpenOptions,
-    ): VfsResult<OpenFileBackend> =
-        if (options.access == AccessMode.READ_WRITE && lock.withLock { !closed }) {
-            VfsResult.Ok(this)
-        } else {
-            VfsResult.Err(VfsError.BAD_DESCRIPTOR)
-        }
-
-    final override fun read(
-        caller: VfsOperationContext,
-        inode: Inode,
-        destination: PreparedBufferDestination,
-        destinationOffset: Int,
-        count: Int,
-        mode: IoMode,
-    ): IoResult = when (val result = receive(
-        UnixReceiveRequest(
-            destination,
-            destinationOffset,
-            count,
-            nonBlocking = mode == IoMode.NON_BLOCKING,
-        ),
-    )) {
-        is VfsResult.Ok -> {
-            result.value.ancillary?.release()
-            IoResult.success(result.value.copiedBytes)
-        }
-        is VfsResult.Err -> IoResult.failure(result.error)
-    }
-
-    final override fun write(
-        caller: VfsOperationContext,
-        inode: Inode,
-        source: PreparedBufferSource,
-        sourceOffset: Int,
-        count: Int,
-        mode: IoMode,
-    ): IoResult {
-        val process = ProcessManager.currentProcess()
-            ?: return IoResult.failure(VfsError.NOT_FOUND)
-        return send(
-            UnixSendRequest(
-                source,
-                sourceOffset,
-                count,
-                UnixCredentials(process.id, process.euid.toUInt(), process.egid.toUInt()),
-                nonBlocking = mode == IoMode.NON_BLOCKING,
-            ),
-        )
-    }
-
-    final override fun ioctl(
-        caller: VfsOperationContext,
-        inode: Inode,
-        command: Int,
-        args: UserMemory,
-    ): Long {
-        if (command != FIONREAD) return -VfsError.NOT_SUPPORTED.errno.toLong()
-        val bytes = ByteArray(Int.SIZE_BYTES)
-        LittleEndianBuffer(bytes).writeU32(0, readableBytes().coerceAtLeast(0).toUInt())
-        return if (args.copyToUser(bytes)) 0L else -VfsError.FAULT.errno.toLong()
-    }
-
-    final override fun poll(
-        caller: VfsOperationContext,
-        inode: Inode,
-        events: Int,
-    ): Long = pollSocket(events).toLong()
-
-    final override fun release() {
-        var cleanup: (() -> Unit)? = null
-        val ownedBinding = lock.withLock {
-            if (closed) return
-            closed = true
-            cleanup = closeLocked()
-            (bindingState as? UnixSocketBindingState.Bound)?.binding.also {
-                bindingState = UnixSocketBindingState.Unbound
-            }
-        }
-        if (ownedBinding != null) subsystem.unbind(this, ownedBinding)
-        cleanup?.invoke()
-    }
 
     fun reserveBinding(): VfsResult<Unit> = lock.withLock {
         if (closed) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
@@ -386,88 +214,9 @@ internal abstract class UnixSocket(
         (bindingState as? UnixSocketBindingState.Bound)?.binding?.address
             ?: UnixSocketAddress.Unnamed
 
-    fun localAddress(): UnixSocketAddress = lock.withLock { localAddressLocked() }
+    final override fun localAddress(): UnixSocketAddress = lock.withLock { localAddressLocked() }
 
     protected open fun localAddressLocked(): UnixSocketAddress = boundAddressLocked()
-
-    fun socketOptions(): UnixSocketOptions = lock.withLock { options }
-
-    fun setSendBufferSize(size: Int): VfsResult<Unit> = lock.withLock {
-        if (closed) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
-        val normalized = normalizedBufferSize(size)
-        options = options.copy(sendBufferSize = normalized)
-        sendBufferSizeChangedLocked(normalized)
-        optionsChangedLocked()
-        VfsResult.Ok(Unit)
-    }
-
-    fun setReceiveBufferSize(size: Int): VfsResult<Unit> = lock.withLock {
-        if (closed) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
-        val normalized = normalizedBufferSize(size)
-        options = options.copy(
-            receiveBufferSize = normalized,
-            receiveLowWatermark = minOf(
-                options.receiveLowWatermark,
-                normalized,
-            ),
-        )
-        receiveBufferSizeChangedLocked(normalized)
-        optionsChangedLocked()
-        VfsResult.Ok(Unit)
-    }
-
-    fun setPassCredentials(enabled: Boolean): VfsResult<Unit> = lock.withLock {
-        if (closed) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
-        options = options.copy(passCredentials = enabled)
-        optionsChangedLocked()
-        VfsResult.Ok(Unit)
-    }
-
-    fun setReceiveLowWatermark(value: Int): VfsResult<Unit> = lock.withLock {
-        if (closed) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
-        options = options.copy(
-            receiveLowWatermark = value.coerceIn(1, options.receiveBufferSize),
-        )
-        optionsChangedLocked()
-        VfsResult.Ok(Unit)
-    }
-
-    fun setSendTimeout(timeoutNanos: ULong?): VfsResult<Unit> = lock.withLock {
-        if (closed) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
-        options = options.copy(sendTimeoutNanos = timeoutNanos)
-        optionsChangedLocked()
-        VfsResult.Ok(Unit)
-    }
-
-    fun setReceiveTimeout(timeoutNanos: ULong?): VfsResult<Unit> = lock.withLock {
-        if (closed) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
-        options = options.copy(receiveTimeoutNanos = timeoutNanos)
-        optionsChangedLocked()
-        VfsResult.Ok(Unit)
-    }
-
-    protected fun optionsLocked(): UnixSocketOptions = options
-
-    protected fun inheritOptions(options: UnixSocketOptions) {
-        lock.withLock { this.options = options }
-    }
-
-    protected open fun sendBufferSizeChangedLocked(size: Int) {}
-
-    protected open fun receiveBufferSizeChangedLocked(size: Int) {}
-
-    protected open fun optionsChangedLocked() {}
-
-    protected fun signalBrokenPipe(suppressed: Boolean) {
-        if (suppressed) return
-        ProcessManager.currentThread()?.let { thread ->
-            SignalRouter.sendThread(
-                sender = thread.process,
-                target = thread,
-                info = SignalInfo.fromSender(Signal.PIPE, thread.process),
-            )
-        }
-    }
 
     open fun listen(backlog: Int, credentials: UnixCredentials): VfsResult<Unit> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
@@ -482,16 +231,16 @@ internal abstract class UnixSocket(
     open fun accept(nonBlocking: Boolean): VfsResult<UnixSocket> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
 
-    open fun shutdown(mode: UnixShutdownMode): VfsResult<Unit> =
+    open fun shutdown(mode: SocketShutdownMode): VfsResult<Unit> =
         VfsResult.Err(VfsError.NOT_CONNECTED)
 
-    open fun peerAddress(): VfsResult<UnixSocketAddress> =
+    override fun peerAddress(): VfsResult<UnixSocketAddress> =
         VfsResult.Err(VfsError.NOT_CONNECTED)
 
-    open fun peerCredentials(): VfsResult<UnixCredentials> =
+    override fun peerCredentials(): VfsResult<UnixCredentials> =
         VfsResult.Err(VfsError.NOT_CONNECTED)
 
-    open fun isListening(): Boolean = false
+    override fun isListening(): Boolean = false
 
     abstract fun pairWith(peer: UnixSocket, credentials: UnixCredentials): VfsResult<Unit>
 
@@ -499,22 +248,175 @@ internal abstract class UnixSocket(
 
     abstract fun receive(request: UnixReceiveRequest): VfsResult<UnixReceiveResult>
 
-    protected abstract fun readableBytes(): Int
-
-    protected abstract fun pollSocket(events: Int): Int
-
-    protected abstract fun closeLocked(): (() -> Unit)?
-
-    companion object {
-        private const val FIONREAD = 0x541B
-        private const val MIN_SOCKET_BUFFER_SIZE = 2_048
-        private const val MAX_SOCKET_BUFFER_SIZE = 4 * 1024 * 1024
-
-        private fun normalizedBufferSize(requested: Int): Int {
-            val doubled = if (requested > Int.MAX_VALUE / 2) Int.MAX_VALUE else requested * 2
-            return doubled.coerceIn(MIN_SOCKET_BUFFER_SIZE, MAX_SOCKET_BUFFER_SIZE)
+    final override fun bindSocket(process: Process, address: SocketAddress): VfsResult<Unit> {
+        val unixAddress = address as? UnixSocketAddress
+            ?: return VfsResult.Err(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
+        val context = process.context ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val caller = process.vfsOperationContext
+        return when (val result = subsystem.bind(
+            caller,
+            context,
+            this,
+            unixAddress,
+            FileMode(0x1FFu and caller.fileCreationMask.inv()),
+            caller.uid,
+            caller.gid,
+        )) {
+            is VfsResult.Ok -> VfsResult.Ok(Unit)
+            is VfsResult.Err -> result
         }
     }
+
+    final override fun connectSocket(
+        process: Process,
+        address: SocketAddress?,
+        nonBlocking: Boolean,
+    ): VfsResult<Unit> {
+        if (address == null || address == UnspecifiedSocketAddress) {
+            return connect(null, UnixSocketAddress.Unnamed, credentials(process), nonBlocking)
+        }
+        val unixAddress = address as? UnixSocketAddress
+            ?: return VfsResult.Err(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
+        val context = process.context ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val peer = when (val result = subsystem.resolve(
+            process.vfsOperationContext,
+            context,
+            unixAddress,
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        return connect(peer, unixAddress, credentials(process), nonBlocking)
+    }
+
+    final override fun listenSocket(process: Process, backlog: Int): VfsResult<Unit> =
+        listen(backlog, credentials(process))
+
+    final override fun acceptSocket(
+        process: Process,
+        nonBlocking: Boolean,
+    ): VfsResult<AcceptedSocket> = when (val result = accept(nonBlocking)) {
+        is VfsResult.Ok -> VfsResult.Ok(
+            AcceptedSocket(
+                result.value,
+                when (val peer = result.value.peerAddress()) {
+                    is VfsResult.Ok -> peer.value
+                    is VfsResult.Err -> UnixSocketAddress.Unnamed
+                },
+            ),
+        )
+        is VfsResult.Err -> result
+    }
+
+    final override fun shutdownSocket(mode: SocketShutdownMode): VfsResult<Unit> = shutdown(mode)
+
+    final override fun sendSocket(request: SocketSendRequest): IoResult {
+        val destination = when (val result = resolveDestination(request.process, request.destination)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> {
+                request.ancillary.release()
+                return IoResult.failure(result.error)
+            }
+        }
+        return send(
+            UnixSendRequest(
+                request.source,
+                request.offset,
+                request.count,
+                credentials(request.process),
+                request.ancillary,
+                destination,
+                request.nonBlocking,
+                request.noSignal,
+            ),
+        )
+    }
+
+    final override fun receiveSocket(
+        request: SocketReceiveRequest,
+    ): VfsResult<SocketReceiveResult> = when (val result = receive(
+        UnixReceiveRequest(
+            request.destination,
+            request.offset,
+            request.count,
+            request.nonBlocking,
+            request.peek,
+            request.waitAll,
+            request.returnFullLength,
+            request.deadline,
+        ),
+    )) {
+        is VfsResult.Ok -> result.value.let { received ->
+            VfsResult.Ok(
+                SocketReceiveResult(
+                    received.bytes,
+                    received.copiedBytes,
+                    received.source,
+                    received.ancillary,
+                    received.senderCredentials,
+                    received.truncated,
+                    received.endOfRecord,
+                ),
+            )
+        }
+        is VfsResult.Err -> result
+    }
+
+    final override fun setPassCredentials(
+        process: Process,
+        enabled: Boolean,
+    ): VfsResult<Unit> {
+        if (enabled && canBind()) {
+            val bound = bindSocket(process, UnixSocketAddress.Unnamed)
+            if (bound is VfsResult.Err) return bound
+        }
+        return super.setPassCredentials(process, enabled)
+    }
+
+    final override fun closeSocketLocked(): (() -> Unit)? {
+        val cleanup = closeUnixLocked()
+        val binding = (bindingState as? UnixSocketBindingState.Bound)?.binding
+        bindingState = UnixSocketBindingState.Unbound
+        return when {
+            binding == null -> cleanup
+            cleanup == null -> ({ subsystem.unbind(this, binding) })
+            else -> ({
+                subsystem.unbind(this, binding)
+                cleanup()
+            })
+        }
+    }
+
+    protected abstract fun closeUnixLocked(): (() -> Unit)?
+
+    private fun resolveDestination(
+        process: Process,
+        address: SocketAddress?,
+    ): VfsResult<UnixSocketDestination?> {
+        if (address == null) return VfsResult.Ok(null)
+        val unixAddress = address as? UnixSocketAddress
+            ?: return VfsResult.Err(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
+        if (socketType.connectionOriented) {
+            return VfsResult.Ok(UnixSocketDestination.Address(unixAddress))
+        }
+        val context = process.context ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        return when (val result = subsystem.resolve(
+            process.vfsOperationContext,
+            context,
+            unixAddress,
+        )) {
+            is VfsResult.Ok -> VfsResult.Ok(
+                UnixSocketDestination.Resolved(result.value, unixAddress),
+            )
+            is VfsResult.Err -> result
+        }
+    }
+
+    private fun credentials(process: Process): UnixCredentials = UnixCredentials(
+        process.id,
+        process.euid.toUInt(),
+        process.egid.toUInt(),
+    )
 }
 
 internal data object SocketNodeBackend : MutableInodeBackend {
@@ -541,7 +443,7 @@ internal class UnixSocketSubsystem(
     fun create(
         caller: VfsOperationContext,
         context: FileSystemContext,
-        type: UnixSocketType,
+        type: SocketType,
         nonBlocking: Boolean,
         credentials: UnixCredentials,
     ): VfsResult<OpenFileDescription> = open(
@@ -563,11 +465,12 @@ internal class UnixSocketSubsystem(
         OpenOptions(access = AccessMode.READ_WRITE, nonBlocking = nonBlocking),
     )
 
-    fun newSocket(type: UnixSocketType, credentials: UnixCredentials): UnixSocket = when (type) {
-        UnixSocketType.DATAGRAM -> UnixDatagramSocket(this, credentials)
-        UnixSocketType.STREAM,
-        UnixSocketType.SEQUENCED_PACKET,
+    fun newSocket(type: SocketType, credentials: UnixCredentials): UnixSocket = when (type) {
+        SocketType.DATAGRAM -> UnixDatagramSocket(this, credentials)
+        SocketType.STREAM,
+        SocketType.SEQUENCED_PACKET,
         -> UnixConnectionSocket(this, type)
+        SocketType.RAW -> error("Raw Unix sockets are unsupported")
     }
 
     fun bind(
@@ -631,7 +534,7 @@ internal class UnixSocketSubsystem(
     fun pair(
         caller: VfsOperationContext,
         context: FileSystemContext,
-        type: UnixSocketType,
+        type: SocketType,
         credentials: UnixCredentials,
         nonBlocking: Boolean,
     ): VfsResult<Pair<OpenFileDescription, OpenFileDescription>> {

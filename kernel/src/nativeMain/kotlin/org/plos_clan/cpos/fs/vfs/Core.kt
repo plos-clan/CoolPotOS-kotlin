@@ -45,10 +45,16 @@ value class VfsError private constructor(val errno: Int) {
         val ADDRESS_FAMILY_NOT_SUPPORTED = VfsError(97)
         val ADDRESS_IN_USE = VfsError(98)
         val ADDRESS_NOT_AVAILABLE = VfsError(99)
+        val NETWORK_UNREACHABLE = VfsError(101)
+        val CONNECTION_ABORTED = VfsError(103)
+        val CONNECTION_RESET = VfsError(104)
         val ALREADY_CONNECTED = VfsError(106)
         val NOT_CONNECTED = VfsError(107)
+        val TIMED_OUT = VfsError(110)
         val CONNECTION_REFUSED = VfsError(111)
+        val HOST_UNREACHABLE = VfsError(113)
         val ALREADY_IN_PROGRESS = VfsError(114)
+        val IN_PROGRESS = VfsError(115)
 
         fun fromErrno(errno: Int): VfsError =
             if (errno in 1..MAX_ERRNO) VfsError(errno) else IO

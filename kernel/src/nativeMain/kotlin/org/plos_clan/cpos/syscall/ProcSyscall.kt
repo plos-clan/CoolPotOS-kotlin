@@ -153,6 +153,36 @@ internal fun getEuid(regs: PtraceRegisters, process: Process): Long = process.eu
 
 internal fun getEgid(regs: PtraceRegisters, process: Process): Long = process.egid.toLong()
 
+internal fun setUid(regs: PtraceRegisters, process: Process): Long {
+    val requested = regs[PtraceRegisters.IDX_RDI]
+        .takeIf { it <= Int.MAX_VALUE.toULong() }
+        ?.toInt() ?: return errno(Errno.EINVAL)
+    val previousEffective = process.euid
+    val previouslyRoot = process.ruid == 0 || previousEffective == 0 || process.suid == 0
+    if (!process.setUserId(requested)) return errno(Errno.EPERM)
+
+    ProcessManager.currentThread()?.let { thread ->
+        val remainsRoot = process.ruid == 0 || process.euid == 0 || process.suid == 0
+        if (previouslyRoot && !remainsRoot) {
+            if (!thread.keepCapabilities) thread.permitted = 0uL
+            thread.effective = 0uL
+            thread.ambient = 0uL
+        } else if (previousEffective == 0 && process.euid != 0) {
+            thread.effective = 0uL
+        } else if (previousEffective != 0 && process.euid == 0) {
+            thread.effective = thread.permitted
+        }
+    }
+    return 0L
+}
+
+internal fun setGid(regs: PtraceRegisters, process: Process): Long {
+    val requested = regs[PtraceRegisters.IDX_RDI]
+        .takeIf { it <= Int.MAX_VALUE.toULong() }
+        ?.toInt() ?: return errno(Errno.EINVAL)
+    return if (process.setGroupId(requested)) 0L else errno(Errno.EPERM)
+}
+
 internal fun getPpid(regs: PtraceRegisters, process: Process): Long = process.parentId.toLong()
 
 internal fun getPgrp(regs: PtraceRegisters, process: Process): Long =
@@ -213,6 +243,43 @@ internal fun prctl(regs: PtraceRegisters, process: Process): Long {
         return errno(Errno.EINVAL)
     }
     return when (option) {
+        PR_GET_DUMPABLE -> if (process.dumpable) 1L else 0L
+
+        PR_SET_DUMPABLE -> when (regs[PtraceRegisters.IDX_RSI]) {
+            0uL -> {
+                process.dumpable = false
+                0L
+            }
+            1uL -> {
+                process.dumpable = true
+                0L
+            }
+            else -> errno(Errno.EINVAL)
+        }
+
+        PR_GET_KEEPCAPS -> if (thread.keepCapabilities) 1L else 0L
+
+        PR_SET_KEEPCAPS -> when (regs[PtraceRegisters.IDX_RSI]) {
+            0uL -> {
+                thread.keepCapabilities = false
+                0L
+            }
+            1uL -> {
+                thread.keepCapabilities = true
+                0L
+            }
+            else -> errno(Errno.EINVAL)
+        }
+
+        PR_GET_NO_NEW_PRIVS -> if (thread.noNewPrivileges) 1L else 0L
+
+        PR_SET_NO_NEW_PRIVS -> if (regs[PtraceRegisters.IDX_RSI] == 1uL) {
+            thread.noNewPrivileges = true
+            0L
+        } else {
+            errno(Errno.EINVAL)
+        }
+
         PR_GET_NAME -> {
             val userName = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
             val raw = thread.name.encodeToByteArray()
@@ -360,7 +427,10 @@ internal fun execve(regs: PtraceRegisters, process: Process): Long {
     process.installExecutable(image.executablePath, image.arguments)
     process.fdTable.closeOnExec(process.vfsOperationContext)
     process.signals.resetForExec()
-    ProcessManager.currentThread()?.signals?.replaceStack(SignalStack.DISABLED)
+    ProcessManager.currentThread()?.let { thread ->
+        thread.signals.replaceStack(SignalStack.DISABLED)
+        thread.keepCapabilities = false
+    }
 
     regs[PtraceRegisters.IDX_RIP] = image.entryPoint
     regs[PtraceRegisters.IDX_RSP] = image.stackPointer

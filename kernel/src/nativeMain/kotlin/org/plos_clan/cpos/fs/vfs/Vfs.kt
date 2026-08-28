@@ -1,10 +1,11 @@
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.fs.sock.AbstractSocket
 import org.plos_clan.cpos.fs.sock.UnixCredentials
 import org.plos_clan.cpos.fs.sock.UnixSocket
 import org.plos_clan.cpos.fs.sock.UnixSocketAddress
 import org.plos_clan.cpos.fs.sock.UnixSocketSubsystem
-import org.plos_clan.cpos.fs.sock.UnixSocketType
+import org.plos_clan.cpos.fs.sock.SocketType
 import org.plos_clan.cpos.mem.PageCache
 
 class Vfs(maxSymlinkDepth: Int = 40) {
@@ -34,7 +35,7 @@ class Vfs(maxSymlinkDepth: Int = 40) {
     internal fun createUnixSocket(
         caller: VfsOperationContext,
         context: FileSystemContext,
-        type: UnixSocketType,
+        type: SocketType,
         nonBlocking: Boolean,
         credentials: UnixCredentials,
     ): VfsResult<OpenFileDescription> = sockets.create(
@@ -45,17 +46,22 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         credentials,
     )
 
-    internal fun openUnixSocket(
+    internal fun openSocket(
         caller: VfsOperationContext,
         context: FileSystemContext,
-        socket: UnixSocket,
+        socket: AbstractSocket,
         nonBlocking: Boolean,
-    ): VfsResult<OpenFileDescription> = sockets.open(caller, context, socket, nonBlocking)
+    ): VfsResult<OpenFileDescription> = anonymousFiles.open(
+        caller,
+        context,
+        socket,
+        OpenOptions(access = AccessMode.READ_WRITE, nonBlocking = nonBlocking),
+    )
 
     internal fun createUnixSocketPair(
         caller: VfsOperationContext,
         context: FileSystemContext,
-        type: UnixSocketType,
+        type: SocketType,
         credentials: UnixCredentials,
         nonBlocking: Boolean,
     ): VfsResult<Pair<OpenFileDescription, OpenFileDescription>> =

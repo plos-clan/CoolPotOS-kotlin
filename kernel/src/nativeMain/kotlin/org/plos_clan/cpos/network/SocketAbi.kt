@@ -1,9 +1,11 @@
-package org.plos_clan.cpos.syscall
+package org.plos_clan.cpos.network
 
 import org.plos_clan.cpos.fs.FileDescriptorFlags
+import org.plos_clan.cpos.fs.sock.SocketAddress
+import org.plos_clan.cpos.fs.sock.SocketReceiveResult
+import org.plos_clan.cpos.fs.sock.UnspecifiedSocketAddress
 import org.plos_clan.cpos.fs.sock.UnixAncillaryData
 import org.plos_clan.cpos.fs.sock.UnixCredentials
-import org.plos_clan.cpos.fs.sock.UnixReceiveResult
 import org.plos_clan.cpos.fs.sock.UnixSocketAddress
 import org.plos_clan.cpos.fs.sock.UnixSocketName
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
@@ -19,6 +21,8 @@ import org.plos_clan.cpos.utils.LittleEndianBuffer
 internal object SocketConstants {
     const val AF_UNSPEC = 0
     const val AF_UNIX = 1
+    const val AF_INET = 2
+    const val AF_NETLINK = 16
 
     const val SOCK_TYPE_MASK = 0xF
     const val SOCK_NONBLOCK = 0x800
@@ -63,8 +67,9 @@ internal object SocketConstants {
     const val RECEIVE_FLAGS = MSG_PEEK or MSG_TRUNC or MSG_DONTWAIT or MSG_WAITALL or
         MSG_CMSG_CLOEXEC or MSG_WAITFORONE
 
-    const val SOCKET_ADDRESS_SIZE = 110
-    const val SOCKET_PATH_SIZE = SOCKET_ADDRESS_SIZE - UShort.SIZE_BYTES
+    const val SOCKET_ADDRESS_SIZE = 128
+    const val UNIX_ADDRESS_SIZE = 110
+    const val SOCKET_PATH_SIZE = UNIX_ADDRESS_SIZE - UShort.SIZE_BYTES
     const val MESSAGE_HEADER_SIZE = 56
     const val MULTI_MESSAGE_HEADER_SIZE = 64
     const val CONTROL_HEADER_SIZE = 16
@@ -73,18 +78,13 @@ internal object SocketConstants {
     const val MAX_RIGHTS = 253
 }
 
-internal sealed interface DecodedSocketAddress {
-    data object Unspec : DecodedSocketAddress
-    data class Unix(val address: UnixSocketAddress) : DecodedSocketAddress
-}
-
-internal object UnixSocketAddressAbi {
+internal object SocketAddressAbi {
     fun read(
         process: Process,
         address: ULong,
         length: ULong,
         allowUnspec: Boolean = false,
-    ): VfsResult<DecodedSocketAddress> {
+    ): VfsResult<SocketAddress> {
         if (length < UShort.SIZE_BYTES.toULong() ||
             length > SocketConstants.SOCKET_ADDRESS_SIZE.toULong()
         ) {
@@ -95,25 +95,53 @@ internal object UnixSocketAddressAbi {
         return decode(bytes, allowUnspec)
     }
 
-    fun decode(bytes: ByteArray, allowUnspec: Boolean = false): VfsResult<DecodedSocketAddress> {
+    fun decode(bytes: ByteArray, allowUnspec: Boolean = false): VfsResult<SocketAddress> {
         if (bytes.size !in UShort.SIZE_BYTES..SocketConstants.SOCKET_ADDRESS_SIZE) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
         val family = LittleEndianBuffer(bytes).readU16(0).toInt()
         if (family == SocketConstants.AF_UNSPEC && allowUnspec) {
-            return VfsResult.Ok(DecodedSocketAddress.Unspec)
+            return VfsResult.Ok(UnspecifiedSocketAddress)
         }
-        if (family != SocketConstants.AF_UNIX) {
-            return VfsResult.Err(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
+        return when (family) {
+            SocketConstants.AF_UNIX -> decodeUnix(bytes)
+            SocketConstants.AF_INET -> decodeIpv4(bytes)
+            SocketConstants.AF_NETLINK -> decodeNetlink(bytes)
+            else -> VfsResult.Err(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
+        }
+    }
+
+    fun encode(address: SocketAddress): ByteArray = when (address) {
+        is UnixSocketAddress -> encodeUnix(address)
+        is Ipv4SocketAddress -> ByteArray(IPV4_ADDRESS_SIZE).also { bytes ->
+            LittleEndianBuffer(bytes).writeU16(0, SocketConstants.AF_INET.toUShort())
+            NetworkOrderBuffer(bytes).apply {
+                writeU16(2, address.port)
+                writeU32(4, address.address.value)
+            }
+        }
+        is NetlinkSocketAddress -> ByteArray(NETLINK_ADDRESS_SIZE).also { bytes ->
+            LittleEndianBuffer(bytes).apply {
+                writeU16(0, SocketConstants.AF_NETLINK.toUShort())
+                writeU16(2, 0u)
+                writeU32(4, address.portId)
+                writeU32(8, address.groups)
+            }
+        }
+        UnspecifiedSocketAddress -> ByteArray(UShort.SIZE_BYTES)
+        else -> error("Unsupported socket address ${address::class.simpleName}")
+    }
+
+    private fun decodeUnix(bytes: ByteArray): VfsResult<SocketAddress> {
+        if (bytes.size > SocketConstants.UNIX_ADDRESS_SIZE) {
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
         val path = bytes.copyOfRange(UShort.SIZE_BYTES, bytes.size)
-        if (path.isEmpty()) return VfsResult.Ok(DecodedSocketAddress.Unix(UnixSocketAddress.Unnamed))
+        if (path.isEmpty()) return VfsResult.Ok(UnixSocketAddress.Unnamed)
         if (path[0] == 0.toByte()) {
             return VfsResult.Ok(
-                DecodedSocketAddress.Unix(
-                    UnixSocketAddress.Abstract(
-                        UnixSocketName.fromBytes(path.copyOfRange(1, path.size)),
-                    ),
+                UnixSocketAddress.Abstract(
+                    UnixSocketName.fromBytes(path.copyOfRange(1, path.size)),
                 ),
             )
         }
@@ -121,13 +149,28 @@ internal object UnixSocketAddressAbi {
         val length = if (terminator < 0) path.size else terminator
         if (length == 0) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         return VfsResult.Ok(
-            DecodedSocketAddress.Unix(
-                UnixSocketAddress.Pathname(VfsPathname.fromBytes(path.copyOf(length))),
+            UnixSocketAddress.Pathname(VfsPathname.fromBytes(path.copyOf(length))),
+        )
+    }
+
+    private fun decodeIpv4(bytes: ByteArray): VfsResult<SocketAddress> {
+        if (bytes.size < IPV4_ADDRESS_SIZE) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        val input = NetworkOrderBuffer(bytes)
+        return VfsResult.Ok(
+            Ipv4SocketAddress(
+                Ipv4Address.fromBits(input.readU32(4)),
+                input.readU16(2),
             ),
         )
     }
 
-    fun encode(address: UnixSocketAddress): ByteArray {
+    private fun decodeNetlink(bytes: ByteArray): VfsResult<SocketAddress> {
+        if (bytes.size < NETLINK_ADDRESS_SIZE) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        val input = LittleEndianBuffer(bytes)
+        return VfsResult.Ok(NetlinkSocketAddress(input.readU32(4), input.readU32(8)))
+    }
+
+    private fun encodeUnix(address: UnixSocketAddress): ByteArray {
         val path = when (address) {
             UnixSocketAddress.Unnamed -> ByteArray(0)
             is UnixSocketAddress.Abstract -> byteArrayOf(0) + address.name.copyBytes()
@@ -140,6 +183,9 @@ internal object UnixSocketAddressAbi {
             path.copyInto(bytes, UShort.SIZE_BYTES)
         }
     }
+
+    private const val IPV4_ADDRESS_SIZE = 16
+    private const val NETLINK_ADDRESS_SIZE = 12
 }
 
 internal class SocketAddressOutput private constructor(
@@ -147,9 +193,9 @@ internal class SocketAddressOutput private constructor(
     private val capacity: Int,
     private val lengthMemory: UserMemory?,
 ) {
-    fun write(address: UnixSocketAddress): Boolean {
+    fun write(address: SocketAddress): Boolean {
         if (memory == null) return true
-        val encoded = UnixSocketAddressAbi.encode(address)
+        val encoded = SocketAddressAbi.encode(address)
         val copied = minOf(capacity, encoded.size)
         if (copied != 0 && !memory.copyToUser(encoded, size = copied)) return false
         val length = ByteArray(UInt.SIZE_BYTES)
@@ -204,9 +250,9 @@ internal class SocketAddressOutput private constructor(
         }
     }
 
-    fun writeMessage(address: UnixSocketAddress): VfsResult<UInt> {
+    fun writeMessage(address: SocketAddress): VfsResult<UInt> {
         if (memory == null) return VfsResult.Ok(0u)
-        val encoded = UnixSocketAddressAbi.encode(address)
+        val encoded = SocketAddressAbi.encode(address)
         val copied = minOf(capacity, encoded.size)
         if (copied != 0 && !memory.copyToUser(encoded, size = copied)) {
             return VfsResult.Err(VfsError.FAULT)
@@ -348,7 +394,7 @@ internal object SocketControlMessages {
         process: Process,
         address: ULong,
         capacity: Int,
-        result: UnixReceiveResult,
+        result: SocketReceiveResult,
         passCredentials: Boolean,
         closeOnExec: Boolean,
     ): VfsResult<ControlWriteResult> {

@@ -18,6 +18,7 @@ packages=(
     python
     procps-ng
     iputils
+    iproute2
 )
 
 rootfs=$(mktemp -d)

@@ -153,6 +153,8 @@ class Thread internal constructor(
     var permitted: ULong = TASK_CAP_FULL_MASK,
     var inheritable: ULong = 0UL,
     var ambient: ULong = 0UL,
+    var keepCapabilities: Boolean = false,
+    var noNewPrivileges: Boolean = false,
 ) {
     private val scheduledCpu = AtomicLong(-1)
 
@@ -285,6 +287,7 @@ class Process internal constructor(
     var sgid: Int = 0,
     var fsgid: Int = egid,
     var fileCreationMask: UInt = 0x12u,
+    var dumpable: Boolean = true,
     val parentId: Int = 0,
     val startTimeTicks: ULong,
     internal val terminationSignal: Signal? = Signal.CHILD,
@@ -356,6 +359,18 @@ class Process internal constructor(
         return previous
     }
 
+    fun setUserId(requested: Int): Boolean {
+        val privileged = euid == 0
+        if (!privileged && requested != ruid && requested != suid) return false
+        if (privileged) {
+            ruid = requested
+            suid = requested
+        }
+        euid = requested
+        fsuid = requested
+        return true
+    }
+
     fun setFilesystemGid(requested: Int?): Int {
         val previous = fsgid
         if (requested != null &&
@@ -365,6 +380,18 @@ class Process internal constructor(
             fsgid = requested
         }
         return previous
+    }
+
+    fun setGroupId(requested: Int): Boolean {
+        val privileged = euid == 0
+        if (!privileged && requested != rgid && requested != sgid) return false
+        if (privileged) {
+            rgid = requested
+            sgid = requested
+        }
+        egid = requested
+        fsgid = requested
+        return true
     }
 
     internal fun establishSession() {
@@ -385,6 +412,7 @@ class Process internal constructor(
         sgid = parent.sgid
         fsgid = parent.fsgid
         fileCreationMask = parent.fileCreationMask
+        dumpable = parent.dumpable
         membershipState.store(parent.membership)
         signals.inherit(parent.signals)
         resourceLimits.inherit(parent.resourceLimits)

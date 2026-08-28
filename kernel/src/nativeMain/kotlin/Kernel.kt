@@ -22,6 +22,7 @@ import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.module.Init
 import org.plos_clan.cpos.module.ModuleManager
 import org.plos_clan.cpos.module.Vdso
+import org.plos_clan.cpos.network.NetworkStack
 import org.plos_clan.cpos.syscall.Syscall
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.SMProcessor
@@ -81,6 +82,7 @@ fun kernelMain() {
     if (!KernelCoroutines.initialize()) {
         return
     }
+    NetworkStack.initialize()
     if (!SerialConsole.install()) {
         return
     }

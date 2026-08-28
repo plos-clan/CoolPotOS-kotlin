@@ -21,6 +21,11 @@ value class MacAddress private constructor(private val value: ULong) {
 
     fun toUByteArray(): UByteArray = UByteArray(SIZE_BYTES, ::get)
 
+    fun copyTo(bytes: ByteArray, offset: Int = 0) {
+        require(offset >= 0 && offset <= bytes.size - SIZE_BYTES)
+        repeat(SIZE_BYTES) { index -> bytes[offset + index] = this[index].toByte() }
+    }
+
     override fun toString(): String = (0 until SIZE_BYTES).joinToString(":") { index ->
         this[index].toString(16).padStart(2, '0')
     }
@@ -28,6 +33,10 @@ value class MacAddress private constructor(private val value: ULong) {
     companion object {
         const val SIZE_BYTES = 6
         val ZERO = MacAddress(0uL)
+        val BROADCAST = MacAddress(0xFFFF_FFFF_FFFFuL)
+
+        fun fromBits(value: ULong): MacAddress? =
+            value.takeIf { it shr (SIZE_BYTES * Byte.SIZE_BITS) == 0uL }?.let(::MacAddress)
 
         fun from(bytes: ByteArray, offset: Int = 0): MacAddress? {
             if (offset < 0 || offset > bytes.size - SIZE_BYTES) return null
@@ -40,7 +49,11 @@ value class MacAddress private constructor(private val value: ULong) {
     }
 }
 
-fun interface EthernetFrameReceiver {
+interface EthernetProtocol {
+    fun attach(device: EthernetDevice) {}
+
+    fun detach(device: EthernetDevice) {}
+
     fun receive(device: EthernetDevice, frame: CPointer<UByteVar>, length: UInt)
 }
 
@@ -64,21 +77,24 @@ abstract class EthernetDevice {
 object EthernetDevices {
     private val lock = IrqSpinLock()
     private val devices = mutableSetOf<EthernetDevice>()
-    private val receiver = AtomicReference<EthernetFrameReceiver?>(null)
+    private val protocol = AtomicReference<EthernetProtocol?>(null)
 
     fun register(device: EthernetDevice) {
-        lock.withLock { devices.add(device) }
+        if (lock.withLock { devices.add(device) }) protocol.load()?.attach(device)
     }
 
     fun unregister(device: EthernetDevice) {
-        lock.withLock { devices.remove(device) }
+        if (lock.withLock { devices.remove(device) }) protocol.load()?.detach(device)
     }
 
     fun snapshot(): List<EthernetDevice> = lock.withLock { devices.toList() }
 
-    fun installReceiver(receiver: EthernetFrameReceiver?) = this.receiver.store(receiver)
+    fun installProtocol(protocol: EthernetProtocol) {
+        check(this.protocol.compareAndSet(null, protocol)) { "Ethernet protocol already installed" }
+        snapshot().forEach(protocol::attach)
+    }
 
     internal fun receive(device: EthernetDevice, frame: CPointer<UByteVar>, length: UInt) {
-        receiver.load()?.receive(device, frame, length)
+        protocol.load()?.receive(device, frame, length)
     }
 }
