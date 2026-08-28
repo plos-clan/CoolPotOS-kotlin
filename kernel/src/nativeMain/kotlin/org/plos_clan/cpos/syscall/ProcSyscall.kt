@@ -74,24 +74,6 @@ private const val PR_TASK_PERF_EVENTS_ENABLE = 32UL
 private const val PR_GET_SPECULATION_CTRL = 52UL
 private const val PR_SET_SPECULATION_CTRL = 53UL
 
-private class IdTriplet(
-    private val real: Int,
-    private val effective: Int,
-    private val saved: Int,
-) : NativeStruct {
-    override fun toNativeBytes(): ByteArray = ByteArray(NATIVE_SIZE).also { buffer ->
-        LittleEndianBuffer(buffer).apply {
-            writeU32(0, real.toUInt())
-            writeU32(Int.SIZE_BYTES, effective.toUInt())
-            writeU32(Int.SIZE_BYTES * 2, saved.toUInt())
-        }
-    }
-
-    companion object {
-        const val NATIVE_SIZE = Int.SIZE_BYTES * 3
-    }
-}
-
 private class LinuxRLimit(val limit: ResourceLimit) : NativeStruct {
     override fun toNativeBytes(): ByteArray = ByteArray(NATIVE_SIZE).also { buffer ->
         LittleEndianBuffer(buffer).apply {
@@ -227,13 +209,21 @@ internal fun getSid(regs: PtraceRegisters, process: Process): Long {
 internal fun getResUid(regs: PtraceRegisters, process: Process): Long = copyIds(
     process,
     regs[PtraceRegisters.IDX_RDI],
-    IdTriplet(process.ruid, process.euid, process.suid),
+    regs[PtraceRegisters.IDX_RSI],
+    regs[PtraceRegisters.IDX_RDX],
+    process.ruid,
+    process.euid,
+    process.suid,
 )
 
 internal fun getResGid(regs: PtraceRegisters, process: Process): Long = copyIds(
     process,
     regs[PtraceRegisters.IDX_RDI],
-    IdTriplet(process.rgid, process.egid, process.sgid),
+    regs[PtraceRegisters.IDX_RSI],
+    regs[PtraceRegisters.IDX_RDX],
+    process.rgid,
+    process.egid,
+    process.sgid,
 )
 
 internal fun prctl(regs: PtraceRegisters, process: Process): Long {
@@ -367,12 +357,26 @@ internal fun schedGetAffinity(regs: PtraceRegisters, process: Process): Long {
     return copySize.toLong()
 }
 
-private fun copyIds(process: Process, address: ULong, ids: IdTriplet): Long =
-    if (UserMemory(process.addressSpace, address).copyToUser(ids.toNativeBytes())) {
+private fun copyIds(
+    process: Process,
+    realAddress: ULong,
+    effectiveAddress: ULong,
+    savedAddress: ULong,
+    real: Int,
+    effective: Int,
+    saved: Int,
+): Long {
+    val bytes = ByteArray(Int.SIZE_BYTES)
+    fun copy(address: ULong, value: Int): Boolean {
+        LittleEndianBuffer(bytes).writeU32(0, value.toUInt())
+        return UserMemory(process.addressSpace, address).copyToUser(bytes)
+    }
+    return if (copy(realAddress, real) && copy(effectiveAddress, effective) && copy(savedAddress, saved)) {
         0L
     } else {
         errno(Errno.EFAULT)
     }
+}
 
 private fun defaultAffinityMask(): ULong {
     val count = SMProcessor.cpu_count

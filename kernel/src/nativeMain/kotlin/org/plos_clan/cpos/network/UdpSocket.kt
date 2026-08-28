@@ -348,15 +348,24 @@ internal class UdpSocket internal constructor(
     }
 
     override fun setProtocolOption(level: Int, name: Int, value: ByteArray): VfsResult<Unit> {
-        if (level != SOL_IP || name != IP_TTL || value.size < Int.SIZE_BYTES) {
+        if (level != SOL_IP || value.size < Int.SIZE_BYTES) {
             return VfsResult.Err(VfsError.PROTOCOL_OPTION_NOT_AVAILABLE)
         }
         val requested = LittleEndianBuffer(value).readU32(0).toInt()
-        if (requested !in 1..UByte.MAX_VALUE.toInt()) {
-            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        return when (name) {
+            IP_TTL -> if (requested in 1..UByte.MAX_VALUE.toInt()) {
+                lock.withLock { ttl = requested }
+                VfsResult.Ok(Unit)
+            } else {
+                VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            }
+
+            IP_RECVERR,
+            IP_MTU_DISCOVER,
+            IP_RECVTTL,
+            -> VfsResult.Ok(Unit)
+            else -> VfsResult.Err(VfsError.PROTOCOL_OPTION_NOT_AVAILABLE)
         }
-        lock.withLock { ttl = requested }
-        return VfsResult.Ok(Unit)
     }
 
     override fun getProtocolOption(level: Int, name: Int): VfsResult<ByteArray> {
@@ -446,6 +455,9 @@ internal class UdpSocket internal constructor(
         private const val MAX_PAYLOAD_SIZE = 65_507
         private const val SOL_IP = 0
         private const val IP_TTL = 2
+        private const val IP_MTU_DISCOVER = 10
+        private const val IP_RECVERR = 11
+        private const val IP_RECVTTL = 12
         private const val IP_MTU = 14
 
     }

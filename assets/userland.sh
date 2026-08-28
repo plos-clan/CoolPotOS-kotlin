@@ -19,6 +19,8 @@ packages=(
     procps-ng
     iputils
     iproute2
+    dbus
+    networkmanager
 )
 
 rootfs=$(mktemp -d)
@@ -58,6 +60,9 @@ pacman -Sy \
 
 sed -i 's/^root:[^:]*:/root::/' "$rootfs/etc/shadow"
 grep -q '^root::' "$rootfs/etc/shadow"
+
+sed -i '/^hosts:/c\hosts: files dns' "$rootfs/etc/nsswitch.conf"
+grep -qx 'hosts: files dns' "$rootfs/etc/nsswitch.conf"
 
 install -d -m 0700 "$keyring"
 install -Dm755 /usr/local/share/cpos/init "$rootfs/init"
