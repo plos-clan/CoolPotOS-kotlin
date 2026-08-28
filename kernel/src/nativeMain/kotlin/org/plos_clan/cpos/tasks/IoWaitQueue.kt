@@ -1,7 +1,5 @@
-package org.plos_clan.cpos.fs.sock
+package org.plos_clan.cpos.tasks
 
-import org.plos_clan.cpos.tasks.Scheduler
-import org.plos_clan.cpos.tasks.Thread
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 internal class IoWaitQueue {

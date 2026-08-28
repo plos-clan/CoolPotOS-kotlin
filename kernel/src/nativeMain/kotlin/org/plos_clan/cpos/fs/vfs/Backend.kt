@@ -491,6 +491,10 @@ interface OpenFileBackend {
     fun release() {}
 }
 
+interface FixedSizeIoOpenFileBackend : OpenFileBackend {
+    val ioSize: Int
+}
+
 interface AllocatingOpenFileBackend : OpenFileBackend {
     fun allocate(
         caller: VfsOperationContext,

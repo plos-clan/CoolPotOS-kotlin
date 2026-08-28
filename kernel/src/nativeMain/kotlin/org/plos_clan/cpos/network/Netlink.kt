@@ -2,7 +2,6 @@ package org.plos_clan.cpos.network
 
 import org.plos_clan.cpos.drivers.net.MacAddress
 import org.plos_clan.cpos.fs.sock.AbstractSocket
-import org.plos_clan.cpos.fs.sock.IoWaitQueue
 import org.plos_clan.cpos.fs.sock.SocketAddress
 import org.plos_clan.cpos.fs.sock.SocketDomain
 import org.plos_clan.cpos.fs.sock.SocketReceiveRequest
@@ -13,6 +12,7 @@ import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.tasks.Process
+import org.plos_clan.cpos.tasks.IoWaitQueue
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.LittleEndianBuffer

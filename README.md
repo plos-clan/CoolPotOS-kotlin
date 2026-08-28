@@ -16,7 +16,8 @@
 - RRS-handoff scheduler
 - VDSO
 - ACPI AML
-- devtmpfs & procfs & erofs rootfs
+- network & unix socket
+- devtmpfs & procfs & sysfs & erofs & fuse3
 - Signal Delivery and Handling
 - Linux programs binary compatible (glibc)
 - GC & Coroutine & runtime exception

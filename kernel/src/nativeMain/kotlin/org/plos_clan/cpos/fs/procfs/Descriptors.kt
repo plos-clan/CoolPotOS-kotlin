@@ -64,6 +64,9 @@ internal class ProcDescriptorDirectory(
             if (inode.type == InodeType.SOCKET) {
                 return VfsPathname.fromString("socket:[$inodeId]")
             }
+            if (inode.type == InodeType.EVENTFD) {
+                return VfsPathname.fromString("anon_inode:[eventfd]")
+            }
 
             val context = process.context ?: return null
             val result = FileSystemManager.vfs.absolutePath(context, file.path)

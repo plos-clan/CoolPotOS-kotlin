@@ -36,6 +36,7 @@ class OpenFileDescription private constructor(
     private val positionLock = KernelMutex()
     private val position = FilePosition()
     private val positionlessBackend = backend as? PositionlessOpenFileBackend
+    private val fixedSizeIoBackend = backend as? FixedSizeIoOpenFileBackend
     private val statusFlags = AtomicInt(initialStatusFlags)
 
     companion object {
@@ -249,9 +250,10 @@ class OpenFileDescription private constructor(
         count: Int,
     ): IoResult {
         readError(offset, count)?.let { return IoResult.failure(it) }
-        val prepared = destination.prepareWrite(offset, count)
+        val transferCount = fixedSizeIoBackend?.ioSize ?: count
+        val prepared = destination.prepareWrite(offset, transferCount)
             ?: return IoResult.failure(VfsError.FAULT)
-        return readBackend(caller, prepared, offset, count, position)
+        return readBackend(caller, prepared, offset, transferCount, position)
     }
 
     internal fun read(
@@ -261,7 +263,7 @@ class OpenFileDescription private constructor(
         count: Int,
     ): IoResult {
         readError(offset, count)?.let { return IoResult.failure(it) }
-        return readBackend(caller, destination, offset, count, position)
+        return readBackend(caller, destination, offset, fixedSizeIoBackend?.ioSize ?: count, position)
     }
 
     fun readAt(
@@ -274,11 +276,12 @@ class OpenFileDescription private constructor(
         if (fileOffset > Long.MAX_VALUE.toULong()) {
             return IoResult.failure(VfsError.INVALID_ARGUMENT)
         }
-        readError(offset, count)?.let { return IoResult.failure(it) }
         if (positionlessBackend != null) return IoResult.failure(VfsError.ILLEGAL_SEEK)
-        val prepared = destination.prepareWrite(offset, count)
+        readError(offset, count)?.let { return IoResult.failure(it) }
+        val transferCount = fixedSizeIoBackend?.ioSize ?: count
+        val prepared = destination.prepareWrite(offset, transferCount)
             ?: return IoResult.failure(VfsError.FAULT)
-        return readBackend(caller, prepared, offset, count, FilePosition(fileOffset.toLong()))
+        return readBackend(caller, prepared, offset, transferCount, FilePosition(fileOffset.toLong()))
     }
 
     fun write(
@@ -315,8 +318,8 @@ class OpenFileDescription private constructor(
         if (fileOffset > Long.MAX_VALUE.toULong()) {
             return IoResult.failure(VfsError.INVALID_ARGUMENT)
         }
-        writeError(offset, count)?.let { return IoResult.failure(it) }
         if (positionlessBackend != null) return IoResult.failure(VfsError.ILLEGAL_SEEK)
+        writeError(offset, count)?.let { return IoResult.failure(it) }
         val prepared = source.prepareRead(offset, count)
             ?: return IoResult.failure(VfsError.FAULT)
         return writeBackend(caller, prepared, offset, count, FilePosition(fileOffset.toLong()))
@@ -669,6 +672,8 @@ class OpenFileDescription private constructor(
 
     private fun readError(offset: Int, count: Int): VfsError? = when {
         offset < 0 || count < 0 -> VfsError.INVALID_ARGUMENT
+        fixedSizeIoBackend != null && count < fixedSizeIoBackend.ioSize ->
+            VfsError.INVALID_ARGUMENT
         references.load() == 0 || !access.canRead -> VfsError.BAD_DESCRIPTOR
         inode.type == InodeType.DIRECTORY -> VfsError.IS_DIRECTORY
         else -> null
@@ -676,6 +681,8 @@ class OpenFileDescription private constructor(
 
     private fun writeError(offset: Int, count: Int): VfsError? = when {
         offset < 0 || count < 0 -> VfsError.INVALID_ARGUMENT
+        fixedSizeIoBackend != null && count != fixedSizeIoBackend.ioSize ->
+            VfsError.INVALID_ARGUMENT
         references.load() == 0 || !access.canWrite -> VfsError.BAD_DESCRIPTOR
         inode.type == InodeType.REGULAR && MountFlag.READ_ONLY in path.mount.flags ->
             VfsError.READ_ONLY

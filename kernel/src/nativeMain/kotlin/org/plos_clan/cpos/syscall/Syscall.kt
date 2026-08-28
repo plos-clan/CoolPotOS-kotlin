@@ -7,6 +7,7 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.reinterpret
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.module.Vdso
+import org.plos_clan.cpos.syscall.fs.EventFdSyscalls
 import org.plos_clan.cpos.syscall.fs.access
 import org.plos_clan.cpos.syscall.fs.chdir
 import org.plos_clan.cpos.syscall.fs.chmod
@@ -261,6 +262,7 @@ private enum class LinuxSyscall(
     UTIMENSAT(280, ::utimensAt),
     FALLOCATE(285, ::fallocate),
     ACCEPT4(288, SocketSyscalls::accept4, restartable = true),
+    EVENTFD2(290, EventFdSyscalls::eventfd2),
     PIPE2(293, ::pipe2),
     RT_TGSIGQUEUEINFO(297, SignalSyscalls::rtTgsigqueueinfo),
     RECVMMSG(299, SocketSyscalls::recvmmsg, restartable = true),
@@ -311,7 +313,7 @@ object Syscall {
             null
         }
         val result = if (definition == null) {
-            println("SYSCALL: no implement $number")
+            if(number != 12UL) println("SYSCALL: no implement $number")
             errno(Errno.ENOSYS)
         } else {
             val process = thread?.process

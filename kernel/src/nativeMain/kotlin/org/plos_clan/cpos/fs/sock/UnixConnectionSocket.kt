@@ -7,6 +7,7 @@ import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.tasks.IoWaitQueue
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PollEvents

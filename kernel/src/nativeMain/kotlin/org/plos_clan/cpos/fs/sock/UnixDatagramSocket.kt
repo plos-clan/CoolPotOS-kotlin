@@ -3,6 +3,7 @@ package org.plos_clan.cpos.fs.sock
 import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.tasks.IoWaitQueue
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.PollEvents
 

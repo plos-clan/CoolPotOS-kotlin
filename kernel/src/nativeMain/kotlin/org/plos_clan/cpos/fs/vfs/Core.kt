@@ -234,6 +234,7 @@ enum class InodeType {
     BLOCK_DEVICE,
     PIPE,
     SOCKET,
+    EVENTFD,
 }
 
 data class InodeMetadata(

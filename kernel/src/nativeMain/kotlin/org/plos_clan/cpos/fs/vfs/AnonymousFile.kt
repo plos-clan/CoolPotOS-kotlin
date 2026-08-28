@@ -25,15 +25,11 @@ internal class AnonymousFileFactory {
         context: FileSystemContext,
         backend: InodeBackend,
         options: OpenOptions,
-        mode: FileMode = FileMode(0x1FFu),
+        metadata: InodeMetadata = InodeMetadata(mode = FileMode(0x1FFu), linkCount = 0u),
     ): VfsResult<OpenFileDescription> = OpenFileDescription.open(
         caller,
         context.root,
-        createInode(
-            context,
-            backend,
-            InodeMetadata(mode = mode, linkCount = 0u),
-        ),
+        createInode(context, backend, metadata),
         options,
     )
 }

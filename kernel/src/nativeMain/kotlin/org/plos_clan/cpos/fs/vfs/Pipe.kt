@@ -1,8 +1,8 @@
 package org.plos_clan.cpos.fs.vfs
 
-import org.plos_clan.cpos.fs.sock.IoWaitQueue
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.tasks.IoWaitQueue
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Signal
 import org.plos_clan.cpos.tasks.SignalInfo

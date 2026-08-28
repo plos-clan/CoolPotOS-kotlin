@@ -9,7 +9,6 @@ import org.plos_clan.cpos.drivers.DeviceType
 import org.plos_clan.cpos.drivers.LinuxDeviceMajor
 import org.plos_clan.cpos.drivers.PositionlessDeviceBackend
 import org.plos_clan.cpos.drivers.WaitablePositionlessDeviceBackend
-import org.plos_clan.cpos.fs.sock.IoWaitQueue
 import org.plos_clan.cpos.fs.sysfs.SysfsDevicePublication
 import org.plos_clan.cpos.fs.vfs.MountResource
 import org.plos_clan.cpos.fs.vfs.VfsError
@@ -19,6 +18,7 @@ import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.tasks.IoWaitQueue
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.Thread

@@ -32,6 +32,20 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         context: FileSystemContext,
     ): VfsResult<Pair<OpenFileDescription, OpenFileDescription>> = pipes.create(caller, context)
 
+    internal fun createEventFd(
+        caller: VfsOperationContext,
+        context: FileSystemContext,
+        initialValue: UInt,
+        semaphore: Boolean,
+        nonBlocking: Boolean,
+    ): VfsResult<OpenFileDescription> = anonymousFiles.open(
+        caller,
+        context,
+        EventFd(initialValue, semaphore),
+        OpenOptions(access = AccessMode.READ_WRITE, nonBlocking = nonBlocking),
+        InodeMetadata(mode = FileMode(0x180u), linkCount = 1u),
+    )
+
     internal fun createUnixSocket(
         caller: VfsOperationContext,
         context: FileSystemContext,
