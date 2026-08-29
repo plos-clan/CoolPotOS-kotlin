@@ -77,7 +77,7 @@ private fun mknodAt(
         S_IFIFO -> NodeKind.Fifo
         S_IFSOCK -> NodeKind.Socket
         S_IFCHR, S_IFBLK -> {
-            if (process.euid != 0) return errno(Errno.EPERM)
+            if (process.credentials.userIds.effective != 0) return errno(Errno.EPERM)
             val number = DeviceNumber.fromEncoded(rawDevice) ?: return errno(Errno.EINVAL)
             NodeKind.Device(
                 if (fileType == S_IFCHR) InodeType.CHARACTER_DEVICE
@@ -351,7 +351,7 @@ private fun linkAt(
     val caller = process.vfsOperationContext
     val sourceBytes = copyPath(process, sourceAddress) ?: return errno(Errno.EFAULT)
     val source = if (sourceBytes.isEmpty() && flags and AT_EMPTY_PATH.toULong() != 0uL) {
-        if (process.euid != 0) return errno(Errno.EPERM)
+        if (process.credentials.userIds.effective != 0) return errno(Errno.EPERM)
         val file = process.fdTable.acquire(sourceDirFd) ?: return errno(Errno.EBADF)
         try {
             val metadata = when (

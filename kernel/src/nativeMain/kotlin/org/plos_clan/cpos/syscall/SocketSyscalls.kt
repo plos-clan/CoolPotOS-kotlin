@@ -112,9 +112,10 @@ internal object SocketSyscalls {
                 val socket = when (options.protocol) {
                     IpProtocol.ICMP.number.toInt() -> {
                         val thread = ProcessManager.currentThread()
-                        if (process.euid != 0 && (thread == null || !CapManager.hasAllCapability(
+                        if (process.credentials.userIds.effective != 0 &&
+                            (thread == null || !CapManager.hasAllCapability(
                                 thread,
-                                CapEnum.CAP_NET_RAW,
+                                CapEnum.NET_RAW,
                             ))
                         ) return errno(Errno.EPERM)
                         IcmpProtocol.createSocket()
@@ -970,8 +971,11 @@ internal object SocketSyscalls {
     private fun isNonBlocking(file: OpenFileDescription, flags: Int): Boolean =
         flags and MSG_DONTWAIT != 0 || file.getStatusFlags() and OpenFlags.O_NONBLOCK != 0
 
-    private fun credentials(process: Process): UnixCredentials =
-        UnixCredentials(process.id, process.euid.toUInt(), process.egid.toUInt())
+    private fun credentials(process: Process): UnixCredentials = UnixCredentials(
+        process.id,
+        process.credentials.userIds.effective.toUInt(),
+        process.credentials.groupIds.effective.toUInt(),
+    )
 
     private fun intOption(value: Int): ByteArray = ByteArray(Int.SIZE_BYTES).also { bytes ->
         LittleEndianBuffer(bytes).writeU32(0, value.toUInt())

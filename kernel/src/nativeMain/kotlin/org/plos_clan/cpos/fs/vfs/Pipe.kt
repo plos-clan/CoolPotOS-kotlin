@@ -1,3 +1,5 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package org.plos_clan.cpos.fs.vfs
 
 import org.plos_clan.cpos.mem.PreparedBufferDestination
@@ -10,8 +12,10 @@ import org.plos_clan.cpos.tasks.SignalInfo
 import org.plos_clan.cpos.tasks.SignalRouter
 import org.plos_clan.cpos.tasks.Thread
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.KernelMutex
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PollEvents
+import kotlin.concurrent.atomics.AtomicInt
 
 private class PipeInode(
     private val state: PipeState,
@@ -47,7 +51,14 @@ internal class FifoBackend : MutableInodeBackend {
 private class PipeEndpoint(
     private val state: PipeState,
     private val access: AccessMode,
-) : WaitableOpenFileBackend {
+) : WaitableOpenFileBackend, SpliceSourceOpenFileBackend, SpliceDestinationOpenFileBackend {
+    private companion object {
+        val pipeSpliceLock = KernelMutex()
+    }
+
+    override val readinessVersion: Int
+        get() = state.readinessVersion
+
     override fun read(
         caller: VfsOperationContext,
         inode: Inode,
@@ -84,6 +95,62 @@ private class PipeEndpoint(
         events: Int,
     ): Long = state.poll(events, access)
 
+    override fun spliceTo(
+        caller: VfsOperationContext,
+        inode: Inode,
+        destination: OpenFileDescription,
+        destinationOffset: ULong?,
+        count: Int,
+        sourceMode: IoMode,
+        destinationMode: IoMode,
+    ): IoResult {
+        if (!access.canRead) return IoResult.failure(VfsError.BAD_DESCRIPTOR)
+        val target = destination.backend as? PipeEndpoint
+        if (target?.state === state) return IoResult.failure(VfsError.INVALID_ARGUMENT)
+        return if (target == null) {
+            state.spliceTo(
+                caller,
+                destination,
+                destinationOffset,
+                count,
+                sourceMode,
+                destinationMode,
+            )
+        } else {
+            pipeSpliceLock.withLock {
+                state.spliceTo(
+                    caller,
+                    destination,
+                    destinationOffset,
+                    count,
+                    sourceMode,
+                    destinationMode,
+                )
+            }
+        }
+    }
+
+    override fun spliceFrom(
+        caller: VfsOperationContext,
+        inode: Inode,
+        source: OpenFileDescription,
+        sourceOffset: ULong?,
+        count: Int,
+        sourceMode: IoMode,
+        destinationMode: IoMode,
+    ): IoResult = if (!access.canWrite) {
+        IoResult.failure(VfsError.BAD_DESCRIPTOR)
+    } else {
+        state.spliceFrom(
+            caller,
+            source,
+            sourceOffset,
+            count,
+            sourceMode,
+            destinationMode,
+        )
+    }
+
     override fun release() = state.close(access)
 }
 
@@ -98,11 +165,17 @@ private class PipeState(
     }
 
     private val lock = IrqSpinLock()
+    private val readTransferLock = KernelMutex()
+    private val writeTransferLock = KernelMutex()
     private val buffer = ByteCircularBuffer(CAPACITY_BYTES)
     private val readWaiters = IoWaitQueue()
     private val writeWaiters = IoWaitQueue()
     private val readerOpenWaiters = IoWaitQueue()
     private val writerOpenWaiters = IoWaitQueue()
+    private val version = AtomicInt(0)
+
+    val readinessVersion: Int
+        get() = version.load()
 
     fun open(access: AccessMode, nonBlocking: Boolean): VfsResult<OpenFileBackend> {
         val thread = ProcessManager.currentThread()
@@ -137,6 +210,7 @@ private class PipeState(
                 }
                 AccessMode.PATH -> return@withLock VfsError.BAD_DESCRIPTOR
             }
+            version.fetchAndAdd(1)
             null
         }
         if (wakeReaders) wakeAllOutsideLock(readerOpenWaiters)
@@ -146,13 +220,18 @@ private class PipeState(
         if (!checkNotNull(waitQueue).await(lock, queued)) {
             lock.withLock {
                 if (access == AccessMode.READ) readers-- else writers--
+                version.fetchAndAdd(1)
             }
             return VfsResult.Err(VfsError.INTERRUPTED)
         }
         return VfsResult.Ok(PipeEndpoint(this, access))
     }
 
-    fun read(destination: PreparedBufferDestination, offset: Int, count: Int): IoResult {
+    fun read(
+        destination: PreparedBufferDestination,
+        offset: Int,
+        count: Int,
+    ): IoResult = readTransferLock.withLock {
         var writerToWake: Thread? = null
         var readerToWake: Thread? = null
         val result = lock.withLock {
@@ -165,11 +244,12 @@ private class PipeState(
             if (transferred == 0) return@withLock IoResult.failure(VfsError.FAULT)
             writerToWake = writeWaiters.takeReady(buffer.remaining)
             if (buffer.size != 0) readerToWake = readWaiters.takeReady(buffer.size)
+            version.fetchAndAdd(1)
             IoResult.success(transferred)
         }
         writerToWake?.let(Scheduler::wake)
         readerToWake?.let(Scheduler::wake)
-        return result
+        result
     }
 
     fun write(
@@ -177,7 +257,7 @@ private class PipeState(
         offset: Int,
         count: Int,
         mode: IoMode,
-    ): IoResult {
+    ): IoResult = writeTransferLock.withLock {
         var readerToWake: Thread? = null
         var brokenPipe = false
         val result = lock.withLock {
@@ -198,6 +278,7 @@ private class PipeState(
             val transferred = buffer.write(source, offset, count)
             if (transferred == 0) return@withLock IoResult.failure(VfsError.FAULT)
             readerToWake = readWaiters.takeReady(buffer.size)
+            version.fetchAndAdd(1)
             IoResult.success(transferred)
         }
         if (brokenPipe) {
@@ -210,7 +291,122 @@ private class PipeState(
             }
         }
         readerToWake?.let(Scheduler::wake)
-        return result
+        result
+    }
+
+    fun spliceTo(
+        caller: VfsOperationContext,
+        destination: OpenFileDescription,
+        destinationOffset: ULong?,
+        count: Int,
+        sourceMode: IoMode,
+        destinationMode: IoMode,
+    ): IoResult {
+        while (true) {
+            var endOfFile = false
+            var available = 0
+            val result = readTransferLock.withLock {
+                val source = lock.withLock {
+                    endOfFile = buffer.size == 0 && writers == 0
+                    available = minOf(count, buffer.size)
+                    buffer.prepareRead(0, available)
+                        ?.takeIf { buffer.size != 0 }
+                } ?: return@withLock null
+                val written = destination.writeForSplice(
+                    caller,
+                    source,
+                    available,
+                    destinationOffset,
+                    destinationMode,
+                )
+                if (written.isSuccess && written.bytesTransferred != 0) {
+                    var writerToWake: Thread? = null
+                    lock.withLock {
+                        buffer.discard(written.bytesTransferred)
+                        writerToWake = writeWaiters.takeReady(buffer.remaining)
+                        version.fetchAndAdd(1)
+                    }
+                    writerToWake?.let(Scheduler::wake)
+                }
+                if (written.error == VfsError.NOT_SUPPORTED ||
+                    written.error == VfsError.IS_DIRECTORY
+                ) {
+                    IoResult.failure(VfsError.INVALID_ARGUMENT)
+                } else {
+                    written
+                }
+            }
+            if (result != null) return result
+            if (endOfFile) return IoResult.success(0)
+            if (sourceMode == IoMode.NON_BLOCKING) {
+                return IoResult.failure(VfsError.WOULD_BLOCK)
+            }
+            if (!await(IoEvent.READABLE, 1)) {
+                return IoResult.failure(VfsError.INTERRUPTED)
+            }
+        }
+    }
+
+    fun spliceFrom(
+        caller: VfsOperationContext,
+        source: OpenFileDescription,
+        sourceOffset: ULong?,
+        count: Int,
+        sourceMode: IoMode,
+        destinationMode: IoMode,
+    ): IoResult {
+        while (true) {
+            var brokenPipe = false
+            val result = writeTransferLock.withLock {
+                val reservation = lock.withLock {
+                    if (readers == 0) {
+                        brokenPipe = true
+                        null
+                    } else {
+                        buffer.reserveWrite(minOf(count, buffer.remaining))
+                            .takeIf { it.capacity != 0 }
+                    }
+                } ?: return@withLock null
+                val read = source.readForSplice(
+                    caller,
+                    reservation.destination,
+                    reservation.capacity,
+                    sourceOffset,
+                    sourceMode,
+                )
+                if (read.isSuccess && read.bytesTransferred != 0) {
+                    var readerToWake: Thread? = null
+                    lock.withLock {
+                        reservation.commit(read.bytesTransferred)
+                        readerToWake = readWaiters.takeReady(buffer.size)
+                        version.fetchAndAdd(1)
+                    }
+                    readerToWake?.let(Scheduler::wake)
+                }
+                if (read.error == VfsError.NOT_SUPPORTED || read.error == VfsError.IS_DIRECTORY) {
+                    IoResult.failure(VfsError.INVALID_ARGUMENT)
+                } else {
+                    read
+                }
+            }
+            if (result != null) return result
+            if (brokenPipe) {
+                ProcessManager.currentThread()?.let { thread ->
+                    SignalRouter.sendThread(
+                        sender = thread.process,
+                        target = thread,
+                        info = SignalInfo.fromSender(Signal.PIPE, thread.process),
+                    )
+                }
+                return IoResult.failure(VfsError.BROKEN_PIPE)
+            }
+            if (destinationMode == IoMode.NON_BLOCKING) {
+                return IoResult.failure(VfsError.WOULD_BLOCK)
+            }
+            if (!await(IoEvent.WRITABLE, count)) {
+                return IoResult.failure(VfsError.INTERRUPTED)
+            }
+        }
     }
 
     fun await(event: IoEvent, count: Int): Boolean {
@@ -251,7 +447,8 @@ private class PipeState(
         if (access.canRead && (buffer.size != 0 || writers == 0)) {
             available = available or PollEvents.NORMAL_INPUT
         }
-        (available and events).toLong()
+        if (access.canRead && writers == 0) available = available or PollEvents.POLLHUP
+        (available and (events or PollEvents.UNCONDITIONALLY_REPORTED)).toLong()
     }
 
     fun close(access: AccessMode) {
@@ -268,6 +465,7 @@ private class PipeState(
                 readers--
                 if (readers == 0) wakeWriters = true
             }
+            version.fetchAndAdd(1)
         }
         if (wakeReaders) wakeAllOutsideLock(readWaiters)
         if (wakeWriters) wakeAllOutsideLock(writeWaiters)

@@ -9,13 +9,110 @@ const val LINUX_CAPABILITY_VERSION_1 = 0x19980330U
 const val LINUX_CAPABILITY_VERSION_2 = 0x20071026U
 const val LINUX_CAPABILITY_VERSION_3 = 0x20080522U
 
-const val TASK_CAP_LAST_CAP = 40U
-const val TASK_CAP_FULL_MASK = 0x1FFFFFFFFFFu
+const val TASK_CAP_LAST_CAP = 40
+const val TASK_CAP_FULL_MASK = 0x1ff_ffff_ffffuL
 
-enum class CapEnum(val id: ULong) {
-    CAP_NET_BIND_SERVICE(10UL),
-    CAP_NET_ADMIN(12UL),
-    CAP_NET_RAW(13UL),
+enum class CapEnum(val id: Int) {
+    SETGID(6),
+    SETUID(7),
+    SETPCAP(8),
+    NET_BIND_SERVICE(10),
+    NET_ADMIN(12),
+    NET_RAW(13),
+    AUDIT_WRITE(29),
+}
+
+class CapabilityState(
+    var effective: ULong = TASK_CAP_FULL_MASK,
+    var permitted: ULong = TASK_CAP_FULL_MASK,
+    var inheritable: ULong = 0uL,
+    var bounding: ULong = TASK_CAP_FULL_MASK,
+    var ambient: ULong = 0uL,
+    var keepAcrossUserIdChange: Boolean = false,
+    var noNewPrivileges: Boolean = false,
+) {
+    fun inherit(parent: CapabilityState) {
+        effective = parent.effective
+        permitted = parent.permitted
+        inheritable = parent.inheritable
+        bounding = parent.bounding
+        ambient = parent.ambient
+        keepAcrossUserIdChange = parent.keepAcrossUserIdChange
+        noNewPrivileges = parent.noNewPrivileges
+    }
+
+    fun hasEffective(capability: CapEnum): Boolean = has(effective, capability.id)
+
+    fun containsBounding(capability: Int): Boolean = has(bounding, capability)
+
+    fun dropBounding(capability: Int) {
+        bounding = bounding and bit(capability).inv()
+    }
+
+    fun containsAmbient(capability: Int): Boolean = has(ambient, capability)
+
+    fun raiseAmbient(capability: Int): Boolean {
+        val mask = bit(capability)
+        if ((permitted and inheritable and mask) == 0uL) return false
+        ambient = ambient or mask
+        return true
+    }
+
+    fun lowerAmbient(capability: Int) {
+        ambient = ambient and bit(capability).inv()
+    }
+
+    fun clearAmbient() {
+        ambient = 0uL
+    }
+
+    fun apply(effective: ULong, permitted: ULong, inheritable: ULong): Boolean {
+        val requestedEffective = effective and TASK_CAP_FULL_MASK
+        val requestedPermitted = permitted and TASK_CAP_FULL_MASK
+        val requestedInheritable = inheritable and TASK_CAP_FULL_MASK
+        if (requestedEffective and requestedPermitted.inv() != 0uL ||
+            requestedPermitted and this.permitted.inv() != 0uL
+        ) {
+            return false
+        }
+
+        val addedInheritable = requestedInheritable and this.inheritable.inv()
+        val inheritableLimit = this.permitted or
+            if (hasEffective(CapEnum.SETPCAP)) bounding else 0uL
+        if (addedInheritable and inheritableLimit.inv() != 0uL) return false
+
+        this.effective = requestedEffective
+        this.permitted = requestedPermitted
+        this.inheritable = requestedInheritable
+        ambient = ambient and requestedPermitted and requestedInheritable
+        return true
+    }
+
+    fun applyUserIdChange(change: Credentials.UserIdChange) {
+        val previous = change.previous
+        val current = change.current
+        val hadRootIdentity = previous.real == 0 || previous.effective == 0 || previous.saved == 0
+        val hasRootIdentity = current.real == 0 || current.effective == 0 || current.saved == 0
+        when {
+            hadRootIdentity && !hasRootIdentity -> {
+                if (!keepAcrossUserIdChange) permitted = 0uL
+                effective = 0uL
+                ambient = 0uL
+            }
+
+            previous.effective == 0 && current.effective != 0 -> effective = 0uL
+            previous.effective != 0 && current.effective == 0 -> effective = permitted
+        }
+    }
+
+    companion object {
+        fun isValid(capability: Int): Boolean = capability in 0..TASK_CAP_LAST_CAP
+
+        private fun bit(capability: Int): ULong = 1uL shl capability
+
+        private fun has(set: ULong, capability: Int): Boolean =
+            isValid(capability) && set and bit(capability) != 0uL
+    }
 }
 
 data class CapHeader(
@@ -70,13 +167,8 @@ data class Capabilities(
 }
 
 object CapManager {
-
-    fun hasAllCapability(thread: Thread, vararg caps: CapEnum) : Boolean{
-        for (cap in caps) {
-            if(thread.effective and (1uL shl (cap.id.toInt())) == 0uL) return false
-        }
-        return true
-    }
+    fun hasAllCapability(thread: Thread, vararg caps: CapEnum): Boolean =
+        caps.all(thread.capabilities::hasEffective)
 
     fun capabilityCount(version: UInt): Int = when (version) {
         LINUX_CAPABILITY_VERSION_1 -> 1
@@ -95,18 +187,10 @@ object CapManager {
             inheritable = inheritable or (array[1].inheritable.toULong() shl 32)
         }
 
-        effective = effective and TASK_CAP_FULL_MASK
-        permitted = permitted and TASK_CAP_FULL_MASK
-        inheritable = inheritable and TASK_CAP_FULL_MASK
-
-        if ((effective and permitted.inv()) != 0UL) return errno(Errno.EPERM)
-
-        task.effective = effective
-        task.permitted = permitted
-        task.inheritable = inheritable
-        task.ambient = task.ambient and (permitted and inheritable)
-
-        return errno(Errno.EOK)
+        return if (task.capabilities.apply(effective, permitted, inheritable)) {
+            errno(Errno.EOK)
+        } else {
+            errno(Errno.EPERM)
+        }
     }
-
 }

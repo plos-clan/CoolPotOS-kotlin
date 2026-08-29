@@ -235,6 +235,7 @@ enum class InodeType {
     PIPE,
     SOCKET,
     EVENTFD,
+    EPOLL,
 }
 
 data class InodeMetadata(

@@ -7,6 +7,8 @@ internal object FsConstants {
     const val IO_CHUNK_SIZE = 64 * 1024
     const val MAX_RW_COUNT = 0x7ffff000uL
     const val MAX_IO_VECTORS = 1024
+    const val SPLICE_F_NONBLOCK = 0x2u
+    const val SPLICE_SUPPORTED_FLAGS = 0xfu
     const val AT_FDCWD = -100
     const val AT_SYMLINK_NOFOLLOW = 0x100
     const val AT_REMOVEDIR = 0x200

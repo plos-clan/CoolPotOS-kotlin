@@ -50,7 +50,7 @@ internal fun chdir(regs: PtraceRegisters, process: Process): Long {
 }
 
 internal fun chroot(regs: PtraceRegisters, process: Process): Long {
-    if (process.euid != 0) return errno(Errno.EPERM)
+    if (process.credentials.userIds.effective != 0) return errno(Errno.EPERM)
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EFAULT)
     if (pathname.isEmpty()) return errno(Errno.ENOENT)

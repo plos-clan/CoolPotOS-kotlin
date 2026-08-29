@@ -55,7 +55,9 @@ internal data class LinuxFileStatus(
             InodeType.BLOCK_DEVICE -> S_IFBLK
             InodeType.PIPE -> S_IFIFO
             InodeType.SOCKET -> S_IFSOCK
-            InodeType.EVENTFD -> 0u
+            InodeType.EVENTFD,
+            InodeType.EPOLL,
+            -> S_IFREG
         }
 
     val deviceMajor: UInt
@@ -200,5 +202,6 @@ internal class LinuxDirent64(
             InodeType.SYMLINK -> 10
             InodeType.SOCKET -> 12
             InodeType.EVENTFD -> 0
+            InodeType.EPOLL -> 0
         }
 }

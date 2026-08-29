@@ -79,6 +79,9 @@ fun Process.status(): String {
     val pendingSignals = thread?.signals?.pending?.mask ?: 0uL
     val sharedPendingSignals = signals.pending.mask
     val (ignoredSignals, caughtSignals) = signals.actionMasks()
+    val capabilities = thread?.capabilities
+    val userIds = credentials.userIds
+    val groupIds = credentials.groupIds
     fun ULong.signalMask() = toString(16).padStart(16, '0')
     return buildString {
         append("Name:\t").append(comm).append('\n')
@@ -86,13 +89,13 @@ fun Process.status(): String {
         append("Tgid:\t").append(id).append('\n')
         append("Pid:\t").append(id).append('\n')
         append("PPid:\t").append(parentId).append('\n')
-        append("Uid:\t").append(ruid).append('\t').append(euid).append('\t')
-            .append(suid).append('\t').append(fsuid).append('\n')
-        append("Gid:\t").append(rgid).append('\t').append(egid).append('\t')
-            .append(sgid).append('\t').append(fsgid).append('\n')
+        append("Uid:\t").append(userIds.real).append('\t').append(userIds.effective).append('\t')
+            .append(userIds.saved).append('\t').append(userIds.filesystem).append('\n')
+        append("Gid:\t").append(groupIds.real).append('\t').append(groupIds.effective).append('\t')
+            .append(groupIds.saved).append('\t').append(groupIds.filesystem).append('\n')
         append("FDSize:\t").append(resourceLimits.get(ProcessResource.OPEN_FILES).soft)
             .append('\n')
-        append("Groups:\t").append(egid).append('\n')
+        append("Groups:\t").append(credentials.supplementaryGroups.joinToString(" ")).append('\n')
         append("VmSize:\t").append(addressSpace.used / KIBIBYTE).append(" kB\n")
         append("VmRSS:\t0 kB\n")
         append("Threads:\t").append(threads.count { it.state != TaskState.ZOMBIE }).append('\n')
@@ -101,6 +104,13 @@ fun Process.status(): String {
         append("SigBlk:\t").append(blockedSignals.signalMask()).append('\n')
         append("SigIgn:\t").append(ignoredSignals.signalMask()).append('\n')
         append("SigCgt:\t").append(caughtSignals.signalMask()).append('\n')
+        append("CapInh:\t").append((capabilities?.inheritable ?: 0uL).signalMask()).append('\n')
+        append("CapPrm:\t").append((capabilities?.permitted ?: 0uL).signalMask()).append('\n')
+        append("CapEff:\t").append((capabilities?.effective ?: 0uL).signalMask()).append('\n')
+        append("CapBnd:\t").append((capabilities?.bounding ?: 0uL).signalMask()).append('\n')
+        append("CapAmb:\t").append((capabilities?.ambient ?: 0uL).signalMask()).append('\n')
+        append("NoNewPrivs:\t").append(if (capabilities?.noNewPrivileges == true) 1 else 0)
+            .append('\n')
     }
 }
 

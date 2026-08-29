@@ -10,7 +10,9 @@ import org.plos_clan.cpos.module.elf.ElfLoader
 import org.plos_clan.cpos.syscall.Syscall.copyWordToUser
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.tasks.CapHeader
+import org.plos_clan.cpos.tasks.CapEnum
 import org.plos_clan.cpos.tasks.CapManager
+import org.plos_clan.cpos.tasks.CapabilityState
 import org.plos_clan.cpos.tasks.Capabilities
 import org.plos_clan.cpos.tasks.ChildEventKind
 import org.plos_clan.cpos.tasks.LINUX_CAPABILITY_VERSION_3
@@ -39,40 +41,36 @@ private const val WAIT_WUNTRACED = 2uL
 private const val WAIT_WCONTINUED = 8uL
 private const val WAIT_SUPPORTED = 0x0buL
 private const val ROBUST_LIST_SIZE = 24uL
-private const val PR_SET_PDEATHSIG = 1UL
-private const val PR_GET_PDEATHSIG = 2UL
 private const val PR_GET_DUMPABLE = 3UL
 private const val PR_SET_DUMPABLE = 4UL
-private const val PR_GET_UNALIGN = 5UL
-private const val PR_SET_UNALIGN = 6UL
 private const val PR_GET_KEEPCAPS = 7UL
 private const val PR_SET_KEEPCAPS = 8UL
-private const val PR_GET_FPEMU = 9UL
-private const val PR_SET_FPEMU = 10UL
-private const val PR_GET_FPEXC = 11UL
-private const val PR_SET_FPEXC = 12UL
-private const val PR_GET_TIMING = 13UL
-private const val PR_SET_TIMING = 14UL
 private const val PR_SET_NAME = 15UL
 private const val PR_GET_NAME = 16UL
-private const val PR_GET_ENDIAN = 19UL
-private const val PR_SET_ENDIAN = 20UL
-private const val PR_GET_SECCOMP = 21UL
-private const val PR_SET_SECCOMP = 22UL
 private const val PR_CAPBSET_READ = 23UL
 private const val PR_CAPBSET_DROP = 24UL
 private const val PR_SET_NO_NEW_PRIVS = 38UL
 private const val PR_GET_NO_NEW_PRIVS = 39UL
-private const val PR_MCE_KILL = 33UL
-private const val PR_MCE_KILL_GET = 34UL
-private const val PR_SET_MM = 35UL
-private const val PR_SET_PTRACER = 0x59616d61UL // 'Yama' magic value
-private const val PR_SET_THP_DISABLE = 41UL
-private const val PR_GET_THP_DISABLE = 42UL
-private const val PR_TASK_PERF_EVENTS_DISABLE = 31UL
-private const val PR_TASK_PERF_EVENTS_ENABLE = 32UL
-private const val PR_GET_SPECULATION_CTRL = 52UL
-private const val PR_SET_SPECULATION_CTRL = 53UL
+private const val PR_CAP_AMBIENT = 47UL
+private const val PR_CAP_AMBIENT_IS_SET = 1uL
+private const val PR_CAP_AMBIENT_RAISE = 2uL
+private const val PR_CAP_AMBIENT_LOWER = 3uL
+private const val PR_CAP_AMBIENT_CLEAR_ALL = 4uL
+private const val PR_NAME_SIZE = 16
+private const val NGROUPS_MAX = 65_536
+
+private sealed interface LinuxIdArgument {
+    data object Unchanged : LinuxIdArgument
+    data class Value(val id: Int) : LinuxIdArgument
+
+    companion object {
+        fun decode(raw: ULong): LinuxIdArgument? = when {
+            raw == UInt.MAX_VALUE.toULong() -> Unchanged
+            raw <= Int.MAX_VALUE.toULong() -> Value(raw.toInt())
+            else -> null
+        }
+    }
+}
 
 private class LinuxRLimit(val limit: ResourceLimit) : NativeStruct {
     override fun toNativeBytes(): ByteArray = ByteArray(NATIVE_SIZE).also { buffer ->
@@ -127,34 +125,28 @@ internal fun archPrctl(regs: PtraceRegisters, process: Process): Long {
 
 internal fun getPid(regs: PtraceRegisters, process: Process): Long = process.id.toLong()
 
-internal fun getUid(regs: PtraceRegisters, process: Process): Long = process.ruid.toLong()
+internal fun getUid(regs: PtraceRegisters, process: Process): Long =
+    process.credentials.userIds.real.toLong()
 
-internal fun getGid(regs: PtraceRegisters, process: Process): Long = process.rgid.toLong()
+internal fun getGid(regs: PtraceRegisters, process: Process): Long =
+    process.credentials.groupIds.real.toLong()
 
-internal fun getEuid(regs: PtraceRegisters, process: Process): Long = process.euid.toLong()
+internal fun getEuid(regs: PtraceRegisters, process: Process): Long =
+    process.credentials.userIds.effective.toLong()
 
-internal fun getEgid(regs: PtraceRegisters, process: Process): Long = process.egid.toLong()
+internal fun getEgid(regs: PtraceRegisters, process: Process): Long =
+    process.credentials.groupIds.effective.toLong()
 
 internal fun setUid(regs: PtraceRegisters, process: Process): Long {
     val requested = regs[PtraceRegisters.IDX_RDI]
         .takeIf { it <= Int.MAX_VALUE.toULong() }
         ?.toInt() ?: return errno(Errno.EINVAL)
-    val previousEffective = process.euid
-    val previouslyRoot = process.ruid == 0 || previousEffective == 0 || process.suid == 0
-    if (!process.setUserId(requested)) return errno(Errno.EPERM)
-
-    ProcessManager.currentThread()?.let { thread ->
-        val remainsRoot = process.ruid == 0 || process.euid == 0 || process.suid == 0
-        if (previouslyRoot && !remainsRoot) {
-            if (!thread.keepCapabilities) thread.permitted = 0uL
-            thread.effective = 0uL
-            thread.ambient = 0uL
-        } else if (previousEffective == 0 && process.euid != 0) {
-            thread.effective = 0uL
-        } else if (previousEffective != 0 && process.euid == 0) {
-            thread.effective = thread.permitted
-        }
-    }
+    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
+    val change = process.credentials.setUserId(
+        requested,
+        thread.capabilities.hasEffective(CapEnum.SETUID),
+    ) ?: return errno(Errno.EPERM)
+    thread.capabilities.applyUserIdChange(change)
     return 0L
 }
 
@@ -162,7 +154,16 @@ internal fun setGid(regs: PtraceRegisters, process: Process): Long {
     val requested = regs[PtraceRegisters.IDX_RDI]
         .takeIf { it <= Int.MAX_VALUE.toULong() }
         ?.toInt() ?: return errno(Errno.EINVAL)
-    return if (process.setGroupId(requested)) 0L else errno(Errno.EPERM)
+    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
+    return if (process.credentials.setGroupId(
+            requested,
+            thread.capabilities.hasEffective(CapEnum.SETGID),
+        )
+    ) {
+        0L
+    } else {
+        errno(Errno.EPERM)
+    }
 }
 
 internal fun getPpid(regs: PtraceRegisters, process: Process): Long = process.parentId.toLong()
@@ -186,17 +187,25 @@ internal fun setSid(regs: PtraceRegisters, process: Process): Long =
     if (ProcessManager.createSession(process)) process.id.toLong() else errno(Errno.EPERM)
 
 internal fun setFsUid(regs: PtraceRegisters, process: Process): Long {
+    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
     val requested = regs[PtraceRegisters.IDX_RDI]
         .takeIf { it <= Int.MAX_VALUE.toULong() }
         ?.toInt()
-    return process.setFilesystemUid(requested).toLong()
+    return process.credentials.setFilesystemUserId(
+        requested,
+        thread.capabilities.hasEffective(CapEnum.SETUID),
+    ).toLong()
 }
 
 internal fun setFsGid(regs: PtraceRegisters, process: Process): Long {
+    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
     val requested = regs[PtraceRegisters.IDX_RDI]
         .takeIf { it <= Int.MAX_VALUE.toULong() }
         ?.toInt()
-    return process.setFilesystemGid(requested).toLong()
+    return process.credentials.setFilesystemGroupId(
+        requested,
+        thread.capabilities.hasEffective(CapEnum.SETGID),
+    ).toLong()
 }
 
 internal fun getSid(regs: PtraceRegisters, process: Process): Long {
@@ -211,9 +220,9 @@ internal fun getResUid(regs: PtraceRegisters, process: Process): Long = copyIds(
     regs[PtraceRegisters.IDX_RDI],
     regs[PtraceRegisters.IDX_RSI],
     regs[PtraceRegisters.IDX_RDX],
-    process.ruid,
-    process.euid,
-    process.suid,
+    process.credentials.userIds.real,
+    process.credentials.userIds.effective,
+    process.credentials.userIds.saved,
 )
 
 internal fun getResGid(regs: PtraceRegisters, process: Process): Long = copyIds(
@@ -221,71 +230,236 @@ internal fun getResGid(regs: PtraceRegisters, process: Process): Long = copyIds(
     regs[PtraceRegisters.IDX_RDI],
     regs[PtraceRegisters.IDX_RSI],
     regs[PtraceRegisters.IDX_RDX],
-    process.rgid,
-    process.egid,
-    process.sgid,
+    process.credentials.groupIds.real,
+    process.credentials.groupIds.effective,
+    process.credentials.groupIds.saved,
 )
+
+internal fun setReUid(regs: PtraceRegisters, process: Process): Long =
+    changeUserIds(process, regs, res = false)
+
+internal fun setReGid(regs: PtraceRegisters, process: Process): Long =
+    changeGroupIds(process, regs, res = false)
+
+internal fun setResUid(regs: PtraceRegisters, process: Process): Long =
+    changeUserIds(process, regs, res = true)
+
+internal fun setResGid(regs: PtraceRegisters, process: Process): Long =
+    changeGroupIds(process, regs, res = true)
+
+internal fun getGroups(regs: PtraceRegisters, process: Process): Long {
+    val size = regs[PtraceRegisters.IDX_RDI]
+    if (size > Int.MAX_VALUE.toULong()) return errno(Errno.EINVAL)
+    val groups = process.credentials.supplementaryGroups
+    if (size == 0uL) return groups.size.toLong()
+    if (size < groups.size.toULong()) return errno(Errno.EINVAL)
+
+    val output = ByteArray(groups.size * UInt.SIZE_BYTES).also { bytes ->
+        val buffer = LittleEndianBuffer(bytes)
+        groups.forEachIndexed { index, group ->
+            buffer.writeU32(index * UInt.SIZE_BYTES, group.toUInt())
+        }
+    }
+    return if (UserMemory(
+            process.addressSpace,
+            regs[PtraceRegisters.IDX_RSI],
+        ).copyToUser(output)
+    ) {
+        groups.size.toLong()
+    } else {
+        errno(Errno.EFAULT)
+    }
+}
+
+internal fun setGroups(regs: PtraceRegisters, process: Process): Long {
+    val count = regs[PtraceRegisters.IDX_RDI]
+    if (count > NGROUPS_MAX.toULong()) return errno(Errno.EINVAL)
+    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
+    if (!thread.capabilities.hasEffective(CapEnum.SETGID)) return errno(Errno.EPERM)
+    if (count == 0uL) {
+        process.credentials.replaceSupplementaryGroups(emptyList())
+        return 0L
+    }
+
+    val input = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
+        .copyFromUser(count.toInt() * UInt.SIZE_BYTES)
+        ?: return errno(Errno.EFAULT)
+    val buffer = LittleEndianBuffer(input)
+    val groups = ArrayList<Int>(count.toInt())
+    repeat(count.toInt()) { index ->
+        val value = buffer.readU32(index * UInt.SIZE_BYTES)
+        if (value > Int.MAX_VALUE.toUInt()) return errno(Errno.EINVAL)
+        groups += value.toInt()
+    }
+    process.credentials.replaceSupplementaryGroups(groups)
+    return 0L
+}
+
+private fun changeUserIds(
+    process: Process,
+    regs: PtraceRegisters,
+    res: Boolean,
+): Long {
+    val real = LinuxIdArgument.decode(regs[PtraceRegisters.IDX_RDI])
+        ?: return errno(Errno.EINVAL)
+    val effective = LinuxIdArgument.decode(regs[PtraceRegisters.IDX_RSI])
+        ?: return errno(Errno.EINVAL)
+    val saved = if (res) {
+        LinuxIdArgument.decode(regs[PtraceRegisters.IDX_RDX]) ?: return errno(Errno.EINVAL)
+    } else {
+        LinuxIdArgument.Unchanged
+    }
+    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
+    val privileged = thread.capabilities.hasEffective(CapEnum.SETUID)
+    val change = if (res) {
+        process.credentials.setResUserIds(
+            real.value,
+            effective.value,
+            saved.value,
+            privileged,
+        )
+    } else {
+        process.credentials.setReUserIds(real.value, effective.value, privileged)
+    } ?: return errno(Errno.EPERM)
+    thread.capabilities.applyUserIdChange(change)
+    return 0L
+}
+
+private fun changeGroupIds(
+    process: Process,
+    regs: PtraceRegisters,
+    res: Boolean,
+): Long {
+    val real = LinuxIdArgument.decode(regs[PtraceRegisters.IDX_RDI])
+        ?: return errno(Errno.EINVAL)
+    val effective = LinuxIdArgument.decode(regs[PtraceRegisters.IDX_RSI])
+        ?: return errno(Errno.EINVAL)
+    val saved = if (res) {
+        LinuxIdArgument.decode(regs[PtraceRegisters.IDX_RDX]) ?: return errno(Errno.EINVAL)
+    } else {
+        LinuxIdArgument.Unchanged
+    }
+    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
+    val privileged = thread.capabilities.hasEffective(CapEnum.SETGID)
+    val changed = if (res) {
+        process.credentials.setResGroupIds(real.value, effective.value, saved.value, privileged)
+    } else {
+        process.credentials.setReGroupIds(real.value, effective.value, privileged)
+    }
+    return if (changed) 0L else errno(Errno.EPERM)
+}
+
+private val LinuxIdArgument.value: Int?
+    get() = (this as? LinuxIdArgument.Value)?.id
 
 internal fun prctl(regs: PtraceRegisters, process: Process): Long {
     val option = regs[PtraceRegisters.IDX_RDI]
-    val thread = ProcessManager.currentThread() ?: run {
-        println("ERROR: sys_prctl cannot get current thread")
-        return errno(Errno.EINVAL)
-    }
+    val argument = regs[PtraceRegisters.IDX_RSI]
+    val third = regs[PtraceRegisters.IDX_RDX]
+    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
+    val capabilities = thread.capabilities
+    fun capability(value: ULong): Int? = value
+        .takeIf { it <= Int.MAX_VALUE.toULong() }
+        ?.toInt()
+        ?.takeIf(CapabilityState::isValid)
+
     return when (option) {
         PR_GET_DUMPABLE -> if (process.dumpable) 1L else 0L
 
-        PR_SET_DUMPABLE -> when (regs[PtraceRegisters.IDX_RSI]) {
-            0uL -> {
+        PR_SET_DUMPABLE -> when {
+            argument == 0uL -> {
                 process.dumpable = false
                 0L
             }
-            1uL -> {
+            argument == 1uL -> {
                 process.dumpable = true
                 0L
             }
             else -> errno(Errno.EINVAL)
         }
 
-        PR_GET_KEEPCAPS -> if (thread.keepCapabilities) 1L else 0L
+        PR_GET_KEEPCAPS -> if (capabilities.keepAcrossUserIdChange) 1L else 0L
 
-        PR_SET_KEEPCAPS -> when (regs[PtraceRegisters.IDX_RSI]) {
-            0uL -> {
-                thread.keepCapabilities = false
+        PR_SET_KEEPCAPS -> when {
+            argument == 0uL -> {
+                capabilities.keepAcrossUserIdChange = false
                 0L
             }
-            1uL -> {
-                thread.keepCapabilities = true
+            argument == 1uL -> {
+                capabilities.keepAcrossUserIdChange = true
                 0L
             }
             else -> errno(Errno.EINVAL)
         }
 
-        PR_GET_NO_NEW_PRIVS -> if (thread.noNewPrivileges) 1L else 0L
+        PR_CAPBSET_READ -> {
+            val requested = capability(argument) ?: return errno(Errno.EINVAL)
+            if (capabilities.containsBounding(requested)) 1L else 0L
+        }
 
-        PR_SET_NO_NEW_PRIVS -> if (regs[PtraceRegisters.IDX_RSI] == 1uL) {
-            thread.noNewPrivileges = true
+        PR_CAPBSET_DROP -> {
+            val requested = capability(argument) ?: return errno(Errno.EINVAL)
+            if (!capabilities.hasEffective(CapEnum.SETPCAP)) return errno(Errno.EPERM)
+            capabilities.dropBounding(requested)
+            0L
+        }
+
+        PR_GET_NO_NEW_PRIVS -> if (capabilities.noNewPrivileges) 1L else 0L
+
+        PR_SET_NO_NEW_PRIVS -> if (argument == 1uL) {
+            capabilities.noNewPrivileges = true
             0L
         } else {
             errno(Errno.EINVAL)
         }
 
+        PR_CAP_AMBIENT -> {
+            when (argument) {
+                PR_CAP_AMBIENT_CLEAR_ALL -> {
+                    if (third != 0uL) return errno(Errno.EINVAL)
+                    capabilities.clearAmbient()
+                    0L
+                }
+
+                PR_CAP_AMBIENT_IS_SET,
+                PR_CAP_AMBIENT_RAISE,
+                PR_CAP_AMBIENT_LOWER -> {
+                    val requested = capability(third) ?: return errno(Errno.EINVAL)
+                    when (argument) {
+                        PR_CAP_AMBIENT_IS_SET ->
+                            if (capabilities.containsAmbient(requested)) 1L else 0L
+                        PR_CAP_AMBIENT_RAISE ->
+                            if (capabilities.raiseAmbient(requested)) 0L else errno(Errno.EPERM)
+                        else -> {
+                            capabilities.lowerAmbient(requested)
+                            0L
+                        }
+                    }
+                }
+
+                else -> errno(Errno.EINVAL)
+            }
+        }
+
         PR_GET_NAME -> {
-            val userName = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
-            val raw = thread.name.encodeToByteArray()
-            if (!userName.copyToUser(raw)) return errno(Errno.EFAULT)
-            errno(Errno.EOK)
+            val encoded = thread.name.encodeToByteArray()
+            val output = ByteArray(PR_NAME_SIZE)
+            encoded.copyInto(output, endIndex = minOf(encoded.size, PR_NAME_SIZE - 1))
+            if (UserMemory(process.addressSpace, argument).copyToUser(output)) 0L
+            else errno(Errno.EFAULT)
         }
 
         PR_SET_NAME -> {
-            val userName = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
-            val raw = userName.copyCStringFromUser(4096) ?: return errno(Errno.EFAULT)
-            val str = raw.decodeToString()
-            thread.name = str
-            errno(Errno.EOK)
+            val raw = UserMemory(process.addressSpace, argument).copyFromUser(PR_NAME_SIZE)
+                ?: return errno(Errno.EFAULT)
+            val length = raw.indexOf(0).let { index ->
+                if (index < 0) PR_NAME_SIZE - 1 else minOf(index, PR_NAME_SIZE - 1)
+            }
+            thread.name = raw.copyOf(length).decodeToString()
+            0L
         }
 
-        else -> errno(Errno.ENOSYS)
+        else -> errno(Errno.EINVAL)
     }
 }
 
@@ -433,7 +607,7 @@ internal fun execve(regs: PtraceRegisters, process: Process): Long {
     process.signals.resetForExec()
     ProcessManager.currentThread()?.let { thread ->
         thread.signals.replaceStack(SignalStack.DISABLED)
-        thread.keepCapabilities = false
+        thread.capabilities.keepAcrossUserIdChange = false
     }
 
     regs[PtraceRegisters.IDX_RIP] = image.entryPoint
@@ -523,14 +697,15 @@ internal fun capGet(regs: PtraceRegisters, process: Process): Long {
     val dataMem = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
 
     val header = CapHeader(0u, 0).apply { updateFromNativeBytes(headByte) }
-    val task =
-        if (header.pid == 0) ProcessManager.currentThread()!!
-        else (ProcessManager.findThread(header.pid)
-            ?: return errno(Errno.ESRCH))
+    val task = if (header.pid == 0) {
+        ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
+    } else {
+        ProcessManager.findThread(header.pid) ?: return errno(Errno.ESRCH)
+    }
     val count = CapManager.capabilityCount(header.version)
     if (count == errno(Errno.EINVAL).toInt()) {
         header.version = LINUX_CAPABILITY_VERSION_3
-        if(!headMem.copyToUser(header.toNativeBytes())) return errno(Errno.EFAULT)
+        if (!headMem.copyToUser(header.toNativeBytes())) return errno(Errno.EFAULT)
         return count.toLong()
     }
 
@@ -538,14 +713,15 @@ internal fun capGet(regs: PtraceRegisters, process: Process): Long {
         Capabilities(0u, 0u, 0u)
     }
 
-    array[0].effective = (task.effective and UInt.MAX_VALUE.toULong()).toUInt()
-    array[0].permitted = (task.permitted and UInt.MAX_VALUE.toULong()).toUInt()
-    array[0].inheritable = (task.inheritable and UInt.MAX_VALUE.toULong()).toUInt()
+    val capabilities = task.capabilities
+    array[0].effective = (capabilities.effective and UInt.MAX_VALUE.toULong()).toUInt()
+    array[0].permitted = (capabilities.permitted and UInt.MAX_VALUE.toULong()).toUInt()
+    array[0].inheritable = (capabilities.inheritable and UInt.MAX_VALUE.toULong()).toUInt()
 
     if (count > 1) {
-        array[1].effective = (task.effective shr 32).toUInt()
-        array[1].permitted = (task.permitted shr 32).toUInt()
-        array[1].inheritable = (task.inheritable shr 32).toUInt()
+        array[1].effective = (capabilities.effective shr 32).toUInt()
+        array[1].permitted = (capabilities.permitted shr 32).toUInt()
+        array[1].inheritable = (capabilities.inheritable shr 32).toUInt()
     }
 
     if (!dataMem.copyNativeStructArrayToUser(array)) return errno(Errno.EFAULT)
@@ -561,14 +737,12 @@ internal fun capSet(regs: PtraceRegisters, process: Process): Long {
     val dataMem = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
 
     val header = CapHeader(0u, 0).apply { updateFromNativeBytes(headByte) }
-    val task =
-        if (header.pid == 0) ProcessManager.currentThread()!!
-        else (ProcessManager.findThread(header.pid)
-            ?: return errno(Errno.ESRCH))
+    val task = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
+    if (header.pid != 0 && header.pid != task.id) return errno(Errno.EPERM)
     val count = CapManager.capabilityCount(header.version)
     if (count == errno(Errno.EINVAL).toInt()) {
         header.version = LINUX_CAPABILITY_VERSION_3
-        if(!headMem.copyToUser(header.toNativeBytes())) return errno(Errno.EFAULT)
+        if (!headMem.copyToUser(header.toNativeBytes())) return errno(Errno.EFAULT)
         return count.toLong()
     }
 

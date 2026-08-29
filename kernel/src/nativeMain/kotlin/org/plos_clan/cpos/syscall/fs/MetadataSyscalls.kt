@@ -239,7 +239,7 @@ private fun changeMode(
     }
 
     var mode = rawMode.toUInt() and S_IALLUGO
-    if (!caller.privileged && metadata.gid != caller.gid) {
+    if (!caller.privileged && !caller.belongsToGroup(metadata.gid)) {
         mode = mode and S_ISGID.inv()
     }
     return when (val result = FileSystemManager.vfs.setMode(
@@ -524,9 +524,9 @@ private fun accessAt(
 }
 
 private fun Process.accessContext(effective: Boolean) = vfsOperationContext.copy(
-    uid = (if (effective) euid else ruid).toUInt(),
-    gid = (if (effective) egid else rgid).toUInt(),
-    privileged = (if (effective) euid else ruid) == 0,
+    uid = (if (effective) credentials.userIds.effective else credentials.userIds.real).toUInt(),
+    gid = (if (effective) credentials.groupIds.effective else credentials.groupIds.real).toUInt(),
+    privileged = (if (effective) credentials.userIds.effective else credentials.userIds.real) == 0,
 )
 
 internal fun newFstatAt(regs: PtraceRegisters, process: Process): Long {

@@ -1,3 +1,5 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package org.plos_clan.cpos.fs.vfs
 
 import org.plos_clan.cpos.mem.PreparedBufferDestination
@@ -7,6 +9,7 @@ import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
+import kotlin.concurrent.atomics.AtomicInt
 
 internal class EventFd(
     initialValue: UInt,
@@ -21,11 +24,15 @@ internal class EventFd(
     private val transfer = ByteArray(VALUE_BYTES)
     private val readWaiters = IoWaitQueue()
     private val writeWaiters = IoWaitQueue()
+    private val version = AtomicInt(0)
     private var value = initialValue.toULong()
 
     override val type = InodeType.EVENTFD
     override val ioSize: Int
         get() = VALUE_BYTES
+
+    override val readinessVersion: Int
+        get() = version.load()
 
     override fun open(
         caller: VfsOperationContext,
@@ -71,6 +78,7 @@ internal class EventFd(
                     return@withLock IoResult.failure(VfsError.FAULT)
                 }
                 value -= resultValue
+                version.fetchAndAdd(1)
                 writeWaiters.wakeAll()
                 if (semaphore && value != 0uL) readWaiters.wakeOne()
                 IoResult.success(VALUE_BYTES)
@@ -107,6 +115,7 @@ internal class EventFd(
                 if (increment <= MAX_VALUE - value) {
                     val wasEmpty = value == 0uL
                     value += increment
+                    version.fetchAndAdd(1)
                     if (wasEmpty && value != 0uL) readWaiters.wakeOne()
                     return@withLock IoResult.success(VALUE_BYTES)
                 }

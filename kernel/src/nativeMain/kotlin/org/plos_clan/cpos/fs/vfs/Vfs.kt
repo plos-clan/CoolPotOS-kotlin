@@ -46,6 +46,17 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         InodeMetadata(mode = FileMode(0x180u), linkCount = 1u),
     )
 
+    internal fun createEpoll(
+        caller: VfsOperationContext,
+        context: FileSystemContext,
+    ): VfsResult<OpenFileDescription> = anonymousFiles.open(
+        caller,
+        context,
+        Epoll(),
+        OpenOptions(access = AccessMode.READ_WRITE),
+        InodeMetadata(mode = FileMode(0x180u), linkCount = 1u),
+    )
+
     internal fun createUnixSocket(
         caller: VfsOperationContext,
         context: FileSystemContext,

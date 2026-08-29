@@ -484,12 +484,14 @@ internal object SocketControlMessages {
     )
 
     private fun credentialsAllowed(process: Process, credentials: UnixCredentials): Boolean {
-        if (process.euid == 0) return true
+        val processCredentials = process.credentials
+        if (processCredentials.userIds.effective == 0) return true
         val userId = credentials.userId.toInt()
         val groupId = credentials.groupId.toInt()
-        val validUser = userId == process.ruid || userId == process.euid || userId == process.suid
-        val validGroup = groupId == process.rgid || groupId == process.egid ||
-            groupId == process.sgid
+        val validUser = userId == processCredentials.userIds.real ||
+            userId == processCredentials.userIds.effective || userId == processCredentials.userIds.saved
+        val validGroup = groupId == processCredentials.groupIds.real ||
+            groupId == processCredentials.groupIds.effective || groupId == processCredentials.groupIds.saved
         return credentials.processId == process.id && validUser && validGroup
     }
 

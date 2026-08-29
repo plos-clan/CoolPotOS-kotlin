@@ -414,8 +414,8 @@ internal abstract class UnixSocket(
 
     private fun credentials(process: Process): UnixCredentials = UnixCredentials(
         process.id,
-        process.euid.toUInt(),
-        process.egid.toUInt(),
+        process.credentials.userIds.effective.toUInt(),
+        process.credentials.groupIds.effective.toUInt(),
     )
 }
 

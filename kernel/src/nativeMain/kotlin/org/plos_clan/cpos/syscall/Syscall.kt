@@ -8,6 +8,7 @@ import kotlinx.cinterop.reinterpret
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.module.Vdso
 import org.plos_clan.cpos.syscall.fs.EventFdSyscalls
+import org.plos_clan.cpos.syscall.fs.EpollSyscalls
 import org.plos_clan.cpos.syscall.fs.access
 import org.plos_clan.cpos.syscall.fs.chdir
 import org.plos_clan.cpos.syscall.fs.chmod
@@ -81,6 +82,7 @@ import org.plos_clan.cpos.syscall.fs.setxattr
 import org.plos_clan.cpos.syscall.fs.stat
 import org.plos_clan.cpos.syscall.fs.statfs
 import org.plos_clan.cpos.syscall.fs.statx
+import org.plos_clan.cpos.syscall.fs.splice
 import org.plos_clan.cpos.syscall.fs.symlink
 import org.plos_clan.cpos.syscall.fs.symlinkAt
 import org.plos_clan.cpos.syscall.fs.truncate
@@ -199,7 +201,13 @@ private enum class LinuxSyscall(
     GETPPID(110, ::getPpid),
     GETPGRP(111, ::getPgrp),
     SETSID(112, ::setSid),
+    SETREUID(113, ::setReUid),
+    SETREGID(114, ::setReGid),
+    GETGROUPS(115, ::getGroups),
+    SETGROUPS(116, ::setGroups),
+    SETRESUID(117, ::setResUid),
     GETRESUID(118, ::getResUid),
+    SETRESGID(119, ::setResGid),
     GETRESGID(120, ::getResGid),
     SETFSUID(122, ::setFsUid),
     SETFSGID(123, ::setFsGid),
@@ -237,12 +245,15 @@ private enum class LinuxSyscall(
     TIME(201, ::time),
     FUTEX(202, Futex::handle, restartable = true),
     G_AFFINITY(204, ::schedGetAffinity),
+    EPOLL_CREATE(213, EpollSyscalls::create),
     GETDENTS64(217, ::getdents64),
     SET_TID_ADDRESS(218, ::setTidAddress),
     FADVISE64(221, ::fadvise64),
     CLOCK_GETTIME(228, ::clockGetTime),
     CLOCK_GETRES(229, ::clockGetRes),
     EXIT_GROUP(231, ::exitGroup),
+    EPOLL_WAIT(232, EpollSyscalls::wait),
+    EPOLL_CTL(233, EpollSyscalls::control),
     TGKILL(234, SignalSyscalls::tgkill),
     OPENAT(257, ::openAt, restartable = true),
     MKDIRAT(258, ::mkdirAt),
@@ -259,10 +270,13 @@ private enum class LinuxSyscall(
     PSELECT6(270, ::pselect6),
     PPOLL(271, ::ppoll),
     SET_ROBUST_LIST(273, ::setRobustList),
+    SPLICE(275, ::splice, restartable = true),
     UTIMENSAT(280, ::utimensAt),
+    EPOLL_PWAIT(281, EpollSyscalls::pwait),
     FALLOCATE(285, ::fallocate),
     ACCEPT4(288, SocketSyscalls::accept4, restartable = true),
     EVENTFD2(290, EventFdSyscalls::eventfd2),
+    EPOLL_CREATE1(291, EpollSyscalls::create1),
     PIPE2(293, ::pipe2),
     RT_TGSIGQUEUEINFO(297, SignalSyscalls::rtTgsigqueueinfo),
     RECVMMSG(299, SocketSyscalls::recvmmsg, restartable = true),
@@ -278,6 +292,7 @@ private enum class LinuxSyscall(
     CLONE3(435, ::clone3),
     CLOSE_RANGE(436, ::closeRange),
     FACCESSAT2(439, ::faccessAt2),
+    EPOLL_PWAIT2(441, EpollSyscalls::pwait2),
     FCHMODAT2(452, ::fchmodAt2),
 }
 

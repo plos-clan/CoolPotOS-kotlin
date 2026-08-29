@@ -114,12 +114,7 @@ private data class Request(
             if (!threadClone) ProcessManager.discardUserProcess(child)
             return errno(Errno.ENOMEM)
         }
-        childThread.effective = current.effective
-        childThread.permitted = current.permitted
-        childThread.inheritable = current.inheritable
-        childThread.ambient = current.ambient
-        childThread.keepCapabilities = current.keepCapabilities
-        childThread.noNewPrivileges = current.noNewPrivileges
+        childThread.capabilities.inherit(current.capabilities)
 
         val tid = ByteArray(Int.SIZE_BYTES).also { bytes ->
             LittleEndianBuffer(bytes).writeU32(0, childThread.id.toUInt())

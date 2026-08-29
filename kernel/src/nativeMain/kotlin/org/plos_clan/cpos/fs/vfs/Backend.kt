@@ -161,7 +161,7 @@ interface InodeBackend {
 
         val shift = when {
             caller.uid == metadata.uid -> 6
-            caller.gid == metadata.gid -> 3
+            caller.belongsToGroup(metadata.gid) -> 3
             else -> 0
         }
         val allowed = metadata.mode.bits shr shift and 0x7u
@@ -430,6 +430,9 @@ interface FileContent {
 }
 
 interface OpenFileBackend {
+    val readinessVersion: Int
+        get() = 0
+
     val seekable: Boolean
         get() = true
 
@@ -666,4 +669,28 @@ interface WaitableOpenFileBackend : PositionlessOpenFileBackend {
     ): IoResult = write(caller, inode, source, sourceOffset, count, IoMode.BLOCKING)
 
     fun await(event: IoEvent, count: Int): Boolean
+}
+
+internal interface SpliceSourceOpenFileBackend : OpenFileBackend {
+    fun spliceTo(
+        caller: VfsOperationContext,
+        inode: Inode,
+        destination: OpenFileDescription,
+        destinationOffset: ULong?,
+        count: Int,
+        sourceMode: IoMode,
+        destinationMode: IoMode,
+    ): IoResult
+}
+
+internal interface SpliceDestinationOpenFileBackend : OpenFileBackend {
+    fun spliceFrom(
+        caller: VfsOperationContext,
+        inode: Inode,
+        source: OpenFileDescription,
+        sourceOffset: ULong?,
+        count: Int,
+        sourceMode: IoMode,
+        destinationMode: IoMode,
+    ): IoResult
 }

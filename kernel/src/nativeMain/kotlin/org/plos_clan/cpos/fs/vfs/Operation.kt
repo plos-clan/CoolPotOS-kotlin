@@ -4,9 +4,13 @@ data class VfsOperationContext(
     val uid: UInt,
     val gid: UInt,
     val processId: UInt,
+    val supplementaryGroups: List<Int> = emptyList(),
     val fileCreationMask: UInt = 0u,
     val privileged: Boolean = uid == 0u,
 ) {
+    fun belongsToGroup(group: UInt): Boolean = group == gid ||
+        group <= Int.MAX_VALUE.toUInt() && group.toInt() in supplementaryGroups
+
     companion object {
         val KERNEL = VfsOperationContext(0u, 0u, 0u, privileged = true)
     }

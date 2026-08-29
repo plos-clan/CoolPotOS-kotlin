@@ -161,8 +161,8 @@ internal class ProcfsInstance : SuperBlockBackend {
                 InodeMetadata(
                     mode = FileMode(mode),
                     linkCount = 2u,
-                    uid = owner?.euid?.toUInt() ?: 0u,
-                    gid = owner?.egid?.toUInt() ?: 0u,
+                    uid = owner?.credentials?.userIds?.effective?.toUInt() ?: 0u,
+                    gid = owner?.credentials?.groupIds?.effective?.toUInt() ?: 0u,
                     timestamps = InodeTimestamps.fromModificationTime(VfsTimestamp.now()),
                 ),
             ),
@@ -185,8 +185,8 @@ internal class ProcfsInstance : SuperBlockBackend {
             InodeAttributes(
                 InodeMetadata(
                     mode = FileMode(mode),
-                    uid = owner?.euid?.toUInt() ?: 0u,
-                    gid = owner?.egid?.toUInt() ?: 0u,
+                    uid = owner?.credentials?.userIds?.effective?.toUInt() ?: 0u,
+                    gid = owner?.credentials?.groupIds?.effective?.toUInt() ?: 0u,
                     timestamps = InodeTimestamps.fromModificationTime(VfsTimestamp.now()),
                 ),
             ),
@@ -208,8 +208,8 @@ internal class ProcfsInstance : SuperBlockBackend {
             InodeAttributes(
                 InodeMetadata(
                     mode = FileMode(mode),
-                    uid = owner?.euid?.toUInt() ?: 0u,
-                    gid = owner?.egid?.toUInt() ?: 0u,
+                    uid = owner?.credentials?.userIds?.effective?.toUInt() ?: 0u,
+                    gid = owner?.credentials?.groupIds?.effective?.toUInt() ?: 0u,
                     timestamps = InodeTimestamps.fromModificationTime(VfsTimestamp.now()),
                 ),
             ),

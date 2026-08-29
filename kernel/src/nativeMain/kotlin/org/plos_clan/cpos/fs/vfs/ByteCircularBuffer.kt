@@ -1,9 +1,19 @@
 package org.plos_clan.cpos.fs.vfs
 
+import kotlinx.cinterop.CPointer
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.UByteVar
+import kotlinx.cinterop.addressOf
+import kotlinx.cinterop.plus
+import kotlinx.cinterop.usePinned
+import org.plos_clan.cpos.mem.BufferDestination
+import org.plos_clan.cpos.mem.BufferSource
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
+import platform.posix.memcpy
 
-internal class ByteCircularBuffer(capacity: Int) {
+@OptIn(ExperimentalForeignApi::class)
+internal class ByteCircularBuffer(capacity: Int) : BufferSource {
     private var bytes = ByteArray(capacity)
     private var readOffset = 0
     private var writeOffset = 0
@@ -19,6 +29,32 @@ internal class ByteCircularBuffer(capacity: Int) {
 
     init {
         require(capacity > 0)
+    }
+
+    override fun prepareRead(offset: Int, count: Int): PreparedBufferSource? =
+        if (offset >= 0 && count >= 0 && offset <= size - count) {
+            PreparedBufferSource(this)
+        } else {
+            null
+        }
+
+    override fun copyTo(
+        sourceOffset: Int,
+        destination: ByteArray,
+        destinationOffset: Int,
+        count: Int,
+    ): Int {
+        require(sourceOffset >= 0 && count >= 0 && sourceOffset <= size - count)
+        require(
+            destinationOffset >= 0 && destinationOffset <= destination.size - count,
+        )
+        val start = (readOffset + sourceOffset) % capacity
+        val firstChunk = minOf(count, capacity - start)
+        bytes.copyInto(destination, destinationOffset, start, start + firstChunk)
+        if (firstChunk != count) {
+            bytes.copyInto(destination, destinationOffset + firstChunk, 0, count - firstChunk)
+        }
+        return count
     }
 
     fun read(
@@ -76,5 +112,76 @@ internal class ByteCircularBuffer(capacity: Int) {
         bytes = replacement
         readOffset = 0
         writeOffset = size
+    }
+
+    fun reserveWrite(count: Int): WriteReservation {
+        require(count in 0..remaining)
+        return WriteReservation(writeOffset, count)
+    }
+
+    inner class WriteReservation internal constructor(
+        private val start: Int,
+        val capacity: Int,
+    ) : BufferDestination {
+        val destination = PreparedBufferDestination(this)
+
+        override fun prepareWrite(offset: Int, count: Int): PreparedBufferDestination? =
+            if (validRange(offset, count)) destination else null
+
+        override fun copyFrom(
+            destinationOffset: Int,
+            source: ByteArray,
+            sourceOffset: Int,
+            count: Int,
+        ): Int {
+            require(validRange(destinationOffset, count))
+            require(sourceOffset >= 0 && sourceOffset <= source.size - count)
+            val target = (start + destinationOffset) % this@ByteCircularBuffer.capacity
+            val firstChunk = minOf(count, this@ByteCircularBuffer.capacity - target)
+            source.copyInto(bytes, target, sourceOffset, sourceOffset + firstChunk)
+            if (firstChunk != count) {
+                source.copyInto(bytes, 0, sourceOffset + firstChunk, sourceOffset + count)
+            }
+            return count
+        }
+
+        override fun copyFrom(
+            destinationOffset: Int,
+            source: CPointer<UByteVar>,
+            count: Int,
+        ): Int {
+            require(validRange(destinationOffset, count))
+            val target = (start + destinationOffset) % this@ByteCircularBuffer.capacity
+            val firstChunk = minOf(count, this@ByteCircularBuffer.capacity - target)
+            bytes.usePinned { destination ->
+                memcpy(destination.addressOf(target), source, firstChunk.toULong())
+                if (firstChunk != count) {
+                    memcpy(
+                        destination.addressOf(0),
+                        requireNotNull(source + firstChunk),
+                        (count - firstChunk).toULong(),
+                    )
+                }
+            }
+            return count
+        }
+
+        override fun fill(destinationOffset: Int, count: Int, value: Byte): Int {
+            require(validRange(destinationOffset, count))
+            val target = (start + destinationOffset) % this@ByteCircularBuffer.capacity
+            val firstChunk = minOf(count, this@ByteCircularBuffer.capacity - target)
+            bytes.fill(value, target, target + firstChunk)
+            if (firstChunk != count) bytes.fill(value, 0, count - firstChunk)
+            return count
+        }
+
+        fun commit(count: Int) {
+            require(count in 0..capacity && start == writeOffset)
+            writeOffset = (writeOffset + count) % this@ByteCircularBuffer.capacity
+            size += count
+        }
+
+        private fun validRange(offset: Int, count: Int): Boolean =
+            offset >= 0 && count >= 0 && offset <= capacity - count
     }
 }

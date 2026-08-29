@@ -147,14 +147,7 @@ class Thread internal constructor(
     internal val signals: ThreadSignalState = process.signals.newThread(),
     var name: String = "",
     val affinityMask: ULong = 0UL,
-
-    // cap
-    var effective: ULong = TASK_CAP_FULL_MASK,
-    var permitted: ULong = TASK_CAP_FULL_MASK,
-    var inheritable: ULong = 0UL,
-    var ambient: ULong = 0UL,
-    var keepCapabilities: Boolean = false,
-    var noNewPrivileges: Boolean = false,
+    val capabilities: CapabilityState = CapabilityState(),
 ) {
     private val scheduledCpu = AtomicLong(-1)
 
@@ -278,14 +271,7 @@ class Process internal constructor(
     val isKernelProcess: Boolean,
     addressSpace: AddressSpace,
     var context: FileSystemContext?,
-    var ruid: Int = 0,
-    var euid: Int = 0,
-    var suid: Int = 0,
-    var fsuid: Int = euid,
-    var egid: Int = 0,
-    var rgid: Int = 0,
-    var sgid: Int = 0,
-    var fsgid: Int = egid,
+    val credentials: Credentials = Credentials(),
     var fileCreationMask: UInt = 0x12u,
     var dumpable: Boolean = true,
     val parentId: Int = 0,
@@ -295,11 +281,12 @@ class Process internal constructor(
 ) {
     val vfsOperationContext: VfsOperationContext
         get() = VfsOperationContext(
-            uid = fsuid.toUInt(),
-            gid = fsgid.toUInt(),
+            uid = credentials.userIds.filesystem.toUInt(),
+            gid = credentials.groupIds.filesystem.toUInt(),
+            supplementaryGroups = credentials.supplementaryGroups,
             processId = id.toUInt(),
             fileCreationMask = fileCreationMask,
-            privileged = euid == 0,
+            privileged = credentials.userIds.effective == 0,
         )
 
     private val vforkCompletion = vforkParent?.let(::VforkCompletion)
@@ -328,7 +315,7 @@ class Process internal constructor(
         set(value) = processState.store(value)
     val resourceLimits = ProcessLimits()
     internal val signals = ProcessSignalState(
-        uid = { ruid },
+        uid = { credentials.userIds.real },
         limit = { resourceLimits.get(ProcessResource.PENDING_SIGNALS).soft },
     )
     internal val childEvents = ChildWaitQueue()
@@ -348,52 +335,6 @@ class Process internal constructor(
         "Filesystem context is unavailable before VFS initialization"
     }
 
-    fun setFilesystemUid(requested: Int?): Int {
-        val previous = fsuid
-        if (requested != null &&
-            (euid == 0 || requested == ruid || requested == euid ||
-                    requested == suid || requested == fsuid)
-        ) {
-            fsuid = requested
-        }
-        return previous
-    }
-
-    fun setUserId(requested: Int): Boolean {
-        val privileged = euid == 0
-        if (!privileged && requested != ruid && requested != suid) return false
-        if (privileged) {
-            ruid = requested
-            suid = requested
-        }
-        euid = requested
-        fsuid = requested
-        return true
-    }
-
-    fun setFilesystemGid(requested: Int?): Int {
-        val previous = fsgid
-        if (requested != null &&
-            (euid == 0 || requested == rgid || requested == egid ||
-                    requested == sgid || requested == fsgid)
-        ) {
-            fsgid = requested
-        }
-        return previous
-    }
-
-    fun setGroupId(requested: Int): Boolean {
-        val privileged = euid == 0
-        if (!privileged && requested != rgid && requested != sgid) return false
-        if (privileged) {
-            rgid = requested
-            sgid = requested
-        }
-        egid = requested
-        fsgid = requested
-        return true
-    }
-
     internal fun establishSession() {
         membershipState.store(ProcessMembership(id, id))
     }
@@ -403,14 +344,7 @@ class Process internal constructor(
     }
 
     internal fun inherit(parent: Process) {
-        ruid = parent.ruid
-        euid = parent.euid
-        suid = parent.suid
-        fsuid = parent.fsuid
-        rgid = parent.rgid
-        egid = parent.egid
-        sgid = parent.sgid
-        fsgid = parent.fsgid
+        credentials.inherit(parent.credentials)
         fileCreationMask = parent.fileCreationMask
         dumpable = parent.dumpable
         membershipState.store(parent.membership)
@@ -688,7 +622,7 @@ object ProcessManager {
                     },
                     payload = SignalPayload.Child(
                         pid = process.id,
-                        uid = process.ruid,
+                        uid = process.credentials.userIds.real,
                         status = if (termination == 0) waitStatus ushr 8 and 0xff else termination,
                     ),
                 ),
@@ -751,7 +685,7 @@ object ProcessManager {
                 code = infoCode,
                 payload = SignalPayload.Child(
                     pid = process.id,
-                    uid = process.ruid,
+                    uid = process.credentials.userIds.real,
                     status = infoStatus,
                 ),
             ),

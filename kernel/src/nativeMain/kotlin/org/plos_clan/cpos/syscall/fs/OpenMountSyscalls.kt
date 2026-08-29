@@ -190,7 +190,7 @@ internal fun close(regs: PtraceRegisters, process: Process): Long {
 }
 
 internal fun mount(regs: PtraceRegisters, process: Process): Long {
-    if (process.euid != 0) return errno(Errno.EPERM)
+    if (process.credentials.userIds.effective != 0) return errno(Errno.EPERM)
 
     val target = copyPath(process, regs[PtraceRegisters.IDX_RSI])
         ?: return errno(Errno.EFAULT)
@@ -246,7 +246,7 @@ internal fun mount(regs: PtraceRegisters, process: Process): Long {
 }
 
 internal fun umount2(regs: PtraceRegisters, process: Process): Long {
-    if (process.euid != 0) return errno(Errno.EPERM)
+    if (process.credentials.userIds.effective != 0) return errno(Errno.EPERM)
 
     val flags = LinuxUnmountFlags.fromBits(regs[PtraceRegisters.IDX_RSI])
         ?: return errno(Errno.EINVAL)

@@ -157,7 +157,7 @@ internal data class SignalInfo(
         ) = SignalInfo(
             signal = signal,
             code = code,
-            payload = SignalPayload.Sender(pid, process.ruid, value),
+            payload = SignalPayload.Sender(pid, process.credentials.userIds.real, value),
         )
     }
 }
@@ -619,9 +619,11 @@ internal object SignalRouter {
     }
 
     private fun permitted(sender: Process, target: Process, signal: Signal?): Boolean =
-        sender === target || sender.euid == 0 ||
-            sender.ruid == target.ruid || sender.ruid == target.suid ||
-            sender.euid == target.ruid || sender.euid == target.suid ||
+        sender === target || sender.credentials.userIds.effective == 0 ||
+            sender.credentials.userIds.real == target.credentials.userIds.real ||
+            sender.credentials.userIds.real == target.credentials.userIds.saved ||
+            sender.credentials.userIds.effective == target.credentials.userIds.real ||
+            sender.credentials.userIds.effective == target.credentials.userIds.saved ||
             signal == Signal.CONTINUE && sender.sessionId == target.sessionId
 
     fun sendProcess(

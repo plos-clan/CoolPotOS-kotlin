@@ -63,4 +63,54 @@ class PipeBufferTest {
         assertEquals(4, buffer.read(assertNotNull(ByteArrayBuffer(output).prepareWrite(0, 4)), 0, 4))
         assertContentEquals(byteArrayOf(2, 3, 4, 5), output)
     }
+
+    @Test
+    fun preparedSourceReadsWrappedContentsWithoutConsumingThem() {
+        val buffer = ByteCircularBuffer(5)
+        val discarded = ByteArray(3)
+        val output = ByteArray(4)
+        val first = ByteArrayBuffer(byteArrayOf(1, 2, 3, 4, 5))
+        val second = ByteArrayBuffer(byteArrayOf(6, 7, 8))
+
+        assertEquals(5, buffer.write(assertNotNull(first.prepareRead(0, 5)), 0, 5))
+        assertEquals(
+            3,
+            buffer.read(
+                assertNotNull(ByteArrayBuffer(discarded).prepareWrite(0, 3)),
+                0,
+                3,
+            ),
+        )
+        assertEquals(3, buffer.write(assertNotNull(second.prepareRead(0, 3)), 0, 3))
+
+        val source = assertNotNull(buffer.prepareRead(0, 4))
+        assertEquals(4, source.copyTo(0, output, 0, 4))
+        assertContentEquals(byteArrayOf(4, 5, 6, 7), output)
+        assertEquals(5, buffer.size)
+    }
+
+    @Test
+    fun writeReservationPublishesOnlyCommittedBytes() {
+        val buffer = ByteCircularBuffer(5)
+        val initial = ByteArrayBuffer(byteArrayOf(1, 2, 3))
+        val appended = byteArrayOf(4, 5)
+        val output = ByteArray(4)
+
+        assertEquals(3, buffer.write(assertNotNull(initial.prepareRead(0, 3)), 0, 3))
+        val reservation = buffer.reserveWrite(2)
+        assertEquals(2, reservation.destination.copyFrom(0, appended, 0, appended.size))
+        assertEquals(3, buffer.size)
+        reservation.commit(1)
+        assertEquals(4, buffer.size)
+
+        assertEquals(
+            4,
+            buffer.read(
+                assertNotNull(ByteArrayBuffer(output).prepareWrite(0, output.size)),
+                0,
+                output.size,
+            ),
+        )
+        assertContentEquals(byteArrayOf(1, 2, 3, 4), output)
+    }
 }
