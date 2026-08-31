@@ -240,15 +240,15 @@ internal object NetlinkCodec {
     const val HEADER_SIZE = 16
     const val ATTRIBUTE_HEADER_SIZE = 4
 
-    fun decode(bytes: ByteArray): List<NetlinkMessage>? {
+    fun decode(bytes: ByteArray): List<NetlinkMessage> {
         val input = LittleEndianBuffer(bytes)
-        val messages = mutableListOf<NetlinkMessage>()
+        val messages = ArrayList<NetlinkMessage>(1)
         var offset = 0
         while (bytes.size - offset >= HEADER_SIZE) {
-            val unsignedLength = input.readU32(offset).toLong()
             val remaining = bytes.size - offset
-            if (unsignedLength < HEADER_SIZE || unsignedLength > remaining) return null
-            val length = unsignedLength.toInt()
+            val encodedLength = input.readU32(offset)
+            if (encodedLength < HEADER_SIZE.toUInt() || encodedLength > remaining.toUInt()) break
+            val length = encodedLength.toInt()
             messages += NetlinkMessage(
                 input.readU16(offset + 4),
                 input.readU16(offset + 6),
@@ -257,13 +257,7 @@ internal object NetlinkCodec {
                 NetlinkBuffer(bytes, offset + HEADER_SIZE, length - HEADER_SIZE),
                 NetlinkBuffer(bytes, offset, length),
             )
-            val aligned = align(length)
-            if (aligned > remaining) {
-                if (length != remaining) return null
-                offset = bytes.size
-            } else {
-                offset += aligned
-            }
+            offset += minOf(align(length), remaining)
         }
         return messages
     }

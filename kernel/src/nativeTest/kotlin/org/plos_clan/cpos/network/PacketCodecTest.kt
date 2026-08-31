@@ -125,9 +125,9 @@ class PacketCodecTest {
         )
         val payload = NetlinkCodec.payload(ByteArray(4), attributes)
         val message = NetlinkCodec.encode(24, 0x301, 99u, payload = payload)
-        val decoded = assertNotNull(NetlinkCodec.decode(message)).single()
+        val decoded = NetlinkCodec.decode(message).single()
         val reply = NetlinkCodec.encode(24, 0x301, 99u, 4242u, payload)
-        val decodedReply = assertNotNull(NetlinkCodec.decode(reply)).single()
+        val decodedReply = NetlinkCodec.decode(reply).single()
         val decodedAttributes = assertNotNull(decoded.attributes(4))
 
         assertContentEquals(byteArrayOf(7), requireNotNull(decodedAttributes[1]).payload.copy())
@@ -150,7 +150,7 @@ class PacketCodecTest {
             ),
         )
         val message = NetlinkCodec.encode(16, 0, 1u, payload = payload)
-        val attributes = assertNotNull(assertNotNull(NetlinkCodec.decode(message)).single().attributes())
+        val attributes = assertNotNull(NetlinkCodec.decode(message).single().attributes())
 
         assertEquals(2, attributes.all(1).size)
         assertContentEquals(byteArrayOf(2), requireNotNull(attributes[1]).payload.copy())
@@ -164,7 +164,7 @@ class PacketCodecTest {
         val encoded = NetlinkCodec.encode(18, 0x301, 3u, payload = byteArrayOf(0))
         val second = NetlinkCodec.encode(3, 2, 3u, payload = ByteArray(Int.SIZE_BYTES))
         val batch = encoded.copyOf(20) + second
-        val decoded = assertNotNull(NetlinkCodec.decode(batch))
+        val decoded = NetlinkCodec.decode(batch)
 
         assertEquals(2, decoded.size)
         assertEquals(17, decoded.first().raw.size)
@@ -172,9 +172,19 @@ class PacketCodecTest {
     }
 
     @Test
+    fun netlinkDecoderProcessesValidMessageBeforeOversizedZeroTail() {
+        val request = NetlinkCodec.encode(22, 0x301, 4u, payload = ByteArray(8))
+        val decoded = NetlinkCodec.decode(request.copyOf(152))
+
+        assertEquals(1, decoded.size)
+        assertEquals(22u.toUShort(), decoded.single().type)
+        assertEquals(24, decoded.single().raw.size)
+    }
+
+    @Test
     fun netlinkDoneCarriesZeroStatusWord() {
         val done = NetlinkCodec.encode(3, 2, 99u, payload = ByteArray(Int.SIZE_BYTES))
-        val decoded = assertNotNull(NetlinkCodec.decode(done)).single()
+        val decoded = NetlinkCodec.decode(done).single()
 
         assertEquals(Int.SIZE_BYTES, decoded.payload.size)
         assertEquals(0u, decoded.payload.readU32(0))

@@ -326,7 +326,7 @@ internal abstract class NetlinkKernelProtocol(
         sourcePort: UInt,
         bytes: ByteArray,
     ): Boolean {
-        val messages = NetlinkCodec.decode(bytes) ?: return true
+        val messages = NetlinkCodec.decode(bytes)
         val options = socket.netlinkOptions()
         for (message in messages) {
             if (message.flags.toInt() and NetlinkAbi.NLM_F_REQUEST == 0) continue
