@@ -340,7 +340,12 @@ internal abstract class AbstractSocket(
         copy(linger = linger)
     }
 
-    open fun setProtocolOption(level: Int, name: Int, value: ByteArray): VfsResult<Unit> =
+    open fun setProtocolOption(
+        process: Process,
+        level: Int,
+        name: Int,
+        value: ByteArray,
+    ): VfsResult<Unit> =
         VfsResult.Err(VfsError.PROTOCOL_OPTION_NOT_AVAILABLE)
 
     open fun getProtocolOption(level: Int, name: Int): VfsResult<ByteArray> =

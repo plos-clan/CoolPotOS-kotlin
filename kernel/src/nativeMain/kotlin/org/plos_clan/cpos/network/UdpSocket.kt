@@ -347,7 +347,12 @@ internal class UdpSocket internal constructor(
         }
     }
 
-    override fun setProtocolOption(level: Int, name: Int, value: ByteArray): VfsResult<Unit> {
+    override fun setProtocolOption(
+        process: Process,
+        level: Int,
+        name: Int,
+        value: ByteArray,
+    ): VfsResult<Unit> {
         if (level != SOL_IP || value.size < Int.SIZE_BYTES) {
             return VfsResult.Err(VfsError.PROTOCOL_OPTION_NOT_AVAILABLE)
         }

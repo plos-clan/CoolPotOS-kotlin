@@ -1,7 +1,6 @@
 package org.plos_clan.cpos.network
 
 import org.plos_clan.cpos.drivers.net.MacAddress
-import org.plos_clan.cpos.utils.LittleEndianBuffer
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -121,29 +120,63 @@ class PacketCodecTest {
     @Test
     fun netlinkMessagesAndAttributesHonorFourByteAlignment() {
         val attributes = listOf(
-            NetlinkCodec.attribute(1, byteArrayOf(7)),
-            NetlinkCodec.intAttribute(2, 0x1234_5678u),
+            NetlinkAttribute.binary(1, byteArrayOf(7)),
+            NetlinkAttribute.u32(2, 0x1234_5678u),
         )
         val payload = NetlinkCodec.payload(ByteArray(4), attributes)
-        val message = NetlinkCodec.encode(24, 0x301, 99u, payload)
+        val message = NetlinkCodec.encode(24, 0x301, 99u, payload = payload)
         val decoded = assertNotNull(NetlinkCodec.decode(message)).single()
-        val reply = NetlinkCodec.withPortId(message, 4242u)
+        val reply = NetlinkCodec.encode(24, 0x301, 99u, 4242u, payload)
         val decodedReply = assertNotNull(NetlinkCodec.decode(reply)).single()
-        val decodedAttributes = assertNotNull(NetlinkCodec.attributes(decoded.payload, 4))
+        val decodedAttributes = assertNotNull(decoded.attributes(4))
 
-        assertContentEquals(byteArrayOf(7), decodedAttributes[1])
-        assertEquals(0x1234_5678u, LittleEndianBuffer(requireNotNull(decodedAttributes[2])).readU32(0))
+        assertContentEquals(byteArrayOf(7), requireNotNull(decodedAttributes[1]).payload.copy())
+        assertEquals(0x1234_5678u, requireNotNull(decodedAttributes[2]).u32())
         assertEquals(0u, decoded.portId)
         assertEquals(4242u, decodedReply.portId)
         assertEquals(0, message.size and 3)
     }
 
     @Test
+    fun netlinkAttributesPreserveDuplicatesAndNestedTypeFlags() {
+        val payload = NetlinkCodec.payload(
+            attributes = listOf(
+                NetlinkAttribute.binary(1, byteArrayOf(1)),
+                NetlinkAttribute.binary(1, byteArrayOf(2)),
+                NetlinkAttribute.nested(
+                    2,
+                    listOf(NetlinkAttribute.u16(3, 7u)),
+                ),
+            ),
+        )
+        val message = NetlinkCodec.encode(16, 0, 1u, payload = payload)
+        val attributes = assertNotNull(assertNotNull(NetlinkCodec.decode(message)).single().attributes())
+
+        assertEquals(2, attributes.all(1).size)
+        assertContentEquals(byteArrayOf(2), requireNotNull(attributes[1]).payload.copy())
+        val nested = requireNotNull(attributes[2])
+        assertTrue(nested.nested)
+        assertEquals(7u.toUShort(), requireNotNull(nested.attributes()?.get(3)).u16())
+    }
+
+    @Test
+    fun netlinkDecoderAcceptsAlignedDatagramPaddingOutsideMessageLength() {
+        val encoded = NetlinkCodec.encode(18, 0x301, 3u, payload = byteArrayOf(0))
+        val second = NetlinkCodec.encode(3, 2, 3u, payload = ByteArray(Int.SIZE_BYTES))
+        val batch = encoded.copyOf(20) + second
+        val decoded = assertNotNull(NetlinkCodec.decode(batch))
+
+        assertEquals(2, decoded.size)
+        assertEquals(17, decoded.first().raw.size)
+        assertContentEquals(byteArrayOf(0), decoded.first().payload.copy())
+    }
+
+    @Test
     fun netlinkDoneCarriesZeroStatusWord() {
-        val done = NetlinkCodec.encode(3, 2, 99u, ByteArray(Int.SIZE_BYTES))
+        val done = NetlinkCodec.encode(3, 2, 99u, payload = ByteArray(Int.SIZE_BYTES))
         val decoded = assertNotNull(NetlinkCodec.decode(done)).single()
 
         assertEquals(Int.SIZE_BYTES, decoded.payload.size)
-        assertEquals(0u, LittleEndianBuffer(decoded.payload).readU32(0))
+        assertEquals(0u, decoded.payload.readU32(0))
     }
 }

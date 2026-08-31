@@ -702,7 +702,12 @@ internal class TcpSocket internal constructor(
         }
     }
 
-    override fun setProtocolOption(level: Int, name: Int, value: ByteArray): VfsResult<Unit> {
+    override fun setProtocolOption(
+        process: Process,
+        level: Int,
+        name: Int,
+        value: ByteArray,
+    ): VfsResult<Unit> {
         if (value.size < Int.SIZE_BYTES) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         val requested = LittleEndianBuffer(value).readU32(0).toInt()
         return when {

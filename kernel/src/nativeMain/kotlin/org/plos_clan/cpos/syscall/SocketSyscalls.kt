@@ -25,7 +25,8 @@ import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.network.IcmpProtocol
 import org.plos_clan.cpos.network.IpProtocol
-import org.plos_clan.cpos.network.RouteNetlink
+import org.plos_clan.cpos.network.NetlinkProtocolKind
+import org.plos_clan.cpos.network.NetlinkProtocols
 import org.plos_clan.cpos.network.SocketAddressAbi
 import org.plos_clan.cpos.network.SocketAddressOutput
 import org.plos_clan.cpos.network.SocketConstants
@@ -126,12 +127,11 @@ internal object SocketSyscalls {
                 }
                 FileSystemManager.vfs.openSocket(caller, context, socket, options.nonBlocking)
             }
-            SocketDomain.NETLINK -> FileSystemManager.vfs.openSocket(
-                caller,
-                context,
-                RouteNetlink.createSocket(options.type),
-                options.nonBlocking,
-            )
+            SocketDomain.NETLINK -> {
+                val socket = NetlinkProtocols.createSocket(options.protocol, options.type)
+                    ?: return errno(Errno.EPROTONOSUPPORT)
+                FileSystemManager.vfs.openSocket(caller, context, socket, options.nonBlocking)
+            }
         }
         val file = when (fileResult) {
             is VfsResult.Ok -> fileResult.value
@@ -491,6 +491,7 @@ internal object SocketSyscalls {
             val bytes = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_R10])
                 .copyFromUser(length.toInt()) ?: return@withSocket errno(Errno.EFAULT)
             return@withSocket when (val result = socket.setProtocolOption(
+                process,
                 level.toInt(),
                 option.toInt(),
                 bytes,
@@ -935,13 +936,11 @@ internal object SocketSyscalls {
                 -> return VfsResult.Err(VfsError.SOCKET_TYPE_NOT_SUPPORTED)
             }
             SocketDomain.NETLINK -> {
-                if (requestedProtocol != 0) {
-                    return VfsResult.Err(VfsError.PROTOCOL_NOT_SUPPORTED)
-                }
                 if (type != SocketType.RAW && type != SocketType.DATAGRAM) {
                     return VfsResult.Err(VfsError.SOCKET_TYPE_NOT_SUPPORTED)
                 }
-                0
+                NetlinkProtocolKind.fromNumber(requestedProtocol)?.number
+                    ?: return VfsResult.Err(VfsError.PROTOCOL_NOT_SUPPORTED)
             }
         }
         return VfsResult.Ok(

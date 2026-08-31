@@ -48,6 +48,7 @@ value class VfsError private constructor(val errno: Int) {
         val NETWORK_UNREACHABLE = VfsError(101)
         val CONNECTION_ABORTED = VfsError(103)
         val CONNECTION_RESET = VfsError(104)
+        val NO_BUFFER_SPACE = VfsError(105)
         val ALREADY_CONNECTED = VfsError(106)
         val NOT_CONNECTED = VfsError(107)
         val TIMED_OUT = VfsError(110)
