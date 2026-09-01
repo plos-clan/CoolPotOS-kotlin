@@ -19,6 +19,7 @@ enum class CapEnum(val id: Int) {
     NET_BIND_SERVICE(10),
     NET_ADMIN(12),
     NET_RAW(13),
+    SYS_ADMIN(21),
     AUDIT_WRITE(29),
 }
 

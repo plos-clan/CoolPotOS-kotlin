@@ -2,7 +2,6 @@
 
 package org.plos_clan.cpos.syscall
 
-import KERNEL_NAME
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.RealtimeClock
 import org.plos_clan.cpos.drivers.TscClock
@@ -132,49 +131,6 @@ private data class SysInfo(
     }
 }
 
-private data class UtsName(
-    val sysname: String,
-    val nodename: String,
-    val release: String,
-    val version: String,
-    val machine: String,
-    val domainname: String,
-) : NativeStruct {
-    init {
-        fields().forEach { (name, value) ->
-            require('\u0000' !in value) { "$name must not contain NUL" }
-            require(value.encodeToByteArray().size < FIELD_SIZE) {
-                "$name must fit in ${FIELD_SIZE - 1} UTF-8 bytes"
-            }
-        }
-    }
-
-    override fun toNativeBytes(): ByteArray =
-        ByteArray(NATIVE_SIZE).also { buffer ->
-            fields().forEachIndexed { index, (_, value) ->
-                value.encodeToByteArray().copyInto(
-                    destination = buffer,
-                    destinationOffset = index * FIELD_SIZE,
-                )
-            }
-        }
-
-    private fun fields(): List<Pair<String, String>> = listOf(
-        "sysname" to sysname,
-        "nodename" to nodename,
-        "release" to release,
-        "version" to version,
-        "machine" to machine,
-        "domainname" to domainname,
-    )
-
-    companion object {
-        const val FIELD_SIZE = 65
-        const val FIELD_COUNT = 6
-        const val NATIVE_SIZE = FIELD_SIZE * FIELD_COUNT
-    }
-}
-
 internal data class TimeSpec(var sec: Long, var nsec: Long) : NativeStruct {
     override fun toNativeBytes(): ByteArray =
         ByteArray(NATIVE_SIZE).also { buffer ->
@@ -205,15 +161,6 @@ internal data class TimeSpec(var sec: Long, var nsec: Long) : NativeStruct {
     }
 }
 
-private val UTS_NAME = UtsName(
-    sysname = "CoolPotOS",
-    nodename = "localhost",
-    release = KERNEL_NAME,
-    version = "v0.0.1",
-    machine = "x86_64",
-    domainname = "",
-).toNativeBytes()
-
 internal fun reboot(regs: PtraceRegisters, process: Process): Long {
     val magic1 = regs[PtraceRegisters.IDX_RDI]
     val magic2 = regs[PtraceRegisters.IDX_RSI]
@@ -237,11 +184,6 @@ internal fun reboot(regs: PtraceRegisters, process: Process): Long {
         REBOOT_CMD_CAD_OFF or REBOOT_CMD_CAD_ON -> errno(Errno.ENOSYS)
         else -> errno(Errno.EINVAL)
     }
-}
-
-internal fun uname(regs: PtraceRegisters, process: Process): Long {
-    val userBuffer = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI])
-    return if (userBuffer.copyToUser(UTS_NAME)) 0L else errno(Errno.EFAULT)
 }
 
 internal fun time(regs: PtraceRegisters, process: Process): Long {
