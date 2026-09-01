@@ -75,6 +75,8 @@ object Init {
                 return
             }
         }
+        process.credentials.commitExec(image.execution)
+        process.dumpable = !image.execution.privileged
         process.installExecutable(image.executablePath, image.arguments)
 
         initializeStdio(process)
@@ -87,6 +89,7 @@ object Init {
             println("Init: cannot create user thread")
             return
         }
+        thread.capabilities.applyExec(image.execution)
         Scheduler.enqueueThread(thread)
 
         println("Init: created process=${process.id} thread=${thread.id} rip=0x${image.entryPoint.toString(16)}")

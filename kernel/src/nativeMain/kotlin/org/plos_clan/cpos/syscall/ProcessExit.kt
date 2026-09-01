@@ -29,7 +29,7 @@ internal object ProcessExit {
         val exiting = if (group) process.threads.toList() else listOf(current)
         if (group) process.signals.resume(process)
         exiting.forEach { thread ->
-            thread.state = TaskState.ZOMBIE
+            ProcessManager.markThreadExited(thread)
             thread.signals.pending.discard(ULong.MAX_VALUE)
             clearChildTid(thread)
         }

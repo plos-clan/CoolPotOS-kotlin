@@ -208,7 +208,9 @@ private class PipeState(
                     wakeReaders = true
                     wakeWriters = true
                 }
-                AccessMode.PATH -> return@withLock VfsError.BAD_DESCRIPTOR
+                AccessMode.EXECUTE,
+                AccessMode.PATH,
+                -> return@withLock VfsError.BAD_DESCRIPTOR
             }
             version.fetchAndAdd(1)
             null

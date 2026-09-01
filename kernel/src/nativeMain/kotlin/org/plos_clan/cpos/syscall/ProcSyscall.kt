@@ -23,6 +23,7 @@ import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.tasks.ResourceLimit
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.Scheduler
+import org.plos_clan.cpos.tasks.Signal
 import org.plos_clan.cpos.tasks.SignalStack
 import org.plos_clan.cpos.tasks.Thread
 import org.plos_clan.cpos.utils.Errno
@@ -41,6 +42,8 @@ private const val WAIT_WUNTRACED = 2uL
 private const val WAIT_WCONTINUED = 8uL
 private const val WAIT_SUPPORTED = 0x0buL
 private const val ROBUST_LIST_SIZE = 24uL
+private const val PR_SET_PDEATHSIG = 1UL
+private const val PR_GET_PDEATHSIG = 2UL
 private const val PR_GET_DUMPABLE = 3UL
 private const val PR_SET_DUMPABLE = 4UL
 private const val PR_GET_KEEPCAPS = 7UL
@@ -142,10 +145,9 @@ internal fun setUid(regs: PtraceRegisters, process: Process): Long {
         .takeIf { it <= Int.MAX_VALUE.toULong() }
         ?.toInt() ?: return errno(Errno.EINVAL)
     val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
-    val change = process.credentials.setUserId(
-        requested,
-        thread.capabilities.hasEffective(CapEnum.SETUID),
-    ) ?: return errno(Errno.EPERM)
+    val privileged = thread.capabilities.hasEffective(CapEnum.SETUID)
+    val change = thread.updateCredentials { setUserId(requested, privileged) }
+        ?: return errno(Errno.EPERM)
     thread.capabilities.applyUserIdChange(change)
     return 0L
 }
@@ -155,11 +157,8 @@ internal fun setGid(regs: PtraceRegisters, process: Process): Long {
         .takeIf { it <= Int.MAX_VALUE.toULong() }
         ?.toInt() ?: return errno(Errno.EINVAL)
     val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
-    return if (process.credentials.setGroupId(
-            requested,
-            thread.capabilities.hasEffective(CapEnum.SETGID),
-        )
-    ) {
+    val privileged = thread.capabilities.hasEffective(CapEnum.SETGID)
+    return if (thread.updateCredentials { setGroupId(requested, privileged) }) {
         0L
     } else {
         errno(Errno.EPERM)
@@ -191,10 +190,10 @@ internal fun setFsUid(regs: PtraceRegisters, process: Process): Long {
     val requested = regs[PtraceRegisters.IDX_RDI]
         .takeIf { it <= Int.MAX_VALUE.toULong() }
         ?.toInt()
-    return process.credentials.setFilesystemUserId(
-        requested,
-        thread.capabilities.hasEffective(CapEnum.SETUID),
-    ).toLong()
+    val privileged = thread.capabilities.hasEffective(CapEnum.SETUID)
+    return thread.updateCredentials {
+        setFilesystemUserId(requested, privileged)
+    }.toLong()
 }
 
 internal fun setFsGid(regs: PtraceRegisters, process: Process): Long {
@@ -202,10 +201,10 @@ internal fun setFsGid(regs: PtraceRegisters, process: Process): Long {
     val requested = regs[PtraceRegisters.IDX_RDI]
         .takeIf { it <= Int.MAX_VALUE.toULong() }
         ?.toInt()
-    return process.credentials.setFilesystemGroupId(
-        requested,
-        thread.capabilities.hasEffective(CapEnum.SETGID),
-    ).toLong()
+    val privileged = thread.capabilities.hasEffective(CapEnum.SETGID)
+    return thread.updateCredentials {
+        setFilesystemGroupId(requested, privileged)
+    }.toLong()
 }
 
 internal fun getSid(regs: PtraceRegisters, process: Process): Long {
@@ -312,14 +311,11 @@ private fun changeUserIds(
     val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
     val privileged = thread.capabilities.hasEffective(CapEnum.SETUID)
     val change = if (res) {
-        process.credentials.setResUserIds(
-            real.value,
-            effective.value,
-            saved.value,
-            privileged,
-        )
+        thread.updateCredentials {
+            setResUserIds(real.value, effective.value, saved.value, privileged)
+        }
     } else {
-        process.credentials.setReUserIds(real.value, effective.value, privileged)
+        thread.updateCredentials { setReUserIds(real.value, effective.value, privileged) }
     } ?: return errno(Errno.EPERM)
     thread.capabilities.applyUserIdChange(change)
     return 0L
@@ -342,9 +338,11 @@ private fun changeGroupIds(
     val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
     val privileged = thread.capabilities.hasEffective(CapEnum.SETGID)
     val changed = if (res) {
-        process.credentials.setResGroupIds(real.value, effective.value, saved.value, privileged)
+        thread.updateCredentials {
+            setResGroupIds(real.value, effective.value, saved.value, privileged)
+        }
     } else {
-        process.credentials.setReGroupIds(real.value, effective.value, privileged)
+        thread.updateCredentials { setReGroupIds(real.value, effective.value, privileged) }
     }
     return if (changed) 0L else errno(Errno.EPERM)
 }
@@ -364,6 +362,26 @@ internal fun prctl(regs: PtraceRegisters, process: Process): Long {
         ?.takeIf(CapabilityState::isValid)
 
     return when (option) {
+        PR_SET_PDEATHSIG -> {
+            val signal = when (argument) {
+                0uL -> null
+                else -> Signal.from(argument) ?: return errno(Errno.EINVAL)
+            }
+            ProcessManager.setParentDeathSignal(thread, signal)
+            0L
+        }
+
+        PR_GET_PDEATHSIG -> {
+            val output = ByteArray(Int.SIZE_BYTES).also { bytes ->
+                LittleEndianBuffer(bytes).writeU32(
+                    0,
+                    (thread.parentDeathSignal?.number ?: 0).toUInt(),
+                )
+            }
+            if (UserMemory(process.addressSpace, argument).copyToUser(output)) 0L
+            else errno(Errno.EFAULT)
+        }
+
         PR_GET_DUMPABLE -> if (process.dumpable) 1L else 0L
 
         PR_SET_DUMPABLE -> when {
@@ -586,6 +604,7 @@ internal fun setRobustList(regs: PtraceRegisters, process: Process): Long {
 internal fun rseq(regs: PtraceRegisters, process: Process): Long = errno(Errno.ENOSYS)
 
 internal fun execve(regs: PtraceRegisters, process: Process): Long {
+    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
     val path = Syscall.copyPath(process, regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EFAULT)
     val arguments = readStringVector(process, regs[PtraceRegisters.IDX_RSI])
@@ -598,17 +617,17 @@ internal fun execve(regs: PtraceRegisters, process: Process): Long {
         process = process,
         arguments = arguments,
         environment = environment,
+        suppressFilePrivileges = thread.capabilities.noNewPrivileges,
     )) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
+    thread.commitExecution(image.execution)
+    process.dumpable = !image.execution.privileged
     process.installExecutable(image.executablePath, image.arguments)
     process.fdTable.closeOnExec(process.vfsOperationContext)
     process.signals.resetForExec()
-    ProcessManager.currentThread()?.let { thread ->
-        thread.signals.replaceStack(SignalStack.DISABLED)
-        thread.capabilities.keepAcrossUserIdChange = false
-    }
+    thread.signals.replaceStack(SignalStack.DISABLED)
 
     regs[PtraceRegisters.IDX_RIP] = image.entryPoint
     regs[PtraceRegisters.IDX_RSP] = image.stackPointer

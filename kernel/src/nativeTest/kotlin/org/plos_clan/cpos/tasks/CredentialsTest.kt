@@ -39,6 +39,25 @@ class CredentialsTest {
         parent.replaceSupplementaryGroups(listOf(30))
         assertEquals(listOf(10, 20), child.supplementaryGroups)
     }
+
+    @Test
+    fun setUserIdExecIsPreparedBeforeItIsCommitted() {
+        val credentials = Credentials(
+            userIds = Credentials.Identity(81, 81, 81),
+            groupIds = Credentials.Identity(81, 81, 81),
+        )
+
+        val execution = credentials.prepareExec(effectiveUserId = 0)
+
+        assertEquals(Credentials.Identity(81, 81, 81), credentials.userIds)
+        assertEquals(Credentials.Identity(81, 0, 0), execution.userIds)
+        assertEquals(Credentials.Identity(81, 81, 81), execution.groupIds)
+        assertTrue(execution.privileged)
+
+        credentials.commitExec(execution)
+        assertEquals(execution.userIds, credentials.userIds)
+        assertEquals(execution.groupIds, credentials.groupIds)
+    }
 }
 
 class CapabilityStateTest {
@@ -84,6 +103,50 @@ class CapabilityStateTest {
         assertTrue(state.containsBounding(capability))
         state.dropBounding(capability)
         assertFalse(state.containsBounding(capability))
+    }
+
+    @Test
+    fun setUserIdRootExecRestoresOnlyBoundedCapabilities() {
+        val network = bit(CapEnum.NET_ADMIN) or bit(CapEnum.NET_RAW)
+        val credentials = Credentials(
+            userIds = Credentials.Identity(81, 81, 81),
+            groupIds = Credentials.Identity(81, 81, 81),
+        )
+        val execution = credentials.prepareExec(effectiveUserId = 0)
+        val state = CapabilityState(
+            effective = 0uL,
+            permitted = 0uL,
+            bounding = network,
+            keepAcrossUserIdChange = true,
+        )
+
+        state.applyExec(execution)
+
+        assertEquals(network, state.permitted)
+        assertEquals(network, state.effective)
+        assertEquals(0uL, state.ambient)
+        assertFalse(state.keepAcrossUserIdChange)
+    }
+
+    @Test
+    fun unprivilegedExecCarriesOnlyAmbientCapabilities() {
+        val audit = bit(CapEnum.AUDIT_WRITE)
+        val credentials = Credentials(
+            userIds = Credentials.Identity(81, 81, 81),
+            groupIds = Credentials.Identity(81, 81, 81),
+        )
+        val state = CapabilityState(
+            effective = TASK_CAP_FULL_MASK,
+            permitted = TASK_CAP_FULL_MASK,
+            inheritable = audit,
+            ambient = audit,
+        )
+
+        state.applyExec(credentials.prepareExec())
+
+        assertEquals(audit, state.permitted)
+        assertEquals(audit, state.effective)
+        assertEquals(audit, state.ambient)
     }
 
     private fun bit(capability: CapEnum): ULong = 1uL shl capability.id

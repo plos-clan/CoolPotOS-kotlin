@@ -26,6 +26,14 @@ class Credentials(
 
     data class UserIdChange(val previous: Identity, val current: Identity)
 
+    class Execution internal constructor(
+        internal val previousUserIds: Identity,
+        internal val previousGroupIds: Identity,
+        val userIds: Identity,
+        val groupIds: Identity,
+        val privileged: Boolean,
+    )
+
     var userIds = userIds
         private set
     var groupIds = groupIds
@@ -37,6 +45,30 @@ class Credentials(
         userIds = parent.userIds
         groupIds = parent.groupIds
         supplementaryGroups = parent.supplementaryGroups
+    }
+
+    fun prepareExec(
+        effectiveUserId: Int? = null,
+        effectiveGroupId: Int? = null,
+        privileged: Boolean = effectiveUserId != null || effectiveGroupId != null,
+    ): Execution {
+        require(effectiveUserId == null || effectiveUserId >= 0)
+        require(effectiveGroupId == null || effectiveGroupId >= 0)
+        val userId = effectiveUserId ?: userIds.effective
+        val groupId = effectiveGroupId ?: groupIds.effective
+        return Execution(
+            previousUserIds = userIds,
+            previousGroupIds = groupIds,
+            userIds = Identity(userIds.real, userId, userId),
+            groupIds = Identity(groupIds.real, groupId, groupId),
+            privileged = privileged,
+        )
+    }
+
+    fun commitExec(execution: Execution) {
+        check(userIds == execution.previousUserIds && groupIds == execution.previousGroupIds)
+        userIds = execution.userIds
+        groupIds = execution.groupIds
     }
 
     fun setUserId(id: Int, privileged: Boolean): UserIdChange? {

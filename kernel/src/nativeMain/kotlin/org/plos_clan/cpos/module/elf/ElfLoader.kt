@@ -1,12 +1,8 @@
 package org.plos_clan.cpos.module.elf
 
 import org.plos_clan.cpos.fs.FileSystemManager
-import org.plos_clan.cpos.fs.vfs.AccessMode
-import org.plos_clan.cpos.fs.vfs.AccessPermissions
-import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
-import org.plos_clan.cpos.fs.vfs.OpenOptions
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPathname
@@ -26,6 +22,7 @@ import org.plos_clan.cpos.module.Vdso
 import org.plos_clan.cpos.module.elf.ElfLayout.checkedAdd
 import org.plos_clan.cpos.module.elf.ElfLayout.fitsInFile
 import org.plos_clan.cpos.module.elf.ElfLayout.isPowerOfTwo
+import org.plos_clan.cpos.tasks.Credentials
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.LittleEndianBuffer
@@ -76,13 +73,40 @@ data class UserProcessImage(
     val stackPointer: ULong,
     val executablePath: String,
     val arguments: List<String>,
+    val execution: Credentials.Execution,
 )
 
 private data class ResolvedExecutable(
     val file: ElfFile,
     val path: String,
     val arguments: List<String>,
-)
+) {
+    fun prepareExecution(
+        credentials: Credentials,
+        suppressFilePrivileges: Boolean,
+    ): VfsResult<Credentials.Execution> {
+        val handle = file.file
+        if (suppressFilePrivileges || MountFlag.NO_SUID in handle.path.mount.flags) {
+            return VfsResult.Ok(credentials.prepareExec())
+        }
+
+        val metadata = handle.inode.metadata()
+        val mode = metadata.mode
+        val userId = if (mode.setUserId) {
+            metadata.uid.takeIf { it <= Int.MAX_VALUE.toUInt() }?.toInt()
+                ?: return VfsResult.Err(VfsError.OVERFLOW)
+        } else {
+            null
+        }
+        val groupId = if (mode.setGroupId && mode.groupExecutable) {
+            metadata.gid.takeIf { it <= Int.MAX_VALUE.toUInt() }?.toInt()
+                ?: return VfsResult.Err(VfsError.OVERFLOW)
+        } else {
+            null
+        }
+        return VfsResult.Ok(credentials.prepareExec(userId, groupId))
+    }
+}
 
 private data class ScriptInterpreter(
     val path: String,
@@ -95,6 +119,7 @@ object ElfLoader {
         process: Process,
         arguments: List<String> = listOf(path),
         environment: List<String> = emptyList(),
+        suppressFilePrivileges: Boolean = false,
     ): VfsResult<UserProcessImage> {
         val userDirectory = KernelPageDirectory.getDirectory().createUserDirectory()
         val addressSpace = AddressSpace.user(userDirectory)
@@ -103,6 +128,16 @@ object ElfLoader {
             val resolved = when (val result = resolveExecutable(process, path, arguments)) {
                 is VfsResult.Ok -> result.value
                 is VfsResult.Err -> return result
+            }
+            val execution = when (val result = resolved.prepareExecution(
+                process.credentials,
+                suppressFilePrivileges,
+            )) {
+                is VfsResult.Ok -> result.value
+                is VfsResult.Err -> {
+                    resolved.file.file.release()
+                    return result
+                }
             }
             val executableFile = resolved.file
             val executable = try {
@@ -149,6 +184,7 @@ object ElfLoader {
                 environment = environment,
                 executablePath = path,
                 executable = executable,
+                execution = execution,
                 interpreter = interpreter,
                 addressSpace = addressSpace,
             ) ?: return VfsResult.Err(VfsError.NO_MEMORY)
@@ -163,6 +199,7 @@ object ElfLoader {
                     stackPointer = stack.stackPointer,
                     executablePath = resolved.path,
                     arguments = resolved.arguments,
+                    execution = execution,
                 ),
             )
         } finally {
@@ -230,11 +267,10 @@ object ElfLoader {
 
     private fun openExecutable(process: Process, path: String): VfsResult<OpenFileDescription> {
         val file = when (
-            val result = FileSystemManager.vfs.open(
+            val result = FileSystemManager.vfs.openForExecution(
                 caller = process.vfsOperationContext,
                 context = process.getFSContext(),
                 pathname = VfsPathname.fromString(path),
-                options = OpenOptions(access = AccessMode.READ),
             )
         ) {
             is VfsResult.Ok -> result.value
@@ -242,27 +278,6 @@ object ElfLoader {
                 println("ELF: cannot open $path: ${result.error}")
                 return result
             }
-        }
-        if (file.inode.type != InodeType.REGULAR) {
-            file.release()
-            println("ELF: $path is not a regular file")
-            return VfsResult.Err(VfsError.PERMISSION_DENIED)
-        }
-        if (MountFlag.NO_EXEC in file.path.mount.flags) {
-            file.release()
-            println("ELF: execution is disabled on the mount containing $path")
-            return VfsResult.Err(VfsError.PERMISSION_DENIED)
-        }
-        when (val result = file.inode.backend.checkAccess(
-            process.vfsOperationContext,
-            file.inode,
-            AccessPermissions.EXECUTE,
-        )) {
-            is VfsResult.Err -> {
-                file.release()
-                return result
-            }
-            is VfsResult.Ok -> Unit
         }
         return VfsResult.Ok(file)
     }

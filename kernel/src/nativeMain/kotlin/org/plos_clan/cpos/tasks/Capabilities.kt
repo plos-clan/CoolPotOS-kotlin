@@ -105,6 +105,15 @@ class CapabilityState(
         }
     }
 
+    fun applyExec(execution: Credentials.Execution) {
+        val inheritedAmbient = if (execution.privileged) 0uL else ambient
+        val root = execution.userIds.real == 0 || execution.userIds.effective == 0
+        permitted = (if (root) bounding else 0uL) or inheritedAmbient
+        effective = if (execution.userIds.effective == 0) permitted else inheritedAmbient
+        ambient = inheritedAmbient
+        keepAcrossUserIdChange = false
+    }
+
     companion object {
         fun isValid(capability: Int): Boolean = capability in 0..TASK_CAP_LAST_CAP
 

@@ -140,6 +140,7 @@ internal class ChildWaitQueue {
 class Thread internal constructor(
     val id: Int,
     val process: Process,
+    internal val parentThread: Thread? = null,
     val kernelStackTop: ULong = 0uL,
     val kernelStackPhysicalBase: ULong = 0uL,
     val kernelStackPages: ULong = 0uL,
@@ -150,6 +151,11 @@ class Thread internal constructor(
     val capabilities: CapabilityState = CapabilityState(),
 ) {
     private val scheduledCpu = AtomicLong(-1)
+    private val parentDeathSignalNumber = AtomicInt(0)
+
+    internal var parentDeathSignal: Signal?
+        get() = Signal.from(parentDeathSignalNumber.load())
+        set(value) = parentDeathSignalNumber.store(value?.number ?: 0)
 
     internal val scheduledLapicId: UInt?
         get() = scheduledCpu.load().takeIf { it >= 0 }?.toUInt()
@@ -248,6 +254,31 @@ class Thread internal constructor(
     internal fun hasPendingSignal(): Boolean {
         val accepted = signals.mask.inv()
         return process.signals.hasActionable(pendingSignalMask and accepted)
+    }
+
+    internal fun <T> updateCredentials(update: Credentials.() -> T): T {
+        val credentials = process.credentials
+        val previousUserIds = credentials.userIds
+        val previousGroupIds = credentials.groupIds
+        val result = credentials.update()
+        val userIds = credentials.userIds
+        val groupIds = credentials.groupIds
+        val identityChanged = previousUserIds.effective != userIds.effective ||
+            previousUserIds.filesystem != userIds.filesystem ||
+            previousGroupIds.effective != groupIds.effective ||
+            previousGroupIds.filesystem != groupIds.filesystem
+        if (identityChanged && parentDeathSignal != null) {
+            ProcessManager.setParentDeathSignal(this, null)
+        }
+        return result
+    }
+
+    internal fun commitExecution(execution: Credentials.Execution) {
+        updateCredentials { commitExec(execution) }
+        capabilities.applyExec(execution)
+        if (execution.privileged && parentDeathSignal != null) {
+            ProcessManager.setParentDeathSignal(this, null)
+        }
     }
 }
 
@@ -369,6 +400,7 @@ object ProcessManager {
     private val processes = mutableListOf<Process>()
     private val processLock = IrqSpinLock()
     private val threadTable = mutableMapOf<Int, Thread>()
+    private val parentDeathSubscribers = mutableMapOf<Thread, MutableSet<Thread>>()
     private val threadTableLock = IrqSpinLock()
     private var bootstrapThread: Thread? = null
 
@@ -467,6 +499,7 @@ object ProcessManager {
         process: Process,
         entryPoint: ULong,
         stackPointer: ULong,
+        parentThread: Thread? = null,
         fsBase: ULong = 0uL,
         kernelStackPages: ULong = DEFAULT_THREAD_STACK_PAGES,
         registers: ULongArray? = null,
@@ -486,6 +519,7 @@ object ProcessManager {
         }
         return newThread(
             process = process,
+            parentThread = parentThread,
             kernelStackTop = stack.top,
             kernelStackPhysicalBase = stack.physicalBase,
             kernelStackPages = stack.pages,
@@ -536,6 +570,43 @@ object ProcessManager {
     }
 
     fun findThread(tid: Int): Thread? = threadTableLock.withLock { threadTable[tid] }
+
+    internal fun setParentDeathSignal(thread: Thread, signal: Signal?) {
+        threadTableLock.withLock {
+            thread.parentDeathSignal = signal
+            val parent = thread.parentThread ?: return@withLock
+            if (signal != null && parent.state != TaskState.ZOMBIE) {
+                parentDeathSubscribers.getOrPut(parent, ::mutableSetOf) += thread
+                return@withLock
+            }
+            parentDeathSubscribers[parent]?.let { subscribers ->
+                subscribers.remove(thread)
+                if (subscribers.isEmpty()) parentDeathSubscribers.remove(parent)
+            }
+        }
+    }
+
+    internal fun markThreadExited(thread: Thread) {
+        val deliveries = threadTableLock.withLock {
+            thread.state = TaskState.ZOMBIE
+            thread.parentThread?.let { parent ->
+                parentDeathSubscribers[parent]?.let { subscribers ->
+                    subscribers.remove(thread)
+                    if (subscribers.isEmpty()) parentDeathSubscribers.remove(parent)
+                }
+            }
+            parentDeathSubscribers.remove(thread).orEmpty().map { child ->
+                child.process to checkNotNull(child.parentDeathSignal)
+            }
+        }
+        for ((target, signal) in deliveries) {
+            SignalRouter.sendProcess(
+                sender = null,
+                target = target,
+                info = SignalInfo.fromSender(signal, thread.process, SignalInfo.KERNEL),
+            )
+        }
+    }
 
     fun snapshotProcesses(): List<Process> = processLock.withLock {
         processes.filterNot(Process::isKernelProcess).sortedBy(Process::id)
@@ -739,6 +810,7 @@ object ProcessManager {
 
     private fun newThread(
         process: Process,
+        parentThread: Thread? = null,
         kernelStackTop: ULong = 0uL,
         kernelStackPhysicalBase: ULong = 0uL,
         kernelStackPages: ULong = 0uL,
@@ -748,6 +820,7 @@ object ProcessManager {
         Thread(
             id = if (process.threads.isEmpty()) process.id else nextTaskId.fetchAndAdd(1),
             process = process,
+            parentThread = parentThread,
             kernelStackTop = kernelStackTop,
             kernelStackPhysicalBase = kernelStackPhysicalBase,
             kernelStackPages = kernelStackPages,

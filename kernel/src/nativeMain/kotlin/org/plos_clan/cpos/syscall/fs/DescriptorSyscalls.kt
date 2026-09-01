@@ -151,6 +151,7 @@ internal fun fcntl(regs: PtraceRegisters, process: Process): Long {
                     AccessMode.READ -> OpenFlags.O_RDONLY
                     AccessMode.WRITE -> OpenFlags.O_WRONLY
                     AccessMode.READ_WRITE -> OpenFlags.O_RDWR
+                    AccessMode.EXECUTE -> OpenFlags.O_RDONLY
                     AccessMode.PATH -> OpenFlags.O_PATH
                 }
                 (access or file.getStatusFlags() or OpenFlags.O_LARGEFILE).toLong()

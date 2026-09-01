@@ -636,6 +636,7 @@ private class FuseInstance(
             AccessMode.READ -> OpenFlags.O_RDONLY
             AccessMode.WRITE -> OpenFlags.O_WRONLY
             AccessMode.READ_WRITE -> OpenFlags.O_RDWR
+            AccessMode.EXECUTE -> OpenFlags.O_RDONLY
             AccessMode.PATH -> OpenFlags.O_PATH
         }
         if (options.append) flags = flags or OpenFlags.O_APPEND

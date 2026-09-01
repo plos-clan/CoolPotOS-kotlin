@@ -4,6 +4,7 @@ import org.plos_clan.cpos.fs.vfs.AccessPermission
 import org.plos_clan.cpos.fs.vfs.AccessPermissions
 import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.DirectoryLookup
+import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.VfsError
 import kotlin.test.Test
@@ -53,5 +54,14 @@ class VfsCoreSemanticsTest {
         assertTrue(AccessPermission.WRITE in permissions)
         assertTrue(AccessPermission.EXECUTE in permissions)
         assertEquals(null, AccessPermissions.fromBits(0x8u))
+    }
+
+    @Test
+    fun decodesSetIdExecutionMode() {
+        val helperMode = FileMode(0x848u)
+
+        assertTrue(helperMode.setUserId)
+        assertFalse(helperMode.setGroupId)
+        assertTrue(helperMode.groupExecutable)
     }
 }

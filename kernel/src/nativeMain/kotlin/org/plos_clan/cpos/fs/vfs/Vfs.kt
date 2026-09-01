@@ -174,6 +174,31 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         options = options,
     )
 
+    internal fun openForExecution(
+        caller: VfsOperationContext,
+        context: FileSystemContext,
+        pathname: VfsPathname,
+    ): VfsResult<OpenFileDescription> {
+        val path = when (val result = resolve(caller, context, pathname)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        if (inode.type != InodeType.REGULAR || MountFlag.NO_EXEC in path.mount.flags) {
+            return VfsResult.Err(VfsError.PERMISSION_DENIED)
+        }
+        when (val result = inode.backend.checkAccess(caller, inode, AccessPermissions.EXECUTE)) {
+            is VfsResult.Ok -> Unit
+            is VfsResult.Err -> return result
+        }
+        return OpenFileDescription.open(
+            caller = caller,
+            path = path,
+            inode = inode,
+            options = OpenOptions(access = AccessMode.EXECUTE),
+        )
+    }
+
     fun openAt(
         caller: VfsOperationContext,
         context: FileSystemContext,
@@ -241,6 +266,7 @@ class Vfs(maxSymlinkDepth: Int = 40) {
             AccessMode.READ -> AccessPermissions.READ
             AccessMode.WRITE -> AccessPermissions.WRITE
             AccessMode.READ_WRITE -> AccessPermissions.READ + AccessPermission.WRITE
+            AccessMode.EXECUTE -> AccessPermissions.EXECUTE
             AccessMode.PATH -> AccessPermissions.NONE
         }
         if (!opened.created) {

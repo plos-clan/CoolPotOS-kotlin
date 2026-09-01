@@ -3,22 +3,14 @@ set -euo pipefail
 
 archive="/output/${1:?missing output filename}"
 packages=(
-    bash
+    base
     fastfetch
-    pacman
-    archlinux-keyring
     cachyos-keyring
     cachyos-mirrorlist
     cachyos-v3-mirrorlist
     fuse2fs
-    fuse3
     fuse-overlayfs
-    util-linux
-    pciutils
     python
-    procps-ng
-    iputils
-    iproute2
     dbus
     networkmanager
 )
@@ -90,7 +82,6 @@ rm -rf "$rootfs/var/log"/* "$rootfs/var/tmp"/*
 
 mkfs.erofs \
     -x-1 \
-    --all-root \
     -z zstd,level=3 \
     -C 1048576 \
     -Eall-fragments,dedupe \

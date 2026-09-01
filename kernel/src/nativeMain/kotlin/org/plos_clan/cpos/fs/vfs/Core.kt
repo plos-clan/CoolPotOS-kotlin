@@ -35,6 +35,7 @@ value class VfsError private constructor(val errno: Int) {
         val NOT_EMPTY = VfsError(39)
         val TOO_MANY_SYMLINKS = VfsError(40)
         val NO_DATA = VfsError(61)
+        val OVERFLOW = VfsError(75)
         val DESTINATION_ADDRESS_REQUIRED = VfsError(89)
         val MESSAGE_TOO_LONG = VfsError(90)
         val WRONG_PROTOCOL_TYPE = VfsError(91)
@@ -225,7 +226,16 @@ enum class ExtendedAttributeMode {
 
 value class InodeId(val value: ULong)
 
-value class FileMode(val bits: UInt)
+value class FileMode(val bits: UInt) {
+    val setUserId: Boolean
+        get() = bits and 0x800u != 0u
+
+    val setGroupId: Boolean
+        get() = bits and 0x400u != 0u
+
+    val groupExecutable: Boolean
+        get() = bits and 0x8u != 0u
+}
 
 enum class InodeType {
     REGULAR,
@@ -253,10 +263,11 @@ enum class AccessMode {
     READ,
     WRITE,
     READ_WRITE,
+    EXECUTE,
     PATH;
 
     internal val canRead: Boolean
-        get() = this == READ || this == READ_WRITE
+        get() = this == READ || this == READ_WRITE || this == EXECUTE
 
     internal val canWrite: Boolean
         get() = this == WRITE || this == READ_WRITE

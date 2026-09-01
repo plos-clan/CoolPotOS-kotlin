@@ -107,6 +107,7 @@ private data class Request(
             process = child,
             entryPoint = registers[PtraceRegisters.IDX_RIP],
             stackPointer = childStack,
+            parentThread = if (threadClone) current.parentThread else current,
             fsBase = fsBase,
             registers = snapshot,
             signals = threadSignals,

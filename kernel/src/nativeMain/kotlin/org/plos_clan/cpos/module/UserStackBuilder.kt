@@ -12,6 +12,7 @@ import org.plos_clan.cpos.mem.addressspace.USER_MMAP_END
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.module.elf.ElfInterpreterLoadResult
 import org.plos_clan.cpos.module.elf.ElfLoadResult
+import org.plos_clan.cpos.tasks.Credentials
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.KernelRandom
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -54,6 +55,7 @@ object UserStackBuilder {
         environment: List<String>,
         executablePath: String,
         executable: ElfLoadResult,
+        execution: Credentials.Execution,
         interpreter: ElfInterpreterLoadResult? = null,
         stackTop: ULong = DEFAULT_USER_STACK_TOP,
         stackSize: ULong = DEFAULT_USER_STACK_SIZE,
@@ -142,11 +144,11 @@ object UserStackBuilder {
         auxiliary(AT_PAGESZ, PAGE_SIZE_BYTES)
         interpreter?.let { auxiliary(AT_BASE, it.loadBias) }
         auxiliary(AT_ENTRY, executable.entryPoint)
-        auxiliary(AT_UID, process.credentials.userIds.real.toUInt().toULong())
-        auxiliary(AT_EUID, process.credentials.userIds.effective.toUInt().toULong())
-        auxiliary(AT_GID, process.credentials.groupIds.real.toUInt().toULong())
-        auxiliary(AT_EGID, process.credentials.groupIds.effective.toUInt().toULong())
-        auxiliary(AT_SECURE, 0uL)
+        auxiliary(AT_UID, execution.userIds.real.toUInt().toULong())
+        auxiliary(AT_EUID, execution.userIds.effective.toUInt().toULong())
+        auxiliary(AT_GID, execution.groupIds.real.toUInt().toULong())
+        auxiliary(AT_EGID, execution.groupIds.effective.toUInt().toULong())
+        auxiliary(AT_SECURE, if (execution.privileged) 1uL else 0uL)
         auxiliary(AT_RANDOM, randomAddress)
         auxiliary(AT_EXECFN, execfnAddress)
         auxiliary(AT_SYSINFO_EHDR, USER_MMAP_END)
