@@ -8,6 +8,7 @@ import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.FileDescriptorTable
 import org.plos_clan.cpos.fs.OpenFlags
 import org.plos_clan.cpos.fs.vfs.AccessMode
+import org.plos_clan.cpos.fs.vfs.AnonymousFileBackend
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.SeekOrigin
 import org.plos_clan.cpos.fs.vfs.VfsError
@@ -154,7 +155,12 @@ internal fun fcntl(regs: PtraceRegisters, process: Process): Long {
                     AccessMode.EXECUTE -> OpenFlags.O_RDONLY
                     AccessMode.PATH -> OpenFlags.O_PATH
                 }
-                (access or file.getStatusFlags() or OpenFlags.O_LARGEFILE).toLong()
+                val largeFile = if (file.backend is AnonymousFileBackend) {
+                    0
+                } else {
+                    OpenFlags.O_LARGEFILE
+                }
+                (access or file.getStatusFlags() or largeFile).toLong()
             } finally {
                 file.release()
             }

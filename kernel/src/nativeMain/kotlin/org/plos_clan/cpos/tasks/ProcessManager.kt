@@ -38,12 +38,53 @@ internal enum class ProcessState {
     STOPPED,
     EXITING,
     ZOMBIE,
+    DEAD,
+    ;
+
+    val canReceiveSignals: Boolean
+        get() = this != EXITING && this != ZOMBIE && this != DEAD
 }
 
 internal enum class ProcessGroupResult {
     SUCCESS,
     NO_SUCH_PROCESS,
     NOT_PERMITTED,
+}
+
+internal class PidHandle(
+    val thread: Thread,
+    val scope: Scope,
+) {
+    enum class Scope {
+        PROCESS,
+        THREAD,
+    }
+
+    enum class State {
+        RUNNING,
+        EXITED,
+        DEAD,
+    }
+
+    init {
+        require(scope == Scope.THREAD || thread.id == thread.process.id)
+    }
+
+    val state: State
+        get() = when (scope) {
+            Scope.PROCESS -> when (thread.process.state) {
+                ProcessState.ZOMBIE -> State.EXITED
+                ProcessState.DEAD -> State.DEAD
+                else -> State.RUNNING
+            }
+
+            Scope.THREAD -> when {
+                thread.process.state == ProcessState.DEAD -> State.DEAD
+                thread.state != TaskState.ZOMBIE -> State.RUNNING
+                thread.id == thread.process.id -> State.EXITED
+                else -> State.DEAD
+            }
+        }
 }
 
 internal enum class MemoryCloneMode {
@@ -649,7 +690,7 @@ object ProcessManager {
 
     fun markExited(process: Process, waitStatus: Int) {
         val context = processLock.withLock {
-            if (process.state == ProcessState.EXITING || process.state == ProcessState.ZOMBIE) return
+            if (!process.state.canReceiveSignals) return
             process.state = ProcessState.EXITING
             process.context.also { process.context = null }
         }
@@ -725,8 +766,10 @@ object ProcessManager {
         val reaped = processLock.withLock {
             val removable = child.parentId == parentId &&
                     child.state == ProcessState.ZOMBIE && processes.remove(child)
-            if (removable) parent = processes.firstOrNull { it.id == parentId }
-            removable
+            if (!removable) return@withLock false
+            child.state = ProcessState.DEAD
+            parent = processes.firstOrNull { it.id == parentId }
+            true
         }
         if (reaped) {
             parent?.childEvents?.discard(child)

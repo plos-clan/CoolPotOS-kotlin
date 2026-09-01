@@ -289,6 +289,7 @@ private enum class LinuxSyscall(
     COPY_FILE_RANGE(326, ::copyFileRange, restartable = true),
     STATX(332, ::statx),
     RSEQ(334, ::rseq),
+    PIDFD_OPEN(434, PidFdSyscalls::open),
     CLONE3(435, ::clone3),
     CLOSE_RANGE(436, ::closeRange),
     FACCESSAT2(439, ::faccessAt2),

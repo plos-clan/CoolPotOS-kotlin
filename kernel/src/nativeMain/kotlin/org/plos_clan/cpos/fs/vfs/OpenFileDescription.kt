@@ -50,6 +50,7 @@ class OpenFileDescription private constructor(
             options: OpenOptions,
             truncate: Boolean = options.truncate,
             openedBackend: OpenFileBackend? = null,
+            initialStatusFlags: Int = 0,
         ): VfsResult<OpenFileDescription> {
             if (!path.mount.retain()) {
                 openedBackend?.release()
@@ -91,7 +92,8 @@ class OpenFileDescription private constructor(
                     path,
                     inode,
                     options.access,
-                    (if (options.append) OpenFlags.O_APPEND else 0) or
+                    initialStatusFlags or
+                        (if (options.append) OpenFlags.O_APPEND else 0) or
                         (if (options.nonBlocking) OpenFlags.O_NONBLOCK else 0) or
                         (if (options.noAtime) OpenFlags.O_NOATIME else 0),
                     backend,
@@ -113,9 +115,12 @@ class OpenFileDescription private constructor(
     fun getStatusFlags(): Int = statusFlags.load()
 
     fun setStatusFlags(flags: Int) {
-        statusFlags.store(
-            flags and (OpenFlags.O_APPEND or OpenFlags.O_NONBLOCK or OpenFlags.O_NOATIME),
-        )
+        val mutable = OpenFlags.O_APPEND or OpenFlags.O_NONBLOCK or OpenFlags.O_NOATIME
+        while (true) {
+            val observed = statusFlags.load()
+            val updated = observed and mutable.inv() or (flags and mutable)
+            if (statusFlags.compareAndSet(observed, updated)) return
+        }
     }
 
     internal fun recordAccess(caller: VfsOperationContext) {
@@ -238,11 +243,8 @@ class OpenFileDescription private constructor(
         if (!sourceIsPipe && !destinationIsPipe) {
             return IoResult.failure(VfsError.INVALID_ARGUMENT)
         }
-        if ((!sourceIsPipe &&
-                (inode.type == InodeType.EVENTFD || inode.type == InodeType.EPOLL)) ||
-            (!destinationIsPipe &&
-                (destination.inode.type == InodeType.EVENTFD ||
-                    destination.inode.type == InodeType.EPOLL))
+        if ((!sourceIsPipe && backend is AnonymousFileBackend) ||
+            (!destinationIsPipe && destination.backend is AnonymousFileBackend)
         ) return IoResult.failure(VfsError.INVALID_ARGUMENT)
         if ((sourceOffset != null && positionlessBackend != null) ||
             (destinationOffset != null && destination.positionlessBackend != null)

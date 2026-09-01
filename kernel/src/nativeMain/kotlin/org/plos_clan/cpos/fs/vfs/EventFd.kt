@@ -14,7 +14,9 @@ import kotlin.concurrent.atomics.AtomicInt
 internal class EventFd(
     initialValue: UInt,
     private val semaphore: Boolean,
-) : InodeBackend, ModeAwareOpenFileBackend, FixedSizeIoOpenFileBackend {
+) : AnonymousFileBackend(InodeType.EVENTFD, "eventfd"),
+    ModeAwareOpenFileBackend,
+    FixedSizeIoOpenFileBackend {
     private companion object {
         const val VALUE_BYTES = ULong.SIZE_BYTES
         const val MAX_VALUE = 0xffff_ffff_ffff_fffeuL
@@ -27,26 +29,11 @@ internal class EventFd(
     private val version = AtomicInt(0)
     private var value = initialValue.toULong()
 
-    override val type = InodeType.EVENTFD
     override val ioSize: Int
         get() = VALUE_BYTES
 
     override val readinessVersion: Int
         get() = version.load()
-
-    override fun open(
-        caller: VfsOperationContext,
-        inode: Inode,
-        options: OpenOptions,
-    ): VfsResult<OpenFileBackend> =
-        if (options.access == AccessMode.READ_WRITE) VfsResult.Ok(this)
-        else VfsResult.Err(VfsError.BAD_DESCRIPTOR)
-
-    override fun syncHandle(
-        caller: VfsOperationContext,
-        inode: Inode,
-        dataOnly: Boolean,
-    ): VfsResult<Unit> = VfsResult.Err(VfsError.INVALID_ARGUMENT)
 
     override fun read(
         caller: VfsOperationContext,

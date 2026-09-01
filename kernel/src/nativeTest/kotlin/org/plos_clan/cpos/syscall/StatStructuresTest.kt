@@ -193,4 +193,13 @@ class StatStructuresTest {
         assertEquals(4096uL, input.readU64(72))
         assertEquals(FsConstants.ST_RDONLY or FsConstants.ST_NOEXEC, input.readU64(80))
     }
+
+    @Test
+    fun anonymousDescriptorsHaveNoFilesystemObjectType() {
+        val metadata = status.metadata.copy(mode = FileMode(0x1c0u))
+
+        listOf(InodeType.EVENTFD, InodeType.EPOLL, InodeType.PIDFD).forEach { type ->
+            assertEquals(0x1c0u, status.copy(type = type, metadata = metadata).mode)
+        }
+    }
 }

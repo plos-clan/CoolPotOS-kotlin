@@ -29,7 +29,8 @@ internal object EpollEvents {
     const val EXCLUSIVE_SUPPORTED = 0xb000_001du
 }
 
-internal class Epoll : InodeBackend, PositionlessOpenFileBackend {
+internal class Epoll : AnonymousFileBackend(InodeType.EPOLL, "eventpoll"),
+    PositionlessOpenFileBackend {
     private data class RegistrationKey(
         val descriptor: Int,
         val file: OpenFileDescription,
@@ -57,28 +58,11 @@ internal class Epoll : InodeBackend, PositionlessOpenFileBackend {
     private val ready = ArrayDeque<Registration>()
     private val version = AtomicInt(0)
 
-    override val type: InodeType
-        get() = InodeType.EPOLL
-
     override val seekable: Boolean
         get() = false
 
     override val readinessVersion: Int
         get() = version.load()
-
-    override fun open(
-        caller: VfsOperationContext,
-        inode: Inode,
-        options: OpenOptions,
-    ): VfsResult<OpenFileBackend> =
-        if (options.access == AccessMode.READ_WRITE) VfsResult.Ok(this)
-        else VfsResult.Err(VfsError.BAD_DESCRIPTOR)
-
-    override fun syncHandle(
-        caller: VfsOperationContext,
-        inode: Inode,
-        dataOnly: Boolean,
-    ): VfsResult<Unit> = VfsResult.Err(VfsError.INVALID_ARGUMENT)
 
     override fun poll(caller: VfsOperationContext, inode: Inode, events: Int): Long =
         lock.withLock {

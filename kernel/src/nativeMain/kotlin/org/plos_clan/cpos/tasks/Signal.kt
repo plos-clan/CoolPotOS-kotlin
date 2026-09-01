@@ -471,7 +471,7 @@ internal class ProcessSignalState(uid: () -> Int, limit: () -> ULong) {
 
     fun stop(process: Process, current: Thread, signal: Signal) {
         val notifyParent = stopLock.withLock {
-            if (process.state == ProcessState.EXITING || process.state == ProcessState.ZOMBIE) {
+            if (!process.state.canReceiveSignals) {
                 return
             }
             val stopped = process.state == ProcessState.STOPPED
@@ -635,9 +635,7 @@ internal object SignalRouter {
         if (sender != null && !permitted(sender, target, info?.signal)) {
             return SignalSendResult.NOT_PERMITTED
         }
-        if (info == null || target.state == ProcessState.EXITING ||
-            target.state == ProcessState.ZOMBIE
-        ) {
+        if (info == null || !target.state.canReceiveSignals) {
             return SignalSendResult.SUCCESS
         }
 

@@ -2,6 +2,25 @@ package org.plos_clan.cpos.fs.vfs
 
 import org.plos_clan.cpos.utils.IrqSpinLock
 
+internal abstract class AnonymousFileBackend(
+    final override val type: InodeType,
+    val anonymousName: String,
+) : InodeBackend, OpenFileBackend {
+    final override fun open(
+        caller: VfsOperationContext,
+        inode: Inode,
+        options: OpenOptions,
+    ): VfsResult<OpenFileBackend> =
+        if (options.access == AccessMode.READ_WRITE) VfsResult.Ok(this)
+        else VfsResult.Err(VfsError.BAD_DESCRIPTOR)
+
+    final override fun syncHandle(
+        caller: VfsOperationContext,
+        inode: Inode,
+        dataOnly: Boolean,
+    ): VfsResult<Unit> = VfsResult.Err(VfsError.INVALID_ARGUMENT)
+}
+
 internal class AnonymousFileFactory {
     private val lock = IrqSpinLock()
     private var nextInodeId = ULong.MAX_VALUE
@@ -26,10 +45,12 @@ internal class AnonymousFileFactory {
         backend: InodeBackend,
         options: OpenOptions,
         metadata: InodeMetadata = InodeMetadata(mode = FileMode(0x1FFu), linkCount = 0u),
+        initialStatusFlags: Int = 0,
     ): VfsResult<OpenFileDescription> = OpenFileDescription.open(
         caller,
         context.root,
         createInode(context, backend, metadata),
         options,
+        initialStatusFlags = initialStatusFlags,
     )
 }

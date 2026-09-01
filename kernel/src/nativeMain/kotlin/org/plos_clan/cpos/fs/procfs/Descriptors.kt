@@ -1,6 +1,7 @@
 package org.plos_clan.cpos.fs.procfs
 
 import org.plos_clan.cpos.fs.FileSystemManager
+import org.plos_clan.cpos.fs.vfs.AnonymousFileBackend
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
 import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.vfs.InodeType
@@ -64,8 +65,8 @@ internal class ProcDescriptorDirectory(
             if (inode.type == InodeType.SOCKET) {
                 return VfsPathname.fromString("socket:[$inodeId]")
             }
-            if (inode.type == InodeType.EVENTFD) {
-                return VfsPathname.fromString("anon_inode:[eventfd]")
+            (file.backend as? AnonymousFileBackend)?.let { backend ->
+                return VfsPathname.fromString("anon_inode:[${backend.anonymousName}]")
             }
 
             val context = process.context ?: return null

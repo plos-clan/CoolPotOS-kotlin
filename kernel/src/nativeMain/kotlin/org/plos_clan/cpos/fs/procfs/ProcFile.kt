@@ -19,7 +19,7 @@ val Process.comm: String
     get() = name.substringAfterLast('/').ifEmpty { name }.take(MAX_COMM_LENGTH)
 
 val Process.isRunnable: Boolean
-    get() = state != ProcessState.ZOMBIE && threads.any {
+    get() = state.canReceiveSignals && threads.any {
         it.state == TaskState.READY || it.state == TaskState.RUNNING
     }
 
@@ -117,6 +117,7 @@ fun Process.status(): String {
 private fun Process.stateCode(): Char = stateDescription().first
 
 private fun Process.stateDescription(): Pair<Char, String> = when {
+    state == ProcessState.DEAD -> 'X' to "dead"
     state == ProcessState.ZOMBIE -> 'Z' to "zombie"
     state == ProcessState.STOPPED -> 'T' to "stopped"
     threads.any { it.state == TaskState.RUNNING } -> 'R' to "running"

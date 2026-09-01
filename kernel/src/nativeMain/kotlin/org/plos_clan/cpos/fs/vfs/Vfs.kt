@@ -7,6 +7,7 @@ import org.plos_clan.cpos.fs.sock.UnixSocketAddress
 import org.plos_clan.cpos.fs.sock.UnixSocketSubsystem
 import org.plos_clan.cpos.fs.sock.SocketType
 import org.plos_clan.cpos.mem.PageCache
+import org.plos_clan.cpos.tasks.PidHandle
 
 class Vfs(maxSymlinkDepth: Int = 40) {
     private val paths = VfsPathResolver(maxSymlinkDepth)
@@ -55,6 +56,20 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         Epoll(),
         OpenOptions(access = AccessMode.READ_WRITE),
         InodeMetadata(mode = FileMode(0x180u), linkCount = 1u),
+    )
+
+    internal fun createPidFd(
+        caller: VfsOperationContext,
+        context: FileSystemContext,
+        target: PidHandle,
+        statusFlags: Int,
+    ): VfsResult<OpenFileDescription> = anonymousFiles.open(
+        caller,
+        context,
+        PidFd(target),
+        OpenOptions(access = AccessMode.READ_WRITE),
+        InodeMetadata(mode = FileMode(0x1c0u), linkCount = 1u),
+        initialStatusFlags = statusFlags,
     )
 
     internal fun createUnixSocket(

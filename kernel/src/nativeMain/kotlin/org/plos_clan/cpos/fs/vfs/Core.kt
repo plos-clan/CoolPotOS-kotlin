@@ -247,6 +247,7 @@ enum class InodeType {
     SOCKET,
     EVENTFD,
     EPOLL,
+    PIDFD,
 }
 
 data class InodeMetadata(
