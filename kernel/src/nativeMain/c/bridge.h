@@ -118,7 +118,7 @@ int cp_zstd_decompress(void *destination, size_t capacity,
 
 void register_interrupt_handler(
     uint16_t vector,
-    void (*handler)(void *, uint64_t, uint64_t),
+    void (*handler)(void *, uint64_t, uint64_t, uint64_t),
     uint8_t ist,
     uint8_t flags
 );

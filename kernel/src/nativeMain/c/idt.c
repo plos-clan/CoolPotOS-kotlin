@@ -5,6 +5,7 @@ enum {
     idt_vector_count = 256,
     irq_vector_base = 32,
     irq_stub_size = 10,
+    page_fault_vector = 14,
 };
 
 struct idt_entry {
@@ -30,7 +31,8 @@ _Static_assert(sizeof(interrupt_frame_t) == 40, "invalid interrupt frame layout"
 typedef void (*kotlin_interrupt_handler_t)(
     interrupt_frame_t *frame,
     uint64_t error_code,
-    uint64_t rbp
+    uint64_t rbp,
+    uint64_t fault_address
 );
 
 extern uint8_t irq_stub_base[];
@@ -47,7 +49,8 @@ static void dispatch_kotlin_handler(
     kotlin_interrupt_handler_t handler,
     interrupt_frame_t *frame,
     uint64_t error_code,
-    uint64_t rbp
+    uint64_t rbp,
+    uint64_t fault_address
 ) {
     xstate_t xstate;
     initialize_xstate_header(&xstate);
@@ -65,7 +68,7 @@ static void dispatch_kotlin_handler(
         wrmsr(ia32_fs_base_msr, kernel_fs_base);
     }
 
-    handler(frame, error_code, rbp);
+    handler(frame, error_code, rbp, fault_address);
 
     if (from_user) {
         wrmsr(ia32_fs_base_msr, user_fs_base);
@@ -108,16 +111,17 @@ static void set_idt_gate(uint16_t vector, void *handler, uint8_t ist, uint8_t fl
     __attribute__((interrupt)) static void isr_no_error_##vector(interrupt_frame_t *frame) { \
         kotlin_interrupt_handler_t handler = kotlin_handlers[vector]; \
         if (!handler) halt_forever(); \
-        dispatch_kotlin_handler(handler, frame, 0, read_rbp()); \
+        dispatch_kotlin_handler(handler, frame, 0, read_rbp(), 0); \
     }
 EXCEPTION_NO_ERROR_CODE_LIST
 #undef X
 
 #define X(vector) \
     __attribute__((interrupt)) static void isr_with_error_##vector(interrupt_frame_t *frame, uint64_t error_code) { \
+        const uint64_t fault_address = vector == page_fault_vector ? read_cr2() : 0; \
         kotlin_interrupt_handler_t handler = kotlin_handlers[vector]; \
         if (!handler) halt_forever(); \
-        dispatch_kotlin_handler(handler, frame, error_code, read_rbp()); \
+        dispatch_kotlin_handler(handler, frame, error_code, read_rbp(), fault_address); \
     }
 EXCEPTION_WITH_ERROR_CODE_LIST
 #undef X
@@ -292,7 +296,12 @@ void idt_setup(void) {
 
 void register_interrupt_handler(
     uint16_t vector,
-    void (*handler)(void *interrupt_frame, uint64_t error_code, uint64_t rbp),
+    void (*handler)(
+        void *interrupt_frame,
+        uint64_t error_code,
+        uint64_t rbp,
+        uint64_t fault_address
+    ),
     uint8_t ist,
     uint8_t flags
 ) {

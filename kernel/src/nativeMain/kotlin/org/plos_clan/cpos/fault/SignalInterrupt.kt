@@ -72,6 +72,11 @@ internal object SignalInterrupt : SignalPreemption {
 }
 
 @Suppress("UNUSED_PARAMETER")
-private fun signalInterrupt(frame: COpaquePointer?, errorCode: ULong, interruptedRbp: ULong) {
+private fun signalInterrupt(
+    frame: COpaquePointer?,
+    errorCode: ULong,
+    interruptedRbp: ULong,
+    faultAddress: ULong,
+) {
     SignalInterrupt.handle(InterruptFrame(requireNotNull(frame).reinterpret()))
 }

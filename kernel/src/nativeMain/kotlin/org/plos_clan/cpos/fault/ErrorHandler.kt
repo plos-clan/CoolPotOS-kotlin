@@ -2,7 +2,6 @@
 
 package org.plos_clan.cpos.fault
 
-import bridge.read_cr2
 import bridge.read_cr3
 import bridge.register_interrupt_handler
 import kotlinx.cinterop.COpaquePointer
@@ -128,11 +127,12 @@ private fun printFaultContext(
     frame: InterruptFrame,
     errorCode: ULong,
     interruptedRbp: ULong,
+    faultAddress: ULong,
 ) {
     println("name=$name errorCode=${errorCode.hex()} cpu=${SMProcessor.currentLocal().lapicId}")
     println("rip=${frame.rip.hex()} cs=${frame.cs.hex()} rflags=${frame.rflags.hex()}")
     println("rsp=${frame.rsp.hex()} rbp=${interruptedRbp.hex()} ss=${frame.ss.hex()}")
-    println("cr2=${read_cr2().hex()} cr3=${read_cr3().hex()}")
+    println("cr2=${faultAddress.hex()} cr3=${read_cr3().hex()}")
     printCallStack(frame, interruptedRbp)
 }
 
@@ -140,9 +140,10 @@ private fun haltOnFault(
     frame: InterruptFrame,
     errorCode: ULong,
     interruptedRbp: ULong,
+    faultAddress: ULong,
     name: String,
 ) {
-    printFaultContext(name, frame, errorCode, interruptedRbp)
+    printFaultContext(name, frame, errorCode, interruptedRbp, faultAddress)
     while (true) {
         bridge.wait_for_interrupt()
     }
@@ -160,11 +161,15 @@ private fun redirectUserSignal(
     return SignalGateway.redirectSynchronous(frame, thread, errorCode, trapNumber, info)
 }
 
-fun pageFault(frame: COpaquePointer?, ecode: ULong, interruptedRbp: ULong) {
+fun pageFault(
+    frame: COpaquePointer?,
+    ecode: ULong,
+    interruptedRbp: ULong,
+    faultAddress: ULong,
+) {
     val interruptFrame = InterruptFrame(requireNotNull(frame).reinterpret())
     val cameFromUser = (ecode and PAGE_FAULT_USER) != 0uL &&
         interruptFrame.cameFromUser
-    val address = read_cr2()
     val canResolve = (ecode and PAGE_FAULT_RESERVED) == 0uL &&
         ((ecode and PAGE_FAULT_PRESENT) == 0uL ||
             (ecode and PAGE_FAULT_WRITE) != 0uL ||
@@ -177,9 +182,9 @@ fun pageFault(frame: COpaquePointer?, ecode: ULong, interruptedRbp: ULong) {
             ProcessManager.currentProcess()
                 ?.takeUnless { it.isKernelProcess }
                 ?.addressSpace
-                ?.faultIn(address, write, execute)
+                ?.faultIn(faultAddress, write, execute)
         } else {
-            KernelPageDirectory.addressSpace.faultIn(address, write, execute)
+            KernelPageDirectory.addressSpace.faultIn(faultAddress, write, execute)
         }
         if (resolution == PageFaultResult.RESOLVED) {
             return
@@ -190,7 +195,7 @@ fun pageFault(frame: COpaquePointer?, ecode: ULong, interruptedRbp: ULong) {
         SignalInfo(
             signal = Signal.BUS,
             code = SignalInfo.BUS_OBJECT_ERROR,
-            payload = SignalPayload.Fault(address),
+            payload = SignalPayload.Fault(faultAddress),
         )
     } else {
         SignalInfo(
@@ -202,7 +207,7 @@ fun pageFault(frame: COpaquePointer?, ecode: ULong, interruptedRbp: ULong) {
             } else {
                 SignalInfo.SEGMENT_MAPPING_ERROR
             },
-            payload = SignalPayload.Fault(address),
+            payload = SignalPayload.Fault(faultAddress),
         )
     }
     if (cameFromUser && redirectUserSignal(
@@ -212,13 +217,14 @@ fun pageFault(frame: COpaquePointer?, ecode: ULong, interruptedRbp: ULong) {
             info = info,
         )
     ) return
-    haltOnFault(interruptFrame, ecode, interruptedRbp, "PageFault(#PF)")
+    haltOnFault(interruptFrame, ecode, interruptedRbp, faultAddress, "PageFault(#PF)")
 }
 
 private fun handleUserException(
     frame: COpaquePointer?,
     errorCode: ULong,
     interruptedRbp: ULong,
+    faultAddress: ULong,
     exception: UserException,
 ) {
     val interruptFrame = InterruptFrame(requireNotNull(frame).reinterpret())
@@ -239,38 +245,38 @@ private fun handleUserException(
             ),
         )
     ) return
-    haltOnFault(interruptFrame, errorCode, interruptedRbp, exception.displayName)
+    haltOnFault(interruptFrame, errorCode, interruptedRbp, faultAddress, exception.displayName)
 }
 
-fun divideError(frame: COpaquePointer?, ecode: ULong, rbp: ULong) =
-    handleUserException(frame, ecode, rbp, UserException.DIVIDE)
+fun divideError(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
+    handleUserException(frame, ecode, rbp, faultAddress, UserException.DIVIDE)
 
-fun debugException(frame: COpaquePointer?, ecode: ULong, rbp: ULong) =
-    handleUserException(frame, ecode, rbp, UserException.DEBUG)
+fun debugException(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
+    handleUserException(frame, ecode, rbp, faultAddress, UserException.DEBUG)
 
-fun breakpoint(frame: COpaquePointer?, ecode: ULong, rbp: ULong) =
-    handleUserException(frame, ecode, rbp, UserException.BREAKPOINT)
+fun breakpoint(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
+    handleUserException(frame, ecode, rbp, faultAddress, UserException.BREAKPOINT)
 
-fun overflow(frame: COpaquePointer?, ecode: ULong, rbp: ULong) =
-    handleUserException(frame, ecode, rbp, UserException.OVERFLOW)
+fun overflow(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
+    handleUserException(frame, ecode, rbp, faultAddress, UserException.OVERFLOW)
 
-fun boundsCheck(frame: COpaquePointer?, ecode: ULong, rbp: ULong) =
-    handleUserException(frame, ecode, rbp, UserException.BOUNDS)
+fun boundsCheck(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
+    handleUserException(frame, ecode, rbp, faultAddress, UserException.BOUNDS)
 
-fun invalidOpcode(frame: COpaquePointer?, ecode: ULong, rbp: ULong) =
-    handleUserException(frame, ecode, rbp, UserException.INVALID_OPCODE)
+fun invalidOpcode(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
+    handleUserException(frame, ecode, rbp, faultAddress, UserException.INVALID_OPCODE)
 
-fun generalProtectionFault(frame: COpaquePointer?, ecode: ULong, rbp: ULong) =
-    handleUserException(frame, ecode, rbp, UserException.GENERAL_PROTECTION)
+fun generalProtectionFault(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
+    handleUserException(frame, ecode, rbp, faultAddress, UserException.GENERAL_PROTECTION)
 
-fun x87FloatingPoint(frame: COpaquePointer?, ecode: ULong, rbp: ULong) =
-    handleUserException(frame, ecode, rbp, UserException.X87_FLOATING_POINT)
+fun x87FloatingPoint(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
+    handleUserException(frame, ecode, rbp, faultAddress, UserException.X87_FLOATING_POINT)
 
-fun alignmentCheck(frame: COpaquePointer?, ecode: ULong, rbp: ULong) =
-    handleUserException(frame, ecode, rbp, UserException.ALIGNMENT)
+fun alignmentCheck(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
+    handleUserException(frame, ecode, rbp, faultAddress, UserException.ALIGNMENT)
 
-fun simdFloatingPoint(frame: COpaquePointer?, ecode: ULong, rbp: ULong) =
-    handleUserException(frame, ecode, rbp, UserException.SIMD_FLOATING_POINT)
+fun simdFloatingPoint(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
+    handleUserException(frame, ecode, rbp, faultAddress, UserException.SIMD_FLOATING_POINT)
 
 object ErrorHandler {
     fun initialize() {

@@ -13,6 +13,7 @@ packages=(
     python
     dbus
     networkmanager
+    less
 )
 
 rootfs=$(mktemp -d)
