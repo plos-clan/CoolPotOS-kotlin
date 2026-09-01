@@ -53,10 +53,11 @@ fun apStart() {
         return
     }
     CpuID.apInit(SMProcessor.currentLocal())
-    SMProcessor.currentLocal().scheduler.waitUntilEnabled()
-    if (!Scheduler.apInitialize()) {
-        return
-    }
+    val scheduler = SMProcessor.currentLocal().scheduler
+    scheduler.waitForBindRequest()
+    val initialized = Scheduler.apInitialize()
+    scheduler.completeBind(initialized)
+    if (!initialized || !scheduler.waitUntilEnabled()) return
     bridge.enable_interrupt()
     bridge.fast_handoff_idle()
 }

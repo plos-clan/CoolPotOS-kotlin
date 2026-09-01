@@ -3,18 +3,59 @@
 package org.plos_clan.cpos.tasks
 
 import kotlinx.cinterop.ExperimentalForeignApi
-import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
+
+private enum class SchedulerStartupState {
+    WAITING,
+    BIND_REQUESTED,
+    BOUND,
+    ENABLED,
+    FAILED,
+}
 
 class PerCpuScheduler {
     var bootstrapThread: Thread? = null
-    val scheduled = AtomicBoolean(false)
     val signalPasses = AtomicInt(0)
+    private val startupState = AtomicReference(SchedulerStartupState.WAITING)
 
-    fun waitUntilEnabled() {
-        while (!scheduled.load()) {
-            bridge.asm_pause()
+    internal fun requestBind() {
+        check(startupState.compareAndSet(
+            expectedValue = SchedulerStartupState.WAITING,
+            newValue = SchedulerStartupState.BIND_REQUESTED,
+        ))
+    }
+
+    internal fun waitForBindRequest() {
+        check(awaitState(SchedulerStartupState.BIND_REQUESTED))
+    }
+
+    internal fun completeBind(success: Boolean) {
+        check(startupState.compareAndSet(
+            expectedValue = SchedulerStartupState.BIND_REQUESTED,
+            newValue = if (success) SchedulerStartupState.BOUND else SchedulerStartupState.FAILED,
+        ))
+    }
+
+    internal fun waitUntilBound(): Boolean = awaitState(SchedulerStartupState.BOUND)
+
+    internal fun enable() {
+        check(startupState.compareAndSet(
+            expectedValue = SchedulerStartupState.BOUND,
+            newValue = SchedulerStartupState.ENABLED,
+        ))
+    }
+
+    internal fun waitUntilEnabled(): Boolean = awaitState(SchedulerStartupState.ENABLED)
+
+    private fun awaitState(expected: SchedulerStartupState): Boolean {
+        while (true) {
+            when (startupState.load()) {
+                expected -> return true
+                SchedulerStartupState.FAILED -> return false
+                else -> bridge.asm_pause()
+            }
         }
     }
 }
@@ -28,12 +69,19 @@ object Scheduler {
         )
     }
 
-    fun enableScheduler() {
-        prepareApBootstrapThreads()
-        bridge.fast_handoff_set_enabled(1u.toUByte())
-        SMProcessor.locals.values.forEach { local ->
-            local.scheduler.scheduled.store(true)
+    fun enableScheduler(): Boolean {
+        val applicationProcessors = schedulingCpus.filterNot(CpuLocal::isBsp)
+        applicationProcessors.forEach { local ->
+            if (local.scheduler.bootstrapThread == null) {
+                local.scheduler.bootstrapThread = ProcessManager.getNewApIdleThread()
+            }
+            local.scheduler.requestBind()
         }
+        if (applicationProcessors.any { !it.scheduler.waitUntilBound() }) return false
+
+        bridge.fast_handoff_set_enabled(1u.toUByte())
+        applicationProcessors.forEach { it.scheduler.enable() }
+        return true
     }
 
     fun enqueueThread(thread: Thread) {
@@ -104,17 +152,6 @@ object Scheduler {
             println("Scheduler: initialized policy=RRS-fast-handoff core=${local.lapicId}")
         }
         return true
-    }
-
-    private fun prepareApBootstrapThreads() {
-        SMProcessor.locals.values
-            .filterNot(CpuLocal::isBsp)
-            .sortedBy(CpuLocal::lapicId)
-            .forEach { local ->
-                if (local.scheduler.bootstrapThread == null) {
-                    local.scheduler.bootstrapThread = ProcessManager.getNewApIdleThread()
-                }
-            }
     }
 
     private fun selectTargetCpu(): CpuLocal {

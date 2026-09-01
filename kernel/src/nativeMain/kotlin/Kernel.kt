@@ -72,7 +72,9 @@ fun kernelMain() {
         return
     }
     startCapturedCloneThreads()
-    Scheduler.enableScheduler()
+    if (!Scheduler.enableScheduler()) {
+        return
+    }
     Cmdline.initialize()
     KernelRandom.initialize()
     if (!FileSystemManager.initialize()) {

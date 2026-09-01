@@ -29,6 +29,19 @@
 #define CLOCK_MONOTONIC_COARSE 6
 #define CLOCK_BOOTTIME 7
 
+enum {
+    futex_command_mask = 0x7f,
+    futex_private_flag = 0x80,
+    futex_bucket_bits = 8,
+    futex_bucket_count = 1u << futex_bucket_bits,
+};
+
+enum futex_waiter_state {
+    futex_waiting,
+    futex_waking,
+    futex_woken,
+};
+
 struct timespec_arg {
     int64_t tv_sec;
     int64_t tv_nsec;
@@ -37,6 +50,20 @@ struct timespec_arg {
 struct vm_block {
     size_t size;
     struct vm_block *next;
+};
+
+struct futex_waiter {
+    struct futex_waiter *next;
+    struct futex_waiter *previous;
+    int *address;
+    uint64_t task;
+    enum futex_waiter_state state;
+};
+
+struct futex_bucket {
+    struct futex_waiter *head;
+    struct futex_waiter *tail;
+    uint8_t lock;
 };
 
 typedef void *(*vm_allocate_fn)(size_t);
@@ -48,8 +75,7 @@ static struct vm_block *bootstrap_vm_free_list;
 static vm_allocate_fn runtime_vm_allocate;
 static struct vm_block *runtime_vm_released;
 static uint8_t vm_lock;
-static uint64_t futex_epoch;
-static uint64_t futex_waiter_count;
+static struct futex_bucket futex_buckets[futex_bucket_count];
 void cpu_relax(void) { __asm__ volatile("pause" : : : "memory"); }
 
 static void spin_lock(uint8_t *lock) {
@@ -156,8 +182,6 @@ static void wait_for_event(void) {
 static long futex_deadline(const struct timespec_arg *time, uint64_t *deadline) {
     if (time->tv_sec < 0 || time->tv_nsec < 0 || time->tv_nsec >= (int64_t)NS_PER_SEC)
         return -EINVAL;
-    if (time->tv_sec == 0 && time->tv_nsec == 0)
-        return -ETIMEDOUT;
 
     const uint64_t sec = time->tv_sec;
     const uint64_t nsec = time->tv_nsec;
@@ -168,43 +192,138 @@ static long futex_deadline(const struct timespec_arg *time, uint64_t *deadline) 
     return 0;
 }
 
-static long futex_call(int *pointer, int operation, int expected, const struct timespec_arg *time) {
-    if (!pointer)
-        return -EINVAL;
+static struct futex_bucket *futex_bucket_for(const int *address) {
+    const uintptr_t key = (uintptr_t)address / _Alignof(int);
+    return &futex_buckets[
+        ((uint64_t)key * UINT64_C(11400714819323198485)) >>
+            (sizeof(uint64_t) * 8 - futex_bucket_bits)
+    ];
+}
 
-    const int command = operation & 0x7f;
-    if (command == FUTEX_WAKE) {
-        __atomic_add_fetch(&futex_epoch, 1u, __ATOMIC_RELEASE);
-        const uint64_t waiters = __atomic_load_n(&futex_waiter_count, __ATOMIC_ACQUIRE);
-        const uint64_t requested = expected > 0 ? (uint64_t)expected : 0;
-        return (long)(waiters < requested ? waiters : requested);
-    }
-    if (command != FUTEX_WAIT) return -ENOSYS;
-    if (__atomic_load_n(pointer, __ATOMIC_ACQUIRE) != expected)
-        return -EAGAIN;
+static void futex_remove_locked(
+    struct futex_bucket *bucket,
+    struct futex_waiter *waiter
+) {
+    if (waiter->previous) waiter->previous->next = waiter->next;
+    else bucket->head = waiter->next;
+    if (waiter->next) waiter->next->previous = waiter->previous;
+    else bucket->tail = waiter->previous;
+    waiter->next = NULL;
+    waiter->previous = NULL;
+}
 
+static long futex_wait(
+    int *pointer,
+    int expected,
+    const struct timespec_arg *time
+) {
     uint64_t deadline = 0;
     if (time) {
         const long error = futex_deadline(time, &deadline);
         if (error) return error;
     }
 
-    const uint64_t observed_epoch = __atomic_load_n(&futex_epoch, __ATOMIC_ACQUIRE);
-    __atomic_add_fetch(&futex_waiter_count, 1u, __ATOMIC_ACQ_REL);
-    while (__atomic_load_n(pointer, __ATOMIC_ACQUIRE) == expected) {
-        if (__atomic_load_n(&futex_epoch, __ATOMIC_ACQUIRE) != observed_epoch) {
-            __atomic_sub_fetch(&futex_waiter_count, 1u, __ATOMIC_ACQ_REL);
+    struct futex_bucket *bucket = futex_bucket_for(pointer);
+    struct futex_waiter waiter = {
+        .address = pointer,
+        .state = futex_waiting,
+    };
+    uint64_t interrupt_flags = irq_save();
+    spin_lock(&bucket->lock);
+    if (__atomic_load_n(pointer, __ATOMIC_ACQUIRE) != expected) {
+        spin_unlock(&bucket->lock);
+        irq_restore(interrupt_flags);
+        return -EAGAIN;
+    }
+    waiter.task = fast_handoff_current_task_handle();
+    waiter.previous = bucket->tail;
+    if (bucket->tail) bucket->tail->next = &waiter;
+    else bucket->head = &waiter;
+    bucket->tail = &waiter;
+    spin_unlock(&bucket->lock);
+    irq_restore(interrupt_flags);
+
+    for (;;) {
+        const bool parked = waiter.task && (time
+            ? fast_handoff_park_current_until(deadline)
+            : fast_handoff_park_current());
+
+        interrupt_flags = irq_save();
+        spin_lock(&bucket->lock);
+        const enum futex_waiter_state state = __atomic_load_n(
+            &waiter.state,
+            __ATOMIC_ACQUIRE
+        );
+        if (state == futex_woken) {
+            spin_unlock(&bucket->lock);
+            irq_restore(interrupt_flags);
             return 0;
         }
-        if (time && runtime_clock_nanos() >= deadline) {
-            __atomic_sub_fetch(&futex_waiter_count, 1u, __ATOMIC_ACQ_REL);
+        if (state == futex_waiting && time && runtime_clock_nanos() >= deadline) {
+            futex_remove_locked(bucket, &waiter);
+            spin_unlock(&bucket->lock);
+            irq_restore(interrupt_flags);
             return -ETIMEDOUT;
         }
-        wait_for_event();
-    }
+        spin_unlock(&bucket->lock);
+        irq_restore(interrupt_flags);
 
-    __atomic_sub_fetch(&futex_waiter_count, 1u, __ATOMIC_ACQ_REL);
-    return 0;
+        if (state == futex_waking) {
+            if (waiter.task) fast_handoff_park_current();
+            else cpu_relax();
+        } else if (!parked) {
+            cpu_relax();
+        }
+    }
+}
+
+static long futex_wake(int *pointer, int requested) {
+    if (requested <= 0) return 0;
+
+    struct futex_bucket *bucket = futex_bucket_for(pointer);
+    struct futex_waiter *selected = NULL;
+    struct futex_waiter **selected_tail = &selected;
+    const uint64_t interrupt_flags = irq_save();
+    spin_lock(&bucket->lock);
+    long count = 0;
+    for (struct futex_waiter *waiter = bucket->head, *next;
+         waiter && count < requested; waiter = next) {
+        next = waiter->next;
+        if (waiter->address != pointer) continue;
+
+        futex_remove_locked(bucket, waiter);
+        __atomic_store_n(&waiter->state, futex_waking, __ATOMIC_RELEASE);
+        *selected_tail = waiter;
+        selected_tail = &waiter->next;
+        count++;
+    }
+    spin_unlock(&bucket->lock);
+    irq_restore(interrupt_flags);
+
+    while (selected) {
+        struct futex_waiter *next = selected->next;
+        const uint64_t task = selected->task;
+        __atomic_store_n(&selected->state, futex_woken, __ATOMIC_RELEASE);
+        if (task) fast_handoff_unpark(task);
+        selected = next;
+    }
+    return count;
+}
+
+static long futex_call(int *pointer, int operation, int expected, const struct timespec_arg *time) {
+    if (!pointer || (uintptr_t)pointer % _Alignof(int)) return -EINVAL;
+
+    const unsigned int flags = (unsigned int)operation & ~futex_command_mask;
+    if (flags & ~futex_private_flag) return -EINVAL;
+
+    switch (operation & futex_command_mask) {
+    case FUTEX_WAIT:
+        return futex_wait(pointer, expected, time);
+    case FUTEX_WAKE:
+        return futex_wake(pointer, expected);
+    default:
+        return -ENOSYS;
+    }
 }
 
 static long mmap_call(void *hint, size_t size, int prot, int flags, int fd, int64_t offset) {
