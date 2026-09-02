@@ -75,13 +75,17 @@ class StatStructuresTest {
 
     @Test
     fun serializesLinuxStatxLayout() {
-        val bytes = LinuxStatx(status, isMountRoot = false).toNativeBytes()
+        val bytes = LinuxStatx(status, isMountRoot = false, mountId = 42uL).toNativeBytes()
         val input = LittleEndianBuffer(bytes)
 
         assertEquals(FsConstants.STATX_SIZE, bytes.size)
         assertEquals(
             FsConstants.STATX_SUPPORTED_FIELDS or FsConstants.STATX_BTIME,
             input.readU32(0),
+        )
+        assertEquals(
+            FsConstants.STATX_MNT_ID,
+            input.readU32(0) and FsConstants.STATX_MNT_ID,
         )
         assertEquals(8192u, input.readU32(4))
         assertEquals(0uL, input.readU64(8))
@@ -103,12 +107,14 @@ class StatStructuresTest {
         assertEquals(222u, input.readU32(120))
         assertEquals(0xABCu, input.readU32(128))
         assertEquals(0x54321u, input.readU32(132))
-        assertTrue(bytes.copyOfRange(136, bytes.size).all { it == 0.toByte() })
+        assertTrue(bytes.copyOfRange(136, 144).all { it == 0.toByte() })
+        assertEquals(42uL, input.readU64(144))
+        assertTrue(bytes.copyOfRange(152, bytes.size).all { it == 0.toByte() })
     }
 
     @Test
     fun marksLinuxStatxMountRoot() {
-        val bytes = LinuxStatx(status, isMountRoot = true).toNativeBytes()
+        val bytes = LinuxStatx(status, isMountRoot = true, mountId = 42uL).toNativeBytes()
         val input = LittleEndianBuffer(bytes)
 
         assertEquals(FsConstants.STATX_ATTR_MOUNT_ROOT, input.readU64(8))
@@ -122,7 +128,11 @@ class StatStructuresTest {
                 timestamps = status.metadata.timestamps.copy(birthTime = null),
             ),
         )
-        val bytes = LinuxStatx(withoutBirthTime, isMountRoot = false).toNativeBytes()
+        val bytes = LinuxStatx(
+            withoutBirthTime,
+            isMountRoot = false,
+            mountId = 42uL,
+        ).toNativeBytes()
 
         assertEquals(
             FsConstants.STATX_SUPPORTED_FIELDS,

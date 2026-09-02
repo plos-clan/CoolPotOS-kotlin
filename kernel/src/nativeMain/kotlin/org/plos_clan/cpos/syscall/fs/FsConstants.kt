@@ -73,8 +73,9 @@ internal object FsConstants {
 
     const val XATTR_CREATE = 0x1
     const val XATTR_REPLACE = 0x2
-    const val STATX_SUPPORTED_FIELDS = 0x7ffu
     const val STATX_BTIME = 0x800u
+    const val STATX_MNT_ID = 0x1000u
+    const val STATX_SUPPORTED_FIELDS = 0x17ffu
     const val STATX_RESERVED = 0x8000_0000u
     const val STATX_ATTR_MOUNT_ROOT = 0x2000uL
 

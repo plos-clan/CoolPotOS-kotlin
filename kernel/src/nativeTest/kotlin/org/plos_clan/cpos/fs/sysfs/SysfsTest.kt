@@ -53,13 +53,18 @@ class SysfsTest {
         val busDevices = registry.child(busDirectory.id, "devices")
         val busLink = registry.child(busDevices.id, "null") as SysfsNode.Link
         val devLink = registry.child(SysfsRegistry.DEV_CHAR_ID, "1:3") as SysfsNode.Link
+        val subsystemLink = registry.child(canonical.id, "subsystem") as SysfsNode.Link
         assertEquals("../../devices/virtual/mem/null", registry.readLink(classLink).value().toString())
         assertEquals(
             "../../../devices/virtual/mem/null",
             registry.readLink(busLink).value().toString(),
         )
         assertEquals("../../devices/virtual/mem/null", registry.readLink(devLink).value().toString())
-        assertEquals(4, setOf(canonical.id, classLink.id, busLink.id, devLink.id).size)
+        assertEquals("../../../../bus/platform", registry.readLink(subsystemLink).value().toString())
+        assertEquals(
+            5,
+            setOf(canonical.id, classLink.id, busLink.id, devLink.id, subsystemLink.id).size,
+        )
 
         registry.unregisterDevice(device).value()
         assertNull(registry.childOrNull(category.id, "null"))
@@ -182,6 +187,26 @@ class SysfsTest {
         assertEquals(4096uL, attributeNode.attribute.size)
         assertSame(attributeNode.attribute, binary)
         registry.unregisterObject(objectHandle).value()
+    }
+
+    @Test
+    fun projectsClassAsTheSubsystemForClassOnlyObjects() {
+        val registry = registry()
+        val handle = registry.registerObject(
+            SysfsObjectSpec(
+                name = "lo",
+                parent = SysfsParent.Virtual("net"),
+                attributes = listOf(SysfsTextAttribute.constant("uevent", "IFINDEX=1\n")),
+                bindings = SysfsBindings(deviceClass = SysfsIndexBinding("net")),
+            ),
+        ).value()
+        val category = registry.child(SysfsRegistry.VIRTUAL_ID, "net")
+        val canonical = registry.child(category.id, "lo")
+        val subsystem = assertIs<SysfsNode.Link>(registry.child(canonical.id, "subsystem"))
+
+        assertEquals("../../../../class/net", registry.readLink(subsystem).value().toString())
+        registry.unregisterObject(handle).value()
+        assertNull(registry.childOrNull(category.id, "lo"))
     }
 
     private fun registry(): SysfsRegistry = SysfsRegistry { VfsTimestamp(1L, 0u) }

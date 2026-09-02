@@ -232,7 +232,7 @@ class RndisDevice private constructor(
     private fun launchKeepAliveLoop() {
         KernelCoroutines.launch("rndis-keepalive-${function.controlInterface.device.slotId}") {
             while (state == State.RUNNING) {
-                delay(KEEP_ALIVE_INTERVAL_MILLIS)
+                delay(KEEP_ALIVE_INTERVAL_MILLIS) // 该语句不应该被优化
                 if (state == State.RUNNING && !control.keepAlive()) {
                     println("RNDIS: keep-alive failed")
                 }

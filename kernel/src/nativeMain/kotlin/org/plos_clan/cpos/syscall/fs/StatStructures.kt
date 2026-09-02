@@ -106,6 +106,7 @@ internal class LinuxStat(private val status: LinuxFileStatus) : NativeStruct {
 internal class LinuxStatx(
     private val status: LinuxFileStatus,
     private val isMountRoot: Boolean,
+    private val mountId: ULong,
 ) : NativeStruct {
     override fun toNativeBytes(): ByteArray = ByteArray(STATX_SIZE).also { buffer ->
         LittleEndianBuffer(buffer).apply {
@@ -127,6 +128,7 @@ internal class LinuxStatx(
             writeTimestamp(112, status.metadata.timestamps.modificationTime)
             writeU32(128, status.deviceMajor)
             writeU32(132, status.deviceMinor)
+            writeU64(144, mountId)
         }
     }
 

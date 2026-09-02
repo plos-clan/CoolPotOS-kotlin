@@ -22,11 +22,6 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicInt
 
-internal enum class NetworkInterfaceKind(val hardwareType: UShort) {
-    ETHERNET(1u),
-    LOOPBACK(772u),
-}
-
 internal data class NetworkInterfaceAddress(
     val address: Ipv4Address,
     val prefixLength: Int,
@@ -104,11 +99,11 @@ internal interface IpProtocolHandler {
 }
 
 internal class NetworkInterface internal constructor(
-    val index: Int,
-    val name: String,
-    val kind: NetworkInterfaceKind,
+    override val index: Int,
+    override val name: String,
+    override val kind: NetworkInterfaceKind,
     private val device: EthernetDevice?,
-) {
+) : NetworkInterfaceView {
     private val administrativeState = AtomicBoolean(kind == NetworkInterfaceKind.LOOPBACK)
     private val configuredMtu = AtomicInt(
         if (device == null) LOOPBACK_MTU
@@ -120,10 +115,10 @@ internal class NetworkInterface internal constructor(
     private var queuedBytes = 0
     private val transmitEvent: KernelEvent? = device?.let { KernelCoroutines.dispatcher.createEvent() }
 
-    val hardwareAddress: MacAddress
+    override val hardwareAddress: MacAddress
         get() = device?.macAddress ?: MacAddress.ZERO
 
-    val mtu: Int
+    override val mtu: Int
         get() = configuredMtu.load()
 
     val hardwareMaximumMtu: Int
@@ -133,10 +128,31 @@ internal class NetworkInterface internal constructor(
     val administrativeUp: Boolean
         get() = administrativeState.load()
 
-    val running: Boolean
-        get() = administrativeUp && attached.load() && (device?.linkUp ?: true)
+    override val carrier: Boolean
+        get() = attached.load() && (device?.linkUp ?: true)
 
-    val linkSpeedBitsPerSecond: ULong
+    val running: Boolean
+        get() = administrativeUp && carrier
+
+    val flags: UInt
+        get() = (if (administrativeUp) UP_FLAG else 0u) or
+            (if (kind == NetworkInterfaceKind.LOOPBACK) {
+                LOOPBACK_FLAG
+            } else {
+                BROADCAST_FLAG or MULTICAST_FLAG
+            }) or if (running) RUNNING_FLAG or LOWER_UP_FLAG else 0u
+
+    override val configurationFlags: UInt
+        get() = flags and (RUNNING_FLAG or LOWER_UP_FLAG).inv()
+
+    override val operationalState: NetworkInterfaceState
+        get() = when {
+            kind == NetworkInterfaceKind.LOOPBACK -> NetworkInterfaceState.UNKNOWN
+            running -> NetworkInterfaceState.UP
+            else -> NetworkInterfaceState.DOWN
+        }
+
+    override val linkSpeedBitsPerSecond: ULong
         get() = device?.linkSpeedBitsPerSecond ?: 0uL
 
     init {
@@ -192,6 +208,12 @@ internal class NetworkInterface internal constructor(
     }
 
     companion object {
+        const val UP_FLAG = 0x0001u
+        private const val BROADCAST_FLAG = 0x0002u
+        private const val LOOPBACK_FLAG = 0x0008u
+        private const val RUNNING_FLAG = 0x0040u
+        private const val MULTICAST_FLAG = 0x1000u
+        private const val LOWER_UP_FLAG = 0x1_0000u
         private const val DEFAULT_ETHERNET_MTU = 1500
         private const val LOOPBACK_MTU = 65_535
         private const val MIN_IPV4_MTU = 68
@@ -300,6 +322,7 @@ internal object NetworkStack : EthernetProtocol {
     fun initialize() {
         if (initialized) return
         initialized = true
+        addListener(NetworkInterfaceKobjects)
         val loopback = NetworkInterface(LOOPBACK_INDEX, "lo", NetworkInterfaceKind.LOOPBACK, null)
         lock.withLock {
             interfaces[loopback.index] = loopback
@@ -307,6 +330,7 @@ internal object NetworkStack : EthernetProtocol {
                 NetworkInterfaceAddress(Ipv4Address.fromBits(0x7F00_0001u), 8),
             )
         }
+        notifyListeners { it.linkChanged(loopback, removed = false) }
         EthernetDevices.installProtocol(this)
         UdpProtocol.initialize()
         TcpProtocol.initialize()

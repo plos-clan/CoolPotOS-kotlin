@@ -148,8 +148,11 @@ internal object RouteNetlinkProtocol :
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        val up = if (request.change and IFF_UP != 0u) request.flags and IFF_UP != 0u
-        else interface_.administrativeUp
+        val up = if (request.change and NetworkInterface.UP_FLAG != 0u) {
+            request.flags and NetworkInterface.UP_FLAG != 0u
+        } else {
+            interface_.administrativeUp
+        }
         return when (val result = NetworkStack.setLink(interface_.index, up, mtu)) {
             is VfsResult.Ok -> VfsResult.Ok(
                 if (echo) NetworkStack.interfaceByIndex(interface_.index)?.let {
@@ -357,22 +360,14 @@ internal object RouteNetlinkProtocol :
 
     private fun linkReply(interface_: NetworkInterface, removed: Boolean): NetlinkReply {
         val fixed = ByteArray(IFINFO_SIZE)
-        val flags = (if (interface_.administrativeUp) IFF_UP else 0u) or
-            (if (interface_.kind == NetworkInterfaceKind.LOOPBACK) {
-                IFF_LOOPBACK
-            } else {
-                IFF_BROADCAST or IFF_MULTICAST
-            }) or if (interface_.running) IFF_RUNNING or IFF_LOWER_UP else 0u
         LittleEndianBuffer(fixed).apply {
             writeU8(0, AF_UNSPEC.toUByte())
             writeU16(2, interface_.kind.hardwareType)
             writeU32(4, interface_.index.toUInt())
-            writeU32(8, flags)
+            writeU32(8, interface_.flags)
             writeU32(12, 0u)
         }
         val address = ByteArray(MacAddress.SIZE_BYTES).also(interface_.hardwareAddress::copyTo)
-        val operationalState = if (interface_.kind == NetworkInterfaceKind.LOOPBACK) IF_OPER_UNKNOWN
-        else if (interface_.running) IF_OPER_UP else IF_OPER_DOWN
         return NetlinkReply(
             if (removed) RTM_DELLINK else RTM_NEWLINK,
             NetlinkCodec.payload(
@@ -383,7 +378,7 @@ internal object RouteNetlinkProtocol :
                     NetlinkAttribute.u32(IFLA_MTU, interface_.mtu.toUInt()),
                     NetlinkAttribute.u8(
                         IFLA_OPERSTATE,
-                        operationalState.toUByte(),
+                        interface_.operationalState.abiValue,
                     ),
                 ),
             ),
@@ -533,19 +528,10 @@ internal object RouteNetlinkProtocol :
     private const val NDMSG_SIZE = 12
     private const val RTGENMSG_SIZE = 1
     private const val IF_NAMESIZE = 16
-    private const val IFF_UP = 0x0001u
-    private const val IFF_BROADCAST = 0x0002u
-    private const val IFF_LOOPBACK = 0x0008u
-    private const val IFF_RUNNING = 0x0040u
-    private const val IFF_MULTICAST = 0x1000u
-    private const val IFF_LOWER_UP = 0x1_0000u
     private const val IFLA_ADDRESS = 1
     private const val IFLA_IFNAME = 3
     private const val IFLA_MTU = 4
     private const val IFLA_OPERSTATE = 16
-    private const val IF_OPER_UNKNOWN = 0
-    private const val IF_OPER_DOWN = 2
-    private const val IF_OPER_UP = 6
     private const val IFA_ADDRESS = 1
     private const val IFA_LOCAL = 2
     private const val IFA_LABEL = 3

@@ -258,7 +258,7 @@ internal class SysfsRegistry(
         val ownsObject: Boolean,
         val devAttributeId: ULong,
         val devLinkId: ULong,
-        val indexLinkIds: List<ULong>,
+        val bindingLinkIds: List<ULong>,
         val key: DeviceKey,
     )
 
@@ -376,7 +376,7 @@ internal class SysfsRegistry(
             ?: return@withLock VfsResult.Err(VfsError.NOT_FOUND)
         devIndex.remove(binding.key)
         removeLinkLocked(binding.devLinkId)
-        binding.indexLinkIds.forEach(::removeLinkLocked)
+        binding.bindingLinkIds.forEach(::removeLinkLocked)
         removeNodeLocked(binding.devAttributeId)
 
         val objectNode = nodesById[binding.objectId] as? SysfsNode.Directory
@@ -535,6 +535,11 @@ internal class SysfsRegistry(
         }
         val classBinding = spec.bindings.deviceClass
         val busBinding = spec.bindings.bus
+        if ((classBinding != null || busBinding != null) &&
+            prepared.attributes.containsKey(SUBSYSTEM_LINK)
+        ) {
+            return VfsResult.Err(VfsError.ALREADY_EXISTS)
+        }
         if (!indexEntryAvailableLocked(classBinding, classes, CLASS_ID, spec.name) ||
             !busEntryAvailableLocked(busBinding, spec.name)
         ) {
@@ -544,7 +549,8 @@ internal class SysfsRegistry(
         val newVirtual = if (existingParentId == null && virtualCategory != null) 1 else 0
         val newClass = if (classBinding != null && classes[classBinding.name] == null) 1 else 0
         val newBus = if (busBinding != null && buses[busBinding.name] == null) 3 else 0
-        val linkCount = listOfNotNull(classBinding, busBinding).size
+        val linkCount = listOfNotNull(classBinding, busBinding).size +
+            if (classBinding != null || busBinding != null) 1 else 0
         if (!reserveIdsLocked(
                 newVirtual + newClass + newBus + 1 + prepared.attributes.size + linkCount
             )
@@ -577,13 +583,18 @@ internal class SysfsRegistry(
                 ),
             )
         }
-        classBinding?.let { binding ->
+        val classDirectoryId = classBinding?.let { binding ->
             val directoryId = classes[binding.name] ?: createClassLocked(binding.name)
             addLinkLocked(directoryId, binding.entryName ?: spec.name, objectNode.id, createdAt)
+            directoryId
         }
-        busBinding?.let { binding ->
+        val busDirectory = busBinding?.let { binding ->
             val directory = buses[binding.name] ?: createBusLocked(binding.name)
             addLinkLocked(directory.devicesId, binding.entryName ?: spec.name, objectNode.id, createdAt)
+            directory
+        }
+        (busDirectory?.id ?: classDirectoryId)?.let { subsystemId ->
+            addLinkLocked(objectNode.id, SUBSYSTEM_LINK, subsystemId, createdAt)
         }
         return VfsResult.Ok(objectNode)
     }
@@ -595,8 +606,11 @@ internal class SysfsRegistry(
         devAttribute: SysfsTextAttribute,
         ownsObject: Boolean,
     ): VfsResult<Unit> {
+        val hasSubsystemBinding = bindings.deviceClass != null || bindings.bus != null
         if (deviceBindings.containsKey(device) ||
-            childrenIndex.getValue(objectNode.id).containsKey(DEV_ATTRIBUTE_NAME)
+            childrenIndex.getValue(objectNode.id).containsKey(DEV_ATTRIBUTE_NAME) ||
+            hasSubsystemBinding && childrenIndex.getValue(objectNode.id)
+                .containsKey(SUBSYSTEM_LINK_NAME)
         ) {
             return VfsResult.Err(VfsError.ALREADY_EXISTS)
         }
@@ -620,8 +634,9 @@ internal class SysfsRegistry(
             classes[bindings.deviceClass.name] == null
         ) 1 else 0
         val newBus = if (bindings.bus != null && buses[bindings.bus.name] == null) 3 else 0
-        val indexCount = listOfNotNull(bindings.deviceClass, bindings.bus).size
-        if (!reserveIdsLocked(newClass + newBus + 2 + indexCount)) {
+        val bindingCount = listOfNotNull(bindings.deviceClass, bindings.bus).size +
+            if (hasSubsystemBinding) 1 else 0
+        if (!reserveIdsLocked(newClass + newBus + 2 + bindingCount)) {
             return VfsResult.Err(VfsError.NO_SPACE)
         }
 
@@ -638,22 +653,32 @@ internal class SysfsRegistry(
         installNodeLocked(devAttributeNode)
         val devLinkId = addLinkLocked(devDirectoryId, devName, objectNode.id, createdAt)
         devIndex[key] = devLinkId
-        val indexLinks = ArrayList<ULong>(indexCount)
-        bindings.deviceClass?.let { binding ->
+        val bindingLinks = ArrayList<ULong>(bindingCount)
+        val classDirectoryId = bindings.deviceClass?.let { binding ->
             val directoryId = classes[binding.name] ?: createClassLocked(binding.name)
-            indexLinks += addLinkLocked(
+            bindingLinks += addLinkLocked(
                 directoryId,
                 binding.entryName ?: objectName,
                 objectNode.id,
                 createdAt,
             )
+            directoryId
         }
-        bindings.bus?.let { binding ->
+        val busDirectory = bindings.bus?.let { binding ->
             val directory = buses[binding.name] ?: createBusLocked(binding.name)
-            indexLinks += addLinkLocked(
+            bindingLinks += addLinkLocked(
                 directory.devicesId,
                 binding.entryName ?: objectName,
                 objectNode.id,
+                createdAt,
+            )
+            directory
+        }
+        (busDirectory?.id ?: classDirectoryId)?.let { subsystemId ->
+            bindingLinks += addLinkLocked(
+                objectNode.id,
+                SUBSYSTEM_LINK,
+                subsystemId,
                 createdAt,
             )
         }
@@ -663,7 +688,7 @@ internal class SysfsRegistry(
             ownsObject,
             devAttributeNode.id,
             devLinkId,
-            indexLinks,
+            bindingLinks,
             key,
         )
         return VfsResult.Ok(Unit)
@@ -675,7 +700,10 @@ internal class SysfsRegistry(
         if (children.any { it is SysfsNode.Directory }) return VfsResult.Err(VfsError.BUSY)
 
         linksByTarget.remove(objectNode.id)?.toList()?.forEach(::removeLinkLocked)
-        children.forEach { removeNodeLocked(it.id) }
+        children.forEach { child ->
+            if (child is SysfsNode.Link) removeLinkLocked(child.id)
+            else removeNodeLocked(child.id)
+        }
         removeNodeLocked(objectNode.id)
         return VfsResult.Ok(Unit)
     }
@@ -907,7 +935,11 @@ internal class SysfsRegistry(
     companion object {
         private const val PERMISSION_MASK = 0x1ffu
         private const val DEV_ATTRIBUTE = "dev"
+        private const val SUBSYSTEM_LINK = "subsystem"
         private val DEV_ATTRIBUTE_NAME = DEV_ATTRIBUTE.encodeToByteArray().let { bytes ->
+            VfsName.fromPath(bytes, 0, bytes.size)
+        }
+        private val SUBSYSTEM_LINK_NAME = SUBSYSTEM_LINK.encodeToByteArray().let { bytes ->
             VfsName.fromPath(bytes, 0, bytes.size)
         }
         private val DEVICES_NAME = "devices".encodeToByteArray().let { bytes ->

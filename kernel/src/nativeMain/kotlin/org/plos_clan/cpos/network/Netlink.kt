@@ -8,6 +8,7 @@ import org.plos_clan.cpos.fs.sock.SocketReceiveRequest
 import org.plos_clan.cpos.fs.sock.SocketReceiveResult
 import org.plos_clan.cpos.fs.sock.SocketSendRequest
 import org.plos_clan.cpos.fs.sock.SocketType
+import org.plos_clan.cpos.fs.sock.UnixCredentials
 import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
@@ -23,6 +24,7 @@ import org.plos_clan.cpos.utils.PollEvents
 internal enum class NetlinkProtocolKind(val number: Int) {
     ROUTE(0),
     USERSOCK(2),
+    KOBJECT_UEVENT(15),
     GENERIC(16),
     ;
 
@@ -201,7 +203,8 @@ internal abstract class NetlinkProtocol(
                 }
             }
             val source = NetlinkSocketAddress(sourcePort, 1u shl (group - 1))
-            val failed = recipients.count { !it.enqueue(bytes, source) }
+            val credentials = senderCredentials(request.process)
+            val failed = recipients.count { !it.enqueue(bytes, source, credentials) }
             return if (failed != 0 && socket.netlinkOptions().broadcastErrors) {
                 VfsResult.Err(VfsError.NO_BUFFER_SPACE)
             } else {
@@ -217,7 +220,12 @@ internal abstract class NetlinkProtocol(
         }
         val recipient = lock.withLock { ports[destination.portId]?.socket }
             ?: return VfsResult.Err(VfsError.CONNECTION_REFUSED)
-        return if (recipient.enqueue(bytes, NetlinkSocketAddress(sourcePort, 0u))) {
+        return if (recipient.enqueue(
+                bytes,
+                NetlinkSocketAddress(sourcePort, 0u),
+                senderCredentials(request.process),
+            )
+        ) {
             VfsResult.Ok(Unit)
         } else {
             VfsResult.Err(if (request.nonBlocking) VfsError.WOULD_BLOCK else VfsError.NO_BUFFER_SPACE)
@@ -237,12 +245,11 @@ internal abstract class NetlinkProtocol(
         bytes: ByteArray,
     ): Boolean = false
 
-    protected fun multicastFromKernel(group: Int, createReply: () -> NetlinkReply?) {
+    protected fun multicastFromKernel(group: Int, createDatagram: () -> ByteArray?) {
         if (!acceptsMulticastGroup(group)) return
         val recipients = lock.withLock { subscribers[group].orEmpty().map(Endpoint::socket) }
         if (recipients.isEmpty()) return
-        val reply = createReply() ?: return
-        val bytes = NetlinkCodec.encode(reply.type, reply.flags, 0u, payload = reply.payload)
+        val bytes = createDatagram() ?: return
         val groups = if (group <= UInt.SIZE_BITS) 1u shl (group - 1) else 0u
         val source = NetlinkSocketAddress(0u, groups)
         recipients.forEach { it.enqueue(bytes, source) }
@@ -252,6 +259,12 @@ internal abstract class NetlinkProtocol(
         process.vfsOperationContext.privileged || ProcessManager.currentThread()?.let { thread ->
             thread.process === process && CapManager.hasAllCapability(thread, CapEnum.NET_ADMIN)
         } == true
+
+    private fun senderCredentials(process: Process): UnixCredentials = UnixCredentials(
+        process.id,
+        process.credentials.userIds.effective.toUInt(),
+        process.credentials.groupIds.effective.toUInt(),
+    )
 
     private fun validateDestination(
         destination: NetlinkSocketAddress,
@@ -313,6 +326,7 @@ internal abstract class NetlinkProtocol(
 
     companion object {
         val KERNEL_ADDRESS = NetlinkSocketAddress(0u, 0u)
+        val KERNEL_CREDENTIALS = UnixCredentials(0, 0u, 0u)
     }
 }
 
@@ -372,7 +386,11 @@ internal abstract class NetlinkKernelProtocol(
     protected abstract fun handle(request: NetlinkRequest): NetlinkResult
 
     protected fun notify(group: Int, createReply: () -> NetlinkReply?) =
-        multicastFromKernel(group, createReply)
+        multicastFromKernel(group) {
+            createReply()?.let { reply ->
+                NetlinkCodec.encode(reply.type, reply.flags, 0u, payload = reply.payload)
+            }
+        }
 
     private fun done(sequence: UInt, portId: UInt): ByteArray = NetlinkCodec.encode(
         NetlinkAbi.NLMSG_DONE,
@@ -439,6 +457,7 @@ internal object NetlinkProtocols {
     ) {
         NetlinkProtocolKind.ROUTE -> RouteNetlinkProtocol.createSocket(type)
         NetlinkProtocolKind.USERSOCK -> UserspaceNetlinkProtocol.createSocket(type)
+        NetlinkProtocolKind.KOBJECT_UEVENT -> KobjectUeventNetlinkProtocol.createSocket(type)
         NetlinkProtocolKind.GENERIC -> GenericNetlinkProtocol.createSocket(type)
         null -> null
     }
@@ -456,7 +475,11 @@ internal class NetlinkSocket internal constructor(
     private val subsystem: NetlinkProtocol,
     type: SocketType,
 ) : AbstractSocket(SocketDomain.NETLINK, type, subsystem.kind.number) {
-    private data class Datagram(val bytes: ByteArray, val source: NetlinkSocketAddress)
+    private data class Datagram(
+        val bytes: ByteArray,
+        val source: NetlinkSocketAddress,
+        val senderCredentials: UnixCredentials,
+    )
 
     private var peer = NetlinkProtocol.KERNEL_ADDRESS
     private val messages = ArrayDeque<Datagram>()
@@ -546,6 +569,7 @@ internal class NetlinkSocket internal constructor(
                             if (request.returnFullLength) datagram.bytes.size else copied,
                             copied,
                             datagram.source,
+                            senderCredentials = datagram.senderCredentials,
                             truncated = copied < datagram.bytes.size,
                             endOfRecord = true,
                         ),
@@ -630,7 +654,11 @@ internal class NetlinkSocket internal constructor(
 
     internal fun netlinkOptions(): NetlinkSocketOptions = lock.withLock { netlinkOptions }
 
-    internal fun enqueue(bytes: ByteArray, source: NetlinkSocketAddress): Boolean = lock.withLock {
+    internal fun enqueue(
+        bytes: ByteArray,
+        source: NetlinkSocketAddress,
+        senderCredentials: UnixCredentials = NetlinkProtocol.KERNEL_CREDENTIALS,
+    ): Boolean = lock.withLock {
         if (closed) return@withLock false
         if (bytes.size > optionsLocked().receiveBufferSize - queuedBytes) {
             if (!netlinkOptions.noEnobufs) {
@@ -639,7 +667,7 @@ internal class NetlinkSocket internal constructor(
             }
             return@withLock false
         }
-        messages += Datagram(bytes, source)
+        messages += Datagram(bytes, source, senderCredentials)
         queuedBytes += bytes.size
         readWaiters.wakeOne()
         true

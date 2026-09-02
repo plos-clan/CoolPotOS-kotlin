@@ -598,6 +598,7 @@ internal fun statx(regs: PtraceRegisters, process: Process): Long {
     val status = LinuxStatx(
         LinuxFileStatus.snapshot(inode, attributes),
         isMountRoot = target.dentry === target.mount.root,
+        mountId = target.mount.id,
     ).toNativeBytes()
     return if (UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_R8]).copyToUser(status)) {
         0L

@@ -4,6 +4,7 @@ package org.plos_clan.cpos.fs.vfs
 
 import org.plos_clan.cpos.utils.IrqSpinLock
 import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
@@ -15,6 +16,7 @@ class Mount internal constructor(
     flags: MountFlags = MountFlags.NONE,
     attachment: VfsPath? = null,
 ) {
+    val id = nextId.fetchAndAdd(1L).toULong()
     private val references = AtomicInt(1)
     private val attachmentReference = AtomicReference(attachment)
     val flags = flags.withDefaultAtimePolicy()
@@ -89,6 +91,10 @@ class Mount internal constructor(
         superBlock.root.releaseCachedChildren()
         superBlock.backend.release()
         detachFromParent()
+    }
+
+    private companion object {
+        private val nextId = AtomicLong(1L)
     }
 }
 
