@@ -58,6 +58,18 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         InodeMetadata(mode = FileMode(0x180u), linkCount = 1u),
     )
 
+    internal fun createInotify(
+        caller: VfsOperationContext,
+        context: FileSystemContext,
+        nonBlocking: Boolean,
+    ): VfsResult<OpenFileDescription> = anonymousFiles.open(
+        caller,
+        context,
+        Inotify(),
+        OpenOptions(access = AccessMode.READ, nonBlocking = nonBlocking),
+        InodeMetadata(mode = FileMode(0x180u), linkCount = 1u),
+    )
+
     internal fun createPidFd(
         caller: VfsOperationContext,
         context: FileSystemContext,
@@ -302,11 +314,11 @@ class Vfs(maxSymlinkDepth: Int = 40) {
 
     fun resize(
         caller: VfsOperationContext,
-        mount: Mount,
+        path: VfsPath,
         inode: Inode,
         size: ULong,
     ): VfsResult<Unit> {
-        if (MountFlag.READ_ONLY in mount.flags) {
+        if (MountFlag.READ_ONLY in path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
         val backend = inode.backend as? RegularFileBackend
@@ -316,6 +328,7 @@ class Vfs(maxSymlinkDepth: Int = 40) {
             PageCache.invalidate(inode)
             val identity = backend.pageCacheIdentity(inode)
             if (identity != inode) PageCache.invalidate(identity)
+            path.notify(inode, FileSystemEvent.MODIFIED)
         }
         return result
     }
@@ -359,40 +372,46 @@ class Vfs(maxSymlinkDepth: Int = 40) {
 
     fun setMode(
         caller: VfsOperationContext,
-        mount: Mount,
+        path: VfsPath,
         inode: Inode,
         mode: FileMode,
     ): VfsResult<Unit> {
-        if (MountFlag.READ_ONLY in mount.flags) {
+        if (MountFlag.READ_ONLY in path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        return inode.backend.setMode(caller, inode, mode)
+        val result = inode.backend.setMode(caller, inode, mode)
+        if (result is VfsResult.Ok) path.notify(inode, FileSystemEvent.ATTRIBUTES_CHANGED)
+        return result
     }
 
     fun setOwner(
         caller: VfsOperationContext,
-        mount: Mount,
+        path: VfsPath,
         inode: Inode,
         uid: UInt?,
         gid: UInt?,
     ): VfsResult<Unit> {
-        if (MountFlag.READ_ONLY in mount.flags) {
+        if (MountFlag.READ_ONLY in path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        return inode.backend.setOwner(caller, inode, uid, gid)
+        val result = inode.backend.setOwner(caller, inode, uid, gid)
+        if (result is VfsResult.Ok) path.notify(inode, FileSystemEvent.ATTRIBUTES_CHANGED)
+        return result
     }
 
     fun updateTimestamps(
         caller: VfsOperationContext,
-        mount: Mount,
+        path: VfsPath,
         inode: Inode,
         update: InodeTimestampSet,
     ): VfsResult<Unit> {
         if (update.omitsBoth) return VfsResult.Ok(Unit)
-        if (MountFlag.READ_ONLY in mount.flags) {
+        if (MountFlag.READ_ONLY in path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        return inode.superBlock.backend.updateTimestamps(caller, inode, update)
+        val result = inode.superBlock.backend.updateTimestamps(caller, inode, update)
+        if (result is VfsResult.Ok) path.notify(inode, FileSystemEvent.ATTRIBUTES_CHANGED)
+        return result
     }
 
     fun getExtendedAttribute(
@@ -408,28 +427,32 @@ class Vfs(maxSymlinkDepth: Int = 40) {
 
     fun setExtendedAttribute(
         caller: VfsOperationContext,
-        mount: Mount,
+        path: VfsPath,
         inode: Inode,
         name: ExtendedAttributeName,
         value: ByteArray,
         mode: ExtendedAttributeMode,
     ): VfsResult<Unit> {
-        if (MountFlag.READ_ONLY in mount.flags) {
+        if (MountFlag.READ_ONLY in path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        return inode.backend.setExtendedAttribute(caller, inode, name, value, mode)
+        val result = inode.backend.setExtendedAttribute(caller, inode, name, value, mode)
+        if (result is VfsResult.Ok) path.notify(inode, FileSystemEvent.ATTRIBUTES_CHANGED)
+        return result
     }
 
     fun removeExtendedAttribute(
         caller: VfsOperationContext,
-        mount: Mount,
+        path: VfsPath,
         inode: Inode,
         name: ExtendedAttributeName,
     ): VfsResult<Unit> {
-        if (MountFlag.READ_ONLY in mount.flags) {
+        if (MountFlag.READ_ONLY in path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
         }
-        return inode.backend.removeExtendedAttribute(caller, inode, name)
+        val result = inode.backend.removeExtendedAttribute(caller, inode, name)
+        if (result is VfsResult.Ok) path.notify(inode, FileSystemEvent.ATTRIBUTES_CHANGED)
+        return result
     }
 
     internal fun createFile(

@@ -208,7 +208,12 @@ class StatStructuresTest {
     fun anonymousDescriptorsHaveNoFilesystemObjectType() {
         val metadata = status.metadata.copy(mode = FileMode(0x1c0u))
 
-        listOf(InodeType.EVENTFD, InodeType.EPOLL, InodeType.PIDFD).forEach { type ->
+        listOf(
+            InodeType.EVENTFD,
+            InodeType.EPOLL,
+            InodeType.INOTIFY,
+            InodeType.PIDFD,
+        ).forEach { type ->
             assertEquals(0x1c0u, status.copy(type = type, metadata = metadata).mode)
         }
     }

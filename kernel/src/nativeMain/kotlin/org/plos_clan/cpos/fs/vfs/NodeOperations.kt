@@ -1,4 +1,8 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package org.plos_clan.cpos.fs.vfs
+
+import kotlin.concurrent.atomics.AtomicInt
 
 internal data class OpenedPath(
     val path: VfsPath,
@@ -43,8 +47,13 @@ internal class VfsNodeOperations(
 
         val parent = directory.inode ?: return VfsResult.Err(VfsError.IO)
         val backend = parent.backend as? DirectoryBackend ?: return VfsResult.Err(VfsError.IO)
-        backend.remove(caller, parent, name, inode, RemoveMode.FILE)
-        directory.dentry.markChildNegative(name, path.dentry)
+        if (backend.remove(caller, parent, name, inode, RemoveMode.FILE) is VfsResult.Ok) {
+            directory.dentry.markChildNegative(name, path.dentry)
+            if (inode.metadata().linkCount != 0u) {
+                inode.notify(FileSystemEvent.ATTRIBUTES_CHANGED)
+            }
+            parent.notify(FileSystemEvent.ENTRY_DELETED, name = name, subject = inode)
+        }
         return VfsResult.Err(VfsError.IO)
     }
 
@@ -156,6 +165,14 @@ internal class VfsNodeOperations(
         val result = backend.remove(caller, parentInode, parent.name, inode, mode)
         if (result is VfsResult.Ok) {
             parent.path.dentry.markChildNegative(parent.name, target.dentry)
+            if (inode.metadata().linkCount != 0u) {
+                inode.notify(FileSystemEvent.ATTRIBUTES_CHANGED)
+            }
+            parentInode.notify(
+                FileSystemEvent.ENTRY_DELETED,
+                name = parent.name,
+                subject = inode,
+            )
         }
         return result
     }
@@ -209,6 +226,12 @@ internal class VfsNodeOperations(
         val result = backend.linkEntry(caller, parentInode, parent.name, sourceInode)
         if (result is VfsResult.Ok) {
             parent.path.dentry.cacheChild(parent.name, result.value)
+            sourceInode.notify(FileSystemEvent.ATTRIBUTES_CHANGED)
+            parentInode.notify(
+                FileSystemEvent.ENTRY_CREATED,
+                name = parent.name,
+                subject = sourceInode,
+            )
         }
         return when (result) {
             is VfsResult.Ok -> VfsResult.Ok(Unit)
@@ -305,6 +328,7 @@ internal class VfsNodeOperations(
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
         if (targetPath?.inode === sourceInode) return VfsResult.Ok(Unit)
+        val replacedInode = targetPath?.inode
         val sourceParentInode = sourceParent.path.inode
             ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val targetParentInode = targetParent.path.inode
@@ -346,6 +370,42 @@ internal class VfsNodeOperations(
                 targetParent.name,
                 targetPath?.dentry.takeIf { mode == RenameMode.EXCHANGE },
             )
+            val cookie = nextMoveCookie()
+            sourceParentInode.notify(
+                FileSystemEvent.ENTRY_MOVED_FROM,
+                name = sourceParent.name,
+                cookie = cookie,
+                subject = sourceInode,
+            )
+            targetParentInode.notify(
+                FileSystemEvent.ENTRY_MOVED_TO,
+                name = targetParent.name,
+                cookie = cookie,
+                subject = sourceInode,
+            )
+            val replaced = replacedInode
+            if (mode == RenameMode.EXCHANGE && replaced != null) {
+                sourceInode.notify(FileSystemEvent.MOVED)
+                val exchangeCookie = nextMoveCookie()
+                targetParentInode.notify(
+                    FileSystemEvent.ENTRY_MOVED_FROM,
+                    name = targetParent.name,
+                    cookie = exchangeCookie,
+                    subject = replaced,
+                )
+                sourceParentInode.notify(
+                    FileSystemEvent.ENTRY_MOVED_TO,
+                    name = sourceParent.name,
+                    cookie = exchangeCookie,
+                    subject = replaced,
+                )
+                replaced.notify(FileSystemEvent.MOVED)
+            } else {
+                if (replaced != null && replaced.metadata().linkCount != 0u) {
+                    replaced.notify(FileSystemEvent.ATTRIBUTES_CHANGED)
+                }
+                sourceInode.notify(FileSystemEvent.MOVED)
+            }
         }
         return result
     }
@@ -433,6 +493,11 @@ internal class VfsNodeOperations(
             return when (atomic) {
                 is VfsResult.Ok -> {
                     val dentry = parent.path.dentry.cacheChild(parent.name, atomic.value.entry)
+                    parentInode.notify(
+                        FileSystemEvent.ENTRY_CREATED,
+                        name = parent.name,
+                        subject = checkNotNull(atomic.value.entry.inode),
+                    )
                     VfsResult.Ok(
                         OpenedPath(
                             VfsPath(parent.path.mount, dentry),
@@ -464,6 +529,11 @@ internal class VfsNodeOperations(
             }
         }
         val dentry = parent.path.dentry.cacheChild(parent.name, lookup)
+        parentInode.notify(
+            FileSystemEvent.ENTRY_CREATED,
+            name = parent.name,
+            subject = checkNotNull(lookup.inode),
+        )
         return VfsResult.Ok(OpenedPath(VfsPath(parent.path.mount, dentry), created = true))
     }
 
@@ -507,8 +577,23 @@ internal class VfsNodeOperations(
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        return VfsResult.Ok(
-            VfsPath(directory.mount, directory.dentry.cacheChild(name, lookup)),
+        val path = VfsPath(directory.mount, directory.dentry.cacheChild(name, lookup))
+        parent.notify(
+            FileSystemEvent.ENTRY_CREATED,
+            name = name,
+            subject = checkNotNull(lookup.inode),
         )
+        return VfsResult.Ok(path)
+    }
+
+    private fun nextMoveCookie(): UInt {
+        while (true) {
+            val cookie = moveCookie.fetchAndAdd(1).toUInt()
+            if (cookie != 0u) return cookie
+        }
+    }
+
+    private companion object {
+        val moveCookie = AtomicInt(1)
     }
 }

@@ -5,13 +5,14 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 internal abstract class AnonymousFileBackend(
     final override val type: InodeType,
     val anonymousName: String,
+    private val access: AccessMode = AccessMode.READ_WRITE,
 ) : InodeBackend, OpenFileBackend {
     final override fun open(
         caller: VfsOperationContext,
         inode: Inode,
         options: OpenOptions,
     ): VfsResult<OpenFileBackend> =
-        if (options.access == AccessMode.READ_WRITE) VfsResult.Ok(this)
+        if (options.access == access) VfsResult.Ok(this)
         else VfsResult.Err(VfsError.BAD_DESCRIPTOR)
 
     final override fun syncHandle(

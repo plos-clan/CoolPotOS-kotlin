@@ -105,6 +105,10 @@ class VfsName private constructor(private val bytes: ByteArray) {
 
     fun copyBytes(): ByteArray = bytes.copyOf()
 
+    internal fun copyInto(destination: ByteArray, offset: Int) {
+        bytes.copyInto(destination, offset)
+    }
+
     override fun equals(other: Any?): Boolean =
         this === other || other is VfsName && bytes.contentEquals(other.bytes)
 
@@ -247,6 +251,7 @@ enum class InodeType {
     SOCKET,
     EVENTFD,
     EPOLL,
+    INOTIFY,
     PIDFD,
 }
 

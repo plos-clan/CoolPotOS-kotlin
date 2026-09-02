@@ -322,7 +322,7 @@ internal fun truncate(regs: PtraceRegisters, process: Process): Long {
     }
     return when (val result = FileSystemManager.vfs.resize(
         caller,
-        path.mount,
+        path,
         inode,
         size,
     )) {
@@ -341,7 +341,7 @@ internal fun ftruncate(regs: PtraceRegisters, process: Process): Long {
         if (!file.access.canWrite) return errno(Errno.EBADF)
         when (val result = FileSystemManager.vfs.resize(
             process.vfsOperationContext,
-            file.path.mount,
+            file.path,
             file.inode,
             size,
         )) {

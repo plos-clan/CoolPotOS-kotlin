@@ -29,6 +29,7 @@ import org.plos_clan.cpos.fs.vfs.InodeAttributes
 import org.plos_clan.cpos.fs.vfs.InodeBackend
 import org.plos_clan.cpos.fs.vfs.InodeId
 import org.plos_clan.cpos.fs.vfs.InodeMetadata
+import org.plos_clan.cpos.fs.vfs.InodeTimestampEvent
 import org.plos_clan.cpos.fs.vfs.InodeTimestampSet
 import org.plos_clan.cpos.fs.vfs.InodeTimestampUpdate
 import org.plos_clan.cpos.fs.vfs.InodeType
@@ -1091,6 +1092,15 @@ private class FuseDirectoryNode(
             is VfsResult.Ok -> {
                 invalidate(sourceName)
                 destination.invalidate(targetName)
+                if (mode != RenameMode.EXCHANGE && target != null) {
+                    target.updateMetadata(InodeTimestampEvent.NONE) { metadata ->
+                        metadata.copy(
+                            linkCount = if (target.type == InodeType.DIRECTORY ||
+                                metadata.linkCount == 0u
+                            ) 0u else metadata.linkCount - 1u,
+                        )
+                    }
+                }
                 VfsResult.Ok(Unit)
             }
             is VfsResult.Err -> if (result.error.errno == Errno.ENOSYS) {
@@ -1115,7 +1125,13 @@ private class FuseDirectoryNode(
         return when (val result = instance.request(caller, request)) {
             is VfsResult.Ok -> {
                 invalidate(name)
-                target.invalidateAttributes()
+                target.updateMetadata(InodeTimestampEvent.NONE) { metadata ->
+                    metadata.copy(
+                        linkCount = if (mode == RemoveMode.DIRECTORY ||
+                            metadata.linkCount == 0u
+                        ) 0u else metadata.linkCount - 1u,
+                    )
+                }
                 VfsResult.Ok(Unit)
             }
             is VfsResult.Err -> result

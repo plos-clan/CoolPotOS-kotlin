@@ -88,6 +88,7 @@ class Mount internal constructor(
     }
 
     private fun releaseResources() {
+        superBlock.unmount()
         superBlock.root.releaseCachedChildren()
         superBlock.backend.release()
         detachFromParent()
@@ -101,6 +102,12 @@ class Mount internal constructor(
 data class VfsPath(val mount: Mount, val dentry: Dentry) {
     val inode: Inode?
         get() = dentry.inode()
+
+    internal fun notify(inode: Inode, event: FileSystemEvent, cookie: UInt = 0u) {
+        if (!FileSystemEventObservers.active) return
+        dentry.notifyParent(inode, event, cookie)
+        inode.notify(event, cookie = cookie)
+    }
 }
 
 class MountNamespace internal constructor(val root: Mount) {

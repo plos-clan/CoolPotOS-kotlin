@@ -6,6 +6,7 @@ import org.plos_clan.cpos.mem.PageCacheSource
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PollEvents
 
 abstract class FileSystemType(
@@ -94,12 +95,34 @@ class SuperBlock internal constructor(
     val type: FileSystemType,
     val backend: SuperBlockBackend,
 ) {
+    private val observerLock = IrqSpinLock()
+    private var observedInodes: MutableSet<Inode>? = mutableSetOf()
+
     val root: Dentry = Dentry(
         superBlock = this,
         name = VfsName.ROOT,
         parent = null,
         inode = backend.createRoot(this).also { require(it.superBlock === this) },
     )
+
+    internal fun trackObservedInode(inode: Inode): Boolean = observerLock.withLock {
+        val observed = observedInodes ?: return@withLock false
+        observed += inode
+        true
+    }
+
+    internal fun stopTrackingObservedInode(inode: Inode) = observerLock.withLock {
+        observedInodes?.remove(inode)
+    }
+
+    internal fun unmount() {
+        val observed = observerLock.withLock {
+            val current = observedInodes ?: return
+            observedInodes = null
+            current.toList()
+        }
+        observed.forEach { it.removeObservers(InodeObserverRemoval.UNMOUNTED, tracked = false) }
+    }
 }
 
 interface InodeBackend {

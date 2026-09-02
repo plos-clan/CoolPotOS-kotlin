@@ -87,18 +87,23 @@ class OpenFileDescription private constructor(
                 val identity = inode.backend.pageCacheIdentity(inode)
                 if (identity != inode) PageCache.invalidate(identity)
             }
-            return VfsResult.Ok(
-                OpenFileDescription(
-                    path,
-                    inode,
-                    options.access,
-                    initialStatusFlags or
-                        (if (options.append) OpenFlags.O_APPEND else 0) or
-                        (if (options.nonBlocking) OpenFlags.O_NONBLOCK else 0) or
-                        (if (options.noAtime) OpenFlags.O_NOATIME else 0),
-                    backend,
-                ),
+            val file = OpenFileDescription(
+                path,
+                inode,
+                options.access,
+                initialStatusFlags or
+                    (if (options.append) OpenFlags.O_APPEND else 0) or
+                    (if (options.nonBlocking) OpenFlags.O_NONBLOCK else 0) or
+                    (if (options.noAtime) OpenFlags.O_NOATIME else 0),
+                backend,
             )
+            if (options.access != AccessMode.PATH) {
+                path.notify(inode, FileSystemEvent.OPENED)
+                if (truncate && inode.type == InodeType.REGULAR) {
+                    path.notify(inode, FileSystemEvent.MODIFIED)
+                }
+            }
+            return VfsResult.Ok(file)
         }
     }
 
@@ -161,6 +166,7 @@ class OpenFileDescription private constructor(
         ) ?: VfsResult.Err(VfsError.INVALID_ARGUMENT)
         if (result is VfsResult.Ok) {
             invalidateCachedRange(offset, length)
+            path.notify(inode, FileSystemEvent.MODIFIED)
         }
         return result
     }
@@ -256,8 +262,8 @@ class OpenFileDescription private constructor(
 
         val sourceMode = ioMode(nonBlocking)
         val destinationMode = destination.ioMode(nonBlocking)
-        if (!sourceIsPipe && sourceOffset == null && positionlessBackend == null) {
-            return positionLock.withLock {
+        val result = if (!sourceIsPipe && sourceOffset == null && positionlessBackend == null) {
+            positionLock.withLock {
                 val result = spliceAt(
                     caller,
                     destination,
@@ -270,11 +276,10 @@ class OpenFileDescription private constructor(
                 if (result.isSuccess) position.value += result.bytesTransferred
                 result
             }
-        }
-        if (!destinationIsPipe && destinationOffset == null &&
+        } else if (!destinationIsPipe && destinationOffset == null &&
             destination.positionlessBackend == null
         ) {
-            return destination.positionLock.withLock {
+            destination.positionLock.withLock {
                 val result = spliceAt(
                     caller,
                     destination,
@@ -287,16 +292,18 @@ class OpenFileDescription private constructor(
                 if (result.isSuccess) destination.position.value += result.bytesTransferred
                 result
             }
+        } else {
+            spliceAt(
+                caller,
+                destination,
+                sourceOffset,
+                destinationOffset,
+                count,
+                sourceMode,
+                destinationMode,
+            )
         }
-        return spliceAt(
-            caller,
-            destination,
-            sourceOffset,
-            destinationOffset,
-            count,
-            sourceMode,
-            destinationMode,
-        )
+        return result.recordSplice(caller, destination)
     }
 
     internal fun flush(caller: VfsOperationContext): VfsResult<Unit> = when {
@@ -316,6 +323,13 @@ class OpenFileDescription private constructor(
         if (previous <= 0) {
             references.fetchAndAdd(1)
         } else if (previous == 1) {
+            if (access != AccessMode.PATH) {
+                path.notify(
+                    inode,
+                    if (access.canWrite) FileSystemEvent.CLOSED_WRITE
+                    else FileSystemEvent.CLOSED_READ,
+                )
+            }
             backend.release()
             inode.releaseOpenReference()
             path.mount.release()
@@ -371,10 +385,10 @@ class OpenFileDescription private constructor(
     ): IoResult {
         writeError(offset, count)?.let { return IoResult.failure(it) }
         val discard = positionlessBackend as? DiscardingOpenFileBackend
-        if (discard != null) return discard.discard(inode, count)
+        if (discard != null) return discard.discard(inode, count).recordModification()
         val prepared = source.prepareRead(offset, count)
             ?: return IoResult.failure(VfsError.FAULT)
-        return writeBackend(caller, prepared, offset, count, position)
+        return writeBackend(caller, prepared, offset, count, position).recordModification()
     }
 
     internal fun write(
@@ -384,7 +398,7 @@ class OpenFileDescription private constructor(
         count: Int,
     ): IoResult {
         writeError(offset, count)?.let { return IoResult.failure(it) }
-        return writeBackend(caller, source, offset, count, position)
+        return writeBackend(caller, source, offset, count, position).recordModification()
     }
 
     internal fun readForSplice(
@@ -406,11 +420,20 @@ class OpenFileDescription private constructor(
                 0,
                 fixedSizeIoBackend?.ioSize ?: count,
                 FilePosition(offset.toLong()),
-                mode,
+                forcedMode = mode,
+                notifyAccess = false,
             )
         }
         if (fileOffset != null) return IoResult.failure(VfsError.ILLEGAL_SEEK)
-        return readBackend(caller, destination, 0, count, FilePosition(), mode)
+        return readBackend(
+            caller,
+            destination,
+            0,
+            count,
+            FilePosition(),
+            forcedMode = mode,
+            notifyAccess = false,
+        )
     }
 
     internal fun writeForSplice(
@@ -453,7 +476,13 @@ class OpenFileDescription private constructor(
         writeError(offset, count)?.let { return IoResult.failure(it) }
         val prepared = source.prepareRead(offset, count)
             ?: return IoResult.failure(VfsError.FAULT)
-        return writeBackend(caller, prepared, offset, count, FilePosition(fileOffset.toLong()))
+        return writeBackend(
+            caller,
+            prepared,
+            offset,
+            count,
+            FilePosition(fileOffset.toLong()),
+        ).recordModification()
     }
 
     fun iterate(
@@ -475,7 +504,10 @@ class OpenFileDescription private constructor(
                 emit(entry, nextOffset)
             }
         }
-        if (result is VfsResult.Ok) recordAccess(caller)
+        if (result is VfsResult.Ok) {
+            recordAccess(caller)
+            path.notify(inode, FileSystemEvent.ACCESSED)
+        }
         return result
     }
 
@@ -545,16 +577,17 @@ class OpenFileDescription private constructor(
         count: Int,
         filePosition: FilePosition,
         forcedMode: IoMode? = null,
+        notifyAccess: Boolean = true,
     ): IoResult {
         val positionless = positionlessBackend
         if (positionless == null) {
             if (filePosition !== position) {
                 return backend.read(caller, inode, destination, offset, count, filePosition)
-                    .recordAccess(caller, count)
+                    .recordAccess(caller, notifyAccess)
             }
             return positionLock.withLock {
                 backend.read(caller, inode, destination, offset, count, filePosition)
-            }.recordAccess(caller, count)
+            }.recordAccess(caller, notifyAccess)
         }
         if (positionless is ModeAwareOpenFileBackend) {
             return positionless.read(
@@ -565,16 +598,16 @@ class OpenFileDescription private constructor(
                 count,
                 forcedMode ?: currentIoMode(),
             )
-                .recordAccess(caller, count)
+                .recordAccess(caller, notifyAccess)
         }
         val waitable = positionless as? WaitableOpenFileBackend
             ?: return positionless.read(caller, inode, destination, offset, count)
-                .recordAccess(caller, count)
+                .recordAccess(caller, notifyAccess)
         while (true) {
             val mode = forcedMode ?: currentIoMode()
             val result = waitable.read(caller, inode, destination, offset, count)
             if (result.error != VfsError.WOULD_BLOCK || mode == IoMode.NON_BLOCKING) {
-                return result.recordAccess(caller, count)
+                return result.recordAccess(caller, notifyAccess)
             }
             if (!waitable.await(IoEvent.READABLE, count)) {
                 return IoResult.failure(VfsError.INTERRUPTED)
@@ -794,6 +827,8 @@ class OpenFileDescription private constructor(
                 destination.invalidateCachedRange(destinationOffset, result.value)
                 destination.inode.invalidateAttributes()
                 recordAccess(caller)
+                path.notify(inode, FileSystemEvent.ACCESSED)
+                destination.path.notify(destination.inode, FileSystemEvent.MODIFIED)
             }
         }
         return result
@@ -881,8 +916,31 @@ class OpenFileDescription private constructor(
             IoMode.NON_BLOCKING
         }
 
-    private fun IoResult.recordAccess(caller: VfsOperationContext, requested: Int): IoResult {
-        if (isSuccess && requested != 0) this@OpenFileDescription.recordAccess(caller)
+    private fun IoResult.recordAccess(
+        caller: VfsOperationContext,
+        enabled: Boolean = true,
+    ): IoResult {
+        if (enabled && isSuccess && bytesTransferred != 0) {
+            this@OpenFileDescription.recordAccess(caller)
+            path.notify(inode, FileSystemEvent.ACCESSED)
+        }
+        return this
+    }
+
+    private fun IoResult.recordModification(): IoResult {
+        if (isSuccess && bytesTransferred != 0) path.notify(inode, FileSystemEvent.MODIFIED)
+        return this
+    }
+
+    private fun IoResult.recordSplice(
+        caller: VfsOperationContext,
+        destination: OpenFileDescription,
+    ): IoResult {
+        if (isSuccess && bytesTransferred != 0) {
+            this@OpenFileDescription.recordAccess(caller)
+            path.notify(inode, FileSystemEvent.ACCESSED)
+            destination.path.notify(destination.inode, FileSystemEvent.MODIFIED)
+        }
         return this
     }
 }

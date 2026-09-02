@@ -9,6 +9,7 @@ import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.module.Vdso
 import org.plos_clan.cpos.syscall.fs.EventFdSyscalls
 import org.plos_clan.cpos.syscall.fs.EpollSyscalls
+import org.plos_clan.cpos.syscall.fs.InotifySyscalls
 import org.plos_clan.cpos.syscall.fs.access
 import org.plos_clan.cpos.syscall.fs.chdir
 import org.plos_clan.cpos.syscall.fs.chmod
@@ -257,6 +258,9 @@ private enum class LinuxSyscall(
     EPOLL_WAIT(232, EpollSyscalls::wait),
     EPOLL_CTL(233, EpollSyscalls::control),
     TGKILL(234, SignalSyscalls::tgkill),
+    INOTIFY_INIT(253, InotifySyscalls::init),
+    INOTIFY_ADD_WATCH(254, InotifySyscalls::addWatch),
+    INOTIFY_RM_WATCH(255, InotifySyscalls::removeWatch),
     OPENAT(257, ::openAt, restartable = true),
     MKDIRAT(258, ::mkdirAt),
     MKNODAT(259, ::mknodAt),
@@ -280,6 +284,7 @@ private enum class LinuxSyscall(
     EVENTFD2(290, EventFdSyscalls::eventfd2),
     EPOLL_CREATE1(291, EpollSyscalls::create1),
     PIPE2(293, ::pipe2),
+    INOTIFY_INIT1(294, InotifySyscalls::init1),
     RT_TGSIGQUEUEINFO(297, SignalSyscalls::rtTgsigqueueinfo),
     RECVMMSG(299, SocketSyscalls::recvmmsg, restartable = true),
     PRLIMIT64(302, ::prlimit64),

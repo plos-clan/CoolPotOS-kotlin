@@ -1,7 +1,10 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package org.plos_clan.cpos.fs.vfs
 
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlin.concurrent.atomics.AtomicReference
 
 class Inode internal constructor(
     val id: InodeId,
@@ -15,6 +18,7 @@ class Inode internal constructor(
     private var attributeSnapshot: InodeAttributeSnapshot? = initialAttributes
     private var attributeGeneration = 0uL
     private var extendedAttributes: MutableMap<ExtendedAttributeName, ByteArray>? = null
+    private val observers = AtomicReference<List<InodeObserver>?>(null)
     private var openReferences = 0
     private var evicted = false
 
@@ -112,18 +116,25 @@ class Inode internal constructor(
         update: (InodeMetadata) -> InodeMetadata = { it },
     ) {
         var shouldEvict = false
+        var lostLastLink = false
         lock.withLock {
             if (!evicted) {
+                val previousLinks = currentMetadata.linkCount
                 currentMetadata = updateMetadataLocked(timestamps, update)
                 attributeSnapshot = null
                 attributeGeneration++
+                lostLastLink = previousLinks != 0u && currentMetadata.linkCount == 0u
                 if (currentMetadata.linkCount == 0u && openReferences == 0) {
                     evicted = true
                     shouldEvict = true
                 }
             }
         }
+        if (lostLastLink && type != InodeType.DIRECTORY) {
+            notify(FileSystemEvent.ATTRIBUTES_CHANGED)
+        }
         if (shouldEvict) {
+            removeObservers(InodeObserverRemoval.DELETED)
             backend.evict(this)
         }
     }
@@ -223,8 +234,73 @@ class Inode internal constructor(
             }
         }
         if (shouldEvict) {
+            removeObservers(InodeObserverRemoval.DELETED)
             backend.evict(this)
         }
+    }
+
+    internal fun observe(observer: InodeObserver): Boolean = lock.withLock {
+        if (evicted) return@withLock false
+        val current = observers.load()
+        if (current != null) {
+            observers.store(current + observer)
+            FileSystemEventObservers.added()
+            return@withLock true
+        }
+        try {
+            if (!superBlock.trackObservedInode(this)) return@withLock false
+            observers.store(listOf(observer))
+            FileSystemEventObservers.added()
+        } catch (error: OutOfMemoryError) {
+            superBlock.stopTrackingObservedInode(this)
+            throw error
+        }
+        true
+    }
+
+    internal fun stopObserving(observer: InodeObserver) {
+        val untrack = lock.withLock {
+            val current = observers.load() ?: return
+            val index = current.indexOfFirst { it === observer }
+            if (index < 0) return
+            if (current.size == 1) {
+                observers.store(null)
+                true
+            } else {
+                observers.store(current.toMutableList().also { it.removeAt(index) })
+                false
+            }
+        }
+        FileSystemEventObservers.removed()
+        if (untrack) superBlock.stopTrackingObservedInode(this)
+    }
+
+    internal fun notify(
+        event: FileSystemEvent,
+        name: VfsName? = null,
+        cookie: UInt = 0u,
+        subject: Inode = this,
+        unlinked: Boolean = false,
+    ) {
+        val current = observers.load() ?: return
+        val notification = FileSystemNotification(
+            event = event,
+            name = name,
+            cookie = cookie,
+            directory = subject.type == InodeType.DIRECTORY,
+            unlinked = unlinked,
+        )
+        current.forEach { it.notify(notification) }
+    }
+
+    internal fun removeObservers(reason: InodeObserverRemoval, tracked: Boolean = true) {
+        val removed = lock.withLock {
+            observers.exchange(null).orEmpty()
+        }
+        if (removed.isEmpty()) return
+        FileSystemEventObservers.removed(removed.size)
+        if (tracked) superBlock.stopTrackingObservedInode(this)
+        removed.forEach { it.removed(reason) }
     }
 }
 
@@ -310,6 +386,20 @@ class Dentry internal constructor(
             val child = children[name] ?: return@withLock
             if (child.dentry.inode() == null) children.remove(name)
         }
+    }
+
+    internal fun notifyParent(subject: Inode, event: FileSystemEvent, cookie: UInt) {
+        var eventName: VfsName? = null
+        val eventParent = lock.withLock {
+            currentParent?.also { eventName = currentName }
+        } ?: return
+        eventParent.inode()?.notify(
+            event = event,
+            name = checkNotNull(eventName),
+            cookie = cookie,
+            subject = subject,
+            unlinked = inode()?.sameIdentity(subject) != true,
+        )
     }
 
     internal fun renameChild(

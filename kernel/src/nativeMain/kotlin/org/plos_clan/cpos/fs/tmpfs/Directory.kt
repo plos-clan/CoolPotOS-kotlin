@@ -5,6 +5,7 @@ import org.plos_clan.cpos.fs.vfs.DirectoryBackend
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
 import org.plos_clan.cpos.fs.vfs.DirectoryLookup
 import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.FileSystemEvent
 import org.plos_clan.cpos.fs.vfs.FilePosition
 import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.vfs.InodeBackend
@@ -175,8 +176,10 @@ internal class TmpfsDirectory(
         val name = path[index]
         if (index == path.lastIndex) {
             if (children.containsKey(name)) return@withLock false
-            children[name] = fileSystem.newSpecialNode(directory.superBlock, backend, metadata)
+            val child = fileSystem.newSpecialNode(directory.superBlock, backend, metadata)
+            children[name] = child
             directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED)
+            directory.notify(FileSystemEvent.ENTRY_CREATED, name = name, subject = child)
             return@withLock true
         }
 
@@ -208,6 +211,7 @@ internal class TmpfsDirectory(
             directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
                 it.copy(linkCount = it.linkCount + 1u)
             }
+            directory.notify(FileSystemEvent.ENTRY_CREATED, name = name, subject = child)
         }
         installed
     }
@@ -225,6 +229,7 @@ internal class TmpfsDirectory(
             children.remove(name)
             child.updateMetadata { it.copy(linkCount = 0u) }
             directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED)
+            directory.notify(FileSystemEvent.ENTRY_DELETED, name = name, subject = child)
             return@withLock true
         }
 
@@ -242,6 +247,7 @@ internal class TmpfsDirectory(
             }
             childDirectory.parent = null
             child.updateMetadata { it.copy(linkCount = 0u) }
+            directory.notify(FileSystemEvent.ENTRY_DELETED, name = name, subject = child)
         }
         removed
     }

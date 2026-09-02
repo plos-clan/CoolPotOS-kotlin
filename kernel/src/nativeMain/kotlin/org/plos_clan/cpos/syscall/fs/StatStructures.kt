@@ -57,6 +57,7 @@ internal data class LinuxFileStatus(
             InodeType.SOCKET -> S_IFSOCK
             InodeType.EVENTFD,
             InodeType.EPOLL,
+            InodeType.INOTIFY,
             InodeType.PIDFD,
             -> 0u
         }
@@ -206,6 +207,7 @@ internal class LinuxDirent64(
             InodeType.SOCKET -> 12
             InodeType.EVENTFD -> 0
             InodeType.EPOLL -> 0
+            InodeType.INOTIFY -> 0
             InodeType.PIDFD -> 0
         }
 }

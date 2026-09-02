@@ -97,7 +97,7 @@ private object ExtendedAttributes {
             }
             when (val result = FileSystemManager.vfs.setExtendedAttribute(
                 caller,
-                path.mount,
+                path,
                 inode,
                 name,
                 value,
@@ -167,7 +167,7 @@ private object ExtendedAttributes {
             }
             when (val result = FileSystemManager.vfs.removeExtendedAttribute(
                 caller,
-                path.mount,
+                path,
                 inode,
                 name,
             )) {
