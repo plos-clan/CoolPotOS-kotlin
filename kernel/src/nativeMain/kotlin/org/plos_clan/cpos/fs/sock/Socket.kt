@@ -312,7 +312,7 @@ internal abstract class AbstractSocket(
         )
     }
 
-    open fun setPassCredentials(process: Process, enabled: Boolean): VfsResult<Unit> =
+    fun setPassCredentials(enabled: Boolean): VfsResult<Unit> =
         updateOptions { copy(passCredentials = enabled) }
 
     fun setReceiveLowWatermark(value: Int): VfsResult<Unit> = updateOptions {

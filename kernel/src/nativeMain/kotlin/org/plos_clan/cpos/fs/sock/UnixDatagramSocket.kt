@@ -36,6 +36,8 @@ internal class UnixDatagramSocket(
     private var readOpen = true
     private var writeOpen = true
 
+    override fun prepareSend(): VfsError? = autobind()
+
     override fun connect(
         peer: UnixSocket?,
         address: UnixSocketAddress,
@@ -82,8 +84,12 @@ internal class UnixDatagramSocket(
         return result
     }
 
-    override fun peerAddress(): VfsResult<UnixSocketAddress> = lock.withLock {
-        peer?.address?.let { VfsResult.Ok(it) } ?: VfsResult.Err(VfsError.NOT_CONNECTED)
+    override fun peerAddress(): VfsResult<UnixSocketAddress> {
+        val connected = lock.withLock { peer }
+            ?: return VfsResult.Err(VfsError.NOT_CONNECTED)
+        val address = connected.address.takeUnless { it == UnixSocketAddress.Unnamed }
+            ?: connected.socket.localAddress()
+        return VfsResult.Ok(address)
     }
 
     override fun peerCredentials(): VfsResult<UnixCredentials> = lock.withLock {

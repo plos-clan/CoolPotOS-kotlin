@@ -25,6 +25,7 @@ import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.Process
+import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 internal class UnixSocketName private constructor(private val bytes: ByteArray) {
@@ -184,10 +185,11 @@ internal abstract class UnixSocket(
 
     fun reserveBinding(): VfsResult<Unit> = lock.withLock {
         if (closed) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
-        if (bindingState != UnixSocketBindingState.Unbound) {
+        if (bindingState != UnixSocketBindingState.Unbound ||
+            localAddressLocked() != UnixSocketAddress.Unnamed
+        ) {
             return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
-        if (!canBindLocked()) return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
         bindingState = UnixSocketBindingState.Reserved
         VfsResult.Ok(Unit)
     }
@@ -195,6 +197,7 @@ internal abstract class UnixSocket(
     fun commitBinding(binding: UnixSocketBinding): Boolean = lock.withLock {
         if (closed || bindingState != UnixSocketBindingState.Reserved) return@withLock false
         bindingState = UnixSocketBindingState.Bound(binding)
+        bindingChangedLocked(binding.address)
         true
     }
 
@@ -204,12 +207,6 @@ internal abstract class UnixSocket(
         }
     }
 
-    fun canBind(): Boolean = lock.withLock {
-        !closed && bindingState == UnixSocketBindingState.Unbound && canBindLocked()
-    }
-
-    protected open fun canBindLocked(): Boolean = true
-
     protected fun boundAddressLocked(): UnixSocketAddress =
         (bindingState as? UnixSocketBindingState.Bound)?.binding?.address
             ?: UnixSocketAddress.Unnamed
@@ -217,6 +214,8 @@ internal abstract class UnixSocket(
     final override fun localAddress(): UnixSocketAddress = lock.withLock { localAddressLocked() }
 
     protected open fun localAddressLocked(): UnixSocketAddress = boundAddressLocked()
+
+    protected open fun bindingChangedLocked(address: UnixSocketAddress) {}
 
     open fun listen(backlog: Int, credentials: UnixCredentials): VfsResult<Unit> =
         VfsResult.Err(VfsError.NOT_SUPPORTED)
@@ -248,6 +247,38 @@ internal abstract class UnixSocket(
 
     abstract fun receive(request: UnixReceiveRequest): VfsResult<UnixReceiveResult>
 
+    protected open fun prepareSend(): VfsError? = null
+
+    protected fun autobind(): VfsError? {
+        while (true) {
+            val reserved = lock.withLock {
+                when {
+                    !optionsLocked().passCredentials ||
+                        bindingState is UnixSocketBindingState.Bound ||
+                        localAddressLocked() != UnixSocketAddress.Unnamed -> false
+                    bindingState == UnixSocketBindingState.Unbound -> {
+                        bindingState = UnixSocketBindingState.Reserved
+                        true
+                    }
+                    else -> null
+                }
+            }
+            when (reserved) {
+                false -> return null
+                true -> break
+                null -> Scheduler.yieldCurrent()
+            }
+        }
+
+        return when (val result = subsystem.bindAutomatic(this)) {
+            is VfsResult.Ok -> null
+            is VfsResult.Err -> {
+                cancelBinding()
+                result.error
+            }
+        }
+    }
+
     final override fun bindSocket(process: Process, address: SocketAddress): VfsResult<Unit> {
         val unixAddress = address as? UnixSocketAddress
             ?: return VfsResult.Err(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
@@ -277,6 +308,7 @@ internal abstract class UnixSocket(
         }
         val unixAddress = address as? UnixSocketAddress
             ?: return VfsResult.Err(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
+        autobind()?.let { return VfsResult.Err(it) }
         val context = process.context ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val peer = when (val result = subsystem.resolve(
             process.vfsOperationContext,
@@ -311,7 +343,19 @@ internal abstract class UnixSocket(
     final override fun shutdownSocket(mode: SocketShutdownMode): VfsResult<Unit> = shutdown(mode)
 
     final override fun sendSocket(request: SocketSendRequest): IoResult {
-        val destination = when (val result = resolveDestination(request.process, request.destination)) {
+        val address = when (val destination = request.destination) {
+            null -> null
+            is UnixSocketAddress -> destination
+            else -> {
+                request.ancillary.release()
+                return IoResult.failure(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
+            }
+        }
+        prepareSend()?.let { error ->
+            request.ancillary.release()
+            return IoResult.failure(error)
+        }
+        val destination = when (val result = resolveDestination(request.process, address)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> {
                 request.ancillary.release()
@@ -362,17 +406,6 @@ internal abstract class UnixSocket(
         is VfsResult.Err -> result
     }
 
-    final override fun setPassCredentials(
-        process: Process,
-        enabled: Boolean,
-    ): VfsResult<Unit> {
-        if (enabled && canBind()) {
-            val bound = bindSocket(process, UnixSocketAddress.Unnamed)
-            if (bound is VfsResult.Err) return bound
-        }
-        return super.setPassCredentials(process, enabled)
-    }
-
     final override fun closeSocketLocked(): (() -> Unit)? {
         val cleanup = closeUnixLocked()
         val binding = (bindingState as? UnixSocketBindingState.Bound)?.binding
@@ -391,22 +424,20 @@ internal abstract class UnixSocket(
 
     private fun resolveDestination(
         process: Process,
-        address: SocketAddress?,
+        address: UnixSocketAddress?,
     ): VfsResult<UnixSocketDestination?> {
         if (address == null) return VfsResult.Ok(null)
-        val unixAddress = address as? UnixSocketAddress
-            ?: return VfsResult.Err(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
         if (socketType.connectionOriented) {
-            return VfsResult.Ok(UnixSocketDestination.Address(unixAddress))
+            return VfsResult.Ok(UnixSocketDestination.Address(address))
         }
         val context = process.context ?: return VfsResult.Err(VfsError.NOT_FOUND)
         return when (val result = subsystem.resolve(
             process.vfsOperationContext,
             context,
-            unixAddress,
+            address,
         )) {
             is VfsResult.Ok -> VfsResult.Ok(
-                UnixSocketDestination.Resolved(result.value, unixAddress),
+                UnixSocketDestination.Resolved(result.value, address),
             )
             is VfsResult.Err -> result
         }
@@ -580,7 +611,7 @@ internal class UnixSocketSubsystem(
         }
     }
 
-    private fun bindAutomatic(socket: UnixSocket): VfsResult<UnixSocketAddress> = lock.withLock {
+    fun bindAutomatic(socket: UnixSocket): VfsResult<UnixSocketAddress> = lock.withLock {
         repeat(AUTOMATIC_NAME_SPACE) {
             val value = nextAutomaticName++ and AUTOMATIC_NAME_MASK
             val address = UnixSocketAddress.Abstract(
@@ -590,7 +621,7 @@ internal class UnixSocketSubsystem(
                 return@withLock commitAbstractBinding(socket, address)
             }
         }
-        VfsResult.Err(VfsError.ADDRESS_IN_USE)
+        VfsResult.Err(VfsError.NO_SPACE)
     }
 
     private fun bindAbstract(

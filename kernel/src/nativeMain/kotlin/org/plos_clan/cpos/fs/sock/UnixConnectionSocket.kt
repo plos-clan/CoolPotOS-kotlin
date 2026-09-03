@@ -23,8 +23,6 @@ internal class UnixConnectionSocket(
         data class Connected(
             val connection: UnixDuplexConnection,
             val side: UnixDuplexConnection.Side,
-            val localAddress: UnixSocketAddress,
-            val peerAddress: UnixSocketAddress,
             val peerCredentials: UnixCredentials,
         ) : State
         data object Closed : State
@@ -41,10 +39,13 @@ internal class UnixConnectionSocket(
         require(type.connectionOriented)
     }
 
-    override fun canBindLocked(): Boolean = state == State.Initial
-
     override fun localAddressLocked(): UnixSocketAddress =
-        (state as? State.Connected)?.localAddress ?: boundAddressLocked()
+        (state as? State.Connected)?.let { it.connection.address(it.side) }
+            ?: boundAddressLocked()
+
+    override fun bindingChangedLocked(address: UnixSocketAddress) {
+        (state as? State.Connected)?.let { it.connection.updateAddress(it.side, address) }
+    }
 
     override fun listen(backlog: Int, credentials: UnixCredentials): VfsResult<Unit> =
         lock.withLock {
@@ -130,8 +131,6 @@ internal class UnixConnectionSocket(
                 state = State.Connected(
                     endpoint.connection,
                     UnixDuplexConnection.Side.FIRST,
-                    start.localAddress,
-                    endpoint.peerAddress,
                     endpoint.peerCredentials,
                 )
                 VfsResult.Ok(Unit)
@@ -157,10 +156,10 @@ internal class UnixConnectionSocket(
         return VfsResult.Ok(Unit)
     }
 
-    override fun peerAddress(): VfsResult<UnixSocketAddress> = lock.withLock {
-        val connected = state as? State.Connected
-            ?: return@withLock VfsResult.Err(VfsError.NOT_CONNECTED)
-        VfsResult.Ok(connected.peerAddress)
+    override fun peerAddress(): VfsResult<UnixSocketAddress> {
+        val connected = connectedEndpoint()
+            ?: return VfsResult.Err(VfsError.NOT_CONNECTED)
+        return VfsResult.Ok(connected.connection.address(connected.side.opposite))
     }
 
     override fun peerCredentials(): VfsResult<UnixCredentials> = lock.withLock {
@@ -177,11 +176,15 @@ internal class UnixConnectionSocket(
             request.ancillary.release()
             return IoResult.failure(VfsError.NOT_CONNECTED)
         }
-        if (request.destination != null) {
+        if (request.destination != null && socketType != SocketType.SEQUENCED_PACKET) {
             request.ancillary.release()
             return IoResult.failure(VfsError.ALREADY_CONNECTED)
         }
         if (socketType == SocketType.SEQUENCED_PACKET) {
+            autobind()?.let { error ->
+                request.ancillary.release()
+                return IoResult.failure(error)
+            }
             return sendPacket(endpoint, request)
         }
         if (request.count == 0) {
@@ -237,7 +240,7 @@ internal class UnixConnectionSocket(
                 UnixReceiveResult(
                     bytes = 0,
                     copiedBytes = 0,
-                    source = endpoint.peerAddress,
+                    source = endpoint.connection.address(endpoint.side.opposite),
                     senderCredentials = endpoint.peerCredentials,
                 ),
             )
@@ -311,7 +314,7 @@ internal class UnixConnectionSocket(
             UnixReceiveResult(
                 bytes = reported,
                 copiedBytes = copied,
-                source = endpoint.peerAddress,
+                source = endpoint.connection.address(endpoint.side.opposite),
                 ancillary = ancillary,
                 senderCredentials = endpoint.peerCredentials,
                 truncated = truncated,
@@ -368,14 +371,14 @@ internal class UnixConnectionSocket(
             socketType,
             firstOptions,
             secondOptions,
+            UnixSocketAddress.Unnamed,
+            UnixSocketAddress.Unnamed,
         )
         lock.withLock {
             if (state != State.Initial) return VfsResult.Err(VfsError.ALREADY_CONNECTED)
             state = State.Connected(
                 connection,
                 UnixDuplexConnection.Side.FIRST,
-                UnixSocketAddress.Unnamed,
-                UnixSocketAddress.Unnamed,
                 credentials,
             )
         }
@@ -384,8 +387,6 @@ internal class UnixConnectionSocket(
             connectionPeer.state = State.Connected(
                 connection,
                 UnixDuplexConnection.Side.SECOND,
-                UnixSocketAddress.Unnamed,
-                UnixSocketAddress.Unnamed,
                 credentials,
             )
         }
@@ -485,8 +486,6 @@ internal class UnixConnectionSocket(
             subsystem: UnixSocketSubsystem,
             type: SocketType,
             connection: UnixDuplexConnection,
-            localAddress: UnixSocketAddress,
-            peerAddress: UnixSocketAddress,
             peerCredentials: UnixCredentials,
             options: SocketOptions,
         ): UnixConnectionSocket = UnixConnectionSocket(
@@ -495,8 +494,6 @@ internal class UnixConnectionSocket(
             State.Connected(
                 connection,
                 UnixDuplexConnection.Side.SECOND,
-                localAddress,
-                peerAddress,
                 peerCredentials,
             ),
             options,
@@ -513,7 +510,6 @@ internal class UnixConnectionSocket(
     ) {
         data class ClientEndpoint(
             val connection: UnixDuplexConnection,
-            val peerAddress: UnixSocketAddress,
             val peerCredentials: UnixCredentials,
         )
 
@@ -554,13 +550,13 @@ internal class UnixConnectionSocket(
                         type,
                         clientOptions,
                         acceptedOptions,
+                        clientAddress,
+                        localAddress,
                     )
                     val acceptedSocket = accepted(
                         subsystem,
                         type,
                         connection,
-                        localAddress,
-                        clientAddress,
                         clientCredentials,
                         acceptedOptions,
                     )
@@ -576,7 +572,7 @@ internal class UnixConnectionSocket(
                         return VfsResult.Err(VfsError.CONNECTION_REFUSED)
                     }
                     return VfsResult.Ok(
-                        ClientEndpoint(connection, localAddress, credentials),
+                        ClientEndpoint(connection, credentials),
                     )
                 }
                 if (deadline != null) {
@@ -907,6 +903,8 @@ private class UnixDuplexConnection(
     type: SocketType,
     firstOptions: SocketOptions,
     secondOptions: SocketOptions,
+    firstAddress: UnixSocketAddress,
+    secondAddress: UnixSocketAddress,
 ) {
     enum class Side {
         FIRST,
@@ -933,6 +931,7 @@ private class UnixDuplexConnection(
     }
 
     private val lock = IrqSpinLock()
+    private val addresses = arrayOf(firstAddress, secondAddress)
     private val directions = arrayOf(
         Direction(
             newBuffer(type, minOf(firstOptions.sendBufferSize, secondOptions.receiveBufferSize)),
@@ -947,6 +946,12 @@ private class UnixDuplexConnection(
             firstOptions.passCredentials,
         ),
     )
+
+    fun address(side: Side): UnixSocketAddress = lock.withLock { addresses[side.ordinal] }
+
+    fun updateAddress(side: Side, address: UnixSocketAddress) = lock.withLock {
+        addresses[side.ordinal] = address
+    }
 
     fun send(
         side: Side,

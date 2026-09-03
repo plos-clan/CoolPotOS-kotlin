@@ -517,7 +517,7 @@ internal object SocketSyscalls {
             } else {
                 socket.setReceiveBufferSize(value)
             }
-            SetSocketOption.PASS_CREDENTIALS -> socket.setPassCredentials(process, value != 0)
+            SetSocketOption.PASS_CREDENTIALS -> socket.setPassCredentials(value != 0)
             SetSocketOption.RECEIVE_LOW_WATERMARK -> if (value <= 0) {
                 VfsResult.Err(VfsError.INVALID_ARGUMENT)
             } else {
