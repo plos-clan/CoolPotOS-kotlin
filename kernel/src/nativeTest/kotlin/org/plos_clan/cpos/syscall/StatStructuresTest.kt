@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.syscall
 
+import org.plos_clan.cpos.fs.vfs.DeviceNumber
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FileSystemStatistics
@@ -27,6 +28,7 @@ import kotlin.test.assertTrue
 
 class StatStructuresTest {
     private val status = LinuxFileStatus(
+        fileSystemDevice = checkNotNull(DeviceNumber.create(0x123u, 0x45678u)),
         inodeId = 0x0102_0304_0506_0708uL,
         type = InodeType.REGULAR,
         metadata = InodeMetadata(
@@ -53,7 +55,7 @@ class StatStructuresTest {
         val input = LittleEndianBuffer(bytes)
 
         assertEquals(FsConstants.STAT_SIZE, bytes.size)
-        assertEquals(0uL, input.readU64(0))
+        assertEquals(status.fileSystemDevice.value, input.readU64(0))
         assertEquals(status.inodeId, input.readU64(8))
         assertEquals(3uL, input.readU64(16))
         assertEquals(0x81A0u, input.readU32(24))
@@ -107,7 +109,8 @@ class StatStructuresTest {
         assertEquals(222u, input.readU32(120))
         assertEquals(0xABCu, input.readU32(128))
         assertEquals(0x54321u, input.readU32(132))
-        assertTrue(bytes.copyOfRange(136, 144).all { it == 0.toByte() })
+        assertEquals(0x123u, input.readU32(136))
+        assertEquals(0x45678u, input.readU32(140))
         assertEquals(42uL, input.readU64(144))
         assertTrue(bytes.copyOfRange(152, bytes.size).all { it == 0.toByte() })
     }

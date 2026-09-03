@@ -4,7 +4,6 @@ import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceBackend
 import org.plos_clan.cpos.drivers.DeviceIoEvent
 import org.plos_clan.cpos.drivers.DeviceManager
-import org.plos_clan.cpos.drivers.DeviceNumber
 import org.plos_clan.cpos.drivers.DeviceRegistryObserver
 import org.plos_clan.cpos.drivers.DeviceType
 import org.plos_clan.cpos.drivers.DiscardingDeviceBackend
@@ -14,6 +13,7 @@ import org.plos_clan.cpos.fs.tmpfs.TmpfsFileSystemType
 import org.plos_clan.cpos.fs.tmpfs.TmpfsInstance
 import org.plos_clan.cpos.fs.tmpfs.TmpfsOptions
 import org.plos_clan.cpos.fs.vfs.DiscardingOpenFileBackend
+import org.plos_clan.cpos.fs.vfs.DeviceNumber
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FilePosition
 import org.plos_clan.cpos.fs.vfs.Inode

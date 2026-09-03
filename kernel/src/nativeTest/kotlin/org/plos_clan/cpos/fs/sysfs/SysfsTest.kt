@@ -2,8 +2,8 @@ package org.plos_clan.cpos.fs.sysfs
 
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceBackend
-import org.plos_clan.cpos.drivers.DeviceNumber
 import org.plos_clan.cpos.drivers.DeviceType
+import org.plos_clan.cpos.fs.vfs.DeviceNumber
 import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsName

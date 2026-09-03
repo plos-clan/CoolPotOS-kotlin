@@ -2,8 +2,8 @@
 
 package org.plos_clan.cpos.syscall.fs
 
-import org.plos_clan.cpos.drivers.DeviceNumber
 import org.plos_clan.cpos.fs.FileSystemManager
+import org.plos_clan.cpos.fs.vfs.DeviceNumber
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.NodeCreation

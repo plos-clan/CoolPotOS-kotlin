@@ -2,7 +2,7 @@
 
 package org.plos_clan.cpos.fs.erofs
 
-import org.plos_clan.cpos.drivers.DeviceNumber
+import org.plos_clan.cpos.fs.vfs.DeviceNumber
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.InodeMetadata
 import org.plos_clan.cpos.fs.vfs.InodeTimestamps

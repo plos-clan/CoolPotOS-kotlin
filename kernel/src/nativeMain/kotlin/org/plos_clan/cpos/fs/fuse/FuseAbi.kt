@@ -1,8 +1,8 @@
 package org.plos_clan.cpos.fs.fuse
 
-import org.plos_clan.cpos.drivers.DeviceNumber
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.vfs.CacheValidity
+import org.plos_clan.cpos.fs.vfs.DeviceNumber
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.InodeAttributeSnapshot
 import org.plos_clan.cpos.fs.vfs.InodeAttributes

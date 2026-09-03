@@ -2,6 +2,7 @@
 
 package org.plos_clan.cpos.syscall.fs
 
+import org.plos_clan.cpos.fs.vfs.DeviceNumber
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
 import org.plos_clan.cpos.fs.vfs.FileSystemStatistics
 import org.plos_clan.cpos.fs.vfs.Inode
@@ -40,6 +41,7 @@ import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct
 
 internal data class LinuxFileStatus(
+    val fileSystemDevice: DeviceNumber,
     val inodeId: ULong,
     val type: InodeType,
     val metadata: InodeMetadata,
@@ -62,15 +64,16 @@ internal data class LinuxFileStatus(
             -> 0u
         }
 
-    val deviceMajor: UInt
+    val specialDeviceMajor: UInt
         get() = (metadata.deviceNumber shr 8 and 0xfffuL).toUInt()
 
-    val deviceMinor: UInt
+    val specialDeviceMinor: UInt
         get() = ((metadata.deviceNumber and 0xffuL) or
             (metadata.deviceNumber shr 12 and 0xfffff00uL)).toUInt()
 
     companion object {
         fun snapshot(inode: Inode, attributes: InodeAttributes) = LinuxFileStatus(
+            fileSystemDevice = inode.superBlock.deviceNumber,
             inodeId = inode.id.value,
             type = inode.type,
             metadata = attributes.metadata,
@@ -83,7 +86,7 @@ internal data class LinuxFileStatus(
 internal class LinuxStat(private val status: LinuxFileStatus) : NativeStruct {
     override fun toNativeBytes(): ByteArray = ByteArray(STAT_SIZE).also { buffer ->
         LittleEndianBuffer(buffer).apply {
-            writeU64(0, 0uL) // st_dev
+            writeU64(0, status.fileSystemDevice.value)
             writeU64(8, status.inodeId)
             writeU64(16, status.metadata.linkCount.toULong())
             writeU32(24, status.mode)
@@ -127,8 +130,10 @@ internal class LinuxStatx(
             birthTime?.let { writeTimestamp(80, it) }
             writeTimestamp(96, status.metadata.timestamps.changeTime)
             writeTimestamp(112, status.metadata.timestamps.modificationTime)
-            writeU32(128, status.deviceMajor)
-            writeU32(132, status.deviceMinor)
+            writeU32(128, status.specialDeviceMajor)
+            writeU32(132, status.specialDeviceMinor)
+            writeU32(136, status.fileSystemDevice.major)
+            writeU32(140, status.fileSystemDevice.minor)
             writeU64(144, mountId)
         }
     }

@@ -230,6 +230,33 @@ enum class ExtendedAttributeMode {
 
 value class InodeId(val value: ULong)
 
+value class DeviceNumber private constructor(val value: ULong) {
+    val major: UInt
+        get() = (value shr 8 and 0xfffuL).toUInt()
+
+    val minor: UInt
+        get() = ((value and 0xffuL) or (value shr 12 and 0xfffff00uL)).toUInt()
+
+    companion object {
+        const val MAX_MAJOR = 0xfffu
+        const val MAX_MINOR = 0xfffffu
+
+        fun create(major: UInt, minor: UInt): DeviceNumber? {
+            if (major > MAX_MAJOR || minor > MAX_MINOR) return null
+            return DeviceNumber(
+                (major.toULong() shl 8) or
+                    (minor.toULong() and 0xffuL) or
+                    ((minor.toULong() and 0xfffff00uL) shl 12),
+            )
+        }
+
+        fun fromEncoded(value: ULong): DeviceNumber? {
+            val number = DeviceNumber(value)
+            return create(number.major, number.minor)?.takeIf { it.value == value }
+        }
+    }
+}
+
 value class FileMode(val bits: UInt) {
     val setUserId: Boolean
         get() = bits and 0x800u != 0u

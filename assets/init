@@ -2,16 +2,18 @@
 set -euo pipefail
 
 readonly overlay_state=/run/fuse-overlayfs
+readonly overlay_lower=$overlay_state/lower
 readonly overlay_root=/run/root
 
 printf 'init: preparing overlay layers\n'
 mount -t tmpfs -o mode=0700,nosuid,nodev tmpfs /run
 mount -t proc -o nosuid,nodev,noexec proc /proc
-mkdir -p "$overlay_state/upper" "$overlay_state/work" "$overlay_root"
+mkdir -p "$overlay_lower" "$overlay_state/upper" "$overlay_state/work" "$overlay_root"
+mount --bind / "$overlay_lower"
 
 printf 'init: starting fuse-overlayfs\n'
 fuse-overlayfs \
-    -o "lowerdir=/,upperdir=$overlay_state/upper,workdir=$overlay_state/work" \
+    -o "lowerdir=$overlay_lower,upperdir=$overlay_state/upper,workdir=$overlay_state/work" \
     "$overlay_root"
 
 printf 'init: mounting runtime filesystems\n'

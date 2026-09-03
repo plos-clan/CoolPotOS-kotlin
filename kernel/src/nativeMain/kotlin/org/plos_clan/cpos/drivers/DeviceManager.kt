@@ -8,6 +8,7 @@ package org.plos_clan.cpos.drivers
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.sysfs.Sysfs
 import org.plos_clan.cpos.fs.sysfs.SysfsDevicePublication
+import org.plos_clan.cpos.fs.vfs.DeviceNumber
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
@@ -27,33 +28,6 @@ enum class LinuxDeviceMajor(val number: UInt) {
     TTY_AUXILIARY(5u),
     MISC(10u),
     INPUT(13u),
-}
-
-value class DeviceNumber private constructor(val value: ULong) {
-    val major: UInt
-        get() = (value shr 8 and 0xfffuL).toUInt()
-
-    val minor: UInt
-        get() = ((value and 0xffuL) or (value shr 12 and 0xfffff00uL)).toUInt()
-
-    companion object {
-        const val MAX_MAJOR = 0xfffu
-        const val MAX_MINOR = 0xfffffu
-
-        fun create(major: UInt, minor: UInt): DeviceNumber? {
-            if (major > MAX_MAJOR || minor > MAX_MINOR) return null
-            val encoded = (major.toULong() shl 8) or
-                    (minor.toULong() and 0xffuL) or
-                    ((minor.toULong() and 0xfffff00uL) shl 12)
-            return DeviceNumber(encoded)
-        }
-
-        fun fromEncoded(value: ULong): DeviceNumber? {
-            val major = (value shr 8 and 0xfffuL).toUInt()
-            val minor = ((value and 0xffuL) or (value shr 12 and 0xfffff00uL)).toUInt()
-            return create(major, minor)?.takeIf { it.value == value }
-        }
-    }
 }
 
 interface DeviceBackend {

@@ -71,7 +71,7 @@ internal class VfsMountManager(
         )) {
             is VfsResult.Ok -> attached
             is VfsResult.Err -> {
-                superBlock.backend.release()
+                superBlock.release()
                 attached
             }
         }
@@ -104,6 +104,33 @@ internal class VfsMountManager(
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
         return context.namespace.move(mounted.mount, mountpoint)
+    }
+
+    fun bind(
+        caller: VfsOperationContext,
+        context: FileSystemContext,
+        source: VfsPathname,
+        target: VfsPathname,
+    ): VfsResult<Unit> {
+        val sourcePath = when (val result = paths.resolve(caller, context, source)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        val targetPath = when (val result = paths.resolve(
+            caller,
+            context,
+            target,
+            followFinalMount = false,
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        val sourceType = sourcePath.inode?.type ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val targetType = targetPath.inode?.type ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        if ((sourceType == InodeType.DIRECTORY) != (targetType == InodeType.DIRECTORY)) {
+            return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        }
+        return context.namespace.bind(sourcePath, targetPath)
     }
 
     private fun findFileSystem(name: String): FileSystemType? {

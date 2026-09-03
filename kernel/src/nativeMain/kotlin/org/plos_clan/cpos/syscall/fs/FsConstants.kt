@@ -88,6 +88,7 @@ internal object FsConstants {
     const val ST_NODIRATIME = 0x800uL
     const val ST_RELATIME = 0x1000uL
     const val ST_NOSYMFOLLOW = 0x2000uL
+    const val MS_BIND = 0x1000uL
     const val MS_SILENT = 0x8000uL
     const val MS_MOVE = 0x2000uL
 }

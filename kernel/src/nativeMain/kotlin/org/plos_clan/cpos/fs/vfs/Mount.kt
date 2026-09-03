@@ -88,9 +88,7 @@ class Mount internal constructor(
     }
 
     private fun releaseResources() {
-        superBlock.unmount()
-        superBlock.root.releaseCachedChildren()
-        superBlock.backend.release()
+        superBlock.release()
         detachFromParent()
     }
 
@@ -155,6 +153,26 @@ class MountNamespace internal constructor(val root: Mount) {
             fileSystemName = fileSystemName,
             source = source,
             flags = flags,
+            attachment = target,
+        )
+        VfsResult.Ok(Unit)
+    }
+
+    internal fun bind(source: VfsPath, target: VfsPath): VfsResult<Unit> = lock.withLock {
+        if (!contains(source.mount) || !contains(target.mount)) {
+            return@withLock VfsResult.Err(VfsError.NOT_FOUND)
+        }
+        if (mounts.containsKey(target)) return@withLock VfsResult.Err(VfsError.BUSY)
+        if (!source.mount.superBlock.retain()) {
+            return@withLock VfsResult.Err(VfsError.NOT_FOUND)
+        }
+
+        mounts[target] = Mount(
+            superBlock = source.mount.superBlock,
+            fileSystemName = source.mount.fileSystemName,
+            source = source.mount.source,
+            root = source.dentry,
+            flags = source.mount.flags,
             attachment = target,
         )
         VfsResult.Ok(Unit)

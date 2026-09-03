@@ -28,6 +28,7 @@ import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.syscall.fs.FsConstants.AT_FDCWD
 import org.plos_clan.cpos.syscall.fs.FsConstants.FALLOC_FL_KEEP_SIZE
+import org.plos_clan.cpos.syscall.fs.FsConstants.MS_BIND
 import org.plos_clan.cpos.syscall.fs.FsConstants.MS_MOVE
 import org.plos_clan.cpos.syscall.fs.FsConstants.MS_SILENT
 import org.plos_clan.cpos.syscall.fs.FsConstants.O_CLOEXEC
@@ -211,6 +212,22 @@ internal fun mount(regs: PtraceRegisters, process: Process): Long {
             caller = process.vfsOperationContext,
             context = context,
             source = VfsPathname.fromBytes(moveSource),
+            target = VfsPathname.fromBytes(target),
+        )) {
+            is VfsResult.Ok -> 0L
+            is VfsResult.Err -> errno(result.error.errno)
+        }
+    }
+    if (rawFlags and MS_BIND != 0uL) {
+        if (rawFlags and (MS_BIND or MS_SILENT).inv() != 0uL) {
+            return errno(Errno.EINVAL)
+        }
+        val bindSource = source?.takeIf(ByteArray::isNotEmpty)
+            ?: return errno(Errno.ENOENT)
+        return when (val result = FileSystemManager.vfs.bindMount(
+            caller = process.vfsOperationContext,
+            context = context,
+            source = VfsPathname.fromBytes(bindSource),
             target = VfsPathname.fromBytes(target),
         )) {
             is VfsResult.Ok -> 0L

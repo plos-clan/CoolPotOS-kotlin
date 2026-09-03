@@ -1,3 +1,5 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package org.plos_clan.cpos.fs.vfs
 
 import org.plos_clan.cpos.mem.PageCache
@@ -8,6 +10,7 @@ import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PollEvents
+import kotlin.concurrent.atomics.AtomicInt
 
 abstract class FileSystemType(
     val name: String,
@@ -61,6 +64,9 @@ abstract class FileSystemType(
 }
 
 interface SuperBlockBackend {
+    val deviceNumber: DeviceNumber?
+        get() = null
+
     fun createRoot(superBlock: SuperBlock): Inode
 
     fun updateTimestamps(
@@ -95,9 +101,11 @@ class SuperBlock internal constructor(
     val type: FileSystemType,
     val backend: SuperBlockBackend,
 ) {
+    private val references = AtomicInt(1)
     private val observerLock = IrqSpinLock()
     private var observedInodes: MutableSet<Inode>? = mutableSetOf()
 
+    val deviceNumber: DeviceNumber = backend.deviceNumber ?: allocateAnonymousDeviceNumber()
     val root: Dentry = Dentry(
         superBlock = this,
         name = VfsName.ROOT,
@@ -115,13 +123,46 @@ class SuperBlock internal constructor(
         observedInodes?.remove(inode)
     }
 
-    internal fun unmount() {
+    internal fun retain(): Boolean {
+        var observed = references.load()
+        while (observed in 1 until Int.MAX_VALUE) {
+            if (references.compareAndSet(observed, observed + 1)) return true
+            observed = references.load()
+        }
+        return false
+    }
+
+    internal fun release() {
+        var observed = references.load()
+        while (observed > 0) {
+            if (!references.compareAndSet(observed, observed - 1)) {
+                observed = references.load()
+                continue
+            }
+            if (observed == 1) releaseResources()
+            return
+        }
+    }
+
+    private fun releaseResources() {
         val observed = observerLock.withLock {
-            val current = observedInodes ?: return
+            val current = observedInodes ?: return@withLock emptyList()
             observedInodes = null
             current.toList()
         }
         observed.forEach { it.removeObservers(InodeObserverRemoval.UNMOUNTED, tracked = false) }
+        root.releaseCachedChildren()
+        backend.release()
+    }
+
+    private companion object {
+        val nextAnonymousDeviceMinor = AtomicInt(1)
+
+        fun allocateAnonymousDeviceNumber(): DeviceNumber {
+            val minor = nextAnonymousDeviceMinor.fetchAndAdd(1).toUInt()
+            check(minor in 1u..DeviceNumber.MAX_MINOR)
+            return checkNotNull(DeviceNumber.create(0u, minor))
+        }
     }
 }
 
