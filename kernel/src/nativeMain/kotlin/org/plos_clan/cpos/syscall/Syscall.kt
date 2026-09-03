@@ -10,6 +10,7 @@ import org.plos_clan.cpos.module.Vdso
 import org.plos_clan.cpos.syscall.fs.EventFdSyscalls
 import org.plos_clan.cpos.syscall.fs.EpollSyscalls
 import org.plos_clan.cpos.syscall.fs.InotifySyscalls
+import org.plos_clan.cpos.syscall.fs.TimerFdSyscalls
 import org.plos_clan.cpos.syscall.fs.access
 import org.plos_clan.cpos.syscall.fs.chdir
 import org.plos_clan.cpos.syscall.fs.chmod
@@ -279,7 +280,10 @@ private enum class LinuxSyscall(
     SPLICE(275, ::splice, restartable = true),
     UTIMENSAT(280, ::utimensAt),
     EPOLL_PWAIT(281, EpollSyscalls::pwait),
+    TIMERFD_CREATE(283, TimerFdSyscalls::create),
     FALLOCATE(285, ::fallocate),
+    TIMERFD_SETTIME(286, TimerFdSyscalls::setTime),
+    TIMERFD_GETTIME(287, TimerFdSyscalls::getTime),
     ACCEPT4(288, SocketSyscalls::accept4, restartable = true),
     EVENTFD2(290, EventFdSyscalls::eventfd2),
     EPOLL_CREATE1(291, EpollSyscalls::create1),

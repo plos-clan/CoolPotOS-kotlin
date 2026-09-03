@@ -261,16 +261,8 @@ internal object EpollSyscalls {
             }
 
             fun fromTimespec(value: TimeSpec): WaitTimeout? {
-                if (value.sec < 0 || value.nsec !in 0 until 1_000_000_000L) return null
-                if (value.sec == 0L && value.nsec == 0L) return IMMEDIATE
-                val seconds = value.sec.toULong()
-                val nanoseconds = value.nsec.toULong()
-                val duration = if (seconds > (ULong.MAX_VALUE - nanoseconds) / 1_000_000_000uL) {
-                    ULong.MAX_VALUE
-                } else {
-                    seconds * 1_000_000_000uL + nanoseconds
-                }
-                return after(duration)
+                if (!value.isValidDuration) return null
+                return if (value.isZeroDuration) IMMEDIATE else after(value.durationNanos)
             }
 
             private fun after(duration: ULong): WaitTimeout {

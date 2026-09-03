@@ -230,8 +230,8 @@ internal fun ppoll(regs: PtraceRegisters, process: Process): Long {
     } else {
         when (val result = readPselectTimeout(process, timeoutAddress)) {
             is VfsResult.Ok -> PollTimeout(
-                deadline = timeoutDeadline(result.value),
-                immediate = result.value.isZero,
+                deadline = result.value.deadlineFrom(TscClock.nanoTime()),
+                immediate = result.value.isZeroDuration,
             )
             is VfsResult.Err -> return errno(result.error.errno)
         }
@@ -330,7 +330,7 @@ internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
     val caller = process.vfsOperationContext
     val previousMask = signalMask?.let { thread.signals.replaceMask(it) }
     try {
-        val deadline = timeout?.let(::timeoutDeadline)
+        val deadline = timeout?.deadlineFrom(TscClock.nanoTime())
         while (true) {
             requestedRead.copyInto(readyRead)
             requestedWrite.copyInto(readyWrite)
@@ -345,7 +345,7 @@ internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
             )
             if (ready < 0) return errno(-ready)
             val expired = deadline != null && TscClock.nanoTime() >= deadline
-            if (ready != 0 || timeout?.isZero == true || expired) {
+            if (ready != 0 || timeout?.isZeroDuration == true || expired) {
                 if (!copyFdSet(process, regs[PtraceRegisters.IDX_RSI], readyRead, setSize) ||
                     !copyFdSet(process, regs[PtraceRegisters.IDX_RDX], readyWrite, setSize) ||
                     !copyFdSet(process, regs[PtraceRegisters.IDX_R10], readyExcept, setSize)
@@ -379,10 +379,6 @@ private fun copyFdSet(process: Process, address: ULong, size: Int): ByteArray? =
 private fun copyFdSet(process: Process, address: ULong, value: ByteArray, size: Int): Boolean =
     address == 0uL || size == 0 || UserMemory(process.addressSpace, address).copyToUser(value)
 
-private data class SelectTimeout(val seconds: Long, val nanoseconds: Long) {
-    val isZero: Boolean get() = seconds == 0L && nanoseconds == 0L
-}
-
 private data class PollTimeout(val deadline: ULong?, val immediate: Boolean) {
     fun expired(): Boolean = deadline != null && TscClock.nanoTime() >= deadline
 
@@ -392,15 +388,15 @@ private data class PollTimeout(val deadline: ULong?, val immediate: Boolean) {
     }
 }
 
-private fun readPselectTimeout(process: Process, address: ULong): VfsResult<SelectTimeout> {
+private fun readPselectTimeout(process: Process, address: ULong): VfsResult<TimeSpec> {
     val bytes = UserMemory(process.addressSpace, address).copyFromUser(TimeSpec.NATIVE_SIZE)
         ?: return VfsResult.Err(VfsError.FAULT)
     val value = TimeSpec(0, 0)
     if (!value.updateFromNativeBytes(bytes)) return VfsResult.Err(VfsError.FAULT)
-    if (value.sec < 0 || value.nsec !in 0 until 1_000_000_000L) {
+    if (!value.isValidDuration) {
         return VfsResult.Err(VfsError.INVALID_ARGUMENT)
     }
-    return VfsResult.Ok(SelectTimeout(value.sec, value.nsec))
+    return VfsResult.Ok(value)
 }
 
 private fun readPselectSignalMask(
@@ -418,17 +414,6 @@ private fun readPselectSignalMask(
     val mask = UserMemory(process.addressSpace, signalSet).copyFromUser(ULong.SIZE_BYTES)
         ?: return VfsResult.Err(VfsError.FAULT)
     return VfsResult.Ok(LittleEndianBuffer(mask).readU64(0) and Signal.BLOCKABLE_MASK)
-}
-
-private fun timeoutDeadline(timeout: SelectTimeout): ULong {
-    val seconds = timeout.seconds.toULong()
-    val duration = if (seconds > (ULong.MAX_VALUE - timeout.nanoseconds.toULong()) / 1_000_000_000uL) {
-        ULong.MAX_VALUE
-    } else {
-        seconds * 1_000_000_000uL + timeout.nanoseconds.toULong()
-    }
-    val now = TscClock.nanoTime()
-    return if (duration > ULong.MAX_VALUE - now) ULong.MAX_VALUE else now + duration
 }
 
 private fun scanSelectDescriptors(

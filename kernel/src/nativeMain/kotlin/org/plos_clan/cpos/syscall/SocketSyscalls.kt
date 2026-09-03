@@ -1060,10 +1060,7 @@ internal object SocketSyscalls {
         fun writeRemaining(): Boolean {
             val remaining = deadline.remainingNanos()
             return memory.copyToUser(
-                TimeSpec(
-                    (remaining / NANOSECONDS_PER_SECOND).toLong(),
-                    (remaining % NANOSECONDS_PER_SECOND).toLong(),
-                ).toNativeBytes(),
+                TimeSpec.fromDurationNanos(remaining).toNativeBytes(),
             )
         }
 
@@ -1078,23 +1075,13 @@ internal object SocketSyscalls {
                     return VfsResult.Err(VfsError.FAULT)
                 }
                 val value = TimeSpec(0, 0)
-                if (!value.updateFromNativeBytes(bytes) || value.sec < 0 ||
-                    value.nsec !in 0 until NANOSECONDS_PER_SECOND.toLong()
-                ) {
+                if (!value.updateFromNativeBytes(bytes) || !value.isValidDuration) {
                     return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-                }
-                val seconds = value.sec.toULong()
-                val duration = if (seconds >
-                    (ULong.MAX_VALUE - value.nsec.toULong()) / NANOSECONDS_PER_SECOND
-                ) {
-                    ULong.MAX_VALUE
-                } else {
-                    seconds * NANOSECONDS_PER_SECOND + value.nsec.toULong()
                 }
                 return VfsResult.Ok(
                     ReceiveTimeout(
                         memory,
-                        checkNotNull(SocketDeadline.after(duration)),
+                        checkNotNull(SocketDeadline.after(value.durationNanos)),
                     ),
                 )
             }

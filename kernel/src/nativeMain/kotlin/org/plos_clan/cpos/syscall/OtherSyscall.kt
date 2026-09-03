@@ -131,36 +131,6 @@ private data class SysInfo(
     }
 }
 
-internal data class TimeSpec(var sec: Long, var nsec: Long) : NativeStruct {
-    override fun toNativeBytes(): ByteArray =
-        ByteArray(NATIVE_SIZE).also { buffer ->
-            LittleEndianBuffer(buffer).apply {
-                writeU64(SEC_OFFSET, sec.toULong())
-                writeU64(NSEC_OFFSET, nsec.toULong())
-            }
-        }
-
-    override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
-        if (buffer.size != NATIVE_SIZE) {
-            return false
-        }
-
-        val input = LittleEndianBuffer(buffer)
-        val updatedSec = input.readU64(SEC_OFFSET).toLong()
-        val updatedNsec = input.readU64(NSEC_OFFSET).toLong()
-
-        sec = updatedSec
-        nsec = updatedNsec
-        return true
-    }
-
-    companion object {
-        private const val SEC_OFFSET = 0
-        private const val NSEC_OFFSET = SEC_OFFSET + Long.SIZE_BYTES
-        const val NATIVE_SIZE = Long.SIZE_BYTES * 2
-    }
-}
-
 internal fun reboot(regs: PtraceRegisters, process: Process): Long {
     val magic1 = regs[PtraceRegisters.IDX_RDI]
     val magic2 = regs[PtraceRegisters.IDX_RSI]
@@ -240,40 +210,26 @@ internal fun nanoSleep(regs: PtraceRegisters, process: Process): Long {
         .copyFromUser(TimeSpec.NATIVE_SIZE)
         ?: return errno(Errno.EFAULT)
     val requested = TimeSpec(0, 0)
-    if (!requested.updateFromNativeBytes(bytes) ||
-        requested.sec < 0 || requested.nsec !in 0 until NANOSECONDS_PER_SECOND.toLong()
-    ) {
+    if (!requested.updateFromNativeBytes(bytes) || !requested.isValidDuration) {
         return errno(Errno.EINVAL)
     }
     if (!TscClock.isReady) return errno(Errno.EIO)
 
-    val seconds = requested.sec.toULong()
-    val nanoseconds = requested.nsec.toULong()
-    val duration = if (seconds > (ULong.MAX_VALUE - nanoseconds) / NANOSECONDS_PER_SECOND) {
-        ULong.MAX_VALUE
-    } else {
-        seconds * NANOSECONDS_PER_SECOND + nanoseconds
-    }
-    val start = TscClock.nanoTime()
-    val deadline = if (duration > ULong.MAX_VALUE - start) ULong.MAX_VALUE else start + duration
+    val deadline = requested.deadlineFrom(TscClock.nanoTime())
     while (TscClock.nanoTime() < deadline) {
         if (thread.hasPendingSignal()) {
             val remaining = deadline - TscClock.nanoTime().coerceAtMost(deadline)
             val remainingAddress = regs[PtraceRegisters.IDX_RSI]
             if (remainingAddress != 0uL &&
                 !UserMemory(process.addressSpace, remainingAddress).copyToUser(
-                    TimeSpec(
-                        sec = (remaining / NANOSECONDS_PER_SECOND).toLong(),
-                        nsec = (remaining % NANOSECONDS_PER_SECOND).toLong(),
-                    ).toNativeBytes(),
+                    TimeSpec.fromDurationNanos(remaining).toNativeBytes(),
                 )
             ) {
                 return errno(Errno.EFAULT)
             }
             return errno(Errno.EINTR)
         }
-        Scheduler.yieldCurrent()
-        bridge.wait_for_interrupt()
+        if (!Scheduler.parkCurrentUntil(deadline)) return errno(Errno.ESRCH)
     }
     return 0L
 }

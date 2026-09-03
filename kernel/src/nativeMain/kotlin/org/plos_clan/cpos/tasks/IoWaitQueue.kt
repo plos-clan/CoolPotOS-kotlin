@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.tasks
 
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 internal class IoWaitQueue {
@@ -44,11 +45,22 @@ internal class IoWaitQueue {
         recycled.addLast(waiter)
     }
 
-    fun await(lock: IrqSpinLock, waiter: Waiter): Boolean {
+    fun await(lock: IrqSpinLock, waiter: Waiter, deadlineNanos: ULong? = null): Boolean {
         val thread = checkNotNull(waiter.thread)
         var interrupted = false
-        while (!lock.withLock { waiter.ready }) {
-            if (thread.hasPendingSignal() || !Scheduler.parkCurrent()) {
+        while (!lock.withLock { waiter.ready } &&
+            (deadlineNanos == null || TscClock.nanoTime() < deadlineNanos)
+        ) {
+            if (thread.hasPendingSignal()) {
+                interrupted = true
+                break
+            }
+            val parked = if (deadlineNanos == null) {
+                Scheduler.parkCurrent()
+            } else {
+                Scheduler.parkCurrentUntil(deadlineNanos)
+            }
+            if (!parked) {
                 interrupted = true
                 break
             }
@@ -67,6 +79,13 @@ internal class IoWaitQueue {
 
     fun wakeAll() {
         while (true) Scheduler.wake(takeOne() ?: return)
+    }
+
+    fun takeAll(): List<Thread> {
+        if (waiting.isEmpty()) return emptyList()
+        return ArrayList<Thread>(waiting.size).also { result ->
+            while (waiting.isNotEmpty()) result += checkNotNull(takeOne())
+        }
     }
 
     fun takeReady(available: Int): Thread? {

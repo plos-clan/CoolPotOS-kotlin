@@ -2,7 +2,6 @@
 
 package org.plos_clan.cpos.syscall
 
-import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
@@ -269,15 +268,11 @@ internal object SignalSyscalls {
         val timeout = readTimeout(process, regs[PtraceRegisters.IDX_RDX])
         if (timeout is SignalTimeout.Invalid) return errno(timeout.error)
         val finiteTimeout = (timeout as? SignalTimeout.Finite)?.value
-        val immediate = finiteTimeout?.let { it.sec == 0L && it.nsec == 0L } == true
-        val deadline = finiteTimeout?.takeUnless { immediate }?.let(::deadline)
+        val immediate = finiteTimeout?.isZeroDuration == true
+        val deadline = finiteTimeout?.takeUnless { immediate }
+            ?.deadlineFrom(TscClock.nanoTime())
 
         thread.signals.beginWait(accepted)
-        val timeoutWakeup = deadline?.let { expiresAt ->
-            KernelCoroutines.dispatcher.scheduleAt(expiresAt) {
-                Scheduler.wake(thread)
-            }
-        }
         try {
             while (true) {
                 val info = thread.takePendingSignal(accepted)
@@ -295,10 +290,11 @@ internal object SignalSyscalls {
                     return errno(Errno.EAGAIN)
                 }
                 if (thread.hasPendingSignal()) return errno(Errno.EINTR)
-                if (!Scheduler.parkCurrent()) Scheduler.yieldCurrent()
+                val parked = if (deadline == null) Scheduler.parkCurrent()
+                else Scheduler.parkCurrentUntil(deadline)
+                if (!parked) Scheduler.yieldCurrent()
             }
         } finally {
-            timeoutWakeup?.dispose()
             thread.signals.endWait()
         }
     }
@@ -498,25 +494,11 @@ internal object SignalSyscalls {
         val bytes = UserMemory(process.addressSpace, address).copyFromUser(TimeSpec.NATIVE_SIZE)
             ?: return SignalTimeout.Invalid(Errno.EFAULT)
         val timeout = TimeSpec(0, 0)
-        return if (timeout.updateFromNativeBytes(bytes) && timeout.sec >= 0 &&
-            timeout.nsec in 0 until 1_000_000_000L
-        ) {
+        return if (timeout.updateFromNativeBytes(bytes) && timeout.isValidDuration) {
             SignalTimeout.Finite(timeout)
         } else {
             SignalTimeout.Invalid(Errno.EINVAL)
         }
-    }
-
-    private fun deadline(timeout: TimeSpec): ULong {
-        val seconds = timeout.sec.toULong()
-        val nanoseconds = timeout.nsec.toULong()
-        val duration = if (seconds > (ULong.MAX_VALUE - nanoseconds) / 1_000_000_000uL) {
-            ULong.MAX_VALUE
-        } else {
-            seconds * 1_000_000_000uL + nanoseconds
-        }
-        val now = TscClock.nanoTime()
-        return if (duration > ULong.MAX_VALUE - now) ULong.MAX_VALUE else now + duration
     }
 
     private data class RequestedSignal(val value: Signal?)

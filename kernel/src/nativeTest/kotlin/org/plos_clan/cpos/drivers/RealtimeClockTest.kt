@@ -28,6 +28,9 @@ class RealtimeClockTest {
         assertEquals(200_000_000uL, now.durationUntil(11, 100_000_000u))
         assertEquals(0uL, now.durationUntil(10, 900_000_000u))
         assertEquals(0uL, now.durationUntil(9, 999_999_999u))
+        assertEquals(10_900_000_000uL, now.toNanoseconds())
+        assertEquals(0uL, RealtimeClock.Instant(-1, 0u).toNanoseconds())
+        assertEquals(ULong.MAX_VALUE, RealtimeClock.Instant(Long.MAX_VALUE, 0u).toNanoseconds())
         assertEquals(ULong.MAX_VALUE, RealtimeClock.Instant(0, 0u).durationUntil(Long.MAX_VALUE, 0u))
         assertFailsWith<IllegalArgumentException> {
             RealtimeClock.Instant(0, 1_000_000_000u)

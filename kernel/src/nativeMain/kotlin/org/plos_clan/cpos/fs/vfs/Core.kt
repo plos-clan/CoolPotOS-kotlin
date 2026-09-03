@@ -277,6 +277,7 @@ enum class InodeType {
     PIPE,
     SOCKET,
     EVENTFD,
+    TIMERFD,
     EPOLL,
     INOTIFY,
     PIDFD,

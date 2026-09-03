@@ -2,8 +2,6 @@
 
 package org.plos_clan.cpos.syscall
 
-import kotlinx.coroutines.DisposableHandle
-import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.RealtimeClock
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.mem.UserMemory
@@ -20,7 +18,6 @@ private const val FUTEX_CLOCK_REALTIME = 0x100
 private const val FUTEX_COMMAND_MASK = 0x7f
 private const val FUTEX_SUPPORTED_FLAGS = FUTEX_PRIVATE_FLAG or FUTEX_CLOCK_REALTIME
 private const val FUTEX_MATCH_ANY = UInt.MAX_VALUE
-private const val NANOSECONDS_PER_SECOND = 1_000_000_000uL
 
 private enum class FutexOperation(val code: Int) {
     WAIT(0),
@@ -57,7 +54,6 @@ private data class FutexAddress(
 private enum class FutexWaitState {
     WAITING,
     WOKEN,
-    TIMED_OUT,
 }
 
 private class FutexWaiter(
@@ -66,7 +62,6 @@ private class FutexWaiter(
     val bitset: UInt,
 ) {
     var state = FutexWaitState.WAITING
-    var timeout: DisposableHandle? = null
 }
 
 object Futex {
@@ -175,29 +170,42 @@ object Futex {
                 current != expected -> validationError = Errno.EAGAIN
                 expiresAt != null && expiresAt <= TscClock.nanoTime() ->
                     validationError = Errno.ETIMEDOUT
-                else -> {
-                    queues.getOrPut(address.key) { ArrayDeque() }.addLast(waiter)
-                    waiter.timeout = expiresAt?.let { deadline ->
-                        KernelCoroutines.dispatcher.scheduleAt(deadline) {
-                            timeout(waiter)
-                        }
-                    }
-                }
+                else -> queues.getOrPut(address.key) { ArrayDeque() }.addLast(waiter)
             }
         }
         if (validationError != 0) return error(validationError)
 
-        if (!Scheduler.parkCurrent()) {
-            lock.withLock { removeLocked(waiter) }
-            return error(Errno.ESRCH)
-        }
-        return when (lock.withLock { waiter.state }) {
-            FutexWaitState.WOKEN -> 0L
-            FutexWaitState.TIMED_OUT -> error(Errno.ETIMEDOUT)
-            FutexWaitState.WAITING -> {
-                lock.withLock { removeLocked(waiter) }
-                error(Errno.EINTR)
+        while (true) {
+            val expired = expiresAt != null && TscClock.nanoTime() >= expiresAt
+            val interrupted = thread.hasPendingSignal()
+            var result: Long? = null
+            lock.withLock {
+                when {
+                    waiter.state == FutexWaitState.WOKEN -> result = 0L
+                    expired -> {
+                        removeLocked(waiter)
+                        result = error(Errno.ETIMEDOUT)
+                    }
+                    interrupted -> {
+                        removeLocked(waiter)
+                        result = error(Errno.EINTR)
+                    }
+                }
             }
+            result?.let { return it }
+
+            val parked = if (expiresAt == null) Scheduler.parkCurrent()
+            else Scheduler.parkCurrentUntil(expiresAt)
+            if (parked) continue
+
+            val woken = lock.withLock {
+                if (waiter.state == FutexWaitState.WOKEN) true
+                else {
+                    removeLocked(waiter)
+                    false
+                }
+            }
+            return if (woken) 0L else error(Errno.ESRCH)
         }
     }
 
@@ -255,8 +263,6 @@ object Futex {
             val waiter = queue.removeFirst()
             if (selected.size < count && waiter.bitset and bitset != 0u) {
                 waiter.state = FutexWaitState.WOKEN
-                waiter.timeout?.dispose()
-                waiter.timeout = null
                 selected += waiter
             } else {
                 queue.addLast(waiter)
@@ -266,17 +272,7 @@ object Futex {
         return selected
     }
 
-    private fun timeout(waiter: FutexWaiter) {
-        val expired = lock.withLock {
-            removeLocked(waiter, FutexWaitState.TIMED_OUT)
-        }
-        if (expired) Scheduler.wake(waiter.thread)
-    }
-
-    private fun removeLocked(
-        waiter: FutexWaiter,
-        state: FutexWaitState? = null,
-    ): Boolean {
+    private fun removeLocked(waiter: FutexWaiter): Boolean {
         if (waiter.state != FutexWaitState.WAITING) return false
         val queue = queues[waiter.key] ?: return false
         repeat(queue.size) {
@@ -284,9 +280,6 @@ object Futex {
             if (candidate !== waiter) queue.addLast(candidate)
         }
         if (queue.isEmpty()) queues.remove(waiter.key)
-        if (state != null) waiter.state = state
-        waiter.timeout?.dispose()
-        waiter.timeout = null
         return true
     }
 
@@ -318,31 +311,20 @@ object Futex {
         val bytes = UserMemory(process.addressSpace, address).copyFromUser(TimeSpec.NATIVE_SIZE)
             ?: return TimeoutResult.Error(Errno.EFAULT)
         val time = TimeSpec(0, 0)
-        if (!time.updateFromNativeBytes(bytes) ||
-            time.sec < 0 || time.nsec !in 0 until NANOSECONDS_PER_SECOND.toLong()
-        ) {
+        if (!time.updateFromNativeBytes(bytes) || !time.isValidDuration) {
             return TimeoutResult.Error(Errno.EINVAL)
         }
-        val seconds = time.sec.toULong()
-        val nanoseconds = time.nsec.toULong()
         if (absolute && realtime) {
-            val remaining = RealtimeClock.now().durationUntil(time.sec, time.nsec.toUInt())
             val now = TscClock.nanoTime()
+            val remaining = RealtimeClock.atMonotonic(now)
+                .durationUntil(time.sec, time.nsec.toUInt())
             return TimeoutResult.Value(
                 if (remaining > ULong.MAX_VALUE - now) ULong.MAX_VALUE else now + remaining,
             )
         }
-        val value = if (seconds > (ULong.MAX_VALUE - nanoseconds) / NANOSECONDS_PER_SECOND) {
-            ULong.MAX_VALUE
-        } else {
-            seconds * NANOSECONDS_PER_SECOND + nanoseconds
-        }
-        if (absolute) return TimeoutResult.Value(value)
+        if (absolute) return TimeoutResult.Value(time.durationNanos)
 
-        val now = TscClock.nanoTime()
-        return TimeoutResult.Value(
-            if (value > ULong.MAX_VALUE - now) ULong.MAX_VALUE else now + value,
-        )
+        return TimeoutResult.Value(time.deadlineFrom(TscClock.nanoTime()))
     }
 
     private fun wakeCount(value: ULong): Int? = value.toInt().takeIf { it >= 0 }

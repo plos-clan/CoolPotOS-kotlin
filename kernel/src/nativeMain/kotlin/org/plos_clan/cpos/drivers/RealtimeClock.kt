@@ -18,6 +18,18 @@ object RealtimeClock {
             require(nanoseconds.toULong() < NANOSECONDS_PER_SECOND)
         }
 
+        fun toNanoseconds(): ULong {
+            if (seconds <= 0L) return if (seconds == 0L) nanoseconds.toULong() else 0uL
+            val wholeSeconds = seconds.toULong()
+            return if (wholeSeconds >
+                (ULong.MAX_VALUE - nanoseconds.toULong()) / NANOSECONDS_PER_SECOND
+            ) {
+                ULong.MAX_VALUE
+            } else {
+                wholeSeconds * NANOSECONDS_PER_SECOND + nanoseconds.toULong()
+            }
+        }
+
         fun durationUntil(seconds: Long, nanoseconds: UInt): ULong {
             if (seconds < this.seconds ||
                 seconds == this.seconds && nanoseconds <= this.nanoseconds
@@ -116,8 +128,9 @@ object RealtimeClock {
         )
     }
 
-    fun now(): Instant {
-        val monotonic = TscClock.nanoTime()
+    fun now(): Instant = atMonotonic(TscClock.nanoTime())
+
+    internal fun atMonotonic(monotonic: ULong): Instant {
         val reference = anchor ?: return Instant(
             (monotonic / NANOSECONDS_PER_SECOND).toLong(),
             (monotonic % NANOSECONDS_PER_SECOND).toUInt(),
