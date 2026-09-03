@@ -6,10 +6,12 @@ import org.plos_clan.cpos.fs.sysfs.SysfsIndexBinding
 import org.plos_clan.cpos.fs.sysfs.SysfsObjectSpec
 import org.plos_clan.cpos.fs.sysfs.SysfsParent
 import org.plos_clan.cpos.fs.sysfs.SysfsTextAttribute
+import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 
 internal class NetworkInterfaceKobject(
     private val interface_: NetworkInterfaceView,
+    private val ueventPublisher: KobjectUeventPublisher,
 ) {
     private val environment = listOf(
         "INTERFACE" to interface_.name,
@@ -20,7 +22,7 @@ internal class NetworkInterfaceKobject(
         name = interface_.name,
         parent = SysfsParent.Virtual(SUBSYSTEM),
         attributes = buildList {
-            add(attribute("uevent") {
+            add(attribute("uevent", UEVENT_MODE, ::storeUevent) {
                 environment.joinToString("\n") { (key, value) -> "$key=$value" }
             })
             add(attribute("ifindex") { interface_.index.toString() })
@@ -42,20 +44,39 @@ internal class NetworkInterfaceKobject(
         bindings = SysfsBindings(deviceClass = SysfsIndexBinding(SUBSYSTEM)),
     )
 
-    fun event(action: KobjectAction): KobjectUevent = KobjectUevent(
-        action,
-        "/devices/virtual/$SUBSYSTEM/${interface_.name}",
-        SUBSYSTEM,
-        environment,
+    fun publish(action: KobjectAction) = ueventPublisher.publish(
+        KobjectUevent(
+            action,
+            "/devices/virtual/$SUBSYSTEM/${interface_.name}",
+            SUBSYSTEM,
+            environment,
+        ),
     )
 
-    private fun attribute(name: String, value: () -> String): SysfsTextAttribute =
-        SysfsTextAttribute(name, reader = {
+    private fun storeUevent(input: ByteArray): VfsResult<Unit> {
+        val action = KobjectAction.parse(input)
+            ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        publish(action)
+        return VfsResult.Ok(Unit)
+    }
+
+    private fun attribute(
+        name: String,
+        mode: UInt = SysfsTextAttribute.TEXT_MODE,
+        writer: ((ByteArray) -> VfsResult<Unit>)? = null,
+        value: () -> String,
+    ): SysfsTextAttribute = SysfsTextAttribute(
+        name,
+        mode,
+        {
             VfsResult.Ok("${value()}\n".encodeToByteArray())
-        })
+        },
+        writer,
+    )
 
     companion object {
         private const val SUBSYSTEM = "net"
         private const val BITS_PER_MEGABIT = 1_000_000uL
+        private const val UEVENT_MODE = 0x1a4u
     }
 }

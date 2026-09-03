@@ -18,7 +18,7 @@ internal object NetworkInterfaceKobjects : NetworkConfigurationListener {
     override fun linkChanged(interface_: NetworkInterface, removed: Boolean) = lock.withLock {
         if (removed) {
             val publication = publications.remove(interface_) ?: return@withLock
-            KobjectUeventNetlinkProtocol.publish(publication.kobject.event(KobjectAction.REMOVE))
+            publication.kobject.publish(KobjectAction.REMOVE)
             val result = Sysfs.unregisterObject(publication.handle)
             if (result is VfsResult.Err && result.error != VfsError.NOT_FOUND) {
                 println("net: failed to remove sysfs object ${interface_.name}: ${result.error}")
@@ -27,11 +27,11 @@ internal object NetworkInterfaceKobjects : NetworkConfigurationListener {
         }
 
         if (publications.containsKey(interface_)) return@withLock
-        val kobject = NetworkInterfaceKobject(interface_)
+        val kobject = NetworkInterfaceKobject(interface_, KobjectUeventNetlinkProtocol)
         when (val result = Sysfs.registerObject(kobject.specification)) {
             is VfsResult.Ok -> {
                 publications[interface_] = Publication(kobject, result.value)
-                KobjectUeventNetlinkProtocol.publish(kobject.event(KobjectAction.ADD))
+                kobject.publish(KobjectAction.ADD)
             }
             is VfsResult.Err -> println(
                 "net: failed to publish sysfs object ${interface_.name}: ${result.error}",

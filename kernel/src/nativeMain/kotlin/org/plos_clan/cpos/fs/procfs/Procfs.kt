@@ -36,6 +36,7 @@ import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.utils.Cmdline
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.decimalInt
 
@@ -479,6 +480,7 @@ private enum class RootFile(
     INTERRUPTS("interrupts", 7UL),
     FILESYSTEMS("filesystems", 8UL),
     CPUINFO("cpuinfo", 9UL),
+    CMDLINE("cmdline",10uL),
     ;
 
     override val type: InodeType
@@ -506,6 +508,7 @@ private enum class RootFile(
         INTERRUPTS -> InterruptsFile.render()
         FILESYSTEMS -> FilesystemsFile.render()
         CPUINFO -> CpuInfo.render()
+        CMDLINE -> Cmdline.raw.encodeToByteArray() + '\n'.code.toByte()
     }
 }
 

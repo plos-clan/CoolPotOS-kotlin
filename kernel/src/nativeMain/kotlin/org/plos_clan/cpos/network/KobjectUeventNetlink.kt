@@ -6,12 +6,12 @@ import kotlin.concurrent.atomics.AtomicLong
 
 internal object KobjectUeventNetlinkProtocol : NetlinkProtocol(
     NetlinkProtocolKind.KOBJECT_UEVENT,
-) {
+), KobjectUeventPublisher {
     private val nextSequence = AtomicLong(1L)
 
     override val multicastGroupCount = UDEV_GROUP
 
-    fun publish(event: KobjectUevent) = multicastFromKernel(KERNEL_GROUP) {
+    override fun publish(event: KobjectUevent) = multicastFromKernel(KERNEL_GROUP) {
         event.encode(nextSequence.fetchAndAdd(1L).toULong())
     }
 
