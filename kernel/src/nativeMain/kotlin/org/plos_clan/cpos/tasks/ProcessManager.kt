@@ -289,6 +289,9 @@ class Thread internal constructor(
     internal val pendingSignalMask: ULong
         get() = signals.pending.mask or process.signals.pending.mask
 
+    internal val pendingSignalVersion: Int
+        get() = signals.pending.version + process.signals.pending.version
+
     internal fun takePendingSignal(accepted: ULong): SignalInfo? =
         signals.pending.take(accepted) ?: process.signals.pending.take(accepted)
 

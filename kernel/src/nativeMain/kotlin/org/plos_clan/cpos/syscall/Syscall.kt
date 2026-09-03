@@ -285,6 +285,7 @@ private enum class LinuxSyscall(
     TIMERFD_SETTIME(286, TimerFdSyscalls::setTime),
     TIMERFD_GETTIME(287, TimerFdSyscalls::getTime),
     ACCEPT4(288, SocketSyscalls::accept4, restartable = true),
+    SIGNALFD4(289, SignalSyscalls::signalfd4),
     EVENTFD2(290, EventFdSyscalls::eventfd2),
     EPOLL_CREATE1(291, EpollSyscalls::create1),
     PIPE2(293, ::pipe2),

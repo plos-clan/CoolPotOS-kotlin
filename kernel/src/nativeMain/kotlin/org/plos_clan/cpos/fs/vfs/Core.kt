@@ -281,6 +281,7 @@ enum class InodeType {
     EPOLL,
     INOTIFY,
     PIDFD,
+    SIGNALFD,
 }
 
 data class InodeMetadata(

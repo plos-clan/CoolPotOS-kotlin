@@ -544,6 +544,9 @@ class OpenFileDescription private constructor(
             if (references.load() == 0) {
                 return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
             }
+            if (backend is NoopSeekOpenFileBackend) {
+                return@withLock VfsResult.Ok(position.value)
+            }
             val base = when (origin) {
                 SeekOrigin.START -> 0L
                 SeekOrigin.CURRENT -> position.value
@@ -888,8 +891,7 @@ class OpenFileDescription private constructor(
 
     private fun readError(offset: Int, count: Int): VfsError? = when {
         offset < 0 || count < 0 -> VfsError.INVALID_ARGUMENT
-        fixedSizeIoBackend != null && count < fixedSizeIoBackend.ioSize ->
-            VfsError.INVALID_ARGUMENT
+        count < backend.minimumReadSize -> VfsError.INVALID_ARGUMENT
         references.load() == 0 || !access.canRead -> VfsError.BAD_DESCRIPTOR
         inode.type == InodeType.DIRECTORY -> VfsError.IS_DIRECTORY
         else -> null

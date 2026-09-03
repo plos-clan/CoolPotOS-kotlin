@@ -3,6 +3,11 @@
 package org.plos_clan.cpos.syscall
 
 import org.plos_clan.cpos.drivers.TscClock
+import org.plos_clan.cpos.fs.FileDescriptorFlags
+import org.plos_clan.cpos.fs.FileSystemManager
+import org.plos_clan.cpos.fs.OpenFlags
+import org.plos_clan.cpos.fs.vfs.SignalFd
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.syscall.Syscall.errno
@@ -242,6 +247,48 @@ internal object SignalSyscalls {
         }
     }
 
+    fun signalfd4(regs: PtraceRegisters, process: Process): Long {
+        if (regs[PtraceRegisters.IDX_RDX] != SIGNAL_SET_SIZE.toULong()) {
+            return errno(Errno.EINVAL)
+        }
+        val mask = readMask(process, regs[PtraceRegisters.IDX_RSI])
+            ?.and(Signal.BLOCKABLE_MASK) ?: return errno(Errno.EFAULT)
+        val flags = SignalFdFlags.from(regs[PtraceRegisters.IDX_R10])
+            ?: return errno(Errno.EINVAL)
+        val descriptor = regs[PtraceRegisters.IDX_RDI].toUInt().toInt()
+        if (descriptor != -1) {
+            val file = process.fdTable.acquire(descriptor) ?: return errno(Errno.EBADF)
+            return try {
+                val signalFd = file.backend as? SignalFd ?: return errno(Errno.EINVAL)
+                signalFd.updateMask(mask)
+                process.signals.notifySignalFdWaiters()
+                descriptor.toLong()
+            } finally {
+                file.release()
+            }
+        }
+
+        val context = process.context ?: return errno(Errno.ENOENT)
+        val file = when (val result = FileSystemManager.vfs.createSignalFd(
+            process.vfsOperationContext,
+            context,
+            mask,
+            flags.nonBlocking,
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return errno(result.error.errno)
+        }
+        val descriptorFlags = if (flags.closeOnExec) {
+            FileDescriptorFlags.FD_CLOEXEC
+        } else {
+            0uL
+        }
+        return process.fdTable.install(file, descriptorFlags)?.toLong() ?: run {
+            file.release()
+            errno(Errno.EMFILE)
+        }
+    }
+
     fun rtSigpending(regs: PtraceRegisters, process: Process): Long {
         if (regs[PtraceRegisters.IDX_RSI] != SIGNAL_SET_SIZE.toULong()) {
             return errno(Errno.EINVAL)
@@ -455,8 +502,7 @@ internal object SignalSyscalls {
     }
 
     private fun sendThread(sender: Process, target: Thread, signal: Signal?, code: Int): Long {
-        val senderId = ProcessManager.currentThread()?.id ?: sender.id
-        val info = signal?.let { SignalInfo.fromSender(it, sender, code, pid = senderId) }
+        val info = signal?.let { SignalInfo.fromSender(it, sender, code) }
         return sendResult(SignalRouter.sendThread(sender, target, info))
     }
 
@@ -498,6 +544,22 @@ internal object SignalSyscalls {
             SignalTimeout.Finite(timeout)
         } else {
             SignalTimeout.Invalid(Errno.EINVAL)
+        }
+    }
+
+    private value class SignalFdFlags private constructor(private val bits: Int) {
+        val nonBlocking: Boolean
+            get() = bits and OpenFlags.O_NONBLOCK != 0
+
+        val closeOnExec: Boolean
+            get() = bits and OpenFlags.O_CLOEXEC != 0
+
+        companion object {
+            private const val SUPPORTED = OpenFlags.O_NONBLOCK or OpenFlags.O_CLOEXEC
+
+            fun from(raw: ULong): SignalFdFlags? = raw.toInt()
+                .takeIf { it and SUPPORTED.inv() == 0 }
+                ?.let(::SignalFdFlags)
         }
     }
 

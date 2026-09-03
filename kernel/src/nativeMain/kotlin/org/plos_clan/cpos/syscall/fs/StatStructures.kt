@@ -62,6 +62,7 @@ internal data class LinuxFileStatus(
             InodeType.EPOLL,
             InodeType.INOTIFY,
             InodeType.PIDFD,
+            InodeType.SIGNALFD,
             -> 0u
         }
 
@@ -216,5 +217,6 @@ internal class LinuxDirent64(
             InodeType.EPOLL -> 0
             InodeType.INOTIFY -> 0
             InodeType.PIDFD -> 0
+            InodeType.SIGNALFD -> 0
         }
 }

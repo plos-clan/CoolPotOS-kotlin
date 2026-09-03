@@ -497,6 +497,9 @@ interface OpenFileBackend {
     val readinessVersion: Int
         get() = 0
 
+    val minimumReadSize: Int
+        get() = 0
+
     val seekable: Boolean
         get() = true
 
@@ -560,7 +563,12 @@ interface OpenFileBackend {
 
 interface FixedSizeIoOpenFileBackend : OpenFileBackend {
     val ioSize: Int
+
+    override val minimumReadSize: Int
+        get() = ioSize
 }
+
+internal interface NoopSeekOpenFileBackend : OpenFileBackend
 
 interface AllocatingOpenFileBackend : OpenFileBackend {
     fun allocate(

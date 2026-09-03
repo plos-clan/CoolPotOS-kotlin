@@ -44,6 +44,7 @@ internal value class Signal private constructor(val number: Int) {
         val TERMINAL_STOP = Signal(20)
         val TERMINAL_INPUT_STOP = Signal(21)
         val TERMINAL_OUTPUT_STOP = Signal(22)
+        val SYS = Signal(31)
 
         val BLOCKABLE_MASK = ULong.MAX_VALUE and KILL.bit.inv() and STOP.bit.inv()
         val STOP_MASK = STOP.bit or TERMINAL_STOP.bit or
@@ -364,22 +365,37 @@ internal class PendingSignalStorage(private val quota: PendingSignalQuota) {
 internal class PendingSignals(quota: PendingSignalQuota) {
     private val lock = IrqSpinLock()
     private val storage = PendingSignalStorage(quota)
+    private val sequence = AtomicInt(0)
 
     val mask: ULong
         get() = storage.mask
 
-    fun enqueue(info: SignalInfo, enforceLimit: Boolean = false): SignalEnqueueResult {
-        if (!info.signal.isRealtime && mask and info.signal.bit != 0uL) {
-            return SignalEnqueueResult.COALESCED
+    val version: Int
+        get() = sequence.load()
+
+    fun enqueue(info: SignalInfo, enforceLimit: Boolean = false): SignalEnqueueResult =
+        lock.withLock {
+            storage.enqueue(info, enforceLimit).also { result ->
+                if (result == SignalEnqueueResult.ADDED) sequence.store(sequence.load() + 1)
+            }
         }
-        return lock.withLock { storage.enqueue(info, enforceLimit) }
+
+    fun take(accepted: ULong): SignalInfo? {
+        if (mask and accepted == 0uL) return null
+        return lock.withLock {
+            storage.take(accepted).also {
+                if (it != null) sequence.store(sequence.load() + 1)
+            }
+        }
     }
 
-    fun take(accepted: ULong): SignalInfo? =
-        if (mask and accepted == 0uL) null else lock.withLock { storage.take(accepted) }
-
     fun discard(discarded: ULong) {
-        if (mask and discarded != 0uL) lock.withLock { storage.discard(discarded) }
+        if (mask and discarded == 0uL) return
+        lock.withLock {
+            if (storage.mask and discarded == 0uL) return@withLock
+            storage.discard(discarded)
+            sequence.store(sequence.load() + 1)
+        }
     }
 }
 
@@ -388,6 +404,7 @@ internal class ProcessSignalState(uid: () -> Int, limit: () -> ULong) {
     private val actions = Array(Signal.MAX) { SignalAction.DEFAULT }
     private val actionable = AtomicLong(DEFAULT_ACTIONABLE_MASK.toLong())
     private val quota = PendingSignalQuota(uid, limit)
+    private val signalFdWaiters = AtomicReference<List<Thread>>(emptyList())
     private val stopLock = IrqSpinLock()
     private val stoppedThreads = mutableListOf<Thread>()
 
@@ -444,6 +461,32 @@ internal class ProcessSignalState(uid: () -> Int, limit: () -> ULong) {
 
     fun hasActionable(pending: ULong): Boolean =
         pending and actionable.load().toULong() != 0uL
+
+    fun registerSignalFdWaiter(thread: Thread) {
+        while (true) {
+            val observed = signalFdWaiters.load()
+            if (thread in observed ||
+                signalFdWaiters.compareAndSet(observed, observed + thread)
+            ) {
+                return
+            }
+        }
+    }
+
+    fun unregisterSignalFdWaiter(thread: Thread) {
+        while (true) {
+            val observed = signalFdWaiters.load()
+            if (thread !in observed ||
+                signalFdWaiters.compareAndSet(observed, observed - thread)
+            ) {
+                return
+            }
+        }
+    }
+
+    fun notifySignalFdWaiters() {
+        for (waiter in signalFdWaiters.load()) Scheduler.wake(waiter)
+    }
 
     fun inherit(source: ProcessSignalState) {
         val inherited = source.dispositionLock.withLock { source.actions.copyOf() }
@@ -742,15 +785,23 @@ internal object SignalRouter {
         enforceLimit: Boolean,
     ): SignalEnqueueResult? {
         val pending = targetThread?.signals?.pending ?: process.signals.pending
-        return process.signals.withAction(info.signal) { action ->
+        val result = process.signals.withAction(info.signal) { action ->
             prepare(process, info.signal)
             if (discardedAtGeneration(process, info.signal, targetThread, action)) null
             else pending.enqueue(info, enforceLimit)
         }
+        if (result == SignalEnqueueResult.ADDED) process.signals.notifySignalFdWaiters()
+        return result
     }
 
     private fun wakeForDelivery(thread: Thread, waitedSignal: Signal? = null) {
-        if (thread.state == TaskState.ZOMBIE || thread === ProcessManager.currentThread()) return
+        if (thread.state == TaskState.ZOMBIE) return
+        if (thread === ProcessManager.currentThread()) {
+            if (waitedSignal != null && thread.signals.waitsFor(waitedSignal)) {
+                Scheduler.wake(thread)
+            }
+            return
+        }
         Scheduler.wake(thread)
         if (waitedSignal == null || !thread.signals.waitsFor(waitedSignal)) {
             preemption.load()?.request(thread)
@@ -765,7 +816,6 @@ internal object SignalRouter {
     ): Boolean {
         if (action.isActionable(signal)) return false
         val routingThread = targetThread ?: process.threads.firstOrNull() ?: return true
-        return routingThread.signals.mask and signal.bit == 0uL &&
-            !routingThread.signals.waitsFor(signal)
+        return routingThread.signals.mask and signal.bit == 0uL
     }
 }
