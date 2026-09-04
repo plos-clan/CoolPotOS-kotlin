@@ -244,10 +244,6 @@ static long futex_wait(
     irq_restore(interrupt_flags);
 
     for (;;) {
-        const bool parked = waiter.task && (time
-            ? fast_handoff_park_current_until(deadline)
-            : fast_handoff_park_current());
-
         interrupt_flags = irq_save();
         spin_lock(&bucket->lock);
         const enum futex_waiter_state state = __atomic_load_n(
@@ -268,12 +264,10 @@ static long futex_wait(
         spin_unlock(&bucket->lock);
         irq_restore(interrupt_flags);
 
-        if (state == futex_waking) {
-            if (waiter.task) fast_handoff_park_current();
-            else cpu_relax();
-        } else if (!parked) {
-            cpu_relax();
-        }
+        const bool parked = waiter.task && (time
+            ? fast_handoff_park_current_until(deadline)
+            : fast_handoff_park_current());
+        if (!parked) cpu_relax();
     }
 }
 

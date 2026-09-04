@@ -494,6 +494,9 @@ interface FileContent {
 }
 
 interface OpenFileBackend {
+    val fileSystemMagic: ULong?
+        get() = null
+
     val readinessVersion: Int
         get() = 0
 

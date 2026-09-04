@@ -7,6 +7,7 @@ value class VfsError private constructor(val errno: Int) {
     companion object {
         val NOT_PERMITTED = VfsError(1)
         val NOT_FOUND = VfsError(2)
+        val NO_SUCH_PROCESS = VfsError(3)
         val INTERRUPTED = VfsError(4)
         val IO = VfsError(5)
         val NO_SUCH_DEVICE_OR_ADDRESS = VfsError(6)

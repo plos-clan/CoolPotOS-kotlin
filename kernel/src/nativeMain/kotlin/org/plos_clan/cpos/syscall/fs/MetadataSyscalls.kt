@@ -417,7 +417,13 @@ internal fun fstatfs(regs: PtraceRegisters, process: Process): Long {
     val file = process.fdTable.acquire(descriptor) ?: return errno(Errno.EBADF)
     val caller = process.vfsOperationContext
     return try {
-        copyStatFs(process, caller, regs[PtraceRegisters.IDX_RSI], file.path)
+        copyStatFs(
+            process,
+            caller,
+            regs[PtraceRegisters.IDX_RSI],
+            file.path,
+            file.backend.fileSystemMagic ?: file.path.mount.superBlock.type.magic,
+        )
     } finally {
         file.release()
     }
@@ -428,6 +434,7 @@ private fun copyStatFs(
     caller: VfsOperationContext,
     address: ULong,
     path: VfsPath,
+    fileSystemMagic: ULong = path.mount.superBlock.type.magic,
 ): Long {
     val statistics = when (
         val result = path.mount.superBlock.backend.statistics(caller)
@@ -437,7 +444,7 @@ private fun copyStatFs(
     }
     return if (UserMemory(process.addressSpace, address).copyToUser(
             LinuxStatFs(
-                path.mount.superBlock.type.magic,
+                fileSystemMagic,
                 path.mount.flags,
                 statistics,
             ).toNativeBytes(),

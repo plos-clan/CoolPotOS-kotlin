@@ -5,6 +5,7 @@ archive="/output/${1:?missing output filename}"
 packages=(
     base
     fastfetch
+    hyfetch
     cachyos-keyring
     cachyos-mirrorlist
     cachyos-v3-mirrorlist

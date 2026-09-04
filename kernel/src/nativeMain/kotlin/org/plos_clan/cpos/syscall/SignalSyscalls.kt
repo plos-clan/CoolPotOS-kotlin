@@ -41,7 +41,7 @@ private const val STACK_ON_STACK = 1u
 private const val STACK_DISABLED = 2u
 private const val STACK_AUTO_DISABLE = 0x8000_0000u
 
-private data class QueuedSignalInfo(
+internal data class QueuedSignalInfo(
     val error: Int,
     val code: Int,
     val payload: ByteArray,
@@ -54,7 +54,9 @@ private data class QueuedSignalInfo(
     )
 }
 
-private object SignalAbi {
+internal object SignalAbi {
+    const val INFO_SIZE = SIGNAL_INFO_SIZE
+
     private const val ACTION_HANDLER_OFFSET = 0
     private const val ACTION_FLAGS_OFFSET = 8
     private const val ACTION_RESTORER_OFFSET = 16

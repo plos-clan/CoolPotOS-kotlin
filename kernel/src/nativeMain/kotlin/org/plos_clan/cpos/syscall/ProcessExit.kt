@@ -62,7 +62,6 @@ internal object ProcessExit {
         current.signals.pending.discard(ULong.MAX_VALUE)
         clearChildTid(current)
         ProcessManager.notifyThreadExited(current)
-        // The reaper may release the page tables after this exit is published.
         check(current.replaceAddressSpace(KernelPageDirectory.addressSpace)) {
             "exiting thread is not current"
         }

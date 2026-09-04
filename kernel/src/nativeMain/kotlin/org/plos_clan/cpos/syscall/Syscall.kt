@@ -259,6 +259,7 @@ private enum class LinuxSyscall(
     EPOLL_WAIT(232, EpollSyscalls::wait),
     EPOLL_CTL(233, EpollSyscalls::control),
     TGKILL(234, SignalSyscalls::tgkill),
+    WAITID(247, ::waitid, restartable = true),
     INOTIFY_INIT(253, InotifySyscalls::init),
     INOTIFY_ADD_WATCH(254, InotifySyscalls::addWatch),
     INOTIFY_RM_WATCH(255, InotifySyscalls::removeWatch),

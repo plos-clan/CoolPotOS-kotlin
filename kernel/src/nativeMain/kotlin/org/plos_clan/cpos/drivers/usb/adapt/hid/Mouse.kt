@@ -71,24 +71,24 @@ class Mouse(
 
         layout.axisX?.let { field ->
             val dx = field.valueSigned(data, 0u)
-            println("Mouse (X): $dx")
+            //println("Mouse (X): $dx")
         }
 
         layout.axisY?.let { field ->
             val dy = field.valueSigned(data, 0u)
-            println("Mouse (Y): $dy")
+            //println("Mouse (Y): $dy")
         }
 
         layout.axisWheel?.let { field ->
             val wheel = field.valueSigned(data, 0u)
-            println("Mouse (Wheel): $wheel")
+            //println("Mouse (Wheel): $wheel")
         }
 
         for (field in layout.buttons) {
             for (i in 0 until field.reportCount.toInt()) {
                 if (field.value(data, i.toUInt()) != 0u) {
                     val buttonId = (field.usageMin + i.toUInt()) and 0xffffu
-                    println("Mouse (Btn): $buttonId")
+                    //println("Mouse (Btn): $buttonId")
                 }
             }
         }

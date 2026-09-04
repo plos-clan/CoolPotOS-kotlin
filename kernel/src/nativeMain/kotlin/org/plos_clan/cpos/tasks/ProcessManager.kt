@@ -108,7 +108,34 @@ internal data class ChildWaitEvent(
     val child: Process,
     val kind: ChildEventKind,
     val status: Int,
-)
+) {
+    fun signalInfo(signal: Signal = Signal.CHILD): SignalInfo {
+        val termination = status and 0x7f
+        val code = when (kind) {
+            ChildEventKind.EXITED -> when {
+                termination == 0 -> SignalInfo.CHILD_EXITED
+                status and 0x80 != 0 -> SignalInfo.CHILD_DUMPED
+                else -> SignalInfo.CHILD_KILLED
+            }
+            ChildEventKind.STOPPED -> SignalInfo.CHILD_STOPPED
+            ChildEventKind.CONTINUED -> SignalInfo.CHILD_CONTINUED
+        }
+        val childStatus = when (kind) {
+            ChildEventKind.EXITED -> if (termination == 0) status ushr 8 and 0xff else termination
+            ChildEventKind.STOPPED -> status ushr 8 and 0xff
+            ChildEventKind.CONTINUED -> Signal.CONTINUE.number
+        }
+        return SignalInfo(
+            signal = signal,
+            code = code,
+            payload = SignalPayload.Child(
+                pid = child.id,
+                uid = child.credentials.userIds.real,
+                status = childStatus,
+            ),
+        )
+    }
+}
 
 internal class ChildWaitQueue {
     private val lock = IrqSpinLock()
@@ -135,16 +162,24 @@ internal class ChildWaitQueue {
         awakened.forEach(Scheduler::wake)
     }
 
-    fun take(childIds: Set<Int>, stopped: Boolean, continued: Boolean): ChildWaitEvent? =
+    fun poll(
+        children: Set<Process>,
+        exited: Boolean,
+        stopped: Boolean,
+        continued: Boolean,
+        consume: Boolean,
+    ): ChildWaitEvent? =
         lock.withLock {
             val index = events.indexOfFirst { event ->
-                event.child.id in childIds && when (event.kind) {
-                    ChildEventKind.EXITED -> true
+                event.child in children && when (event.kind) {
+                    ChildEventKind.EXITED -> exited
                     ChildEventKind.STOPPED -> stopped
                     ChildEventKind.CONTINUED -> continued
                 }
             }
-            if (index < 0) null else events.removeAt(index)
+            if (index < 0) null
+            else if (consume) events.removeAt(index)
+            else events[index]
         }
 
     fun restore(event: ChildWaitEvent) {
@@ -776,10 +811,10 @@ object ProcessManager {
         }
         process.completeVfork()
         val target = parent ?: return
-        val termination = waitStatus and 0x7f
+        val event = ChildWaitEvent(process, ChildEventKind.EXITED, waitStatus)
         val signal = process.terminationSignal
         if (signal == null) {
-            target.childEvents.publish(ChildWaitEvent(process, ChildEventKind.EXITED, waitStatus))
+            target.childEvents.publish(event)
             return
         }
         val childAction = if (signal == Signal.CHILD) {
@@ -790,49 +825,27 @@ object ProcessManager {
         val autoReap = childAction?.let { action ->
             action.isIgnored || action.has(SignalActionFlag.NO_CHILD_WAIT)
         } == true
-        if (!autoReap) {
-            target.childEvents.publish(
-                ChildWaitEvent(process, ChildEventKind.EXITED, waitStatus),
-            )
-        }
+        if (!autoReap) target.childEvents.publish(event)
         if (childAction?.isIgnored != true) {
             SignalRouter.sendProcess(
                 sender = null,
                 target = target,
-                info = SignalInfo(
-                    signal = signal,
-                    code = when {
-                        termination == 0 -> SignalInfo.CHILD_EXITED
-                        waitStatus and 0x80 != 0 -> SignalInfo.CHILD_DUMPED
-                        else -> SignalInfo.CHILD_KILLED
-                    },
-                    payload = SignalPayload.Child(
-                        pid = process.id,
-                        uid = process.credentials.userIds.real,
-                        status = if (termination == 0) waitStatus ushr 8 and 0xff else termination,
-                    ),
-                ),
+                info = event.signalInfo(signal),
             )
         }
-        if (autoReap && reapChild(target.id, process)) {
-            target.childEvents.notifyChange()
-        }
+        if (autoReap) reapChild(target.id, process)
     }
 
     internal fun markStopped(process: Process, signal: Signal) = publishChildState(
         process = process,
         kind = ChildEventKind.STOPPED,
         waitStatus = signal.number shl 8 or 0x7f,
-        infoCode = SignalInfo.CHILD_STOPPED,
-        infoStatus = signal.number,
     )
 
     internal fun markContinued(process: Process) = publishChildState(
         process = process,
         kind = ChildEventKind.CONTINUED,
         waitStatus = 0xffff,
-        infoCode = SignalInfo.CHILD_CONTINUED,
-        infoStatus = Signal.CONTINUE.number,
     )
 
     fun reapChild(parentId: Int, child: Process): Boolean {
@@ -846,7 +859,10 @@ object ProcessManager {
             true
         }
         if (reaped) {
-            parent?.childEvents?.discard(child)
+            parent?.childEvents?.apply {
+                discard(child)
+                notifyChange()
+            }
         }
         return reaped
     }
@@ -855,27 +871,18 @@ object ProcessManager {
         process: Process,
         kind: ChildEventKind,
         waitStatus: Int,
-        infoCode: Int,
-        infoStatus: Int,
     ) {
         val parent = processLock.withLock {
             processes.firstOrNull { it.id == process.parentId }
         } ?: return
-        parent.childEvents.publish(ChildWaitEvent(process, kind, waitStatus))
+        val event = ChildWaitEvent(process, kind, waitStatus)
+        parent.childEvents.publish(event)
         val action = parent.signals.action(Signal.CHILD)
         if (action.isIgnored || action.has(SignalActionFlag.NO_CHILD_STOP)) return
         SignalRouter.sendProcess(
             sender = null,
             target = parent,
-            info = SignalInfo(
-                signal = Signal.CHILD,
-                code = infoCode,
-                payload = SignalPayload.Child(
-                    pid = process.id,
-                    uid = process.credentials.userIds.real,
-                    status = infoStatus,
-                ),
-            ),
+            info = event.signalInfo(),
         )
     }
 

@@ -23,6 +23,11 @@ mount -t sysfs -o nosuid,nodev,noexec sysfs "$overlay_root/sys"
 mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$overlay_root/run"
 mount --move /dev "$overlay_root/dev"
 
+printf 'init: starting device manager\n'
+chroot "$overlay_root" /usr/lib/systemd/systemd-udevd --resolve-names=never &
+while [[ ! -S "$overlay_root/run/udev/control" ]]; do :; done
+chroot "$overlay_root" /usr/bin/udevadm trigger --verbose --action=add --subsystem-match=net --settle --wait-daemon=10
+
 printf 'init: starting network service\n'
 install -d -m 0700 "$overlay_root/etc/NetworkManager/system-connections"
 install -d -m 0755 "$overlay_root/run/dbus"

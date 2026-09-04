@@ -3,6 +3,9 @@
 package org.plos_clan.cpos.syscall
 
 import kotlinx.cinterop.ExperimentalForeignApi
+import org.plos_clan.cpos.fs.OpenFlags
+import org.plos_clan.cpos.fs.vfs.OpenFileDescription
+import org.plos_clan.cpos.fs.vfs.PidFd
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
@@ -15,6 +18,7 @@ import org.plos_clan.cpos.tasks.CapManager
 import org.plos_clan.cpos.tasks.CapabilityState
 import org.plos_clan.cpos.tasks.Capabilities
 import org.plos_clan.cpos.tasks.ChildEventKind
+import org.plos_clan.cpos.tasks.ChildWaitEvent
 import org.plos_clan.cpos.tasks.LINUX_CAPABILITY_VERSION_3
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessGroupResult
@@ -39,8 +43,12 @@ private const val ARCH_GET_GS = 0x1004uL
 private const val MSR_KERNEL_GS_BASE = 0xC0000102U
 private const val WAIT_WNOHANG = 1uL
 private const val WAIT_WUNTRACED = 2uL
+private const val WAIT_WEXITED = 4uL
 private const val WAIT_WCONTINUED = 8uL
-private const val WAIT_SUPPORTED = 0x0buL
+private const val WAIT_WNOWAIT = 0x0100_0000uL
+private const val WAIT4_SUPPORTED = 0x0buL
+private const val WAITID_SUPPORTED = 0x0100_000fuL
+private const val RUSAGE_SIZE = 144
 private const val ROBUST_LIST_SIZE = 24uL
 private const val PR_SET_PDEATHSIG = 1UL
 private const val PR_GET_PDEATHSIG = 2UL
@@ -637,56 +645,165 @@ internal fun execve(regs: PtraceRegisters, process: Process): Long {
     return 0L
 }
 
-internal fun wait4(regs: PtraceRegisters, process: Process): Long {
-    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
-    val requestedPid = regs[PtraceRegisters.IDX_RDI].toUInt().toInt().toLong()
-    val options = regs[PtraceRegisters.IDX_RDX]
-    if (options and WAIT_SUPPORTED.inv() != 0uL) return errno(Errno.EINVAL)
+private sealed interface ChildSelector {
+    fun matches(child: Process): Boolean
 
-    while (true) {
-        val observedSequence = process.childEvents.sequence()
-        val children = ProcessManager.childrenOf(process.id).filter { child ->
-            when {
-                requestedPid > 0 -> child.id.toLong() == requestedPid
-                requestedPid == 0L -> child.processGroupId == process.processGroupId
-                requestedPid == -1L -> true
-                else -> child.processGroupId.toLong() == -requestedPid
+    data object Any : ChildSelector {
+        override fun matches(child: Process) = true
+    }
+
+    data class ProcessId(val id: Long) : ChildSelector {
+        override fun matches(child: Process) = child.id.toLong() == id
+    }
+
+    data class ProcessGroup(val id: Long) : ChildSelector {
+        override fun matches(child: Process) = child.processGroupId.toLong() == id
+    }
+
+    class PidFdTarget(private val target: Process) : ChildSelector {
+        override fun matches(child: Process) = child === target
+    }
+}
+
+private class ChildWait(
+    private val selector: ChildSelector,
+    private val options: ULong,
+    private val nonBlocking: Boolean = false,
+) {
+    fun execute(
+        process: Process,
+        onEvent: (ChildWaitEvent) -> Long,
+        onEmpty: () -> Long = { 0L },
+    ): Long {
+        val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
+        val keepPending = options and WAIT_WNOWAIT != 0uL
+        while (true) {
+            val observedSequence = process.childEvents.sequence()
+            val children = mutableSetOf<Process>()
+            for (child in ProcessManager.childrenOf(process.id)) {
+                if (selector.matches(child)) children += child
             }
-        }
-        if (children.isEmpty()) return errno(Errno.ECHILD)
-        val event = process.childEvents.take(
-            childIds = children.mapTo(mutableSetOf(), Process::id),
-            stopped = options and WAIT_WUNTRACED != 0uL,
-            continued = options and WAIT_WCONTINUED != 0uL,
-        )
-        if (event != null) {
-            val status = regs[PtraceRegisters.IDX_RSI]
-            if (status != 0uL &&
-                !UserMemory(process.addressSpace, status).copyToUser(
-                    byteArrayOf(
-                        event.status.toByte(),
-                        (event.status ushr 8).toByte(),
-                        (event.status ushr 16).toByte(),
-                        (event.status ushr 24).toByte(),
-                    ),
-                )
-            ) {
-                process.childEvents.restore(event)
-                return errno(Errno.EFAULT)
-            }
-            if (event.kind == ChildEventKind.EXITED &&
-                !ProcessManager.reapChild(process.id, event.child)
-            ) {
+            if (children.isEmpty()) return errno(Errno.ECHILD)
+
+            val event = process.childEvents.poll(
+                children = children,
+                exited = options and WAIT_WEXITED != 0uL,
+                stopped = options and WAIT_WUNTRACED != 0uL,
+                continued = options and WAIT_WCONTINUED != 0uL,
+                consume = !keepPending,
+            )
+            if (event != null) {
+                val result = onEvent(event)
+                if (result < 0) {
+                    if (!keepPending) process.childEvents.restore(event)
+                    return result
+                }
+                if (keepPending || event.kind != ChildEventKind.EXITED) return result
+                if (ProcessManager.reapChild(process.id, event.child)) return result
                 continue
             }
-            return event.child.id.toLong()
-        }
-        if (options and WAIT_WNOHANG != 0uL) return 0L
-        if (thread.hasPendingSignal()) return errno(Errno.EINTR)
-        if (!process.childEvents.awaitChange(thread, observedSequence)) {
+            if (options and WAIT_WNOHANG != 0uL) return onEmpty()
+            if (nonBlocking) return errno(Errno.EAGAIN)
             if (thread.hasPendingSignal()) return errno(Errno.EINTR)
-            Scheduler.yieldCurrent()
+            if (!process.childEvents.awaitChange(thread, observedSequence)) {
+                if (thread.hasPendingSignal()) return errno(Errno.EINTR)
+                Scheduler.yieldCurrent()
+            }
         }
+    }
+}
+
+internal fun wait4(regs: PtraceRegisters, process: Process): Long {
+    val requestedPid = regs[PtraceRegisters.IDX_RDI].toUInt().toInt().toLong()
+    val options = regs[PtraceRegisters.IDX_RDX]
+    if (options and WAIT4_SUPPORTED.inv() != 0uL) return errno(Errno.EINVAL)
+    val selector = when {
+        requestedPid > 0 -> ChildSelector.ProcessId(requestedPid)
+        requestedPid == 0L -> ChildSelector.ProcessGroup(process.processGroupId.toLong())
+        requestedPid == -1L -> ChildSelector.Any
+        else -> ChildSelector.ProcessGroup(-requestedPid)
+    }
+    val statusAddress = regs[PtraceRegisters.IDX_RSI]
+    val usageAddress = regs[PtraceRegisters.IDX_R10]
+    return ChildWait(selector, options or WAIT_WEXITED).execute(
+        process = process,
+        onEvent = { event ->
+            if (statusAddress != 0uL) {
+                val status = ByteArray(Int.SIZE_BYTES)
+                LittleEndianBuffer(status).writeU32(0, event.status.toUInt())
+                if (!UserMemory(process.addressSpace, statusAddress).copyToUser(status)) {
+                    return@execute errno(Errno.EFAULT)
+                }
+            }
+            if (usageAddress != 0uL &&
+                !UserMemory(process.addressSpace, usageAddress).copyToUser(ByteArray(RUSAGE_SIZE))
+            ) return@execute errno(Errno.EFAULT)
+            event.child.id.toLong()
+        },
+    )
+}
+
+internal fun waitid(regs: PtraceRegisters, process: Process): Long {
+    val options = regs[PtraceRegisters.IDX_R10]
+    val eventOptions = WAIT_WUNTRACED or WAIT_WEXITED or WAIT_WCONTINUED
+    if (options and WAITID_SUPPORTED.inv() != 0uL || options and eventOptions == 0uL) {
+        return errno(Errno.EINVAL)
+    }
+    val which = regs[PtraceRegisters.IDX_RDI]
+    if (which > 3uL) return errno(Errno.EINVAL)
+
+    val id = regs[PtraceRegisters.IDX_RSI]
+    var pidFdFile: OpenFileDescription? = null
+    var nonBlocking = false
+    val selector = when (which.toInt()) {
+        0 -> ChildSelector.Any
+        1 -> {
+            if (id == 0uL || id > Int.MAX_VALUE.toULong()) return errno(Errno.EINVAL)
+            ChildSelector.ProcessId(id.toLong())
+        }
+        2 -> {
+            if (id > Int.MAX_VALUE.toULong()) return errno(Errno.EINVAL)
+            val group = id.takeUnless { it == 0uL }?.toLong()
+                ?: process.processGroupId.toLong()
+            ChildSelector.ProcessGroup(group)
+        }
+        else -> {
+            val descriptor = Syscall.fileDescriptor(id) ?: return errno(Errno.EBADF)
+            val file = process.fdTable.acquire(descriptor) ?: return errno(Errno.EBADF)
+            val pidFd = file.backend as? PidFd ?: run {
+                file.release()
+                return errno(Errno.EBADF)
+            }
+            pidFdFile = file
+            nonBlocking = file.getStatusFlags() and OpenFlags.O_NONBLOCK != 0
+            ChildSelector.PidFdTarget(pidFd.target.thread.process)
+        }
+    }
+
+    val infoAddress = regs[PtraceRegisters.IDX_RDX]
+    val usageAddress = regs[PtraceRegisters.IDX_R8]
+    return try {
+        ChildWait(selector, options, nonBlocking).execute(
+            process = process,
+            onEvent = { event ->
+                if (infoAddress != 0uL &&
+                    !UserMemory(process.addressSpace, infoAddress)
+                        .copyToUser(SignalAbi.infoBytes(event.signalInfo()))
+                ) return@execute errno(Errno.EFAULT)
+                if (usageAddress != 0uL &&
+                    !UserMemory(process.addressSpace, usageAddress)
+                        .copyToUser(ByteArray(RUSAGE_SIZE))
+                ) return@execute errno(Errno.EFAULT)
+                0L
+            },
+            onEmpty = {
+                if (infoAddress == 0uL || UserMemory(process.addressSpace, infoAddress)
+                        .copyToUser(ByteArray(SignalAbi.INFO_SIZE))
+                ) 0L else errno(Errno.EFAULT)
+            },
+        )
+    } finally {
+        pidFdFile?.release()
     }
 }
 
