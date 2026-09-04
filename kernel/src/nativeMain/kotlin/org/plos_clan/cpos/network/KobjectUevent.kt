@@ -10,21 +10,91 @@ internal enum class KobjectAction(val wireName: String) {
     BIND("bind"),
     UNBIND("unbind"),
     ;
+}
 
+internal class KobjectUeventRequest private constructor(
+    val action: KobjectAction,
+    val environment: List<Pair<String, String>>,
+) {
     companion object {
-        fun parse(input: ByteArray): KobjectAction? {
-            val terminator = input.lastOrNull()
-            val terminated = terminator == '\n'.code.toByte() || terminator == 0.toByte()
-            val length = input.size - if (terminated) 1 else 0
+        private const val UUID_LENGTH = 36
+        private const val SYNTH_UUID = "SYNTH_UUID"
+        private const val SYNTH_ARG_PREFIX = "SYNTH_ARG_"
+        private val NO_UUID_ENVIRONMENT = listOf(SYNTH_UUID to "0")
 
-            for (action in entries) {
-                val name = action.wireName
-                if (name.length != length) continue
-                var index = 0
-                while (index < length && input[index].toInt() == name[index].code) index++
-                if (index == length) return action
+        fun parse(input: ByteArray): KobjectUeventRequest? {
+            var end = input.size
+            if (end != 0 &&
+                (input[end - 1] == '\n'.code.toByte() || input[end - 1] == 0.toByte())
+            ) {
+                end--
             }
-            return null
+            if (end == 0) return null
+
+            var actionEnd = 0
+            while (actionEnd < end && input[actionEnd] != ' '.code.toByte()) actionEnd++
+            val action = KobjectAction.entries.firstOrNull { candidate ->
+                val name = candidate.wireName
+                if (name.length != actionEnd) return@firstOrNull false
+                var index = 0
+                while (index < actionEnd && input[index].toInt() == name[index].code) index++
+                index == actionEnd
+            } ?: return null
+            if (actionEnd == end) return KobjectUeventRequest(action, NO_UUID_ENVIRONMENT)
+
+            var cursor = actionEnd + 1
+            if (end - cursor < UUID_LENGTH || !isUuid(input, cursor)) return null
+            val uuidEnd = cursor + UUID_LENGTH
+            val environment = mutableListOf(
+                SYNTH_UUID to input.decodeToString(cursor, uuidEnd),
+            )
+            cursor = uuidEnd
+
+            while (cursor < end) {
+                if (input[cursor++] != ' '.code.toByte()) return null
+                val keyStart = cursor
+                while (cursor < end && input[cursor] != '='.code.toByte()) {
+                    if (!input[cursor].isAsciiAlphanumeric()) return null
+                    cursor++
+                }
+                if (cursor == keyStart || cursor == end) return null
+                val keyEnd = cursor++
+
+                val valueStart = cursor
+                while (cursor < end && input[cursor] != ' '.code.toByte()) {
+                    if (!input[cursor].isAsciiAlphanumeric()) return null
+                    cursor++
+                }
+                if (cursor == valueStart) return null
+                val key = SYNTH_ARG_PREFIX + input.decodeToString(keyStart, keyEnd)
+                val value = input.decodeToString(valueStart, cursor)
+                environment += key to value
+            }
+            return KobjectUeventRequest(action, environment)
+        }
+
+        private fun isUuid(input: ByteArray, offset: Int): Boolean {
+            repeat(UUID_LENGTH) { index ->
+                val value = input[offset + index]
+                if (index == 8 || index == 13 || index == 18 || index == 23) {
+                    if (value != '-'.code.toByte()) return false
+                } else if (!value.isAsciiHexDigit()) {
+                    return false
+                }
+            }
+            return true
+        }
+
+        private fun Byte.isAsciiHexDigit(): Boolean {
+            val value = toInt()
+            return value in '0'.code..'9'.code ||
+                value in 'a'.code..'f'.code || value in 'A'.code..'F'.code
+        }
+
+        private fun Byte.isAsciiAlphanumeric(): Boolean {
+            val value = toInt()
+            return value in '0'.code..'9'.code ||
+                value in 'a'.code..'z'.code || value in 'A'.code..'Z'.code
         }
     }
 }

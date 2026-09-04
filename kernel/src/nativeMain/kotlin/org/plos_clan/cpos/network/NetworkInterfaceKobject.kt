@@ -13,7 +13,7 @@ internal class NetworkInterfaceKobject(
     private val interface_: NetworkInterfaceView,
     private val ueventPublisher: KobjectUeventPublisher,
 ) {
-    private val environment = listOf(
+    private val deviceEnvironment = listOf(
         "INTERFACE" to interface_.name,
         "IFINDEX" to interface_.index.toString(),
     )
@@ -23,7 +23,7 @@ internal class NetworkInterfaceKobject(
         parent = SysfsParent.Virtual(SUBSYSTEM),
         attributes = buildList {
             add(attribute("uevent", UEVENT_MODE, ::storeUevent) {
-                environment.joinToString("\n") { (key, value) -> "$key=$value" }
+                deviceEnvironment.joinToString("\n") { (key, value) -> "$key=$value" }
             })
             add(attribute("ifindex") { interface_.index.toString() })
             add(attribute("iflink") { interface_.index.toString() })
@@ -44,21 +44,25 @@ internal class NetworkInterfaceKobject(
         bindings = SysfsBindings(deviceClass = SysfsIndexBinding(SUBSYSTEM)),
     )
 
-    fun publish(action: KobjectAction) = ueventPublisher.publish(
-        KobjectUevent(
-            action,
-            "/devices/virtual/$SUBSYSTEM/${interface_.name}",
-            SUBSYSTEM,
-            environment,
-        ),
-    )
+    fun publish(action: KobjectAction) = ueventPublisher.publish(event(action))
 
     private fun storeUevent(input: ByteArray): VfsResult<Unit> {
-        val action = KobjectAction.parse(input)
+        val request = KobjectUeventRequest.parse(input)
             ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        publish(action)
+        ueventPublisher.publish(event(request.action, request.environment))
         return VfsResult.Ok(Unit)
     }
+
+    private fun event(
+        action: KobjectAction,
+        syntheticEnvironment: List<Pair<String, String>> = emptyList(),
+    ) = KobjectUevent(
+        action,
+        "/devices/virtual/$SUBSYSTEM/${interface_.name}",
+        SUBSYSTEM,
+        if (syntheticEnvironment.isEmpty()) deviceEnvironment
+        else syntheticEnvironment + deviceEnvironment,
+    )
 
     private fun attribute(
         name: String,

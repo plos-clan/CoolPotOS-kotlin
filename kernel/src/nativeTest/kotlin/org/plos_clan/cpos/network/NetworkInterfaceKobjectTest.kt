@@ -38,26 +38,79 @@ class NetworkInterfaceKobjectTest {
     }
 
     @Test
-    fun publishesEveryKernelUeventAction() {
+    fun publishesEverySyntheticUeventAction() {
         val published = mutableListOf<KobjectUevent>()
         val publisher = KobjectUeventPublisher(published::add)
         val uevent = NetworkInterfaceKobject(TestInterface, publisher).specification.attributes
             .single { it.name == "uevent" } as SysfsTextAttribute
 
-        KobjectAction.entries.forEach { action ->
+        val terminators = listOf("", "\n", "\u0000")
+        KobjectAction.entries.forEachIndexed { index, action ->
             assertIs<VfsResult.Ok<Unit>>(
-                uevent.store("${action.wireName}\n".encodeToByteArray()),
+                uevent.store(
+                    "${action.wireName}${terminators[index % terminators.size]}"
+                        .encodeToByteArray(),
+                ),
             )
-            assertEquals(action, KobjectAction.parse(action.wireName.encodeToByteArray()))
-            assertEquals(action, KobjectAction.parse("${action.wireName}\u0000".encodeToByteArray()))
         }
         assertEquals(KobjectAction.entries, published.map(KobjectUevent::action))
+        published.forEach { event ->
+            assertEquals(
+                listOf("SYNTH_UUID" to "0", "INTERFACE" to "lo", "IFINDEX" to "1"),
+                event.environment,
+            )
+        }
     }
 
     @Test
-    fun rejectsMalformedKernelUeventActions() {
-        listOf("", "addd", "change\n\n", "change argument", "CHANGE").forEach { input ->
-            assertNull(KobjectAction.parse(input.encodeToByteArray()))
+    fun publishesSyntheticUeventArguments() {
+        val published = mutableListOf<KobjectUevent>()
+        val uevent = NetworkInterfaceKobject(
+            TestInterface,
+            KobjectUeventPublisher(published::add),
+        ).specification.attributes.single { it.name == "uevent" } as SysfsTextAttribute
+
+        val uuid = "fe4d7c9d-b8c6-4a70-9ef1-3d8a58d18eed"
+        assertIs<VfsResult.Ok<Unit>>(uevent.store("add $uuid".encodeToByteArray()))
+        assertIs<VfsResult.Ok<Unit>>(
+            uevent.store("change $uuid A=1 B=abc\n".encodeToByteArray()),
+        )
+
+        assertEquals(
+            listOf(KobjectAction.ADD, KobjectAction.CHANGE),
+            published.map(KobjectUevent::action),
+        )
+        assertEquals(
+            listOf(
+                listOf("SYNTH_UUID" to uuid, "INTERFACE" to "lo", "IFINDEX" to "1"),
+                listOf(
+                    "SYNTH_UUID" to uuid,
+                    "SYNTH_ARG_A" to "1",
+                    "SYNTH_ARG_B" to "abc",
+                    "INTERFACE" to "lo",
+                    "IFINDEX" to "1",
+                ),
+            ),
+            published.map(KobjectUevent::environment),
+        )
+    }
+
+    @Test
+    fun rejectsMalformedSyntheticUevents() {
+        listOf(
+            "",
+            "addd",
+            "change\n\n",
+            "change argument",
+            "CHANGE",
+            "add ",
+            "add fe4d7c9d-b8c6-4a70-9ef1-3d8a58d18ee",
+            "add ge4d7c9d-b8c6-4a70-9ef1-3d8a58d18eed",
+            "add fe4d7c9d-b8c6-4a70-9ef1-3d8a58d18eed ",
+            "add fe4d7c9d-b8c6-4a70-9ef1-3d8a58d18eed A=",
+            "add fe4d7c9d-b8c6-4a70-9ef1-3d8a58d18eed A-B=1",
+        ).forEach { input ->
+            assertNull(KobjectUeventRequest.parse(input.encodeToByteArray()))
         }
 
         val published = mutableListOf<KobjectUevent>()

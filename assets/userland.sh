@@ -14,6 +14,7 @@ packages=(
     dbus
     networkmanager
     less
+    ethtool
 )
 
 rootfs=$(mktemp -d)
