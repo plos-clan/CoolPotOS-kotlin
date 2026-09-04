@@ -223,7 +223,15 @@ internal object RouteNetlinkProtocol :
             ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         val interface_ = NetworkStack.interfaceByIndex(index)
             ?: return VfsResult.Err(VfsError.NO_DEVICE)
-        val configured = NetworkInterfaceAddress(address, prefixLength)
+        val flagsAttribute = attributes[IFA_FLAGS]
+        val flags = flagsAttribute?.u32()
+            ?: if (flagsAttribute == null) message.payload.readU8(2).toUInt()
+            else return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        val configured = NetworkInterfaceAddress(
+            address,
+            prefixLength,
+            automaticPrefixRoute = flags and IFA_F_NOPREFIXROUTE == 0u,
+        )
         val result = if (removed) NetworkStack.removeAddress(index, address, prefixLength)
         else NetworkStack.addAddress(index, configured)
         return when (result) {
@@ -270,7 +278,7 @@ internal object RouteNetlinkProtocol :
                 return VfsResult.Err(VfsError.INVALID_ARGUMENT)
             }
             Ipv4Address.from(it.payload.copy())
-        }
+        }?.takeUnless(Ipv4Address::isAny)
         val interfaceIndex = attributes[RTA_OIF]?.u32()?.toInt()
             ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         if (interfaceIndex <= 0) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
@@ -375,6 +383,12 @@ internal object RouteNetlinkProtocol :
                 listOf(
                     NetlinkAttribute.string(IFLA_IFNAME, interface_.name),
                     NetlinkAttribute.binary(IFLA_ADDRESS, address),
+                    NetlinkAttribute.binary(
+                        IFLA_BROADCAST,
+                        ByteArray(MacAddress.SIZE_BYTES).also(
+                            interface_.kind.broadcastAddress::copyTo,
+                        ),
+                    ),
                     NetlinkAttribute.u32(IFLA_MTU, interface_.mtu.toUInt()),
                     NetlinkAttribute.u8(
                         IFLA_OPERSTATE,
@@ -408,6 +422,9 @@ internal object RouteNetlinkProtocol :
             NetlinkAttribute.binary(IFA_LOCAL, nativeAddress),
             NetlinkAttribute.string(IFA_LABEL, interface_.name),
         )
+        if (!address.automaticPrefixRoute) {
+            attributes += NetlinkAttribute.u32(IFA_FLAGS, IFA_F_NOPREFIXROUTE)
+        }
         if (address.prefixLength < 31) {
             attributes += NetlinkAttribute.binary(
                 IFA_BROADCAST,
@@ -529,6 +546,7 @@ internal object RouteNetlinkProtocol :
     private const val RTGENMSG_SIZE = 1
     private const val IF_NAMESIZE = 16
     private const val IFLA_ADDRESS = 1
+    private const val IFLA_BROADCAST = 2
     private const val IFLA_IFNAME = 3
     private const val IFLA_MTU = 4
     private const val IFLA_OPERSTATE = 16
@@ -536,6 +554,8 @@ internal object RouteNetlinkProtocol :
     private const val IFA_LOCAL = 2
     private const val IFA_LABEL = 3
     private const val IFA_BROADCAST = 4
+    private const val IFA_FLAGS = 8
+    private const val IFA_F_NOPREFIXROUTE = 0x200u
     private const val RTA_DST = 1
     private const val RTA_OIF = 4
     private const val RTA_GATEWAY = 5

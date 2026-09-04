@@ -357,13 +357,14 @@ internal object Ipv4Codec {
         fragmentOffset: Int = 0,
         moreFragments: Boolean = false,
         dontFragment: Boolean = false,
+        typeOfService: UByte = 0u,
     ) {
         require(payloadLength >= 0 && payloadLength <= MAX_PACKET_SIZE - MIN_HEADER_SIZE)
         require(fragmentOffset >= 0 && fragmentOffset and 7 == 0 && fragmentOffset / 8 <= 0x1FFF)
         require(offset >= 0 && offset <= bytes.size - MIN_HEADER_SIZE - payloadLength)
         val output = NetworkOrderBuffer(bytes)
         output.writeU8(offset, 0x45u)
-        output.writeU8(offset + 1, 0u)
+        output.writeU8(offset + 1, typeOfService)
         output.writeU16(offset + 2, (MIN_HEADER_SIZE + payloadLength).toUShort())
         output.writeU16(offset + 4, identification)
         val fragmentation = (fragmentOffset / 8) or

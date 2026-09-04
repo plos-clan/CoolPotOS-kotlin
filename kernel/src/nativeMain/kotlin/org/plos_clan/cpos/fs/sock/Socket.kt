@@ -34,6 +34,7 @@ internal enum class SocketDomain(val abiValue: Int) {
     UNIX(1),
     IPV4(2),
     NETLINK(16),
+    PACKET(17),
     ;
 
     companion object {
@@ -80,6 +81,7 @@ internal data class SocketOptions(
     val broadcast: Boolean = false,
     val keepAlive: Boolean = false,
     val linger: SocketLinger = SocketLinger(),
+    val boundInterfaceIndex: Int? = null,
 )
 
 internal data class SocketSendRequest(
@@ -169,6 +171,7 @@ internal abstract class AbstractSocket(
     protected var closed = false
         private set
     private var options = SocketOptions()
+    private var filter: ClassicBpfProgram? = null
     private var pendingError: VfsError? = null
 
     final override val type = InodeType.SOCKET
@@ -340,6 +343,29 @@ internal abstract class AbstractSocket(
         copy(linger = linger)
     }
 
+    fun setBoundInterfaceIndex(index: Int): VfsResult<Unit> {
+        if (!supportsInterfaceBinding) {
+            return VfsResult.Err(VfsError.PROTOCOL_OPTION_NOT_AVAILABLE)
+        }
+        return updateOptions {
+            if (index < 0) return@updateOptions null
+            copy(boundInterfaceIndex = index.takeIf { it != 0 })
+        }
+    }
+
+    fun attachFilter(program: ClassicBpfProgram): VfsResult<Unit> = lock.withLock {
+        if (closed) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
+        if (!supportsSocketFilter) {
+            return@withLock VfsResult.Err(VfsError.PROTOCOL_OPTION_NOT_AVAILABLE)
+        }
+        filter = program
+        VfsResult.Ok(Unit)
+    }
+
+    fun filterPacket(bytes: ByteArray, offset: Int, length: Int): Int = lock.withLock {
+        filterPacketLocked(bytes, offset, length)
+    }
+
     open fun setProtocolOption(
         process: Process,
         level: Int,
@@ -352,6 +378,15 @@ internal abstract class AbstractSocket(
         VfsResult.Err(VfsError.PROTOCOL_OPTION_NOT_AVAILABLE)
 
     protected fun optionsLocked(): SocketOptions = options
+
+    protected fun filterPacketLocked(bytes: ByteArray, offset: Int, length: Int): Int =
+        filter?.filter(bytes, offset, length) ?: length
+
+    protected open val supportsInterfaceBinding: Boolean
+        get() = false
+
+    protected open val supportsSocketFilter: Boolean
+        get() = false
 
     protected fun inheritOptions(options: SocketOptions) {
         lock.withLock {

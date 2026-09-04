@@ -7,6 +7,7 @@ import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.OpenFlags
 import org.plos_clan.cpos.fs.sock.AbstractSocket
+import org.plos_clan.cpos.fs.sock.ClassicBpfProgram
 import org.plos_clan.cpos.fs.sock.SocketAddress
 import org.plos_clan.cpos.fs.sock.SocketDeadline
 import org.plos_clan.cpos.fs.sock.SocketDomain
@@ -27,6 +28,7 @@ import org.plos_clan.cpos.network.IcmpProtocol
 import org.plos_clan.cpos.network.IpProtocol
 import org.plos_clan.cpos.network.NetlinkProtocolKind
 import org.plos_clan.cpos.network.NetlinkProtocols
+import org.plos_clan.cpos.network.PacketSocketProtocol
 import org.plos_clan.cpos.network.SocketAddressAbi
 import org.plos_clan.cpos.network.SocketAddressOutput
 import org.plos_clan.cpos.network.SocketConstants
@@ -81,6 +83,7 @@ internal object SocketSyscalls {
         BROADCAST(SocketConstants.SO_BROADCAST, Int.SIZE_BYTES),
         KEEP_ALIVE(SocketConstants.SO_KEEPALIVE, Int.SIZE_BYTES),
         LINGER(SocketConstants.SO_LINGER, Int.SIZE_BYTES * 2),
+        BIND_INTERFACE(SocketConstants.SO_BINDTOIFINDEX, Int.SIZE_BYTES),
         ;
 
         companion object {
@@ -112,13 +115,7 @@ internal object SocketSyscalls {
             SocketDomain.IPV4 -> {
                 val socket = when (options.protocol) {
                     IpProtocol.ICMP.number.toInt() -> {
-                        val thread = ProcessManager.currentThread()
-                        if (process.credentials.userIds.effective != 0 &&
-                            (thread == null || !CapManager.hasAllCapability(
-                                thread,
-                                CapEnum.NET_RAW,
-                            ))
-                        ) return errno(Errno.EPERM)
+                        if (!hasRawNetworkAccess(process)) return errno(Errno.EPERM)
                         IcmpProtocol.createSocket()
                     }
                     IpProtocol.TCP.number.toInt() -> TcpProtocol.createSocket()
@@ -131,6 +128,15 @@ internal object SocketSyscalls {
                 val socket = NetlinkProtocols.createSocket(options.protocol, options.type)
                     ?: return errno(Errno.EPROTONOSUPPORT)
                 FileSystemManager.vfs.openSocket(caller, context, socket, options.nonBlocking)
+            }
+            SocketDomain.PACKET -> {
+                if (!hasRawNetworkAccess(process)) return errno(Errno.EPERM)
+                FileSystemManager.vfs.openSocket(
+                    caller,
+                    context,
+                    PacketSocketProtocol.createSocket(options.protocol),
+                    options.nonBlocking,
+                )
             }
         }
         val file = when (fileResult) {
@@ -487,6 +493,22 @@ internal object SocketSyscalls {
         ) {
             return@withSocket errno(Errno.EINVAL)
         }
+        if (level.toInt() == SOL_SOCKET &&
+            option.toInt() == SocketConstants.SO_ATTACH_FILTER
+        ) {
+            val program = when (val result = readClassicFilter(
+                process,
+                regs[PtraceRegisters.IDX_R10],
+                length,
+            )) {
+                is VfsResult.Ok -> result.value
+                is VfsResult.Err -> return@withSocket errno(result.error.errno)
+            }
+            return@withSocket when (val result = socket.attachFilter(program)) {
+                is VfsResult.Ok -> 0L
+                is VfsResult.Err -> errno(result.error.errno)
+            }
+        }
         if (level.toInt() != SOL_SOCKET) {
             val bytes = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_R10])
                 .copyFromUser(length.toInt()) ?: return@withSocket errno(Errno.EFAULT)
@@ -540,6 +562,7 @@ internal object SocketSyscalls {
                     LittleEndianBuffer(bytes).readU32(Int.SIZE_BYTES).toInt(),
                 ),
             )
+            SetSocketOption.BIND_INTERFACE -> socket.setBoundInterfaceIndex(value)
         }
         when (result) {
             is VfsResult.Ok -> 0L
@@ -580,6 +603,7 @@ internal object SocketSyscalls {
                 SocketConstants.SO_BROADCAST -> intOption(if (options.broadcast) 1 else 0)
                 SocketConstants.SO_KEEPALIVE -> intOption(if (options.keepAlive) 1 else 0)
                 SocketConstants.SO_LINGER -> lingerOption(options.linger)
+                SocketConstants.SO_BINDTOIFINDEX -> intOption(options.boundInterfaceIndex ?: 0)
                 SocketConstants.SO_PEERCRED -> when (val result = socket.peerCredentials()) {
                     is VfsResult.Ok -> credentialOption(result.value)
                     is VfsResult.Err -> return@withSocket errno(result.error.errno)
@@ -942,6 +966,15 @@ internal object SocketSyscalls {
                 NetlinkProtocolKind.fromNumber(requestedProtocol)?.number
                     ?: return VfsResult.Err(VfsError.PROTOCOL_NOT_SUPPORTED)
             }
+            SocketDomain.PACKET -> {
+                if (type != SocketType.DATAGRAM) {
+                    return VfsResult.Err(VfsError.SOCKET_TYPE_NOT_SUPPORTED)
+                }
+                if (requestedProtocol !in 0..UShort.MAX_VALUE.toInt()) {
+                    return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                }
+                requestedProtocol
+            }
         }
         return VfsResult.Ok(
             CreationOptions(
@@ -1032,6 +1065,36 @@ internal object SocketSyscalls {
             }
         }
 
+    private fun readClassicFilter(
+        process: Process,
+        address: ULong,
+        length: ULong,
+    ): VfsResult<ClassicBpfProgram> {
+        if (length < SOCKET_FILTER_PROGRAM_SIZE.toULong()) {
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+        val descriptor = UserMemory(process.addressSpace, address)
+            .copyFromUser(SOCKET_FILTER_PROGRAM_SIZE)
+            ?: return VfsResult.Err(VfsError.FAULT)
+        val input = LittleEndianBuffer(descriptor)
+        val instructionCount = input.readU16(0).toInt()
+        if (instructionCount !in 1..ClassicBpfProgram.MAX_INSTRUCTIONS) {
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+        val instructionsAddress = input.readU64(8)
+        if (instructionsAddress == 0uL) return VfsResult.Err(VfsError.FAULT)
+        val instructions = UserMemory(process.addressSpace, instructionsAddress).copyFromUser(
+            instructionCount * ClassicBpfProgram.INSTRUCTION_SIZE,
+        ) ?: return VfsResult.Err(VfsError.FAULT)
+        return ClassicBpfProgram.decode(instructions)
+    }
+
+    private fun hasRawNetworkAccess(process: Process): Boolean {
+        if (process.credentials.userIds.effective == 0) return true
+        val thread = ProcessManager.currentThread() ?: return false
+        return thread.process === process && CapManager.hasAllCapability(thread, CapEnum.NET_RAW)
+    }
+
     private fun copySocketOption(
         process: Process,
         outputAddress: ULong,
@@ -1092,4 +1155,5 @@ internal object SocketSyscalls {
     private const val MICROSECONDS_PER_SECOND = 1_000_000uL
     private const val NANOSECONDS_PER_MICROSECOND = 1_000uL
     private const val MAX_SOCKET_OPTION_SIZE = 4096
+    private const val SOCKET_FILTER_PROGRAM_SIZE = 16
 }

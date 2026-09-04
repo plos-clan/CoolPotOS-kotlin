@@ -25,6 +25,7 @@ import kotlin.concurrent.atomics.AtomicInt
 internal data class NetworkInterfaceAddress(
     val address: Ipv4Address,
     val prefixLength: Int,
+    val automaticPrefixRoute: Boolean = true,
 ) {
     val prefix = Ipv4Prefix(address, prefixLength)
 }
@@ -79,6 +80,7 @@ internal data class IpPacketContext(
     val protocol: UByte,
     val payloadOffset: Int,
     val payloadLength: Int,
+    val packetOffset: Int,
 )
 
 internal enum class IpTransportError {
@@ -520,8 +522,12 @@ internal object NetworkStack : EthernetProtocol {
         addresses.values.any { assigned -> assigned.any { it.address == address } }
     }
 
-    fun path(source: Ipv4Address, destination: Ipv4Address): VfsResult<NetworkPath> =
-        lock.withLock { selectRouteLocked(source, destination) }?.let {
+    fun path(
+        source: Ipv4Address,
+        destination: Ipv4Address,
+        interfaceIndex: Int? = null,
+    ): VfsResult<NetworkPath> =
+        lock.withLock { selectRouteLocked(source, destination, interfaceIndex) }?.let {
             VfsResult.Ok(NetworkPath(it.source, it.interface_.mtu))
         } ?: VfsResult.Err(
             if (source.isAny) VfsError.NETWORK_UNREACHABLE else VfsError.ADDRESS_NOT_AVAILABLE,
@@ -542,12 +548,14 @@ internal object NetworkStack : EthernetProtocol {
         payloadLength: Int = payload.size - payloadOffset,
         dontFragment: Boolean = false,
         ttl: UByte = 64u,
+        typeOfService: UByte = 0u,
+        interfaceIndex: Int? = null,
     ): VfsResult<Ipv4Address> {
         if (payloadOffset < 0 || payloadLength < 0 ||
             payloadOffset > payload.size - payloadLength ||
             payloadLength > Ipv4Codec.MAX_PACKET_SIZE - Ipv4Codec.MIN_HEADER_SIZE
         ) return VfsResult.Err(VfsError.MESSAGE_TOO_LONG)
-        val route = lock.withLock { selectRouteLocked(source, destination) }
+        val route = lock.withLock { selectRouteLocked(source, destination, interfaceIndex) }
             ?: return VfsResult.Err(
                 if (source.isAny) VfsError.NETWORK_UNREACHABLE else VfsError.ADDRESS_NOT_AVAILABLE,
             )
@@ -569,6 +577,7 @@ internal object NetworkStack : EthernetProtocol {
                 protocol.number,
                 identification,
                 ttl,
+                typeOfService = typeOfService,
             )
             dispatchIpv4(
                 IpPacketContext(
@@ -579,6 +588,7 @@ internal object NetworkStack : EthernetProtocol {
                     protocol.number,
                     Ipv4Codec.MIN_HEADER_SIZE,
                     payloadLength,
+                    0,
                 ),
                 protocol.number,
             )
@@ -619,6 +629,7 @@ internal object NetworkStack : EthernetProtocol {
                 position,
                 moreFragments,
                 dontFragment,
+                typeOfService,
             )
             if (!routeFrame(route, destination, frame)) {
                 return VfsResult.Err(VfsError.NO_MEMORY)
@@ -681,6 +692,7 @@ internal object NetworkStack : EthernetProtocol {
             ethernet.destination != MacAddress.BROADCAST &&
             ethernet.destination[0].toUInt() and 1u != 1u
         ) return
+        PacketSocketProtocol.receive(interface_, frame, ethernet)
         when (ethernet.type) {
             EthernetType.ARP.value -> receiveArp(interface_, frame)
             EthernetType.IPV4.value -> receiveIpv4(interface_, frame)
@@ -760,6 +772,7 @@ internal object NetworkStack : EthernetProtocol {
                     packet.protocol,
                     packet.payloadOffset,
                     packet.payloadLength,
+                    EthernetHeader.SIZE,
                 ),
                 packet.protocol,
             )
@@ -786,15 +799,28 @@ internal object NetworkStack : EthernetProtocol {
             if (result != null) fragments.remove(key)
             result
         } ?: return
+        val reassembledPacket = ByteArray(Ipv4Codec.MIN_HEADER_SIZE + reassembled.size)
+        reassembled.copyInto(reassembledPacket, Ipv4Codec.MIN_HEADER_SIZE)
+        Ipv4Codec.writeHeader(
+            reassembledPacket,
+            0,
+            reassembled.size,
+            packet.source,
+            packet.destination,
+            packet.protocol,
+            packet.identification,
+            packet.ttl,
+        )
         dispatchIpv4(
             IpPacketContext(
                 interface_,
-                reassembled,
+                reassembledPacket,
                 packet.source,
                 packet.destination,
                 packet.protocol,
-                0,
+                Ipv4Codec.MIN_HEADER_SIZE,
                 reassembled.size,
+                0,
             ),
             packet.protocol,
         )
@@ -865,6 +891,7 @@ internal object NetworkStack : EthernetProtocol {
                 quoted.protocol,
                 quoted.payloadOffset,
                 minOf(quoted.payloadLength, quotedLength - (quoted.payloadOffset - quotedOffset)),
+                quotedOffset,
             ),
             error,
         )
@@ -998,11 +1025,13 @@ internal object NetworkStack : EthernetProtocol {
     private fun selectRouteLocked(
         requestedSource: Ipv4Address,
         destination: Ipv4Address,
+        interfaceIndex: Int? = null,
     ): SelectedRoute? {
         val local = addresses.entries.firstNotNullOfOrNull { (index, assigned) ->
             assigned.firstOrNull { it.address == destination }?.let { index to it }
         }
         if (local != null) {
+            if (interfaceIndex != null && interfaceIndex != LOOPBACK_INDEX) return null
             val loopback = interfaces[LOOPBACK_INDEX] ?: return null
             val source = if (requestedSource.isAny) local.second.address else requestedSource
             if (!hasAddressLocked(source)) return null
@@ -1010,7 +1039,8 @@ internal object NetworkStack : EthernetProtocol {
         }
         if (destination.isLimitedBroadcast) {
             val interface_ = interfaces.values.firstOrNull {
-                it.kind == NetworkInterfaceKind.ETHERNET && it.running &&
+                (interfaceIndex == null || it.index == interfaceIndex) &&
+                    it.kind == NetworkInterfaceKind.ETHERNET && it.running &&
                     !addresses[it.index].isNullOrEmpty()
             } ?: return null
             val source = selectSourceLocked(interface_, requestedSource, destination) ?: return null
@@ -1018,7 +1048,10 @@ internal object NetworkStack : EthernetProtocol {
         }
         val route = allRoutesLocked()
             .asSequence()
-            .filter { it.kind == NetworkRouteKind.UNICAST && it.destination.contains(destination) }
+            .filter {
+                it.kind == NetworkRouteKind.UNICAST && it.destination.contains(destination) &&
+                    (interfaceIndex == null || it.interfaceIndex == interfaceIndex)
+            }
             .mapNotNull { candidate ->
                 val interface_ = interfaces[candidate.interfaceIndex]
                     ?.takeIf(NetworkInterface::running) ?: return@mapNotNull null
@@ -1030,9 +1063,13 @@ internal object NetworkStack : EthernetProtocol {
             )
             .firstOrNull() ?: return null
         val source = if (!requestedSource.isAny) {
-            requestedSource.takeIf(::hasAddressLocked)
+            requestedSource.takeIf { address ->
+                addresses[route.second.index].orEmpty().any { it.address == address }
+            }
         } else {
-            route.first.preferredSource?.takeIf(::hasAddressLocked)
+            route.first.preferredSource?.takeIf { address ->
+                addresses[route.second.index].orEmpty().any { it.address == address }
+            }
                 ?: selectSourceLocked(route.second, Ipv4Address.ANY, destination)
         } ?: return null
         return SelectedRoute(
@@ -1058,13 +1095,15 @@ internal object NetworkStack : EthernetProtocol {
         result += routes
         for ((index, assigned) in addresses) {
             for (address in assigned) {
-                result += NetworkRoute(
-                    address.prefix,
-                    interfaceIndex = index,
-                    preferredSource = address.address,
-                    kind = NetworkRouteKind.UNICAST,
-                    protocol = ROUTE_PROTOCOL_KERNEL,
-                )
+                if (address.automaticPrefixRoute) {
+                    result += NetworkRoute(
+                        address.prefix,
+                        interfaceIndex = index,
+                        preferredSource = address.address,
+                        kind = NetworkRouteKind.UNICAST,
+                        protocol = ROUTE_PROTOCOL_KERNEL,
+                    )
+                }
                 result += NetworkRoute(
                     Ipv4Prefix(address.address, 32),
                     interfaceIndex = LOOPBACK_INDEX,

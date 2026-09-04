@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.network
 
+import org.plos_clan.cpos.drivers.net.MacAddress
 import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.sock.SocketAddress
 import org.plos_clan.cpos.fs.sock.SocketReceiveResult
@@ -23,6 +24,7 @@ internal object SocketConstants {
     const val AF_UNIX = 1
     const val AF_INET = 2
     const val AF_NETLINK = 16
+    const val AF_PACKET = 17
 
     const val SOCK_TYPE_MASK = 0xF
     const val SOCK_NONBLOCK = 0x800
@@ -47,9 +49,11 @@ internal object SocketConstants {
     const val SO_SNDLOWAT = 19
     const val SO_RCVTIMEO = 20
     const val SO_SNDTIMEO = 21
+    const val SO_ATTACH_FILTER = 26
     const val SO_ACCEPTCONN = 30
     const val SO_PROTOCOL = 38
     const val SO_DOMAIN = 39
+    const val SO_BINDTOIFINDEX = 62
 
     const val MSG_PEEK = 0x0002
     const val MSG_DONTROUTE = 0x0004
@@ -76,6 +80,16 @@ internal object SocketConstants {
     const val CREDENTIAL_SIZE = Int.SIZE_BYTES * 3
     const val MAX_CONTROL_SIZE = 1024 * 1024
     const val MAX_RIGHTS = 253
+}
+
+internal data class PacketSocketAddress(
+    val interfaceIndex: Int = 0,
+    val protocol: UShort = 0u,
+    val hardwareType: UShort = 0u,
+    val packetType: UByte = 0u,
+    val hardwareAddress: MacAddress? = null,
+) : SocketAddress {
+    override val domain = org.plos_clan.cpos.fs.sock.SocketDomain.PACKET
 }
 
 internal object SocketAddressAbi {
@@ -107,6 +121,7 @@ internal object SocketAddressAbi {
             SocketConstants.AF_UNIX -> decodeUnix(bytes)
             SocketConstants.AF_INET -> decodeIpv4(bytes)
             SocketConstants.AF_NETLINK -> decodeNetlink(bytes)
+            SocketConstants.AF_PACKET -> decodePacket(bytes)
             else -> VfsResult.Err(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
         }
     }
@@ -127,6 +142,21 @@ internal object SocketAddressAbi {
                 writeU32(4, address.portId)
                 writeU32(8, address.groups)
             }
+        }
+        is PacketSocketAddress -> ByteArray(PACKET_ADDRESS_SIZE).also { bytes ->
+            LittleEndianBuffer(bytes).apply {
+                writeU16(0, SocketConstants.AF_PACKET.toUShort())
+                writeU32(4, address.interfaceIndex.toUInt())
+                writeU16(8, address.hardwareType)
+                writeU8(10, address.packetType)
+                writeU8(
+                    11,
+                    if (address.hardwareAddress == null) 0.toUByte()
+                    else MacAddress.SIZE_BYTES.toUByte(),
+                )
+            }
+            NetworkOrderBuffer(bytes).writeU16(2, address.protocol)
+            address.hardwareAddress?.copyTo(bytes, 12)
         }
         UnspecifiedSocketAddress -> ByteArray(UShort.SIZE_BYTES)
         else -> error("Unsupported socket address ${address::class.simpleName}")
@@ -170,6 +200,25 @@ internal object SocketAddressAbi {
         return VfsResult.Ok(NetlinkSocketAddress(input.readU32(4), input.readU32(8)))
     }
 
+    private fun decodePacket(bytes: ByteArray): VfsResult<SocketAddress> {
+        if (bytes.size < PACKET_ADDRESS_SIZE) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        val input = LittleEndianBuffer(bytes)
+        val interfaceIndex = input.readU32(4)
+        val addressLength = input.readU8(11).toInt()
+        if (interfaceIndex > Int.MAX_VALUE.toUInt() ||
+            addressLength != 0 && addressLength != MacAddress.SIZE_BYTES
+        ) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        return VfsResult.Ok(
+            PacketSocketAddress(
+                interfaceIndex.toInt(),
+                NetworkOrderBuffer(bytes).readU16(2),
+                input.readU16(8),
+                input.readU8(10),
+                if (addressLength == 0) null else MacAddress.from(bytes, 12),
+            ),
+        )
+    }
+
     private fun encodeUnix(address: UnixSocketAddress): ByteArray {
         val path = when (address) {
             UnixSocketAddress.Unnamed -> ByteArray(0)
@@ -186,6 +235,7 @@ internal object SocketAddressAbi {
 
     private const val IPV4_ADDRESS_SIZE = 16
     private const val NETLINK_ADDRESS_SIZE = 12
+    private const val PACKET_ADDRESS_SIZE = 20
 }
 
 internal class SocketAddressOutput private constructor(

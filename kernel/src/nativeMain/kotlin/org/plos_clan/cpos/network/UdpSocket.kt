@@ -83,7 +83,7 @@ internal object UdpProtocol : IpProtocolHandler {
         val candidates = lock.withLock { bindings[segment.destinationPort]?.toList().orEmpty() }
             .filter { binding ->
                 (binding.address.address.isAny || binding.address.address == packet.destination) &&
-                    binding.socket.accepts(source)
+                    binding.socket.accepts(packet.interface_.index, source)
             }
         val recipients =
             if (NetworkStack.isBroadcast(packet.destination) || packet.destination.isMulticast) {
@@ -98,11 +98,27 @@ internal object UdpProtocol : IpProtocolHandler {
             }
             return
         }
-        val payload = packet.bytes.copyOfRange(
-            segment.payloadOffset,
-            segment.payloadOffset + segment.payloadLength,
-        )
-        recipients.forEach { it.enqueue(payload, source, destination) }
+        val packetLength = packet.payloadOffset + packet.payloadLength - packet.packetOffset
+        recipients.forEach { socket ->
+            val capturedLength = socket.filterPacket(
+                packet.bytes,
+                packet.packetOffset,
+                packetLength,
+            )
+            if (capturedLength == 0) return@forEach
+            val payloadLength = minOf(
+                segment.payloadLength,
+                (capturedLength - (segment.payloadOffset - packet.packetOffset)).coerceAtLeast(0),
+            )
+            socket.enqueue(
+                packet.bytes.copyOfRange(
+                    segment.payloadOffset,
+                    segment.payloadOffset + payloadLength,
+                ),
+                source,
+                destination,
+            )
+        }
     }
 
     override fun receiveError(packet: IpPacketContext, error: IpTransportError) {
@@ -114,7 +130,7 @@ internal object UdpProtocol : IpProtocolHandler {
         val recipient = lock.withLock { bindings[sourcePort]?.toList().orEmpty() }
             .firstOrNull { binding ->
                 (binding.address.address.isAny || binding.address.address == packet.source) &&
-                    binding.socket.accepts(remote)
+                    binding.socket.accepts(packet.interface_.index, remote)
             }?.socket ?: return
         recipient.reportError(
             when (error) {
@@ -158,6 +174,14 @@ internal class UdpSocket internal constructor(
         val destination: Ipv4SocketAddress,
     )
 
+    private data class Transmission(
+        val source: Ipv4SocketAddress,
+        val destination: Ipv4SocketAddress,
+        val interfaceIndex: Int?,
+        val ttl: UByte,
+        val typeOfService: UByte,
+    )
+
     private var binding: Ipv4SocketAddress? = null
     private var selectedSource = Ipv4Address.ANY
     private var peer: Ipv4SocketAddress? = null
@@ -166,7 +190,11 @@ internal class UdpSocket internal constructor(
     private var readOpen = true
     private var writeOpen = true
     private var ttl = DEFAULT_TTL
+    private var typeOfService = 0.toUByte()
     private val readWaiters = IoWaitQueue()
+
+    override val supportsInterfaceBinding = true
+    override val supportsSocketFilter = true
 
     override fun bindSocket(process: Process, address: SocketAddress): VfsResult<Unit> {
         val requested = address as? Ipv4SocketAddress
@@ -177,6 +205,12 @@ internal class UdpSocket internal constructor(
         return lock.withLock {
             if (closed) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
             if (binding != null) return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            val interfaceIndex = optionsLocked().boundInterfaceIndex
+            if (!requested.address.isAny && interfaceIndex != null &&
+                NetworkStack.interfaceAddresses(interfaceIndex).none {
+                    it.address == requested.address
+                }
+            ) return@withLock VfsResult.Err(VfsError.ADDRESS_NOT_AVAILABLE)
             when (val result = subsystem.bind(this, requested, optionsLocked().reuseAddress)) {
                 is VfsResult.Ok -> {
                     binding = result.value
@@ -209,7 +243,11 @@ internal class UdpSocket internal constructor(
             if (closed) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
             val local = ensureBoundLocked()
             if (local is VfsResult.Err) return@withLock local
-            val path = NetworkStack.path(checkNotNull((local as VfsResult.Ok).value).address, destination.address)
+            val path = NetworkStack.path(
+                checkNotNull((local as VfsResult.Ok).value).address,
+                destination.address,
+                optionsLocked().boundInterfaceIndex,
+            )
             when (path) {
                 is VfsResult.Ok -> {
                     selectedSource = path.value.source
@@ -263,18 +301,25 @@ internal class UdpSocket internal constructor(
             val local = ensureBoundLocked()
             if (local is VfsResult.Err) return@withLock local
             val bound = (local as VfsResult.Ok).value
-            val path = NetworkStack.path(bound.address, destination.address)
+            val path = NetworkStack.path(
+                bound.address,
+                destination.address,
+                optionsLocked().boundInterfaceIndex,
+            )
             if (path is VfsResult.Err) return@withLock path
             val selected = (path as VfsResult.Ok).value.source
             if (peer != null) selectedSource = selected
             VfsResult.Ok(
-                Pair(
+                Transmission(
                     Ipv4SocketAddress(selected, bound.port),
                     destination,
+                    optionsLocked().boundInterfaceIndex,
+                    ttl.toUByte(),
+                    typeOfService,
                 ),
             )
         }
-        val endpoints = when (prepared) {
+        val transmission = when (prepared) {
             is VfsResult.Ok -> prepared.value
             is VfsResult.Err -> return IoResult.failure(prepared.error)
         }
@@ -286,13 +331,15 @@ internal class UdpSocket internal constructor(
                 request.count,
             ) != request.count
         ) return IoResult.failure(VfsError.FAULT)
-        UdpCodec.write(payload, 0, request.count, endpoints.first, endpoints.second)
+        UdpCodec.write(payload, 0, request.count, transmission.source, transmission.destination)
         return when (val sent = NetworkStack.sendIpv4(
-            endpoints.first.address,
-            endpoints.second.address,
+            transmission.source.address,
+            transmission.destination.address,
             IpProtocol.UDP,
             payload,
-            ttl = ttl.toUByte(),
+            ttl = transmission.ttl,
+            typeOfService = transmission.typeOfService,
+            interfaceIndex = transmission.interfaceIndex,
         )) {
             is VfsResult.Ok -> IoResult.success(request.count)
             is VfsResult.Err -> IoResult.failure(sent.error)
@@ -358,6 +405,12 @@ internal class UdpSocket internal constructor(
         }
         val requested = LittleEndianBuffer(value).readU32(0).toInt()
         return when (name) {
+            IP_TOS -> if (requested in 0..UByte.MAX_VALUE.toInt()) {
+                lock.withLock { typeOfService = requested.toUByte() }
+                VfsResult.Ok(Unit)
+            } else {
+                VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            }
             IP_TTL -> if (requested in 1..UByte.MAX_VALUE.toInt()) {
                 lock.withLock { ttl = requested }
                 VfsResult.Ok(Unit)
@@ -376,6 +429,7 @@ internal class UdpSocket internal constructor(
     override fun getProtocolOption(level: Int, name: Int): VfsResult<ByteArray> {
         if (level != SOL_IP) return VfsResult.Err(VfsError.PROTOCOL_OPTION_NOT_AVAILABLE)
         val value = when (name) {
+            IP_TOS -> lock.withLock { typeOfService.toInt() }
             IP_TTL -> lock.withLock { ttl }
             IP_MTU -> {
                 val endpoints = lock.withLock { selectedSource to peer }
@@ -393,8 +447,10 @@ internal class UdpSocket internal constructor(
         })
     }
 
-    internal fun accepts(source: Ipv4SocketAddress): Boolean = lock.withLock {
-        peer == null || peer == source
+    internal fun accepts(interfaceIndex: Int, source: Ipv4SocketAddress): Boolean = lock.withLock {
+        (optionsLocked().boundInterfaceIndex == null ||
+            optionsLocked().boundInterfaceIndex == interfaceIndex) &&
+            (peer == null || peer == source)
     }
 
     internal fun enqueue(
@@ -459,6 +515,7 @@ internal class UdpSocket internal constructor(
         private const val DEFAULT_TTL = 64
         private const val MAX_PAYLOAD_SIZE = 65_507
         private const val SOL_IP = 0
+        private const val IP_TOS = 1
         private const val IP_TTL = 2
         private const val IP_MTU_DISCOVER = 10
         private const val IP_RECVERR = 11

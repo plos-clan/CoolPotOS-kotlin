@@ -29,28 +29,7 @@ while [[ ! -S "$overlay_root/run/udev/control" ]]; do :; done
 chroot "$overlay_root" /usr/bin/udevadm trigger --verbose --action=add --subsystem-match=net --settle --wait-daemon=10
 
 printf 'init: starting network service\n'
-install -d -m 0700 "$overlay_root/etc/NetworkManager/system-connections"
 install -d -m 0755 "$overlay_root/run/dbus"
-
-cat > "$overlay_root/etc/NetworkManager/system-connections/eth0.nmconnection" <<'EOF'
-[connection]
-id=cpos-eth0
-uuid=4d89bc6c-2f46-43a1-b721-45a2d65a9b3d
-type=ethernet
-interface-name=eth0
-autoconnect=true
-
-[ipv4]
-method=manual
-addresses1=10.0.2.15/24,10.0.2.2
-dns=10.0.2.3;
-
-[ipv6]
-method=disabled
-EOF
-
-chmod 600 "$overlay_root/etc/NetworkManager/system-connections/eth0.nmconnection"
-
 chroot "$overlay_root" /usr/bin/dbus-daemon --system --fork --nopidfile
 chroot "$overlay_root" /usr/bin/NetworkManager --no-daemon \
 >"$overlay_root/run/NetworkManager.log" 2>&1 &

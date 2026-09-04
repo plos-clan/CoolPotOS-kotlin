@@ -1,6 +1,7 @@
 package org.plos_clan.cpos.network
 
 import org.plos_clan.cpos.drivers.net.MacAddress
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -188,5 +189,18 @@ class PacketCodecTest {
 
         assertEquals(Int.SIZE_BYTES, decoded.payload.size)
         assertEquals(0u, decoded.payload.readU32(0))
+    }
+
+    @Test
+    fun packetSocketAddressPreservesNetworkByteOrderAndLinkMetadata() {
+        val address = PacketSocketAddress(
+            interfaceIndex = 2,
+            protocol = EthernetType.IPV4.value,
+            hardwareType = NetworkInterfaceKind.ETHERNET.hardwareType,
+            packetType = 1u,
+            hardwareAddress = MacAddress.BROADCAST,
+        )
+
+        assertEquals(VfsResult.Ok(address), SocketAddressAbi.decode(SocketAddressAbi.encode(address)))
     }
 }
