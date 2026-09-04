@@ -514,11 +514,7 @@ internal class ProcessSignalState(uid: () -> Int, limit: () -> ULong) {
 
     fun stop(process: Process, current: Thread, signal: Signal) {
         val notifyParent = stopLock.withLock {
-            if (!process.state.canReceiveSignals) {
-                return
-            }
-            val stopped = process.state == ProcessState.STOPPED
-            process.state = ProcessState.STOPPED
+            val previousState = process.stop() ?: return
             for (thread in process.threads) {
                 if ((thread.state == TaskState.READY || thread.state == TaskState.RUNNING) &&
                     thread !in stoppedThreads
@@ -527,7 +523,7 @@ internal class ProcessSignalState(uid: () -> Int, limit: () -> ULong) {
                     if (thread !== current) thread.state = TaskState.BLOCKED
                 }
             }
-            !stopped
+            previousState != ProcessState.STOPPED
         }
         if (notifyParent) ProcessManager.markStopped(process, signal)
         while (process.state == ProcessState.STOPPED) {
@@ -538,8 +534,7 @@ internal class ProcessSignalState(uid: () -> Int, limit: () -> ULong) {
     fun resume(process: Process, notifyParent: Boolean = false) {
         var continued = false
         val threads = stopLock.withLock {
-            continued = process.state == ProcessState.STOPPED
-            if (continued) process.state = ProcessState.READY
+            continued = process.transitionState(ProcessState.STOPPED, ProcessState.READY)
             stoppedThreads.toList().also { stoppedThreads.clear() }
         }
         if (continued && notifyParent) ProcessManager.markContinued(process)

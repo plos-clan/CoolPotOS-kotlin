@@ -1,14 +1,34 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+@file:OptIn(
+    kotlinx.cinterop.ExperimentalForeignApi::class,
+    kotlin.native.internal.InternalForKotlinNative::class,
+)
 
 package org.plos_clan.cpos.syscall
 
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
-import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.Signal
+import org.plos_clan.cpos.tasks.SignalInfo
+import org.plos_clan.cpos.tasks.SignalRouter
 import org.plos_clan.cpos.tasks.TaskState
+import org.plos_clan.cpos.tasks.TaskReaper
 import org.plos_clan.cpos.tasks.Thread
+import kotlin.native.internal.GCUnsafeCall
+
+@GCUnsafeCall("deinitRuntimeIfNeeded")
+private external fun deinitializeRuntime()
+
+@GCUnsafeCall("fast_handoff_set_task_state")
+private external fun markNativeTaskExited(task: ULong, state: UByte)
+
+@GCUnsafeCall("fast_handoff_yield")
+private external fun yieldFromExitedTask(): Boolean
+
+@GCUnsafeCall("fast_handoff_idle")
+private external fun continueScheduling(): Nothing
 
 internal object ProcessExit {
     fun current(process: Process, status: Int, group: Boolean): Nothing {
@@ -26,21 +46,39 @@ internal object ProcessExit {
 
     private fun terminate(current: Thread, waitStatus: Int, group: Boolean): Nothing {
         val process = current.process
-        val exiting = if (group) process.threads.toList() else listOf(current)
-        if (group) process.signals.resume(process)
-        exiting.forEach { thread ->
-            ProcessManager.markThreadExited(thread)
-            thread.signals.pending.discard(ULong.MAX_VALUE)
-            clearChildTid(thread)
-        }
-        val processExited = group || process.threads.none { it.state != TaskState.ZOMBIE }
-        if (processExited) {
-            process.signals.pending.discard(ULong.MAX_VALUE)
-            ProcessManager.markExited(process, waitStatus)
+        val exitingThreads = if (group) process.beginExit(waitStatus) else null
+        if (exitingThreads != null) {
+            process.signals.resume(process)
+            for (thread in exitingThreads) {
+                if (thread === current || thread.state == TaskState.ZOMBIE) continue
+                SignalRouter.sendThread(
+                    sender = null,
+                    target = thread,
+                    info = SignalInfo.fromSender(Signal.KILL, process, SignalInfo.KERNEL),
+                )
+            }
         }
 
-        Scheduler.yieldCurrent()
-        while (true) bridge.wait_for_interrupt()
+        current.signals.pending.discard(ULong.MAX_VALUE)
+        clearChildTid(current)
+        ProcessManager.notifyThreadExited(current)
+        // The reaper may release the page tables after this exit is published.
+        check(current.replaceAddressSpace(KernelPageDirectory.addressSpace)) {
+            "exiting thread is not current"
+        }
+        val lastThread = process.completeThreadExit(waitStatus)
+        if (lastThread) {
+            process.signals.pending.discard(ULong.MAX_VALUE)
+            TaskReaper.enqueue(process)
+        }
+
+        val nativeContext = current.nativeContext
+        val zombieState = TaskState.ZOMBIE.ordinal.toUByte()
+        bridge.irq_save()
+        deinitializeRuntime()
+        markNativeTaskExited(nativeContext, zombieState)
+        yieldFromExitedTask()
+        continueScheduling()
     }
 
     private fun clearChildTid(thread: Thread) {

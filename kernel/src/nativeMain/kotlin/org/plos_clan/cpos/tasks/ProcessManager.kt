@@ -1,7 +1,8 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class, ExperimentalAtomicApi::class)
+@file:OptIn(ExperimentalForeignApi::class, ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.tasks
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.drivers.TscClock
@@ -354,6 +355,13 @@ class Process internal constructor(
     internal val terminationSignal: Signal? = Signal.CHILD,
     vforkParent: Thread? = null,
 ) {
+    private data class Lifecycle(
+        val state: ProcessState = ProcessState.READY,
+        val threads: List<Thread> = emptyList(),
+        val liveThreads: Int = 0,
+        val waitStatus: Int = 0,
+    )
+
     val vfsOperationContext: VfsOperationContext
         get() = VfsOperationContext(
             uid = credentials.userIds.filesystem.toUInt(),
@@ -379,15 +387,13 @@ class Process internal constructor(
     val processGroupId: Int
         get() = membership.processGroupId
 
-    private val threadState = AtomicReference<List<Thread>>(emptyList())
+    private val lifecycle = AtomicReference(Lifecycle())
     val threads: List<Thread>
-        get() = threadState.load()
+        get() = lifecycle.load().threads
     var commandLine: ByteArray = name.encodeToByteArray() + byteArrayOf(0)
         internal set
-    private val processState = AtomicReference(ProcessState.READY)
-    internal var state: ProcessState
-        get() = processState.load()
-        set(value) = processState.store(value)
+    internal val state: ProcessState
+        get() = lifecycle.load().state
     val resourceLimits = ProcessLimits()
     internal val signals = ProcessSignalState(
         uid = { credentials.userIds.real },
@@ -397,13 +403,87 @@ class Process internal constructor(
 
     val fdTable = FileDescriptorTable()
 
+    internal fun transitionState(expected: ProcessState, replacement: ProcessState): Boolean {
+        var observed = lifecycle.load()
+        while (observed.state == expected) {
+            if (lifecycle.compareAndSet(observed, observed.copy(state = replacement))) return true
+            observed = lifecycle.load()
+        }
+        return false
+    }
+
+    internal fun stop(): ProcessState? {
+        var observed = lifecycle.load()
+        while (observed.state.canReceiveSignals) {
+            if (observed.state == ProcessState.STOPPED) return ProcessState.STOPPED
+            val replacement = observed.copy(state = ProcessState.STOPPED)
+            if (lifecycle.compareAndSet(observed, replacement)) return observed.state
+            observed = lifecycle.load()
+        }
+        return null
+    }
+
     fun addThread(thread: Thread) {
         require(thread.process === this) { "Thread ${thread.id} belongs to another process" }
         while (true) {
-            val observed = threadState.load()
-            if (thread in observed) return
-            if (threadState.compareAndSet(observed, observed + thread)) return
+            val observed = lifecycle.load()
+            check(observed.state.canReceiveSignals) {
+                "process $id cannot add a thread while ${observed.state}"
+            }
+            if (thread in observed.threads) return
+            val replacement = observed.copy(
+                threads = observed.threads + thread,
+                liveThreads = observed.liveThreads + 1,
+            )
+            if (lifecycle.compareAndSet(observed, replacement)) return
         }
+    }
+
+    internal fun beginExit(waitStatus: Int): List<Thread>? {
+        var observed = lifecycle.load()
+        while (observed.state.canReceiveSignals) {
+            val replacement = observed.copy(
+                state = ProcessState.EXITING,
+                waitStatus = waitStatus,
+            )
+            if (lifecycle.compareAndSet(observed, replacement)) return observed.threads
+            observed = lifecycle.load()
+        }
+        return null
+    }
+
+    internal fun completeThreadExit(waitStatus: Int): Boolean {
+        while (true) {
+            val observed = lifecycle.load()
+            check(observed.liveThreads > 0) { "process $id has no live thread to exit" }
+            check(observed.state.canReceiveSignals || observed.state == ProcessState.EXITING) {
+                "process $id cannot complete a thread exit while ${observed.state}"
+            }
+            val remaining = observed.liveThreads - 1
+            val beginExit = remaining == 0 && observed.state.canReceiveSignals
+            val replacement = observed.copy(
+                state = if (beginExit) ProcessState.EXITING else observed.state,
+                liveThreads = remaining,
+                waitStatus = if (beginExit) waitStatus else observed.waitStatus,
+            )
+            if (lifecycle.compareAndSet(observed, replacement)) return remaining == 0
+        }
+    }
+
+    internal val requestedExitStatus: Int
+        get() = lifecycle.load().let { lifecycle ->
+            check(lifecycle.state == ProcessState.EXITING && lifecycle.liveThreads == 0) {
+                "process $id is not ready for reaping"
+            }
+            lifecycle.waitStatus
+        }
+
+    internal fun releaseOwnedResources() {
+        val fileSystemContext = context
+        context = null
+        fdTable.closeAll(vfsOperationContext)
+        fileSystemContext?.release()
+        addressSpace.release()
     }
 
     fun getFSContext(): FileSystemContext = requireNotNull(context) {
@@ -462,7 +542,7 @@ object ProcessManager {
             context = null,
             pid = 0,
         ).also { process ->
-            process.state = ProcessState.RUNNING
+            check(process.transitionState(ProcessState.READY, ProcessState.RUNNING))
         }
         kernelProcess = systemProcess
 
@@ -583,10 +663,7 @@ object ProcessManager {
         val removed = processLock.withLock { processes.remove(process) }
         if (!removed) return false
 
-        process.fdTable.closeAll(process.vfsOperationContext)
-        process.context?.release()
-        process.context = null
-        process.addressSpace.release()
+        process.releaseOwnedResources()
         return true
     }
 
@@ -630,9 +707,8 @@ object ProcessManager {
         }
     }
 
-    internal fun markThreadExited(thread: Thread) {
+    internal fun notifyThreadExited(thread: Thread) {
         val deliveries = threadTableLock.withLock {
-            thread.state = TaskState.ZOMBIE
             thread.parentThread?.let { parent ->
                 parentDeathSubscribers[parent]?.let { subscribers ->
                     subscribers.remove(thread)
@@ -691,16 +767,11 @@ object ProcessManager {
         ProcessGroupResult.SUCCESS
     }
 
-    fun markExited(process: Process, waitStatus: Int) {
-        val context = processLock.withLock {
-            if (!process.state.canReceiveSignals) return
-            process.state = ProcessState.EXITING
-            process.context.also { process.context = null }
-        }
-        process.fdTable.closeAll(process.vfsOperationContext)
-        context?.release()
+    internal fun finishExited(process: Process) {
+        val waitStatus = process.requestedExitStatus
+        process.releaseOwnedResources()
         val parent = processLock.withLock {
-            process.state = ProcessState.ZOMBIE
+            check(process.transitionState(ProcessState.EXITING, ProcessState.ZOMBIE))
             processes.firstOrNull { it.id == process.parentId }
         }
         process.completeVfork()
@@ -770,13 +841,12 @@ object ProcessManager {
             val removable = child.parentId == parentId &&
                     child.state == ProcessState.ZOMBIE && processes.remove(child)
             if (!removable) return@withLock false
-            child.state = ProcessState.DEAD
+            check(child.transitionState(ProcessState.ZOMBIE, ProcessState.DEAD))
             parent = processes.firstOrNull { it.id == parentId }
             true
         }
         if (reaped) {
             parent?.childEvents?.discard(child)
-            child.addressSpace.release()
         }
         return reaped
     }

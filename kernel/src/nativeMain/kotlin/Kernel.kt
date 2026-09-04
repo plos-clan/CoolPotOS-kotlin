@@ -27,6 +27,7 @@ import org.plos_clan.cpos.syscall.Syscall
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.Scheduler
+import org.plos_clan.cpos.tasks.TaskReaper
 import org.plos_clan.cpos.utils.Cmdline
 import org.plos_clan.cpos.utils.KernelRandom
 import org.plos_clan.cpos.utils.hex
@@ -84,6 +85,7 @@ fun kernelMain() {
     if (!KernelCoroutines.initialize()) {
         return
     }
+    TaskReaper.initialize()
     NetworkStack.initialize()
     if (!SerialConsole.install()) {
         return
