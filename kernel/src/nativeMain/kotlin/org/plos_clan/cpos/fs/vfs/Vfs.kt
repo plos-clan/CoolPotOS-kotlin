@@ -594,5 +594,6 @@ class Vfs(maxSymlinkDepth: Int = 40) {
     fun absolutePath(
         context: FileSystemContext,
         initial: VfsPath,
-    ): VfsResult<ByteArray> = paths.absolutePath(context, initial)
+        allowUnreachable: Boolean = false,
+    ): VfsResult<ByteArray> = paths.absolutePath(context, initial, allowUnreachable)
 }

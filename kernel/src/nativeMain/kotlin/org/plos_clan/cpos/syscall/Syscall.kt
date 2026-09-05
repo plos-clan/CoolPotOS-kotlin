@@ -144,6 +144,7 @@ private enum class LinuxSyscall(
     WRITEV(20, ::writev, restartable = true),
     ACCESS(21, ::access),
     PIPE(22, ::pipe),
+    MADVISE(28, ::mAdvise),
     DUP(32, ::dup),
     DUP2(33, ::dup2),
     PAUSE(34, SignalSyscalls::pause),

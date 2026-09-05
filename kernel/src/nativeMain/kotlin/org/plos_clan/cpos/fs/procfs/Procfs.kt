@@ -87,9 +87,10 @@ internal class ProcfsInstance : SuperBlockBackend {
 
     fun processEntry(
         superBlock: SuperBlock,
-        process: Process,
+        target: PidHandle,
         name: VfsName
     ): Inode? {
+        val process = target.thread.process
         if (process.state == ProcessState.DEAD) return null
         val pid = process.id
         val fileName = name.toString()
@@ -103,18 +104,12 @@ internal class ProcfsInstance : SuperBlockBackend {
                 process.takeUnless { it.state == ProcessState.DEAD }?.let(file::render)
             }
         }
-        if (fileName != FD_NAME) return null
-        return directory(
-            superBlock = superBlock,
-            id = ProcInode.process(pid, FD_DIRECTORY_ENTRY),
-            backend = ProcDescriptorDirectory(this, pid),
-            mode = DESCRIPTOR_DIRECTORY_MODE,
-            owner = process,
-        )
+        return ProcessNode.entries.firstOrNull { it.fileName == fileName }
+            ?.create(this, superBlock, target)
     }
 
     fun processEntries(process: Process): List<DirectoryEntry> =
-        buildList(ProcessFile.entries.size + 1) {
+        buildList(ProcessFile.entries.size + ProcessNode.entries.size) {
             ProcessFile.entries.forEach { file ->
                 add(
                     entry(
@@ -124,13 +119,9 @@ internal class ProcfsInstance : SuperBlockBackend {
                     ),
                 )
             }
-            add(
-                entry(
-                    FD_NAME,
-                    ProcInode.process(process.id, FD_DIRECTORY_ENTRY),
-                    InodeType.DIRECTORY,
-                ),
-            )
+            ProcessNode.entries.forEach { node ->
+                add(entry(node.fileName, ProcInode.process(process.id, node.entryId), node.type))
+            }
         }
 
     private fun processDirectory(
@@ -201,11 +192,11 @@ internal class ProcfsInstance : SuperBlockBackend {
         id: ULong,
         mode: UInt = SYMLINK_MODE,
         owner: Process? = null,
-        target: () -> VfsPathname?,
+        backend: SymlinkBackend,
     ): Inode = Inode(
         id = InodeId(id),
         superBlock = superBlock,
-        backend = ProcSymlink(target),
+        backend = backend,
         initialAttributes = InodeAttributeSnapshot(
             InodeAttributes(
                 InodeMetadata(
@@ -263,7 +254,7 @@ private class ProcProcessDirectory(
     override val target: PidHandle,
 ) : ProcDirectoryBackend(fileSystem), PidHandle.Provider {
     override fun resolve(superBlock: SuperBlock, name: VfsName): Inode? =
-        fileSystem.processEntry(superBlock, target.thread.process, name)
+        fileSystem.processEntry(superBlock, target, name)
 
     override fun snapshot(): VfsResult<List<DirectoryEntry>> {
         if (target.state == PidHandle.State.DEAD) return VfsResult.Err(VfsError.NOT_FOUND)
@@ -451,21 +442,11 @@ private class ProcTextHandle(
 private class ProcSymlink(
     private val target: () -> VfsPathname?,
 ) : SymlinkBackend {
-    override val type: InodeType
-        get() = InodeType.SYMLINK
-
     override fun readLink(
         caller: VfsOperationContext,
         inode: Inode,
     ): VfsResult<VfsPathname> =
         target()?.let { VfsResult.Ok(it) } ?: VfsResult.Err(VfsError.NOT_FOUND)
-
-    override fun open(
-        caller: VfsOperationContext,
-        inode: Inode,
-        options: OpenOptions
-    ): VfsResult<OpenFileBackend> =
-        VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
 }
 
 private enum class RootFile(
@@ -524,21 +505,50 @@ private enum class RootNode(
     ;
 
     override fun create(fileSystem: ProcfsInstance, superBlock: SuperBlock): Inode = when (this) {
-        SELF -> fileSystem.symlink(superBlock, inodeId) {
+        SELF -> fileSystem.symlink(superBlock, inodeId, backend = ProcSymlink {
             ProcessManager.currentProcess()
                 ?.takeUnless(Process::isKernelProcess)
                 ?.id
                 ?.let { VfsPathname.fromString(it.toString()) }
-        }
-        MOUNTS -> fileSystem.symlink(superBlock, inodeId) {
+        })
+        MOUNTS -> fileSystem.symlink(superBlock, inodeId, backend = ProcSymlink {
             VfsPathname.fromString("self/mounts")
-        }
+        })
         COROUTINES -> fileSystem.directory(
             superBlock,
             inodeId,
             ProcCoroutineDirectory(fileSystem),
         )
         SYS -> ProcSysTree.create(fileSystem, superBlock, inodeId)
+    }
+}
+
+private enum class ProcessNode(val fileName: String, val type: InodeType) {
+    DESCRIPTORS("fd", InodeType.DIRECTORY),
+    EXECUTABLE("exe", InodeType.SYMLINK),
+    ;
+
+    val entryId: UInt
+        get() = (ProcessFile.entries.size + ordinal + 1).toUInt()
+
+    fun create(fileSystem: ProcfsInstance, superBlock: SuperBlock, target: PidHandle): Inode {
+        val process = target.thread.process
+        val id = ProcInode.process(process.id, entryId)
+        return when (this) {
+            DESCRIPTORS -> fileSystem.directory(
+                superBlock,
+                id,
+                ProcDescriptorDirectory(fileSystem, target),
+                mode = DESCRIPTOR_DIRECTORY_MODE,
+                owner = process,
+            )
+            EXECUTABLE -> fileSystem.symlink(
+                superBlock,
+                id,
+                owner = process,
+                backend = ProcFileSymlink(target) { process.addressSpace.acquireExecutable() },
+            )
+        }
     }
 }
 
@@ -570,11 +580,9 @@ private const val SELF_INODE = 10uL
 private const val MOUNTS_INODE = 11uL
 private const val COROUTINES_INODE = 12uL
 internal const val SYS_INODE = 13uL
-private val FD_DIRECTORY_ENTRY = ProcessFile.entries.size.toUInt() + 1u
 private const val DIRECTORY_MODE = 0x16du
 private const val DESCRIPTOR_DIRECTORY_MODE = 0x140u
 private const val FILE_MODE = 0x124u
 private const val SYMLINK_MODE = 0x1ffu
 const val MAX_COMM_LENGTH = 15
-private const val FD_NAME = "fd"
 const val KIBIBYTE = 1024uL

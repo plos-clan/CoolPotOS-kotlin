@@ -4,6 +4,7 @@ package org.plos_clan.cpos.mem.addressspace
 
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
+import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.INVALID_FRAME
@@ -42,6 +43,7 @@ class AddressSpace internal constructor(
 
     private val regions = MemoryRegionMap(start, end, limit)
     private val lock = IrqSpinLock()
+    private var executable: OpenFileDescription? = null
     private val reusableFaultScratch = AtomicReference<ByteArray?>(null)
 
     private sealed interface FaultPlan {
@@ -101,12 +103,25 @@ class AddressSpace internal constructor(
 
     fun snapshotRegions(): List<MemoryRegion> = lock.withLock(regions::snapshot)
 
+    internal fun acquireExecutable(): OpenFileDescription? = lock.withLock {
+        executable?.takeIf(OpenFileDescription::retain)
+    }
+
+    internal fun setExecutable(file: OpenFileDescription?) {
+        val previous = lock.withLock {
+            check(file == null || file.retain())
+            executable.also { executable = file }
+        }
+        previous?.release()
+    }
+
     fun fork(): AddressSpace = lock.withLock {
         val directory = pageDirectory.cloneDirectory(
             sharedRegions = regions.sharedRegions(),
         )
         AddressSpace(directory, start, end, user).also { child ->
             regions.copyRetainedInto(child.regions)
+            child.executable = executable?.also { check(it.retain()) }
         }
     }
 
@@ -143,6 +158,7 @@ class AddressSpace internal constructor(
     }
 
     private fun destroyResources() {
+        setExecutable(null)
         val backings = lock.withLock(regions::removeAll)
         backings.forEach(MemoryRegionBacking::release)
         pageDirectory.destroyUserDirectory()

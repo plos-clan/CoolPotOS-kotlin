@@ -1194,16 +1194,9 @@ private class FuseSymlinkNode(
     override val instance: FuseInstance,
     override val nodeId: ULong,
 ) : FuseNode, SymlinkBackend {
-    override val type = InodeType.SYMLINK
     private val lock = IrqSpinLock()
     private var cachedTarget: VfsPathname? = null
     private var cacheGeneration = 0uL
-
-    override fun open(
-        caller: VfsOperationContext,
-        inode: Inode,
-        options: OpenOptions,
-    ): VfsResult<OpenFileBackend> = VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
 
     override fun readLink(caller: VfsOperationContext, inode: Inode): VfsResult<VfsPathname> {
         val cacheable = instance.supports(FuseFeature.CACHE_SYMLINKS)

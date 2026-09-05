@@ -1,3 +1,6 @@
 [submodule "mlibc"]
 	path = vendor/mlibc
 	url = https://github.com/managarm/mlibc
+[submodule "sima"]
+	path = vendor/SIMA
+	url = git@github.com:plos-clan/SIMA.git

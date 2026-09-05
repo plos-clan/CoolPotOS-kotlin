@@ -538,6 +538,18 @@ val downloadFreestndHeaders = tasks.register<DownloadFileTask>("downloadFreestnd
     destinationFile.set(config.paths.freestandingArchive.file)
 }
 
+val buildSima = tasks.register<Exec>("buildSima") {
+    group = "build"
+    description = "Incrementally builds SIMA and exports its deployment artifacts."
+
+    workingDir(rootProject.file("vendor/SIMA"))
+    val artifacts = workingDir.resolve("target/artifacts")
+    environment("CARGO_BUILD_ARTIFACT_DIR", artifacts.absolutePath)
+    commandLine("cargo", "build", "--release", "--locked")
+    outputs.dir(artifacts)
+    outputs.upToDateWhen { false }
+}
+
 val prepareUserland = tasks.register<Exec>("prepareUserland") {
     group = "build"
     description = "Builds a zstd-compressed CachyOS EROFS root filesystem."
@@ -546,6 +558,8 @@ val prepareUserland = tasks.register<Exec>("prepareUserland") {
     inputs.property("platform", config.userland.platform)
     inputs.file(config.userland.script).withPathSensitivity(PathSensitivity.NONE)
     inputs.file(config.paths.initScript).withPathSensitivity(PathSensitivity.NONE)
+    val artifacts = buildSima.map { it.outputs.files.singleFile }
+    inputs.dir(artifacts).withPathSensitivity(PathSensitivity.RELATIVE)
     outputs.file(config.userland.archive)
 
     commandLine(
@@ -556,6 +570,7 @@ val prepareUserland = tasks.register<Exec>("prepareUserland") {
             "--volume", "${config.userland.archive.parentFile.absolutePath}:/output:rw,Z",
             "--volume", "${config.userland.script.absolutePath}:/usr/local/bin/cpos-userland:ro,Z",
             "--volume", "${config.paths.initScript.absolutePath}:/usr/local/share/cpos/init:ro,Z",
+            "--volume", "${artifacts.get().absolutePath}:/usr/local/share/cpos/artifacts:ro,Z",
             config.userland.image,
             "/usr/local/bin/cpos-userland",
             config.userland.name,

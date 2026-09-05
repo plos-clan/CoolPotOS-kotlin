@@ -25,6 +25,9 @@ class Inode internal constructor(
     val type: InodeType
         get() = backend.type
 
+    internal fun sameIdentity(other: Inode): Boolean =
+        superBlock === other.superBlock && id == other.id && generation == other.generation
+
     fun metadata(): InodeMetadata = lock.withLock { currentMetadata }
 
     fun attributes(
@@ -320,6 +323,7 @@ class Dentry internal constructor(
     private var currentName = name
     private var currentParent = parent
     private var currentInode = inode
+    private var unlinked = false
     private val children = mutableMapOf<VfsName, CachedChild>()
 
     val name: VfsName
@@ -329,6 +333,9 @@ class Dentry internal constructor(
         get() = lock.withLock { currentParent }
 
     fun inode(): Inode? = lock.withLock { currentInode }
+
+    val isUnlinked: Boolean
+        get() = lock.withLock { unlinked }
 
     internal fun cachedChild(name: VfsName): Dentry? = lock.withLock {
         val child = children[name] ?: return@withLock null
@@ -343,8 +350,9 @@ class Dentry internal constructor(
             val cached = children[name]
             if (cached != null) {
                 val current = cached.dentry.inode()
-                if (inode == null || current == null || current.sameIdentity(inode)) {
-                    if (inode == null && current != null) retiredDentry = cached.dentry
+                val sameInode = current === inode ||
+                    current != null && inode != null && current.sameIdentity(inode)
+                if (sameInode) {
                     if (current !== inode) cached.dentry.install(inode)
                     if (cached.reference !== lookup.reference) {
                         retiredReference = cached.reference
@@ -355,7 +363,7 @@ class Dentry internal constructor(
                 }
                 retiredReference = cached.reference
                 retiredDentry = cached.dentry
-                cached.dentry.install(null)
+                cached.dentry.detach()
             }
             val child = Dentry(superBlock, name, this, inode)
             children[name] = CachedChild(child, lookup.validity, lookup.reference)
@@ -372,9 +380,12 @@ class Dentry internal constructor(
         lock.withLock {
             val child = children[name]?.takeIf { it.dentry === expected } ?: return@withLock
             reference = child.reference
-            child.reference = null
-            child.validity = CacheValidity.Persistent
-            child.dentry.install(null)
+            child.dentry.detach()
+            children[name] = CachedChild(
+                Dentry(superBlock, name, this, null),
+                CacheValidity.Persistent,
+                null,
+            )
             invalidated = true
         }
         reference?.release()
@@ -398,7 +409,7 @@ class Dentry internal constructor(
             name = checkNotNull(eventName),
             cookie = cookie,
             subject = subject,
-            unlinked = inode()?.sameIdentity(subject) != true,
+            unlinked = isUnlinked || inode()?.sameIdentity(subject) != true,
         )
     }
 
@@ -438,7 +449,7 @@ class Dentry internal constructor(
         if (children[sourceName]?.dentry === source) children.remove(sourceName)
         if (exchange == null) {
             val retired = targetParent.children.put(targetName, sourceChild)
-            retired?.dentry?.install(null)
+            retired?.dentry?.detach()
             source.relocate(targetParent, targetName)
             return retired
         } else {
@@ -462,6 +473,10 @@ class Dentry internal constructor(
         lock.withLock { currentInode = inode }
     }
 
+    private fun detach() {
+        lock.withLock { unlinked = true }
+    }
+
     internal fun releaseCachedChildren() {
         val pending = ArrayDeque<Dentry>()
         pending.addLast(this)
@@ -476,9 +491,6 @@ class Dentry internal constructor(
             }
         }
     }
-
-    private fun Inode.sameIdentity(other: Inode): Boolean =
-        superBlock === other.superBlock && id == other.id && generation == other.generation
 
     private companion object {
         val renameLock = IrqSpinLock()

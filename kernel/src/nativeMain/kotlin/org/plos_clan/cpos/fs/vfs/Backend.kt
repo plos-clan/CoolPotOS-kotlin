@@ -353,7 +353,20 @@ interface ContentBackedFile {
 }
 
 interface SymlinkBackend : InodeBackend {
+    override val type: InodeType
+        get() = InodeType.SYMLINK
+
     fun readLink(caller: VfsOperationContext, inode: Inode): VfsResult<VfsPathname>
+
+    override fun open(
+        caller: VfsOperationContext,
+        inode: Inode,
+        options: OpenOptions,
+    ): VfsResult<OpenFileBackend> = VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
+}
+
+interface MagicLinkBackend : SymlinkBackend {
+    fun resolveLink(caller: VfsOperationContext, inode: Inode): VfsResult<VfsPath>
 }
 
 sealed class NodeKind {

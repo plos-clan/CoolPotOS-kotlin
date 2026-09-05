@@ -83,6 +83,9 @@ rm -rf \
 find "$rootfs" -type f \( -name '*.a' -o -name '*.o' -o -name '*.debug' \) -delete
 rm -rf "$rootfs/var/log"/* "$rootfs/var/tmp"/*
 
+install -d -m 0755 "$rootfs/usr/lib/sima"
+cp -a --no-preserve=ownership /usr/local/share/cpos/artifacts/. "$rootfs/usr/lib/sima/"
+
 mkfs.erofs \
     -x-1 \
     -z zstd,level=3 \

@@ -63,13 +63,18 @@ internal class VfsPathResolver(
     fun absolutePath(
         context: FileSystemContext,
         initial: VfsPath,
+        allowUnreachable: Boolean = false,
     ): VfsResult<ByteArray> {
         val components = mutableListOf<ByteArray>()
         var current = initial
         while (current != context.root) {
             if (current.dentry === current.mount.root) {
-                current = current.mount.attachment
-                    ?: return VfsResult.Err(VfsError.NOT_FOUND)
+                val attachment = current.mount.attachment
+                if (attachment == null) {
+                    if (allowUnreachable) break
+                    return VfsResult.Err(VfsError.NOT_FOUND)
+                }
+                current = attachment
                 if (current == context.root) {
                     break
                 }
@@ -200,6 +205,13 @@ internal class VfsPathResolver(
             }
             val symlink = inode.backend as? SymlinkBackend
                 ?: return VfsResult.Err(VfsError.NOT_SUPPORTED)
+            if (symlink is MagicLinkBackend) {
+                current = when (val result = symlink.resolveLink(caller, inode)) {
+                    is VfsResult.Ok -> result.value.also { next.mount.recordAccess(caller, inode) }
+                    is VfsResult.Err -> return result
+                }
+                continue
+            }
             val target = when (val result = symlink.readLink(caller, inode)) {
                 is VfsResult.Ok -> result.value.also { next.mount.recordAccess(caller, inode) }
                 is VfsResult.Err -> return result

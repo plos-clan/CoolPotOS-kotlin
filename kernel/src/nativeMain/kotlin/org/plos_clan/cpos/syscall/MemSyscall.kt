@@ -209,3 +209,5 @@ internal fun mmap(regs: PtraceRegisters, process: Process): Long {
         file.release()
     }
 }
+
+internal fun mAdvise(regs: PtraceRegisters, process: Process): Long = errno(Errno.EOK)

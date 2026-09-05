@@ -141,6 +141,7 @@ object ElfLoader {
             }
             val executableFile = resolved.file
             val executable = try {
+                addressSpace.setExecutable(executableFile.file)
                 loadImage(executableFile, addressSpace, resolved.path, 0uL)
             } finally {
                 executableFile.file.release()

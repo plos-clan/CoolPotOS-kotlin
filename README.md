@@ -79,9 +79,18 @@ You need to install:
 - Clang (`clang`, `clang++`)
 - LLD (`ld.lld`)
 - Rootless Podman (for userland packaging)
+- Nightly Rust/Cargo and binutils (`readelf`) (for SIMA)
 - `xorriso` (for ISO creation)
 - `qemu-system-x86_64` (for emulation)
 - Git and Gradle (included with Kotlin/Native)
+
+Userland preparation runs `cargo build --release --locked` in `vendor/SIMA`,
+letting Cargo reuse its build cache and track source, dependency, and toolchain
+changes. Gradle tracks the complete `vendor/SIMA/target/artifacts/` directory
+alongside `assets/init` and `assets/userland.sh`; unchanged contents skip the
+container and EROFS rebuild. Added, changed, renamed, or removed artifacts
+invalidate the image. All artifacts are installed together under
+`/usr/lib/sima` in the rootfs, preserving SIMA's `$ORIGIN` library lookup.
 
 **Overridable environment variables:**
 

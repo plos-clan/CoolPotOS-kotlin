@@ -348,16 +348,8 @@ private class SysfsSymlink(
     private val registry: SysfsRegistry,
     private val node: SysfsNode.Link,
 ) : SymlinkBackend {
-    override val type = InodeType.SYMLINK
-
     override fun readLink(
         caller: VfsOperationContext,
         inode: Inode,
     ): VfsResult<VfsPathname> = registry.readLink(node)
-
-    override fun open(
-        caller: VfsOperationContext,
-        inode: Inode,
-        options: OpenOptions,
-    ): VfsResult<OpenFileBackend> = VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
 }
