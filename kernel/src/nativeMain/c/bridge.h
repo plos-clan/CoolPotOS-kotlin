@@ -53,6 +53,8 @@ void wait_for_interrupt(void);
 void cpu_relax(void);
 void asm_pause(void);
 void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base);
+void fast_handoff_set_user_interrupt_handler(void (*handler)(void *frame));
+void fast_handoff_request_user_interrupt(uint64_t task);
 bool fast_handoff_yield(void);
 bool fast_handoff_park_current(void);
 bool fast_handoff_park_current_until(uint64_t deadline_ns);

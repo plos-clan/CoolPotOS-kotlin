@@ -16,13 +16,9 @@ private const val LAPIC_MMIO_SIZE = 0x1000uL
 private const val X2APIC_MSR_BASE = 0x800u
 
 private const val LAPIC_REG_ID = 0x20u
-private const val LAPIC_REG_EOI = 0xB0u
 private const val LAPIC_REG_SPURIOUS = 0xF0u
-private const val LAPIC_REG_ICR_LOW = 0x300u
-private const val LAPIC_REG_ICR_HIGH = 0x310u
 private const val LAPIC_SPURIOUS_VECTOR = 0xFFu
 private const val LAPIC_SPURIOUS_ENABLE_BIT = 0x100uL
-private const val LAPIC_DELIVERY_PENDING = 0x1000uL
 private const val LAPIC_MIN_INTERRUPT_VECTOR = 32u
 private const val LAPIC_ID_MASK = 0xFFu
 private const val LAPIC_ID_MASK_LONG = 0xFFuL
@@ -95,27 +91,6 @@ object LocalApic {
 
     fun enableController() {
         write(LAPIC_REG_SPURIOUS, LAPIC_SPURIOUS_VECTOR.toULong() or LAPIC_SPURIOUS_ENABLE_BIT)
-    }
-
-    internal fun sendFixedInterrupt(destination: UInt, vector: UByte): Boolean {
-        if (vector.toUInt() !in 16u until LAPIC_SPURIOUS_VECTOR) return false
-        if (x2ApicMode) {
-            return write(
-                LAPIC_REG_ICR_LOW,
-                destination.toULong() shl 32 or vector.toULong(),
-            )
-        }
-        while (read(LAPIC_REG_ICR_LOW) and LAPIC_DELIVERY_PENDING != 0uL) {
-            bridge.asm_pause()
-        }
-        return write(
-            LAPIC_REG_ICR_HIGH,
-            (destination and LAPIC_ID_MASK).toULong() shl 24,
-        ) && write(LAPIC_REG_ICR_LOW, vector.toULong())
-    }
-
-    internal fun endOfInterrupt() {
-        write(LAPIC_REG_EOI, 0uL)
     }
 
     private fun detectX2ApicMode(): Boolean {

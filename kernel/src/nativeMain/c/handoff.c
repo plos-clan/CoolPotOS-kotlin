@@ -76,6 +76,7 @@ struct fast_task {
     uint8_t state;
     uint8_t queued;
     uint8_t wake_pending;
+    uint8_t user_interrupt_pending;
 };
 _Static_assert(
     sizeof(fast_task_t) == 64,
@@ -110,6 +111,7 @@ static uint8_t lapic_x2apic;
 static uint64_t lapic_mmio_base;
 static uint64_t scheduler_tick_cycles;
 static uint64_t bsp_lapic_id = UINT64_MAX;
+static void (*user_interrupt_handler)(void *frame);
 
 static enum fast_schedule_result fast_handoff_schedule(
     fast_cpu_t *cpu,
@@ -495,6 +497,22 @@ static enum fast_schedule_result fast_handoff_schedule(
 void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base) {
     lapic_x2apic = x2apic != 0;
     lapic_mmio_base = mmio_base;
+}
+
+void fast_handoff_set_user_interrupt_handler(void (*handler)(void *frame)) {
+    __atomic_store_n(&user_interrupt_handler, handler, __ATOMIC_RELEASE);
+}
+
+void fast_handoff_request_user_interrupt(uint64_t handle) {
+    fast_task_t *task = task_from_handle(handle);
+    if (!task || task_state_load(task) == task_zombie) return;
+    if (__atomic_exchange_n(&task->user_interrupt_pending, true, __ATOMIC_ACQ_REL))
+        return;
+    fast_cpu_t *cpu = __atomic_load_n(&task->cpu, __ATOMIC_ACQUIRE);
+    if (!cpu) return;
+    const uint64_t flags = interrupt_save();
+    lapic_send_reschedule(cpu->lapic_id);
+    interrupt_restore(flags);
 }
 
 bool fast_handoff_configure_timer(uint8_t vector, uint32_t frequency_hz) {
@@ -913,16 +931,29 @@ __attribute__((used)) bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
     if (irq_num != timer_irq) return false;
 
     cpu->timer_deadline = 0;
+    xstate_t *xstate = &((kernel_entry_frame_t *)regs)->xstate;
+    void (*handler)(void *) = __atomic_load_n(&user_interrupt_handler, __ATOMIC_ACQUIRE);
+    const bool deliver = (regs->cs & 3u) && cpu->current && handler &&
+        __atomic_exchange_n(&cpu->current->user_interrupt_pending, false, __ATOMIC_ACQ_REL);
+    if (deliver) {
+        // IRQ entry already installed kernel FS/GS. Never enter Kotlin from
+        // an interrupted kernel/GC frame; retain its request until user mode.
+        initialize_xstate_header(xstate);
+        save_xstate(xstate);
+        restore_xstate(&initial_xstate);
+        handler(&regs->rip);
+    }
     if (__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) &&
         cpu->state != cpu_offline) {
-        return fast_handoff_schedule(
+        const bool switched = fast_handoff_schedule(
             cpu,
-            &((kernel_entry_frame_t *)regs)->xstate,
+            deliver ? NULL : xstate,
             schedule_reschedule,
             NULL
         ) == schedule_switched;
+        return deliver || switched;
     } else {
         update_scheduler_timer(cpu);
     }
-    return false;
+    return deliver;
 }

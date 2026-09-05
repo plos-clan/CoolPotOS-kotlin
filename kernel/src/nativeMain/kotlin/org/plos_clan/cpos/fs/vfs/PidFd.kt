@@ -8,8 +8,8 @@ import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
 
 internal class PidFd(
-    val target: PidHandle,
-) : AnonymousFileBackend(InodeType.PIDFD, "pidfd"), PositionlessOpenFileBackend {
+    override val target: PidHandle,
+) : AnonymousFileBackend(InodeType.PIDFD, "pidfd"), PositionlessOpenFileBackend, PidHandle.Provider {
     override val fileSystemMagic: ULong
         get() = PID_FS_MAGIC
 

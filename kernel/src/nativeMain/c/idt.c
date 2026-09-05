@@ -137,6 +137,7 @@ static void *const exception_entry_stub[irq_vector_base] = {
 
 static __attribute__((naked, used)) void irq_common_entry(void) {
     __asm__ volatile(
+        "cld\n"
         "pushq %rax\n"
         "leaq 8(%rsp), %rax\n"
         "andq $-64, %rsp\n"

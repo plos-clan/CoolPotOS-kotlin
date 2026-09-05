@@ -34,8 +34,10 @@ import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.fs.vfs.VfsTimestamp
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.tasks.PidHandle
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.ProcessState
 import org.plos_clan.cpos.utils.Cmdline
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.decimalInt
@@ -85,11 +87,11 @@ internal class ProcfsInstance : SuperBlockBackend {
 
     fun processEntry(
         superBlock: SuperBlock,
-        pid: Int,
+        process: Process,
         name: VfsName
     ): Inode? {
-        val process = ProcessManager.findProcess(pid)?.takeUnless(Process::isKernelProcess)
-            ?: return null
+        if (process.state == ProcessState.DEAD) return null
+        val pid = process.id
         val fileName = name.toString()
         val file = ProcessFile.entries.firstOrNull { it.fileName == fileName }
         if (file != null) {
@@ -98,9 +100,7 @@ internal class ProcfsInstance : SuperBlockBackend {
                 id = ProcInode.process(pid, file.ordinal.toUInt() + 1u),
                 owner = process,
             ) {
-                ProcessManager.findProcess(pid)
-                    ?.takeUnless(Process::isKernelProcess)
-                    ?.let(file::render)
+                process.takeUnless { it.state == ProcessState.DEAD }?.let(file::render)
             }
         }
         if (fileName != FD_NAME) return null
@@ -139,10 +139,11 @@ internal class ProcfsInstance : SuperBlockBackend {
     ): Inode? {
         val process = ProcessManager.findProcess(pid)?.takeUnless(Process::isKernelProcess)
             ?: return null
+        val leader = process.threads.firstOrNull { it.id == pid } ?: return null
         return directory(
             superBlock = superBlock,
             id = ProcInode.process(pid),
-            backend = ProcProcessDirectory(this, pid),
+            backend = ProcProcessDirectory(this, PidHandle(leader, PidHandle.Scope.PROCESS)),
             owner = process,
         )
     }
@@ -259,15 +260,14 @@ private class ProcRootDirectory(
 
 private class ProcProcessDirectory(
     fileSystem: ProcfsInstance,
-    private val pid: Int,
-) : ProcDirectoryBackend(fileSystem) {
+    override val target: PidHandle,
+) : ProcDirectoryBackend(fileSystem), PidHandle.Provider {
     override fun resolve(superBlock: SuperBlock, name: VfsName): Inode? =
-        fileSystem.processEntry(superBlock, pid, name)
+        fileSystem.processEntry(superBlock, target.thread.process, name)
 
     override fun snapshot(): VfsResult<List<DirectoryEntry>> {
-        val process = ProcessManager.findProcess(pid)?.takeUnless(Process::isKernelProcess)
-            ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        return VfsResult.Ok(fileSystem.processEntries(process))
+        if (target.state == PidHandle.State.DEAD) return VfsResult.Err(VfsError.NOT_FOUND)
+        return VfsResult.Ok(fileSystem.processEntries(target.thread.process))
     }
 }
 

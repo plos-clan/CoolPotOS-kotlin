@@ -38,20 +38,20 @@ class SignalStateTest {
 
         assertEquals(
             SignalEnqueueResult.ADDED,
-            signals.enqueue(queued(realtime, 1uL), enforceLimit = true),
+            signals.enqueue(queued(realtime, 1uL)),
         )
         assertEquals(
             SignalEnqueueResult.ADDED,
-            signals.enqueue(queued(realtime, 2uL), enforceLimit = true),
+            signals.enqueue(queued(realtime, 2uL)),
         )
         assertEquals(
             SignalEnqueueResult.LIMIT_REACHED,
-            signals.enqueue(queued(realtime, 3uL), enforceLimit = true),
+            signals.enqueue(queued(realtime, 3uL)),
         )
 
         assertEquals(1uL, (signals.take(realtime.bit)?.payload as SignalPayload.Sender).value)
         assertEquals(2uL, (signals.take(realtime.bit)?.payload as SignalPayload.Sender).value)
-        assertEquals(SignalEnqueueResult.ADDED, signals.enqueue(queued(realtime, 3uL), true))
+        assertEquals(SignalEnqueueResult.ADDED, signals.enqueue(queued(realtime, 3uL)))
         assertEquals(3uL, (signals.take(realtime.bit)?.payload as SignalPayload.Sender).value)
     }
 
@@ -61,9 +61,9 @@ class SignalStateTest {
         val lower = checkNotNull(Signal.from(35))
         val higher = checkNotNull(Signal.from(36))
 
-        signals.enqueue(queued(higher, 1uL), true)
-        signals.enqueue(queued(lower, 2uL), true)
-        signals.enqueue(queued(lower, 3uL), true)
+        signals.enqueue(queued(higher, 1uL))
+        signals.enqueue(queued(lower, 2uL))
+        signals.enqueue(queued(lower, 3uL))
 
         assertEquals(2uL, (signals.take(ULong.MAX_VALUE)?.payload as SignalPayload.Sender).value)
         assertEquals(3uL, (signals.take(ULong.MAX_VALUE)?.payload as SignalPayload.Sender).value)
@@ -71,14 +71,15 @@ class SignalStateTest {
     }
 
     @Test
-    fun queuedStandardSignalsAlsoRespectPendingLimit() {
+    fun queuedStandardSignalsFallBackToUserInfoWhenTheQuotaIsFull() {
         val signals = PendingSignalStorage(quota(uid = 3, limit = 0uL))
         val standard = checkNotNull(Signal.from(10))
 
         assertEquals(
-            SignalEnqueueResult.LIMIT_REACHED,
-            signals.enqueue(queued(standard, 1uL), enforceLimit = true),
+            SignalEnqueueResult.ADDED,
+            signals.enqueue(queued(standard, 1uL)),
         )
+        assertEquals(SignalInfo(standard, SignalInfo.USER), signals.take(standard.bit))
         assertEquals(0uL, signals.mask)
         assertEquals(
             SignalEnqueueResult.ADDED,
@@ -92,14 +93,81 @@ class SignalStateTest {
         val second = PendingSignalStorage(quota(uid = 4, limit = 1uL))
         val realtime = checkNotNull(Signal.from(35))
 
-        assertEquals(SignalEnqueueResult.ADDED, first.enqueue(queued(realtime, 1uL), true))
+        assertEquals(SignalEnqueueResult.ADDED, first.enqueue(queued(realtime, 1uL)))
         assertEquals(
             SignalEnqueueResult.LIMIT_REACHED,
-            second.enqueue(queued(realtime, 2uL), true),
+            second.enqueue(queued(realtime, 2uL)),
         )
         assertEquals(1uL, (first.take(realtime.bit)?.payload as SignalPayload.Sender).value)
-        assertEquals(SignalEnqueueResult.ADDED, second.enqueue(queued(realtime, 2uL), true))
+        assertEquals(SignalEnqueueResult.ADDED, second.enqueue(queued(realtime, 2uL)))
         assertEquals(2uL, (second.take(realtime.bit)?.payload as SignalPayload.Sender).value)
+    }
+
+    @Test
+    fun realtimeUserSignalsCoalesceWithoutAllocatingBeyondTheQuota() {
+        val signals = PendingSignalStorage(quota(uid = 7, limit = 0uL))
+        val realtime = checkNotNull(Signal.from(35))
+        val info = SignalInfo(realtime, SignalInfo.USER)
+
+        assertEquals(SignalEnqueueResult.ADDED, signals.enqueue(info))
+        assertEquals(SignalEnqueueResult.COALESCED, signals.enqueue(info))
+        assertEquals(SignalEnqueueResult.LIMIT_REACHED, signals.enqueue(queued(realtime, 1uL)))
+        assertEquals(info, signals.take(realtime.bit))
+        assertEquals(0uL, signals.mask)
+        assertNull(signals.take(realtime.bit))
+
+        signals.enqueue(info)
+        signals.discard(realtime.bit)
+        assertEquals(0uL, signals.mask)
+        assertNull(signals.take(realtime.bit))
+    }
+
+    @Test
+    fun realtimeFallbackDoesNotReplaceQueuedInfoOrReleaseItsCharge() {
+        val signals = PendingSignalStorage(quota(uid = 8, limit = 1uL))
+        val realtime = checkNotNull(Signal.from(35))
+        val queued = queued(realtime, 1uL)
+
+        assertEquals(SignalEnqueueResult.ADDED, signals.enqueue(queued))
+        assertEquals(
+            SignalEnqueueResult.COALESCED,
+            signals.enqueue(SignalInfo(realtime, SignalInfo.USER)),
+        )
+        assertEquals(queued, signals.take(realtime.bit))
+        assertEquals(0uL, signals.mask)
+        assertEquals(SignalEnqueueResult.ADDED, signals.enqueue(queued))
+        signals.discard(realtime.bit)
+        assertEquals(SignalEnqueueResult.ADDED, signals.enqueue(queued))
+        assertEquals(queued, signals.take(realtime.bit))
+    }
+
+    @Test
+    fun realtimeThreadAndKernelCodesRequireQueueSpace() {
+        val signals = PendingSignalStorage(quota(uid = 9, limit = 0uL))
+        val realtime = checkNotNull(Signal.from(35))
+
+        for (code in listOf(SignalInfo.THREAD, SignalInfo.QUEUED, SignalInfo.KERNEL)) {
+            assertEquals(
+                SignalEnqueueResult.LIMIT_REACHED,
+                signals.enqueue(SignalInfo(realtime, code)),
+            )
+        }
+        assertEquals(0uL, signals.mask)
+    }
+
+    @Test
+    fun killAndNonnegativeStandardCodesBypassTheQuota() {
+        val signals = PendingSignalStorage(quota(uid = 10, limit = 0uL))
+        val standard = checkNotNull(Signal.from(10))
+        val infos = listOf(
+            queued(Signal.KILL, 1uL),
+            SignalInfo(standard, SignalInfo.USER, payload = SignalPayload.Sender(42, 1000)),
+            SignalInfo(standard, SignalInfo.KERNEL, payload = SignalPayload.Fault(0x1234uL)),
+        )
+        for (info in infos) {
+            assertEquals(SignalEnqueueResult.ADDED, signals.enqueue(info))
+            assertEquals(info, signals.take(info.signal.bit))
+        }
     }
 
     @Test

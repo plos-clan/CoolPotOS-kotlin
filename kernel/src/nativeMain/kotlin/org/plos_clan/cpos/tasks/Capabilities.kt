@@ -13,6 +13,7 @@ const val TASK_CAP_LAST_CAP = 40
 const val TASK_CAP_FULL_MASK = 0x1ff_ffff_ffffuL
 
 enum class CapEnum(val id: Int) {
+    KILL(5),
     SETGID(6),
     SETUID(7),
     SETPCAP(8),

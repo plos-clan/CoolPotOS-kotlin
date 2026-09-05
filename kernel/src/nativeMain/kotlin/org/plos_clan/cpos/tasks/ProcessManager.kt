@@ -56,6 +56,10 @@ internal class PidHandle(
     val thread: Thread,
     val scope: Scope,
 ) {
+    interface Provider {
+        val target: PidHandle
+    }
+
     enum class Scope {
         PROCESS,
         THREAD,
@@ -233,9 +237,6 @@ class Thread internal constructor(
     internal var parentDeathSignal: Signal?
         get() = Signal.from(parentDeathSignalNumber.load())
         set(value) = parentDeathSignalNumber.store(value?.number ?: 0)
-
-    internal val scheduledLapicId: UInt?
-        get() = scheduledCpu.load().takeIf { it >= 0 }?.toUInt()
 
     internal fun bindToCpu(lapicId: UInt) {
         val requested = lapicId.toLong()
@@ -765,6 +766,10 @@ object ProcessManager {
 
     fun snapshotProcesses(): List<Process> = processLock.withLock {
         processes.filterNot(Process::isKernelProcess).sortedBy(Process::id)
+    }
+
+    fun processesInGroup(groupId: Int): List<Process> = processLock.withLock {
+        processes.filter { !it.isKernelProcess && it.processGroupId == groupId }
     }
 
     fun childrenOf(parentId: Int): List<Process> =

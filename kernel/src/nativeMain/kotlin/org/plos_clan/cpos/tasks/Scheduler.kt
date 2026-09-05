@@ -17,7 +17,6 @@ private enum class SchedulerStartupState {
 
 class PerCpuScheduler {
     var bootstrapThread: Thread? = null
-    val signalPasses = AtomicInt(0)
     private val startupState = AtomicReference(SchedulerStartupState.WAITING)
 
     internal fun requestBind() {

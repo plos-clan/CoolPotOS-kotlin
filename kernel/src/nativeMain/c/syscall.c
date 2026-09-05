@@ -81,7 +81,7 @@ void cpu_relax(void) { __asm__ volatile("pause" : : : "memory"); }
 static void spin_lock(uint8_t *lock) {
     while (__atomic_test_and_set(lock, __ATOMIC_ACQUIRE))
         while (__atomic_load_n(lock, __ATOMIC_RELAXED))
-            cpu_relax();
+            if (!fast_handoff_yield()) cpu_relax();
 }
 
 static void spin_unlock(uint8_t *lock) { __atomic_clear(lock, __ATOMIC_RELEASE); }
@@ -267,7 +267,7 @@ static long futex_wait(
         const bool parked = waiter.task && (time
             ? fast_handoff_park_current_until(deadline)
             : fast_handoff_park_current());
-        if (!parked) cpu_relax();
+        if (!parked && !fast_handoff_yield()) cpu_relax();
     }
 }
 

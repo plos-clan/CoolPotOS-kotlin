@@ -287,28 +287,30 @@ internal class PendingSignalStorage(private val quota: PendingSignalQuota) {
     val mask: ULong
         get() = pending.load().toULong()
 
-    fun enqueue(info: SignalInfo, enforceLimit: Boolean = false): SignalEnqueueResult {
+    fun enqueue(info: SignalInfo): SignalEnqueueResult {
         val signal = info.signal
         val current = pending.load().toULong()
         if (!signal.isRealtime && current and signal.bit != 0uL) {
             return SignalEnqueueResult.COALESCED
         }
 
+        val charge = if (signal == Signal.KILL) null
+            else quota.reserve(signal.isRealtime || info.code < 0)
         if (!signal.isRealtime) {
             val index = signal.number - 1
-            val charge = if (signal == Signal.KILL) null else quota.reserve(enforceLimit)
-            if (signal != Signal.KILL && charge == null) {
-                return SignalEnqueueResult.LIMIT_REACHED
-            }
-            standard[index] = info
+            standard[index] = if (charge == null && signal != Signal.KILL) {
+                SignalInfo(signal, SignalInfo.USER)
+            } else info
             standardCharges[index] = charge
-        } else {
-            val charge = quota.reserve(enforceLimit)
-                ?: return SignalEnqueueResult.LIMIT_REACHED
+        } else if (charge != null) {
             val index = signal.number - Signal.REALTIME_MIN
             (realtime[index] ?: ArrayDeque<QueuedSignalEntry>().also {
                 realtime[index] = it
             }).addLast(QueuedSignalEntry(info, charge))
+        } else if (info.code != SignalInfo.USER) {
+            return SignalEnqueueResult.LIMIT_REACHED
+        } else if (current and signal.bit != 0uL) {
+            return SignalEnqueueResult.COALESCED
         }
         pending.store((current or signal.bit).toLong())
         return SignalEnqueueResult.ADDED
@@ -329,11 +331,11 @@ internal class PendingSignalStorage(private val quota: PendingSignalQuota) {
             }!!
         } else {
             val index = signal.number - Signal.REALTIME_MIN
-            val queue = realtime[index]!!
-            queue.removeFirst().also {
+            val queue = realtime[index]
+            queue?.removeFirst()?.also {
                 it.charge.release()
                 if (queue.isEmpty()) realtime[index] = null
-            }.info
+            }?.info ?: SignalInfo(signal, SignalInfo.USER)
         }
         if (!signal.isRealtime || realtime[signal.number - Signal.REALTIME_MIN] == null) {
             pending.store((current and signal.bit.inv()).toLong())
@@ -373,9 +375,9 @@ internal class PendingSignals(quota: PendingSignalQuota) {
     val version: Int
         get() = sequence.load()
 
-    fun enqueue(info: SignalInfo, enforceLimit: Boolean = false): SignalEnqueueResult =
+    fun enqueue(info: SignalInfo): SignalEnqueueResult =
         lock.withLock {
-            storage.enqueue(info, enforceLimit).also { result ->
+            storage.enqueue(info).also { result ->
                 if (result == SignalEnqueueResult.ADDED) sequence.store(sequence.load() + 1)
             }
         }
@@ -656,20 +658,37 @@ internal object SignalRouter {
         }
     }
 
-    private fun permitted(sender: Process, target: Process, signal: Signal?): Boolean =
-        sender === target || sender.credentials.userIds.effective == 0 ||
-            sender.credentials.userIds.real == target.credentials.userIds.real ||
-            sender.credentials.userIds.real == target.credentials.userIds.saved ||
-            sender.credentials.userIds.effective == target.credentials.userIds.real ||
-            sender.credentials.userIds.effective == target.credentials.userIds.saved ||
-            signal == Signal.CONTINUE && sender.sessionId == target.sessionId
+    private fun permitted(sender: Process, target: Process, signal: Signal?): Boolean {
+        if (sender === target) return true
+        val senderIds = sender.credentials.userIds
+        val targetIds = target.credentials.userIds
+        return senderIds.real == targetIds.real || senderIds.real == targetIds.saved ||
+            senderIds.effective == targetIds.real || senderIds.effective == targetIds.saved ||
+            signal == Signal.CONTINUE && sender.sessionId == target.sessionId ||
+            ProcessManager.currentThread()?.takeIf { it.process === sender }
+                ?.capabilities?.hasEffective(CapEnum.KILL) == true
+    }
+
+    fun sendProcesses(
+        sender: Process,
+        targets: List<Process>,
+        info: SignalInfo?,
+    ): SignalSendResult {
+        var result = SignalSendResult.NO_SUCH_PROCESS
+        var sent = false
+        for (target in targets) {
+            result = sendProcess(sender, target, info)
+            if (result == SignalSendResult.SUCCESS) sent = true
+        }
+        return if (sent) SignalSendResult.SUCCESS else result
+    }
 
     fun sendProcess(
         sender: Process?,
         target: Process,
         info: SignalInfo?,
-        enforceLimit: Boolean = false,
     ): SignalSendResult {
+        if (target.state == ProcessState.DEAD) return SignalSendResult.NO_SUCH_PROCESS
         if (sender != null && !permitted(sender, target, info?.signal)) {
             return SignalSendResult.NOT_PERMITTED
         }
@@ -677,7 +696,7 @@ internal object SignalRouter {
             return SignalSendResult.SUCCESS
         }
 
-        val result = generate(target, null, info, enforceLimit)
+        val result = generate(target, null, info)
             ?: return SignalSendResult.SUCCESS
         if (result == SignalEnqueueResult.LIMIT_REACHED) {
             return SignalSendResult.LIMIT_REACHED
@@ -716,15 +735,23 @@ internal object SignalRouter {
         sender: Process?,
         target: Thread,
         info: SignalInfo?,
-        enforceLimit: Boolean = false,
     ): SignalSendResult {
-        if (target.state == TaskState.ZOMBIE) return SignalSendResult.NO_SUCH_PROCESS
+        if (target.process.state == ProcessState.DEAD ||
+            target.state == TaskState.ZOMBIE && target.id != target.process.id
+        ) {
+            return SignalSendResult.NO_SUCH_PROCESS
+        }
+        if (sender != null && info?.signal == Signal.KILL) {
+            return sendProcess(sender, target.process, info)
+        }
         if (sender != null && !permitted(sender, target.process, info?.signal)) {
             return SignalSendResult.NOT_PERMITTED
         }
-        if (info == null) return SignalSendResult.SUCCESS
+        if (info == null || target.process.state == ProcessState.ZOMBIE) {
+            return SignalSendResult.SUCCESS
+        }
 
-        val result = generate(target.process, target, info, enforceLimit)
+        val result = generate(target.process, target, info)
             ?: return SignalSendResult.SUCCESS
         if (result == SignalEnqueueResult.LIMIT_REACHED) {
             return SignalSendResult.LIMIT_REACHED
@@ -777,13 +804,12 @@ internal object SignalRouter {
         process: Process,
         targetThread: Thread?,
         info: SignalInfo,
-        enforceLimit: Boolean,
     ): SignalEnqueueResult? {
         val pending = targetThread?.signals?.pending ?: process.signals.pending
         val result = process.signals.withAction(info.signal) { action ->
             prepare(process, info.signal)
             if (discardedAtGeneration(process, info.signal, targetThread, action)) null
-            else pending.enqueue(info, enforceLimit)
+            else pending.enqueue(info)
         }
         if (result == SignalEnqueueResult.ADDED) process.signals.notifySignalFdWaiters()
         return result

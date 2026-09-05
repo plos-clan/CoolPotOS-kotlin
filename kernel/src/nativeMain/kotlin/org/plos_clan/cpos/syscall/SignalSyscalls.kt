@@ -6,12 +6,14 @@ import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.OpenFlags
+import org.plos_clan.cpos.fs.vfs.AccessMode
 import org.plos_clan.cpos.fs.vfs.SignalFd
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.tasks.DefaultSignalAction
+import org.plos_clan.cpos.tasks.PidHandle
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
@@ -40,18 +42,48 @@ private const val MINIMUM_SIGNAL_STACK_SIZE = 2_048uL
 private const val STACK_ON_STACK = 1u
 private const val STACK_DISABLED = 2u
 private const val STACK_AUTO_DISABLE = 0x8000_0000u
+private const val PIDFD_SELF_THREAD = -10000
+private const val PIDFD_SELF_THREAD_GROUP = -10001
 
 internal data class QueuedSignalInfo(
+    val number: Int,
     val error: Int,
     val code: Int,
     val payload: ByteArray,
 ) {
+    val requiresSelf: Boolean
+        get() = code >= 0 || code == SignalInfo.THREAD
+
     fun signalInfo(signal: Signal) = SignalInfo(
         signal = signal,
         code = code,
         error = error,
         payload = SignalPayload.Raw(payload),
     )
+}
+
+internal enum class PidFdSignalScope {
+    DEFAULT,
+    THREAD,
+    THREAD_GROUP,
+    PROCESS_GROUP,
+    ;
+
+    fun resolve(scope: PidHandle.Scope): PidFdSignalScope = when {
+        this != DEFAULT -> this
+        scope == PidHandle.Scope.THREAD -> THREAD
+        else -> THREAD_GROUP
+    }
+
+    companion object {
+        fun from(flags: ULong): PidFdSignalScope? = when (flags.toUInt()) {
+            0u -> DEFAULT
+            1u -> THREAD
+            2u -> THREAD_GROUP
+            4u -> PROCESS_GROUP
+            else -> null
+        }
+    }
 }
 
 internal object SignalAbi {
@@ -98,6 +130,7 @@ internal object SignalAbi {
     fun readQueuedInfo(bytes: ByteArray): QueuedSignalInfo {
         val input = LittleEndianBuffer(bytes)
         return QueuedSignalInfo(
+            number = input.readU32(INFO_SIGNAL_OFFSET).toInt(),
             error = input.readU32(INFO_ERROR_OFFSET).toInt(),
             code = input.readU32(INFO_CODE_OFFSET).toInt(),
             payload = bytes.copyOfRange(INFO_PAYLOAD_OFFSET, SIGNAL_INFO_SIZE),
@@ -391,14 +424,70 @@ internal object SignalSyscalls {
         val pid = regs[PtraceRegisters.IDX_RDI].toUInt().toInt()
         val targets = when {
             pid > 0 -> listOfNotNull(ProcessManager.findProcess(pid))
-            pid == 0 -> ProcessManager.snapshotProcesses()
-                .filter { it.processGroupId == process.processGroupId }
+            pid == 0 -> ProcessManager.processesInGroup(process.processGroupId)
             pid == -1 -> ProcessManager.snapshotProcesses()
                 .filter { it !== process && it.id != 1 }
             pid == Int.MIN_VALUE -> emptyList()
-            else -> ProcessManager.snapshotProcesses().filter { it.processGroupId == -pid }
+            else -> ProcessManager.processesInGroup(-pid)
         }
-        return sendProcesses(process, targets, requested.value)
+        val info = requested.value?.let { SignalInfo.fromSender(it, process) }
+        return sendResult(SignalRouter.sendProcesses(process, targets, info))
+    }
+
+    fun pidfdSendSignal(regs: PtraceRegisters, process: Process): Long {
+        val flags = PidFdSignalScope.from(regs[PtraceRegisters.IDX_R10])
+            ?: return errno(Errno.EINVAL)
+        val descriptor = regs[PtraceRegisters.IDX_RDI].toInt()
+        val target = when (descriptor) {
+            PIDFD_SELF_THREAD -> {
+                val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
+                PidHandle(thread, PidHandle.Scope.THREAD)
+            }
+            PIDFD_SELF_THREAD_GROUP -> {
+                val leader = process.threads.firstOrNull { it.id == process.id }
+                    ?: return errno(Errno.ESRCH)
+                PidHandle(leader, PidHandle.Scope.PROCESS)
+            }
+            else -> {
+                val file = process.fdTable.acquire(descriptor) ?: return errno(Errno.EBADF)
+                try {
+                    if (file.access == AccessMode.PATH) return errno(Errno.EBADF)
+                    (file.inode.backend as? PidHandle.Provider)?.target
+                        ?: return errno(Errno.EBADF)
+                } finally {
+                    file.release()
+                }
+            }
+        }
+        val scope = flags.resolve(target.scope)
+        val number = regs[PtraceRegisters.IDX_RSI].toInt()
+        val infoAddress = regs[PtraceRegisters.IDX_RDX]
+        val supplied = if (infoAddress == 0uL) null else {
+            val info = readQueuedInfo(process, infoAddress) ?: return errno(Errno.EFAULT)
+            if (info.number != number) return errno(Errno.EINVAL)
+            val self = scope != PidFdSignalScope.PROCESS_GROUP &&
+                target.thread === ProcessManager.currentThread()
+            if (info.requiresSelf && !self) return errno(Errno.EPERM)
+            info
+        }
+        val group = if (scope == PidFdSignalScope.PROCESS_GROUP) {
+            ProcessManager.processesInGroup(target.thread.id).also {
+                if (it.isEmpty()) return errno(Errno.ESRCH)
+            }
+        } else {
+            if (target.state == PidHandle.State.DEAD) return errno(Errno.ESRCH)
+            null
+        }
+        val signal = Signal.from(number)
+        if (number != 0 && signal == null) return errno(Errno.EINVAL)
+        val code = if (scope == PidFdSignalScope.THREAD) SignalInfo.THREAD else SignalInfo.USER
+        val info = signal?.let { supplied?.signalInfo(it) ?: SignalInfo.fromSender(it, process, code) }
+        val result = when {
+            group != null -> SignalRouter.sendProcesses(process, group, info)
+            scope == PidFdSignalScope.THREAD -> SignalRouter.sendThread(process, target.thread, info)
+            else -> SignalRouter.sendProcess(process, target.thread.process, info)
+        }
+        return sendResult(result)
     }
 
     fun tkill(regs: PtraceRegisters, process: Process): Long {
@@ -427,13 +516,11 @@ internal object SignalSyscalls {
         val supplied = readQueuedInfo(process, regs[PtraceRegisters.IDX_RDX])
             ?: return errno(Errno.EFAULT)
         val current = ProcessManager.currentThread()
-        if ((supplied.code >= 0 || supplied.code == SignalInfo.THREAD) &&
-            current?.id != target.id
-        ) {
+        if (supplied.requiresSelf && current?.id != target.id) {
             return errno(Errno.EPERM)
         }
         val info = requested.value?.let(supplied::signalInfo)
-        return sendResult(SignalRouter.sendProcess(process, target, info, enforceLimit = true))
+        return sendResult(SignalRouter.sendProcess(process, target, info))
     }
 
     fun rtTgsigqueueinfo(regs: PtraceRegisters, process: Process): Long {
@@ -445,13 +532,11 @@ internal object SignalSyscalls {
             ?.takeIf { it.process.id == tgid } ?: return errno(Errno.ESRCH)
         val supplied = readQueuedInfo(process, regs[PtraceRegisters.IDX_R10])
             ?: return errno(Errno.EFAULT)
-        if ((supplied.code >= 0 || supplied.code == SignalInfo.THREAD) &&
-            ProcessManager.currentThread() !== target
-        ) {
+        if (supplied.requiresSelf && ProcessManager.currentThread() !== target) {
             return errno(Errno.EPERM)
         }
         val info = requested.value?.let(supplied::signalInfo)
-        return sendResult(SignalRouter.sendThread(process, target, info, enforceLimit = true))
+        return sendResult(SignalRouter.sendThread(process, target, info))
     }
 
     fun rtSigreturn(regs: PtraceRegisters, process: Process): Long {
@@ -477,29 +562,6 @@ internal object SignalSyscalls {
             }
         } finally {
             if (!regs.signalFrameInstalled) thread.signals.mask = previous
-        }
-    }
-
-    private fun sendProcesses(sender: Process, targets: List<Process>, signal: Signal?): Long {
-        if (targets.isEmpty()) return errno(Errno.ESRCH)
-        var sent = false
-        var permitted = false
-        targets.forEach { target ->
-            val info = signal?.let { SignalInfo.fromSender(it, sender) }
-            when (SignalRouter.sendProcess(sender, target, info)) {
-                SignalSendResult.SUCCESS -> {
-                    sent = true
-                    permitted = true
-                }
-                SignalSendResult.NOT_PERMITTED -> Unit
-                SignalSendResult.LIMIT_REACHED -> permitted = true
-                SignalSendResult.NO_SUCH_PROCESS -> Unit
-            }
-        }
-        return when {
-            sent -> 0L
-            permitted -> errno(Errno.EAGAIN)
-            else -> errno(Errno.EPERM)
         }
     }
 
