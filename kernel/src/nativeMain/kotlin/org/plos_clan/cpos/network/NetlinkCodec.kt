@@ -319,6 +319,7 @@ internal object NetlinkAbi {
     const val NLA_TYPE_MASK = 0x3FFF
     const val NETLINK_ADD_MEMBERSHIP = 1
     const val NETLINK_DROP_MEMBERSHIP = 2
+    const val NETLINK_PKTINFO = 3
     const val NETLINK_BROADCAST_ERROR = 4
     const val NETLINK_NO_ENOBUFS = 5
     const val NETLINK_LIST_MEMBERSHIPS = 9

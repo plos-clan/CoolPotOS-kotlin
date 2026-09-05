@@ -115,6 +115,7 @@ internal data class SocketReceiveResult(
     val senderCredentials: UnixCredentials? = null,
     val truncated: Boolean = false,
     val endOfRecord: Boolean = false,
+    val controlMessages: List<SocketControlMessage> = emptyList(),
 )
 
 internal data class AcceptedSocket(

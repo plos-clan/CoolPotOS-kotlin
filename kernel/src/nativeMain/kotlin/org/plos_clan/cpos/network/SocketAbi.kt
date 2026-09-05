@@ -3,6 +3,7 @@ package org.plos_clan.cpos.network
 import org.plos_clan.cpos.drivers.net.MacAddress
 import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.sock.SocketAddress
+import org.plos_clan.cpos.fs.sock.SocketControlMessage
 import org.plos_clan.cpos.fs.sock.SocketReceiveResult
 import org.plos_clan.cpos.fs.sock.UnspecifiedSocketAddress
 import org.plos_clan.cpos.fs.sock.UnixAncillaryData
@@ -76,7 +77,7 @@ internal object SocketConstants {
     const val SOCKET_PATH_SIZE = UNIX_ADDRESS_SIZE - UShort.SIZE_BYTES
     const val MESSAGE_HEADER_SIZE = 56
     const val MULTI_MESSAGE_HEADER_SIZE = 64
-    const val CONTROL_HEADER_SIZE = 16
+    const val CONTROL_HEADER_SIZE = SocketControlMessage.HEADER_SIZE
     const val CREDENTIAL_SIZE = Int.SIZE_BYTES * 3
     const val MAX_CONTROL_SIZE = 1024 * 1024
     const val MAX_RIGHTS = 253
@@ -460,40 +461,28 @@ internal object SocketControlMessages {
         }
         val memory = UserMemory(process.addressSpace, address)
 
+        val messages = if (credentials == null) result.controlMessages else {
+            result.controlMessages + SocketControlMessage.Integers(
+                SocketConstants.SOL_SOCKET,
+                SocketConstants.SCM_CREDENTIALS,
+                intArrayOf(credentials.processId, credentials.userId.toInt(), credentials.groupId.toInt()),
+            )
+        }
         val originalRights = ancillary?.fileCount ?: 0
-        val required = (if (credentials == null) 0 else controlSpace(SocketConstants.CREDENTIAL_SIZE)) +
-            (if (originalRights == 0) 0 else controlSpace(originalRights * Int.SIZE_BYTES))
+        val required = messages.sumOf(SocketControlMessage::space) +
+            (if (originalRights == 0) 0 else SocketControlMessage.space(originalRights * Int.SIZE_BYTES))
         val output = ByteArray(minOf(capacity, required))
         val writableCapacity = output.size
-        val writer = LittleEndianBuffer(output)
         var used = 0
         var truncated = false
         var installed = IntArray(0)
-        if (credentials != null) {
-            val space = controlSpace(SocketConstants.CREDENTIAL_SIZE)
-            if (space <= writableCapacity) {
-                writer.writeU64(used, (SocketConstants.CONTROL_HEADER_SIZE +
-                    SocketConstants.CREDENTIAL_SIZE).toULong())
-                writer.writeU32(used + 8, SocketConstants.SOL_SOCKET.toUInt())
-                writer.writeU32(used + 12, SocketConstants.SCM_CREDENTIALS.toUInt())
-                writer.writeU32(used + 16, credentials.processId.toUInt())
-                writer.writeU32(used + 20, credentials.userId)
-                writer.writeU32(used + 24, credentials.groupId)
-                used += space
-            } else {
-                truncated = true
-            }
+        for (message in messages) {
+            if (message.length > writableCapacity - used) truncated = true
+            used += message.writeTo(output, used)
         }
-
         val availableForRights = writableCapacity - used
-        var rightsCapacity = if (availableForRights < SocketConstants.CONTROL_HEADER_SIZE +
-            Int.SIZE_BYTES
-        ) 0 else (availableForRights - SocketConstants.CONTROL_HEADER_SIZE) / Int.SIZE_BYTES
-        while (rightsCapacity != 0 &&
-            controlSpace(rightsCapacity * Int.SIZE_BYTES) > availableForRights
-        ) {
-            rightsCapacity--
-        }
+        val rightsCapacity = (availableForRights - SocketConstants.CONTROL_HEADER_SIZE)
+            .coerceAtLeast(0) / Int.SIZE_BYTES
         val requestedRights = minOf(originalRights, rightsCapacity)
         if (requestedRights != 0) {
             val files = checkNotNull(ancillary).takeFiles(requestedRights)
@@ -502,17 +491,12 @@ internal object SocketControlMessages {
             installed = descriptors
             for (index in descriptors.size until files.size) files[index].release()
             if (descriptors.isNotEmpty()) {
-                val payloadLength = descriptors.size * Int.SIZE_BYTES
-                writer.writeU64(
-                    used,
-                    (SocketConstants.CONTROL_HEADER_SIZE + payloadLength).toULong(),
+                val rights = SocketControlMessage.Integers(
+                    SocketConstants.SOL_SOCKET,
+                    SocketConstants.SCM_RIGHTS,
+                    descriptors,
                 )
-                writer.writeU32(used + 8, SocketConstants.SOL_SOCKET.toUInt())
-                writer.writeU32(used + 12, SocketConstants.SCM_RIGHTS.toUInt())
-                descriptors.forEachIndexed { index, fd ->
-                    writer.writeU32(used + 16 + index * Int.SIZE_BYTES, fd.toUInt())
-                }
-                used += controlSpace(payloadLength)
+                used += rights.writeTo(output, used)
             }
             if (descriptors.size != requestedRights) truncated = true
         }
@@ -548,7 +532,4 @@ internal object SocketControlMessages {
     private fun alignControl(length: ULong): ULong =
         (length + ULong.SIZE_BYTES.toULong() - 1uL) and
             (ULong.SIZE_BYTES.toULong() - 1uL).inv()
-
-    private fun controlSpace(payloadLength: Int): Int =
-        alignControl((SocketConstants.CONTROL_HEADER_SIZE + payloadLength).toULong()).toInt()
 }
