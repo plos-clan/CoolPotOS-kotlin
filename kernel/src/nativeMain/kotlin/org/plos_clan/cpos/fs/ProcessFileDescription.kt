@@ -188,7 +188,6 @@ class FileDescriptorTable {
             entries[newFd] = FileDescriptor(source.file, flags)
             VfsResult.Ok(newFd)
         }
-        // Closing can block; dup2/dup3 deliberately ignore the displaced descriptor's close errors.
         replaced?.closeDescriptor(caller)
         return result
     }

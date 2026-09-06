@@ -254,7 +254,7 @@ internal object NetworkStack : EthernetProtocol {
 
     private data class FragmentPiece(val offset: Int, val bytes: ByteArray)
 
-    private class FragmentAssembly(val lastUpdated: ULong) {
+    private class FragmentAssembly(lastUpdated: ULong) {
         var updatedAt = lastUpdated
         var totalLength: Int? = null
         val pieces = mutableListOf<FragmentPiece>()

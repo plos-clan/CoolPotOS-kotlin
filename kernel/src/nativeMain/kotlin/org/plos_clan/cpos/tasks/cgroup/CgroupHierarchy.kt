@@ -7,7 +7,6 @@ import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import kotlin.concurrent.atomics.AtomicBoolean
 
-/** The caller serializes hierarchy operations; the scheduler only reads Task.freezing. */
 internal class CgroupHierarchy(
     private val changed: (Group, Event) -> Unit = { _, _ -> },
 ) {

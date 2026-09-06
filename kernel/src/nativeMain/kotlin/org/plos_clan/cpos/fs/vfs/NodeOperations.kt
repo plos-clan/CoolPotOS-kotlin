@@ -373,26 +373,25 @@ internal class VfsNodeOperations(
                 cookie = cookie,
                 subject = sourceInode,
             )
-            val replaced = replacedInode
-            if (mode == RenameMode.EXCHANGE && replaced != null) {
+            if (mode == RenameMode.EXCHANGE && replacedInode != null) {
                 sourceInode.notify(FileSystemEvent.MOVED)
                 val exchangeCookie = nextMoveCookie()
                 targetParentInode.notify(
                     FileSystemEvent.ENTRY_MOVED_FROM,
                     name = targetParent.name,
                     cookie = exchangeCookie,
-                    subject = replaced,
+                    subject = replacedInode,
                 )
                 sourceParentInode.notify(
                     FileSystemEvent.ENTRY_MOVED_TO,
                     name = sourceParent.name,
                     cookie = exchangeCookie,
-                    subject = replaced,
+                    subject = replacedInode,
                 )
-                replaced.notify(FileSystemEvent.MOVED)
+                replacedInode.notify(FileSystemEvent.MOVED)
             } else {
-                if (replaced != null && replaced.metadata().linkCount != 0u) {
-                    replaced.notify(FileSystemEvent.ATTRIBUTES_CHANGED)
+                if (replacedInode != null && replacedInode.metadata().linkCount != 0u) {
+                    replacedInode.notify(FileSystemEvent.ATTRIBUTES_CHANGED)
                 }
                 sourceInode.notify(FileSystemEvent.MOVED)
             }

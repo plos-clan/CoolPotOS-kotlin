@@ -117,7 +117,7 @@ class RndisDevice private constructor(
     override suspend fun transmit(frame: ByteArray): Boolean {
         val length = frame.size.toUInt()
         if (state != State.RUNNING ||
-            length < EthernetDevice.HEADER_SIZE.toUInt() || length > maximumFrameSize
+            length < HEADER_SIZE.toUInt() || length > maximumFrameSize
         ) return false
 
         transmitLock.acquire()

@@ -12,12 +12,10 @@ import org.plos_clan.cpos.tasks.SignalRouter
 import org.plos_clan.cpos.tasks.Thread
 import org.plos_clan.cpos.utils.IrqSpinLock
 
-/** Admission supplied by a cgroup directory descriptor; invoked with the hierarchy locked. */
 internal fun interface CgroupPlacement {
     fun fork(id: Int, processId: Int, parent: CgroupHierarchy.Task?): VfsResult<CgroupHierarchy.Task>
 }
 
-/** Lock order: hierarchy, then process/thread tables. No caller parks with this lock held. */
 internal object Cgroups {
     val lock = IrqSpinLock()
     var observer: ((CgroupHierarchy.Group, CgroupHierarchy.Event) -> Unit)? = null
@@ -42,7 +40,6 @@ internal object Cgroups {
         if (task.freezing) bridge.fast_handoff_request_user_interrupt(thread.nativeContext)
     }
 
-    /** Called under [lock], including for tasks reserved by a concurrent clone. */
     fun kill(group: CgroupHierarchy.Group) {
         val processes = mutableSetOf<Process>()
         for (child in group.subtree()) {
@@ -56,7 +53,6 @@ internal object Cgroups {
         }
     }
 
-    /** Interrupts user execution and wakes kernel waits so they can reach a safe point. */
     fun wake(tasks: Collection<CgroupHierarchy.Task>) {
         for (task in tasks) {
             val thread = ProcessManager.findThread(task.id) ?: continue

@@ -1,4 +1,4 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.syscall.fs
 
@@ -12,7 +12,6 @@ import org.plos_clan.cpos.fs.vfs.EpollControlOperation
 import org.plos_clan.cpos.fs.vfs.EpollEvent
 import org.plos_clan.cpos.fs.vfs.EpollEvents
 import org.plos_clan.cpos.fs.vfs.InodeType
-import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.syscall.SignalDelivery

@@ -242,9 +242,8 @@ internal class TmpfsRegularFile(
             val pageIndex = absolute / PAGE_SIZE_BYTES
             val pageOffset = (absolute % PAGE_SIZE_BYTES).toInt()
             val chunk = minOf(available - copied, PAGE_SIZE_BYTES.toInt() - pageOffset)
-            val transferred = pages[pageIndex]?.let { page ->
-                page.read(destination, destinationOffset + copied, pageOffset, chunk)
-            } ?: destination.fill(destinationOffset + copied, chunk)
+            val transferred = pages[pageIndex]?.read(destination, destinationOffset + copied, pageOffset, chunk)
+                ?: destination.fill(destinationOffset + copied, chunk)
             if (transferred == 0) {
                 if (copied == 0) return@withLock IoResult.failure(VfsError.FAULT)
                 break

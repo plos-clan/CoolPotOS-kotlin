@@ -131,7 +131,6 @@ internal data class CloneRequest(
                     signals = threadSignals,
                     placement = placement,
                     prepare = { id ->
-                        // Resolve pages after fork so parent writes honor copy-on-write.
                         val bytes = ByteArray(Int.SIZE_BYTES)
                         val output = LittleEndianBuffer(bytes)
                         if (descriptor != null) {

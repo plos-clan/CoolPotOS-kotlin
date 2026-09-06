@@ -295,7 +295,7 @@ internal object RouteNetlinkProtocol :
                 0u
             }
         val route = NetworkRoute(
-            Ipv4Prefix(checkNotNull(destination), prefixLength),
+            Ipv4Prefix(destination, prefixLength),
             gateway,
             interfaceIndex,
             preferredSource,

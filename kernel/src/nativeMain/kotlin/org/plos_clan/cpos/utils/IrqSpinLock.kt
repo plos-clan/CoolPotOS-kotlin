@@ -13,7 +13,6 @@ class IrqSpinLock {
     inline fun <T> withLock(block: () -> T): T {
         val flags = bridge.irq_save()
         while (!held.compareAndSet(expectedValue = false, newValue = true)) {
-            // A GC safepoint can suspend the owner even with interrupts disabled.
             if (!bridge.fast_handoff_yield()) bridge.asm_pause()
         }
         return try {

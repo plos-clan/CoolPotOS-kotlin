@@ -637,7 +637,7 @@ internal class TcpSocket internal constructor(
             transmissions.forEach(subsystem::transmit)
             if (result != null && (transferred != 0 || !result.isSuccess)) return result
             if (transferred == request.count) return IoResult.success(transferred)
-            if (waiter != null && !writeWaiters.await(lock, checkNotNull(waiter))) {
+            if (waiter != null && !writeWaiters.await(lock, waiter)) {
                 return if (transferred == 0) IoResult.failure(VfsError.INTERRUPTED)
                 else IoResult.success(transferred)
             }
@@ -710,8 +710,8 @@ internal class TcpSocket internal constructor(
     ): VfsResult<Unit> {
         if (value.size < Int.SIZE_BYTES) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         val requested = LittleEndianBuffer(value).readU32(0).toInt()
-        return when {
-            level == IPPROTO_TCP && name == TCP_NODELAY -> {
+        return when (level) {
+            IPPROTO_TCP if name == TCP_NODELAY -> {
                 val transmissions = lock.withLock {
                     noDelay = requested != 0
                     flushLocked()
@@ -719,7 +719,7 @@ internal class TcpSocket internal constructor(
                 transmissions.forEach(subsystem::transmit)
                 VfsResult.Ok(Unit)
             }
-            level == IPPROTO_TCP && name == TCP_MAXSEG -> {
+            IPPROTO_TCP if name == TCP_MAXSEG -> {
                 if (requested !in MINIMUM_MSS..UShort.MAX_VALUE.toInt()) {
                     VfsResult.Err(VfsError.INVALID_ARGUMENT)
                 } else {
@@ -732,7 +732,7 @@ internal class TcpSocket internal constructor(
                     }
                 }
             }
-            level == SOL_IP && name == IP_TTL -> {
+            SOL_IP if name == IP_TTL -> {
                 if (requested !in 1..UByte.MAX_VALUE.toInt()) {
                     VfsResult.Err(VfsError.INVALID_ARGUMENT)
                 } else {
@@ -745,11 +745,11 @@ internal class TcpSocket internal constructor(
     }
 
     override fun getProtocolOption(level: Int, name: Int): VfsResult<ByteArray> {
-        val value = when {
-            level == IPPROTO_TCP && name == TCP_NODELAY -> lock.withLock { if (noDelay) 1 else 0 }
-            level == IPPROTO_TCP && name == TCP_MAXSEG -> lock.withLock { peerMss }
-            level == SOL_IP && name == IP_TTL -> lock.withLock { ttl }
-            level == SOL_IP && name == IP_MTU -> lock.withLock {
+        val value = when (level) {
+            IPPROTO_TCP if name == TCP_NODELAY -> lock.withLock { if (noDelay) 1 else 0 }
+            IPPROTO_TCP if name == TCP_MAXSEG -> lock.withLock { peerMss }
+            SOL_IP if name == IP_TTL -> lock.withLock { ttl }
+            SOL_IP if name == IP_MTU -> lock.withLock {
                 val destination = remote ?: return@withLock null
                 when (val path = NetworkStack.path(local.address, destination.address)) {
                     is VfsResult.Ok -> path.value.mtu
@@ -786,7 +786,7 @@ internal class TcpSocket internal constructor(
             segment,
             local,
             remote,
-        ) ?: return
+        )
         val accepted = lock.withLock {
             if (state != State.LISTEN || children.size >= backlog) return@withLock false
             children += child
@@ -947,12 +947,12 @@ internal class TcpSocket internal constructor(
         segment: TcpSegment,
         local: Ipv4SocketAddress,
         remote: Ipv4SocketAddress,
-    ): TcpTransmission? = lock.withLock {
+    ): TcpTransmission = lock.withLock {
         this.parent = parent
         this.binding = local
         this.local = local
         this.remote = remote
-        localMss = (requestedMss ?: interfaceMtu - IPV4_TCP_HEADER_SIZE)
+        localMss = ((requestedMss ?: (interfaceMtu - IPV4_TCP_HEADER_SIZE)))
             .coerceIn(MINIMUM_MSS, UShort.MAX_VALUE.toInt())
         peerMss = (segment.options.maximumSegmentSize?.toInt() ?: DEFAULT_MSS)
             .coerceAtLeast(MINIMUM_MSS)

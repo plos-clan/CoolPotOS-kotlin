@@ -11,7 +11,6 @@ import org.plos_clan.cpos.tasks.cgroup.CgroupPlacement
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PollEvents
 
-/** All mounts share the unified hierarchy and inode identities, including after unmount. */
 object Cgroupfs : FileSystemType("cgroup2", 0x63677270uL) {
     private class Options(val names: List<String>) : FileSystemOptions
     private var shared: SuperBlock? = null
@@ -22,8 +21,7 @@ object Cgroupfs : FileSystemType("cgroup2", 0x63677270uL) {
         if (MountFlag.READ_ONLY in file.path.mount.flags) return VfsResult.Err(VfsError.READ_ONLY)
         return VfsResult.Ok(CgroupPlacement { id, pid, parent ->
             val access = directory.migrationAccess(caller, inode, listOf(parent?.group ?: Cgroups.hierarchy.root), checkTarget = true)
-            if (access is VfsResult.Err) access
-            else Cgroups.hierarchy.fork(id, pid, parent, directory.group, thread)
+            access as? VfsResult.Err ?: Cgroups.hierarchy.fork(id, pid, parent, directory.group, thread)
         })
     }
 
@@ -42,7 +40,7 @@ object Cgroupfs : FileSystemType("cgroup2", 0x63677270uL) {
             else -> VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
 
-    internal override fun createSuperBlock(source: String?, options: FileSystemOptions): VfsResult<SuperBlock> =
+    override fun createSuperBlock(source: String?, options: FileSystemOptions): VfsResult<SuperBlock> =
         Cgroups.lock.withLock {
             if (options !is Options && options !== EmptyFileSystemOptions) {
                 return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
@@ -62,14 +60,14 @@ object Cgroupfs : FileSystemType("cgroup2", 0x63677270uL) {
             }
         }
 
-    internal override fun createSuperBlock(request: MountRequest): VfsResult<SuperBlock> =
+    override fun createSuperBlock(request: MountRequest): VfsResult<SuperBlock> =
         when (val options = configure(request.source, request.data)) {
             is VfsResult.Ok -> createSuperBlock(request.source, options.value)
             is VfsResult.Err -> options
         }
 }
 
-private enum class ControlFile(val fileName: String, val mode: UInt = 0x124u, val controller: Controller? = null) {
+private enum class ControlFile(fileName: String, val mode: UInt = 0x124u, val controller: Controller? = null) {
     TYPE("cgroup.type", 0x1a4u),
     PROCS("cgroup.procs", 0x1a4u),
     THREADS("cgroup.threads", 0x1a4u),

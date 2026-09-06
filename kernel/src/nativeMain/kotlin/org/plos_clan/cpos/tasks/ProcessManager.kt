@@ -82,7 +82,6 @@ internal class PidHandle(
         DEAD,
     }
 
-    /** Bind once, before publishing the descriptor, so PID reuse can never change its target. */
     fun attach(thread: Thread) {
         check(!::thread.isInitialized)
         require(scope == Scope.THREAD || thread.id == thread.process.id)

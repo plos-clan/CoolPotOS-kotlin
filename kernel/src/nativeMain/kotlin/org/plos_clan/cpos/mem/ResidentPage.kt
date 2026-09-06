@@ -12,7 +12,6 @@ import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import platform.posix.memmove
 import platform.posix.memset
 
-/** One owned frame, shared directly with user page tables and never reclaimed as clean cache. */
 internal class ResidentPage private constructor(val frame: ULong) : BufferDestination {
     private val pointer: CPointer<UByteVar>
         get() = checkNotNull(Hhdm.toVirtualPointer(frame))

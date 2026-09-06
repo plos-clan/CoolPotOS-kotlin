@@ -473,7 +473,6 @@ class AddressSpace internal constructor(
         )
     }
 
-    /** Remove PTEs after the file has changed; never called while holding its content lock. */
     internal fun invalidateFile(
         identity: Any,
         offset: ULong,

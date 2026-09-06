@@ -2,7 +2,6 @@ package org.plos_clan.cpos.fs.vfs
 
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_WRITABLE
 
-/** Inode-wide policy; the file's content lock serializes all operations on this state. */
 internal class FileSeals(initial: Int = SEAL) {
     var bits: Int = initial
         private set

@@ -13,6 +13,8 @@ packages=(
     fuse-overlayfs
     python
     dbus
+    dbus-broker
+    dbus-broker-units
     networkmanager
     less
     ethtool

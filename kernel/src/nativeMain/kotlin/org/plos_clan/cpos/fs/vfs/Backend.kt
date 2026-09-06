@@ -520,7 +520,6 @@ interface FileContent {
 }
 
 interface OpenFileBackend {
-    /** Regular virtual files can explicitly provide epoll notifications. */
     val supportsEpoll: Boolean
         get() = false
 

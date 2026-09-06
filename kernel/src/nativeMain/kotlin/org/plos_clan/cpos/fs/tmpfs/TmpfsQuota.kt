@@ -1,6 +1,5 @@
 package org.plos_clan.cpos.fs.tmpfs
 
-/** Resource accounting serialized by the owning filesystem's lock. */
 internal class TmpfsQuota(private val limit: ULong?) {
     var used: ULong = 0uL
         private set
