@@ -138,7 +138,7 @@ class Inode internal constructor(
         }
         if (shouldEvict) {
             removeObservers(InodeObserverRemoval.DELETED)
-            backend.evict(this)
+            superBlock.backend.evict(this)
         }
     }
 
@@ -238,7 +238,7 @@ class Inode internal constructor(
         }
         if (shouldEvict) {
             removeObservers(InodeObserverRemoval.DELETED)
-            backend.evict(this)
+            superBlock.backend.evict(this)
         }
     }
 

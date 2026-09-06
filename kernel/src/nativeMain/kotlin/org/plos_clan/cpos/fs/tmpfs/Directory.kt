@@ -64,6 +64,7 @@ internal class TmpfsDirectory(
                 return@withLock VfsResult.Err(VfsError.TOO_MANY_LINKS)
             }
             val inode = fileSystem.newNode(directory.superBlock, node, directory)
+                ?: return@withLock VfsResult.Err(VfsError.NO_SPACE)
             children[name] = inode
             directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
                 if (node.kind == NodeKind.Directory) it.copy(linkCount = it.linkCount + 1u)
@@ -87,6 +88,9 @@ internal class TmpfsDirectory(
                 val links = target.metadata().linkCount
                 if (links == UInt.MAX_VALUE) {
                     return@withLock VfsResult.Err(VfsError.TOO_MANY_LINKS)
+                }
+                if (links != 0u && !fileSystem.reserveInode()) {
+                    return@withLock VfsResult.Err(VfsError.NO_SPACE)
                 }
                 children[name] = target
                 target.updateMetadata { it.copy(linkCount = links + 1u) }
@@ -141,15 +145,13 @@ internal class TmpfsDirectory(
                 directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
                     it.copy(linkCount = it.linkCount - 1u)
                 }
-                child.parent = null
-                inode.updateMetadata { it.copy(linkCount = 0u) }
             } else {
                 if (inode.type == InodeType.DIRECTORY) {
                     return@withLock VfsResult.Err(VfsError.IS_DIRECTORY)
                 }
-                inode.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
                 directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED)
             }
+            unlink(inode)
             children.remove(name)
             VfsResult.Ok(Unit)
         }
@@ -176,7 +178,8 @@ internal class TmpfsDirectory(
         val name = path[index]
         if (index == path.lastIndex) {
             if (children.containsKey(name)) return@withLock false
-            val child = fileSystem.newSpecialNode(directory.superBlock, backend, metadata)
+            val child = fileSystem.newInode(directory.superBlock, backend, metadata)
+                ?: return@withLock false
             children[name] = child
             directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED)
             directory.notify(FileSystemEvent.ENTRY_CREATED, name = name, subject = child)
@@ -186,12 +189,12 @@ internal class TmpfsDirectory(
         var child = children[name]
         var created = false
         if (child == null) {
-            child = fileSystem.newDirectory(
+            child = fileSystem.newNode(
                 directory.superBlock,
-                FileMode(0x1EDu),
+                NodeCreation(NodeKind.Directory, FileMode(0x1EDu)),
                 automatic = true,
                 parent = directory,
-            )
+            ) ?: return@withLock false
             children[name] = child
             created = true
         }
@@ -205,8 +208,7 @@ internal class TmpfsDirectory(
         )
         if (!installed && created && childDirectory.isEmpty()) {
             children.remove(name)
-            childDirectory.parent = null
-            child.updateMetadata { it.copy(linkCount = 0u) }
+            unlink(child)
         } else if (installed && created) {
             directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
                 it.copy(linkCount = it.linkCount + 1u)
@@ -227,7 +229,7 @@ internal class TmpfsDirectory(
         if (index == path.lastIndex) {
             if (!matches(child.backend)) return@withLock false
             children.remove(name)
-            child.updateMetadata { it.copy(linkCount = 0u) }
+            unlink(child)
             directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED)
             directory.notify(FileSystemEvent.ENTRY_DELETED, name = name, subject = child)
             return@withLock true
@@ -245,8 +247,7 @@ internal class TmpfsDirectory(
             directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
                 it.copy(linkCount = it.linkCount - 1u)
             }
-            childDirectory.parent = null
-            child.updateMetadata { it.copy(linkCount = 0u) }
+            unlink(child)
             directory.notify(FileSystemEvent.ENTRY_DELETED, name = name, subject = child)
         }
         removed
@@ -349,12 +350,7 @@ internal class TmpfsDirectory(
             (source.backend as TmpfsDirectory).parent = targetDirectory
         }
         if (replaced != null) {
-            if (replaced.type == InodeType.DIRECTORY) {
-                (replaced.backend as TmpfsDirectory).parent = null
-                replaced.updateMetadata { it.copy(linkCount = 0u) }
-            } else {
-                replaced.updateMetadata { it.copy(linkCount = it.linkCount - 1u) }
-            }
+            unlink(replaced)
         }
         if (this === target) {
             sourceDirectory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) {
@@ -378,6 +374,16 @@ internal class TmpfsDirectory(
         }
         source.updateMetadata()
         return VfsResult.Ok(Unit)
+    }
+
+    private fun unlink(inode: Inode) {
+        val directory = inode.backend as? TmpfsDirectory
+        directory?.parent = null
+        // Like Linux tmpfs, each extra hard link consumes an inode quota slot.
+        if (directory == null && inode.metadata().linkCount > 1u) fileSystem.releaseInode()
+        inode.updateMetadata {
+            it.copy(linkCount = if (directory == null) it.linkCount - 1u else 0u)
+        }
     }
 
     private fun isWithin(directory: Inode, ancestor: Inode): Boolean {

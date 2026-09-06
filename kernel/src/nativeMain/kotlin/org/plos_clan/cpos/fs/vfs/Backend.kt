@@ -69,6 +69,8 @@ interface SuperBlockBackend {
 
     fun createRoot(superBlock: SuperBlock): Inode
 
+    fun evict(inode: Inode) = inode.backend.evict(inode)
+
     fun updateTimestamps(
         caller: VfsOperationContext,
         inode: Inode,
