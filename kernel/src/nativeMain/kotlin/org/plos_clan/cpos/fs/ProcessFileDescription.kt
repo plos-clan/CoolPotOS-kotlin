@@ -45,12 +45,37 @@ object FileDescriptorFlags {
     const val FD_CLOEXEC = 1uL
 }
 
-data class FileDescriptor(
-    val file: OpenFileDescription,
-    val flags: ULong,
-)
-
 class FileDescriptorTable {
+    internal sealed interface Entry
+
+    private data class FileDescriptor(
+        val file: OpenFileDescription,
+        val flags: ULong,
+    ) : Entry
+
+    internal inner class Reservation internal constructor(
+        val fd: Int,
+        file: OpenFileDescription,
+        flags: ULong,
+    ) : Entry, AutoCloseable {
+        private val descriptor = FileDescriptor(file, flags)
+
+        fun install(): Int = lock.withLock {
+            check(entries.slot(fd) === this) { "Descriptor reservation is no longer pending" }
+            entries[fd] = descriptor
+            fd
+        }
+
+        override fun close() {
+            val cancelled = lock.withLock {
+                if (entries.slot(fd) !== this) return@withLock false
+                entries[fd] = null
+                true
+            }
+            if (cancelled) descriptor.file.release()
+        }
+    }
+
     enum class CloseRangeAction {
         CLOSE,
         MARK_CLOSE_ON_EXEC,
@@ -62,7 +87,7 @@ class FileDescriptorTable {
     fun installExact(
         fd: Int, file: OpenFileDescription, flags: ULong
     ): Boolean = lock.withLock {
-        if (fd !in entries.indices || entries[fd] != null) {
+        if (fd !in entries.indices || entries.slot(fd) != null) {
             return@withLock false
         }
 
@@ -78,6 +103,16 @@ class FileDescriptorTable {
         val fd = entries.firstEmpty(minimum) ?: return@withLock null
         entries[fd] = FileDescriptor(file, flags)
         fd
+    }
+
+    internal fun reserve(
+        file: OpenFileDescription,
+        flags: ULong,
+        limit: ULong,
+    ): Reservation? = lock.withLock {
+        val fd = entries.firstEmpty(0)?.takeIf { it.toULong() < limit }
+            ?: return@withLock null
+        Reservation(fd, file, flags).also { entries[fd] = it }
     }
 
     fun installAll(
@@ -137,20 +172,21 @@ class FileDescriptorTable {
 
     fun snapshotDescriptors(): IntArray = lock.withLock { entries.occupiedIndices() }
 
-    fun dup2(caller: VfsOperationContext, oldFd: Int, newFd: Int): Boolean {
+    fun dup2(caller: VfsOperationContext, oldFd: Int, newFd: Int): VfsResult<Unit> {
         var replaced: OpenFileDescription? = null
-        val duplicated = lock.withLock {
-            if (newFd !in entries.indices) return@withLock false
-            val source = entries[oldFd] ?: return@withLock false
-            if (oldFd == newFd) return@withLock true
-            if (!source.file.retain()) return@withLock false
+        val result = lock.withLock {
+            if (newFd !in entries.indices) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
+            val source = entries[oldFd] ?: return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
+            if (oldFd == newFd) return@withLock VfsResult.Ok(Unit)
+            if (entries.slot(newFd) is Reservation) return@withLock VfsResult.Err(VfsError.BUSY)
+            if (!source.file.retain()) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
 
             replaced = entries[newFd]?.file
             entries[newFd] = FileDescriptor(source.file, 0uL)
-            true
+            VfsResult.Ok(Unit)
         }
-        if (duplicated) replaced?.closeDescriptor(caller)
-        return duplicated
+        replaced?.closeDescriptor(caller)
+        return result
     }
 
     fun close(caller: VfsOperationContext, fd: Int): VfsResult<Unit> {
@@ -196,7 +232,7 @@ class FileDescriptorTable {
             }
         }
         return destination.lock.withLock {
-            if (descriptors.any { (fd, _) -> destination.entries[fd] != null }) {
+            if (descriptors.any { (fd, _) -> destination.entries.slot(fd) != null }) {
                 descriptors.forEach { (_, descriptor) -> descriptor.file.release() }
                 false
             } else {
@@ -232,21 +268,22 @@ class FileDescriptorTable {
         val indices = 0 until size
         private val segments = Array((size + SEGMENT_SIZE - 1) / SEGMENT_SIZE) { index ->
             val remaining = size - index * SEGMENT_SIZE
-            AtomicReference(arrayOfNulls<FileDescriptor>(minOf(SEGMENT_SIZE, remaining)))
+            AtomicReference(arrayOfNulls<Entry>(minOf(SEGMENT_SIZE, remaining)))
         }
 
-        operator fun get(index: Int): FileDescriptor? {
+        fun slot(index: Int): Entry? {
             if (index !in indices) return null
             return segments[index / SEGMENT_SIZE].load()[index % SEGMENT_SIZE]
         }
 
+        operator fun get(index: Int): FileDescriptor? = slot(index) as? FileDescriptor
+
         operator fun get(index: ULong): FileDescriptor? {
             if (index >= size.toULong()) return null
-            val validIndex = index.toInt()
-            return segments[validIndex / SEGMENT_SIZE].load()[validIndex % SEGMENT_SIZE]
+            return get(index.toInt())
         }
 
-        operator fun set(index: Int, descriptor: FileDescriptor?) {
+        operator fun set(index: Int, descriptor: Entry?) {
             require(index in indices)
             val segment = index / SEGMENT_SIZE
             val updated = segments[segment].load().copyOf()
@@ -310,12 +347,12 @@ class FileDescriptorTable {
         }
 
         fun occupiedIndices(): IntArray {
-            val count = segments.sumOf { segment -> segment.load().count { it != null } }
+            val count = segments.sumOf { segment -> segment.load().count { it is FileDescriptor } }
             val result = IntArray(count)
             var resultIndex = 0
             segments.forEachIndexed { segmentIndex, segment ->
                 segment.load().forEachIndexed { offset, descriptor ->
-                    if (descriptor != null) {
+                    if (descriptor is FileDescriptor) {
                         result[resultIndex++] = segmentIndex * SEGMENT_SIZE + offset
                     }
                 }
@@ -326,9 +363,9 @@ class FileDescriptorTable {
         fun removeIf(predicate: (FileDescriptor) -> Boolean): List<FileDescriptor> = buildList {
             for (segment in segments) {
                 val snapshot = segment.load()
-                var updated: Array<FileDescriptor?>? = null
+                var updated: Array<Entry?>? = null
                 for (index in snapshot.indices) {
-                    val descriptor = snapshot[index] ?: continue
+                    val descriptor = snapshot[index] as? FileDescriptor ?: continue
                     if (!predicate(descriptor)) continue
                     val replacement = updated ?: snapshot.copyOf()
                     replacement[index] = null
@@ -350,9 +387,9 @@ class FileDescriptorTable {
                 val segment = segments[segmentIndex]
                 val snapshot = segment.load()
                 val segmentEnd = minOf(end - segmentIndex * SEGMENT_SIZE, snapshot.size)
-                var updated: Array<FileDescriptor?>? = null
+                var updated: Array<Entry?>? = null
                 for (offset in index % SEGMENT_SIZE until segmentEnd) {
-                    val descriptor = snapshot[offset] ?: continue
+                    val descriptor = snapshot[offset] as? FileDescriptor ?: continue
                     val result = replacement(descriptor)
                     if (result === descriptor) continue
                     val target = updated ?: snapshot.copyOf().also { updated = it }

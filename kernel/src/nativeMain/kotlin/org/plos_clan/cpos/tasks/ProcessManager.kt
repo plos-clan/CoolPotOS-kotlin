@@ -58,9 +58,15 @@ internal enum class ProcessGroupResult {
 }
 
 internal class PidHandle(
-    val thread: Thread,
     val scope: Scope,
 ) {
+    lateinit var thread: Thread
+        private set
+
+    constructor(thread: Thread, scope: Scope) : this(scope) {
+        attach(thread)
+    }
+
     interface Provider {
         val target: PidHandle
     }
@@ -76,8 +82,11 @@ internal class PidHandle(
         DEAD,
     }
 
-    init {
+    /** Bind once, before publishing the descriptor, so PID reuse can never change its target. */
+    fun attach(thread: Thread) {
+        check(!::thread.isInitialized)
         require(scope == Scope.THREAD || thread.id == thread.process.id)
+        this.thread = thread
     }
 
     val state: State
@@ -671,6 +680,7 @@ object ProcessManager {
         registers: ULongArray? = null,
         signals: ThreadSignalState? = null,
         placement: CgroupPlacement? = null,
+        prepare: (Int) -> VfsResult<Unit> = { VfsResult.Ok(Unit) },
     ): VfsResult<Thread> {
         if (process.isKernelProcess || entryPoint == 0uL || stackPointer == 0uL) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
@@ -686,6 +696,8 @@ object ProcessManager {
         }
         var published = false
         try {
+            val preparation = prepare(cgroup.id)
+            if (preparation is VfsResult.Err) return preparation
             val stack = allocateKernelStack(
                 name = "process ${process.id} thread",
                 stackPages = kernelStackPages,

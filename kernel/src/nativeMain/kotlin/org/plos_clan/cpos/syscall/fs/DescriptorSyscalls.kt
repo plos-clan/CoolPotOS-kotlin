@@ -96,10 +96,9 @@ internal fun dup2(regs: PtraceRegisters, process: Process): Long {
         ?: return errno(Errno.EBADF)
     val newFd = fileDescriptor(regs[PtraceRegisters.IDX_RSI])
         ?: return errno(Errno.EBADF)
-    return if (process.fdTable.dup2(process.vfsOperationContext, oldFd, newFd)) {
-        newFd.toLong()
-    } else {
-        errno(Errno.EBADF)
+    return when (val result = process.fdTable.dup2(process.vfsOperationContext, oldFd, newFd)) {
+        is VfsResult.Ok -> newFd.toLong()
+        is VfsResult.Err -> errno(result.error.errno)
     }
 }
 
