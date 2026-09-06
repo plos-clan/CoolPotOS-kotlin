@@ -292,6 +292,8 @@ internal class SysfsRegistry(
         installFixedDirectory(DEV_CHAR_ID, DEV_ID, "char", mutableChildren = true, createdAt)
         installFixedDirectory(DEV_BLOCK_ID, DEV_ID, "block", mutableChildren = true, createdAt)
         installFixedDirectory(VIRTUAL_ID, DEVICES_ID, "virtual", mutableChildren = true, createdAt)
+        installFixedDirectory(FS_ID, ROOT_ID, "fs", mutableChildren = true, createdAt)
+        installFixedDirectory(CGROUP_ID, FS_ID, "cgroup", mutableChildren = false, createdAt)
     }
 
     val root: SysfsNode.Directory
@@ -959,6 +961,8 @@ internal class SysfsRegistry(
         const val DEV_CHAR_ID = 8uL
         const val DEV_BLOCK_ID = 9uL
         const val VIRTUAL_ID = 10uL
+        private const val FS_ID = 11uL
+        private const val CGROUP_ID = 12uL
         private const val FIRST_DYNAMIC_ID = 16uL
     }
 }

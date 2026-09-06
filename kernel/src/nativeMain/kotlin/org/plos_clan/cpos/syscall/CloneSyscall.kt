@@ -3,6 +3,8 @@
 package org.plos_clan.cpos.syscall
 
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.fs.cgroupfs.Cgroupfs
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.tasks.MemoryCloneMode
@@ -12,6 +14,7 @@ import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.Signal
 import org.plos_clan.cpos.tasks.SignalStack
 import org.plos_clan.cpos.tasks.TaskState
+import org.plos_clan.cpos.tasks.TaskReaper
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -33,6 +36,7 @@ private enum class Flag(val mask: ULong) {
     CHILD_CLEARTID(0x0020_0000uL),
     CHILD_SETTID(0x0100_0000uL),
     CLEAR_SIGHAND(0x1_0000_0000uL),
+    INTO_CGROUP(0x2_0000_0000uL),
 }
 
 private val supportedFlags = Flag.entries.fold(0uL) { mask, flag -> mask or flag.mask }
@@ -46,6 +50,7 @@ private data class Request(
     val parentTid: ULong,
     val childTid: ULong,
     val tls: ULong,
+    val cgroup: ULong? = null,
 ) {
     fun execute(registers: PtraceRegisters, parent: Process): Long {
         val validationError = validate()
@@ -69,6 +74,18 @@ private data class Request(
             null
         }
         val threadClone = has(Flag.THREAD)
+        val placement = if (has(Flag.INTO_CGROUP)) {
+            val file = parent.fdTable.acquire(checkNotNull(cgroup)) ?: return errno(Errno.EBADF)
+            val result = try {
+                Cgroupfs.placement(parent.vfsOperationContext, file, threadClone)
+            } finally {
+                file.release()
+            }
+            when (result) {
+                is VfsResult.Ok -> result.value
+                is VfsResult.Err -> return errno(result.error.errno)
+            }
+        } else null
         val child = if (threadClone) {
             parent
         } else {
@@ -103,7 +120,7 @@ private data class Request(
                 stack = current.signals.stack.takeIf { inheritStack } ?: SignalStack.DISABLED,
             )
         }
-        val childThread = ProcessManager.createUserThread(
+        val childThread = when (val result = ProcessManager.createUserThread(
             process = child,
             entryPoint = registers[PtraceRegisters.IDX_RIP],
             stackPointer = childStack,
@@ -111,9 +128,13 @@ private data class Request(
             fsBase = fsBase,
             registers = snapshot,
             signals = threadSignals,
-        ) ?: run {
-            if (!threadClone) ProcessManager.discardUserProcess(child)
-            return errno(Errno.ENOMEM)
+            placement = placement,
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> {
+                if (!threadClone) ProcessManager.discardUserProcess(child)
+                return errno(result.error.errno)
+            }
         }
         childThread.capabilities.inherit(current.capabilities)
 
@@ -124,6 +145,8 @@ private data class Request(
             childTidMemory?.copyToUser(tid) == false
         ) {
             childThread.state = TaskState.ZOMBIE
+            ProcessManager.notifyThreadExited(childThread)
+            if (child.completeThreadExit(0)) TaskReaper.enqueue(child)
             return errno(Errno.EFAULT)
         }
         if (has(Flag.CHILD_CLEARTID)) childThread.clearChildTid = childTid
@@ -135,6 +158,7 @@ private data class Request(
 
     private fun validate(): Int? = when {
         flags and supportedFlags.inv() != 0uL || exitSignal > SIGNAL_COUNT -> Errno.EINVAL
+        has(Flag.INTO_CGROUP) && cgroup == null -> Errno.EINVAL
         has(Flag.CLEAR_SIGHAND) && has(Flag.SIGHAND) -> Errno.EINVAL
         has(Flag.SIGHAND) && !has(Flag.VM) -> Errno.EINVAL
         has(Flag.THREAD) && (!has(Flag.SIGHAND) || exitSignal != 0uL) -> Errno.EINVAL
@@ -172,6 +196,7 @@ private data class Arguments(
     val stackSize: ULong,
     val tls: ULong,
     val setTidSize: ULong,
+    val cgroup: ULong?,
 ) {
     fun toRequest(): Request? {
         if (flags and EXIT_SIGNAL_MASK != 0uL ||
@@ -188,6 +213,7 @@ private data class Arguments(
             parentTid = parentTid,
             childTid = childTid,
             tls = tls,
+            cgroup = cgroup,
         )
     }
 
@@ -208,6 +234,7 @@ private data class Arguments(
                 tls = input.readU64(56),
                 setTidSize = if (setTidBytes == 0) 0uL
                 else input.readUnsigned(72, setTidBytes),
+                cgroup = if (bytes.size >= NATIVE_SIZE) input.readU64(80) else null,
             )
         }
     }

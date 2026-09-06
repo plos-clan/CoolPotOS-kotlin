@@ -3,6 +3,7 @@
 package org.plos_clan.cpos.tasks
 
 import kotlinx.cinterop.ExperimentalForeignApi
+import org.plos_clan.cpos.tasks.cgroup.Cgroups
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -104,10 +105,15 @@ object Scheduler {
         return accepted
     }
 
-    fun parkCurrent(): Boolean = bridge.fast_handoff_park_current()
+    fun parkCurrent(): Boolean {
+        if (Cgroups.awaitThaw(ProcessManager.currentThread())) return true
+        return bridge.fast_handoff_park_current()
+    }
 
-    fun parkCurrentUntil(deadlineNanos: ULong): Boolean =
-        bridge.fast_handoff_park_current_until(deadlineNanos)
+    fun parkCurrentUntil(deadlineNanos: ULong): Boolean {
+        if (Cgroups.awaitThaw(ProcessManager.currentThread())) return true
+        return bridge.fast_handoff_park_current_until(deadlineNanos)
+    }
 
     fun yieldCurrent(): Boolean = bridge.fast_handoff_yield()
 

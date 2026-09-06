@@ -81,13 +81,17 @@ object Init {
 
         initializeStdio(process)
 
-        val thread = ProcessManager.createUserThread(
+        val thread = when (val result = ProcessManager.createUserThread(
             process = process,
             entryPoint = image.entryPoint,
             stackPointer = image.stackPointer,
-        ) ?: run {
-            println("Init: cannot create user thread")
-            return
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> {
+                ProcessManager.discardUserProcess(process)
+                println("Init: cannot create user thread: ${result.error}")
+                return
+            }
         }
         thread.capabilities.applyExec(image.execution)
         Scheduler.enqueueThread(thread)

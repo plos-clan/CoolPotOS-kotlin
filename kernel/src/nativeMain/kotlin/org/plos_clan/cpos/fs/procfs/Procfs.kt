@@ -38,6 +38,7 @@ import org.plos_clan.cpos.tasks.PidHandle
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.ProcessState
+import org.plos_clan.cpos.tasks.cgroup.Cgroups
 import org.plos_clan.cpos.utils.Cmdline
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.decimalInt
@@ -375,7 +376,7 @@ private class ProcTextFile(
             return VfsResult.Err(VfsError.PERMISSION_DENIED)
         }
         return render()?.let {
-            VfsResult.Ok(ProcTextHandle(it, render.takeIf { write != null }, write))
+            VfsResult.Ok(ProcTextHandle(it, render, write))
         }
             ?: VfsResult.Err(VfsError.NOT_FOUND)
     }
@@ -383,7 +384,7 @@ private class ProcTextFile(
 
 private class ProcTextHandle(
     private var content: ByteArray,
-    private val refresh: (() -> ByteArray?)?,
+    private val refresh: () -> ByteArray?,
     private val write: ((ByteArray) -> VfsResult<Unit>)?,
 ) : OpenFileBackend {
     override fun read(
@@ -395,7 +396,7 @@ private class ProcTextHandle(
         position: FilePosition,
     ): IoResult {
         if (position.value == 0L && count != 0) {
-            refresh?.invoke()?.let { content = it }
+            content = refresh() ?: return IoResult.failure(VfsError.NOT_FOUND)
         }
         if (position.value < 0 || position.value >= content.size || count == 0) {
             return IoResult.success(0)
@@ -462,6 +463,7 @@ private enum class RootFile(
     FILESYSTEMS("filesystems", 8UL),
     CPUINFO("cpuinfo", 9UL),
     CMDLINE("cmdline",10uL),
+    CGROUPS("cgroups", 16uL),
     ;
 
     override val type: InodeType
@@ -490,6 +492,11 @@ private enum class RootFile(
         FILESYSTEMS -> FilesystemsFile.render()
         CPUINFO -> CpuInfo.render()
         CMDLINE -> Cmdline.raw.encodeToByteArray() + '\n'.code.toByte()
+        CGROUPS -> "#subsys_name\thierarchy\tnum_cgroups\tenabled\npids\t0\t${
+            Cgroups.lock.withLock {
+                Cgroups.hierarchy.root.subtree().count { it.parent == null || it.hasPids }
+            }
+        }\t1\n".encodeToByteArray()
     }
 }
 

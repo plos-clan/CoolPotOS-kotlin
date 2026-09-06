@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.fs.cgroupfs.Cgroupfs
 import org.plos_clan.cpos.fs.erofs.Erofs
 import org.plos_clan.cpos.fs.erofs.ErofsOptions
 import org.plos_clan.cpos.fs.fuse.Fuse
@@ -31,6 +32,7 @@ object FileSystemManager {
         Erofs,
         Fuse,
         Sysfs,
+        Cgroupfs,
     )
 
     var kernelContext: FileSystemContext? = null

@@ -10,6 +10,11 @@ import org.plos_clan.cpos.fs.FileDescriptorTable
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.vfs.FileSystemContext
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.tasks.cgroup.CgroupHierarchy
+import org.plos_clan.cpos.tasks.cgroup.CgroupPlacement
+import org.plos_clan.cpos.tasks.cgroup.Cgroups
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.INVALID_FRAME
@@ -230,6 +235,7 @@ class Thread internal constructor(
     var name: String = "",
     val affinityMask: ULong = 0UL,
     val capabilities: CapabilityState = CapabilityState(),
+    internal val cgroup: CgroupHierarchy.Task? = null,
 ) {
     private val scheduledCpu = AtomicLong(-1)
     private val parentDeathSignalNumber = AtomicInt(0)
@@ -664,33 +670,48 @@ object ProcessManager {
         kernelStackPages: ULong = DEFAULT_THREAD_STACK_PAGES,
         registers: ULongArray? = null,
         signals: ThreadSignalState? = null,
-    ): Thread? {
+        placement: CgroupPlacement? = null,
+    ): VfsResult<Thread> {
         if (process.isKernelProcess || entryPoint == 0uL || stackPointer == 0uL) {
-            return null
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
-        val stack = allocateKernelStack(
-            name = "process ${process.id} thread",
-            stackPages = kernelStackPages,
-        ) ?: return null
-        val kernelFsBase = bridge.create_kernel_runtime_tcb()
-        if (kernelFsBase == 0uL) {
-            BuddyFrameAllocator.free(stack.physicalBase, stack.pages)
-            return null
+        val parent = currentThread()?.cgroup
+        val membership = Cgroups.lock.withLock {
+            val id = if (process.threads.isEmpty()) process.id else nextTaskId.fetchAndAdd(1)
+            placement?.fork(id, process.id, parent) ?: Cgroups.hierarchy.fork(id, process.id, parent)
         }
-        return newThread(
-            process = process,
-            parentThread = parentThread,
-            kernelStackTop = stack.top,
-            kernelStackPhysicalBase = stack.physicalBase,
-            kernelStackPages = stack.pages,
-            kernelFsBase = kernelFsBase,
-            signals = signals,
-        ).also { thread ->
-            if (registers == null) {
-                thread.initializeUserContext(entryPoint, stackPointer, fsBase)
-            } else {
-                thread.initializeUserContext(registers, stackPointer, fsBase)
+        val cgroup = when (membership) {
+            is VfsResult.Ok -> membership.value
+            is VfsResult.Err -> return membership
+        }
+        var published = false
+        try {
+            val stack = allocateKernelStack(
+                name = "process ${process.id} thread",
+                stackPages = kernelStackPages,
+            ) ?: return VfsResult.Err(VfsError.NO_MEMORY)
+            val kernelFsBase = bridge.create_kernel_runtime_tcb()
+            if (kernelFsBase == 0uL) {
+                BuddyFrameAllocator.free(stack.physicalBase, stack.pages)
+                return VfsResult.Err(VfsError.NO_MEMORY)
             }
+            val thread = newThread(
+                process = process,
+                parentThread = parentThread,
+                kernelStackTop = stack.top,
+                kernelStackPhysicalBase = stack.physicalBase,
+                kernelStackPages = stack.pages,
+                kernelFsBase = kernelFsBase,
+                signals = signals,
+                cgroup = cgroup,
+            )
+            if (registers == null) thread.initializeUserContext(entryPoint, stackPointer, fsBase)
+            else thread.initializeUserContext(registers, stackPointer, fsBase)
+            published = true
+            Cgroups.published(thread)
+            return VfsResult.Ok(thread)
+        } finally {
+            if (!published) Cgroups.lock.withLock { Cgroups.hierarchy.exit(cgroup) }
         }
     }
 
@@ -744,6 +765,7 @@ object ProcessManager {
     }
 
     internal fun notifyThreadExited(thread: Thread) {
+        Cgroups.exit(thread)
         val deliveries = threadTableLock.withLock {
             thread.parentThread?.let { parent ->
                 parentDeathSubscribers[parent]?.let { subscribers ->
@@ -944,9 +966,10 @@ object ProcessManager {
         kernelStackPages: ULong = 0uL,
         kernelFsBase: ULong = 0uL,
         signals: ThreadSignalState? = null,
+        cgroup: CgroupHierarchy.Task? = null,
     ): Thread =
         Thread(
-            id = if (process.threads.isEmpty()) process.id else nextTaskId.fetchAndAdd(1),
+            id = cgroup?.id ?: if (process.threads.isEmpty()) process.id else nextTaskId.fetchAndAdd(1),
             process = process,
             parentThread = parentThread,
             kernelStackTop = kernelStackTop,
@@ -954,6 +977,7 @@ object ProcessManager {
             kernelStackPages = kernelStackPages,
             kernelFsBase = kernelFsBase,
             signals = signals ?: process.signals.newThread(),
+            cgroup = cgroup,
         ).also { thread ->
             process.addThread(thread)
             threadTableLock.withLock { threadTable[thread.id] = thread }

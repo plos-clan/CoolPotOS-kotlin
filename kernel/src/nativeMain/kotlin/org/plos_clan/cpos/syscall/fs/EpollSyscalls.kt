@@ -69,7 +69,7 @@ internal object EpollSyscalls {
                 InodeType.DIRECTORY,
                 InodeType.SYMLINK,
                 InodeType.BLOCK_DEVICE,
-                -> return errno(Errno.EPERM)
+                -> if (!target.backend.supportsEpoll) return errno(Errno.EPERM)
                 else -> Unit
             }
 

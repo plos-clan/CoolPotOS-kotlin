@@ -12,6 +12,7 @@ import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.tasks.ProcessState
 import org.plos_clan.cpos.tasks.TaskState
+import org.plos_clan.cpos.tasks.cgroup.Cgroups
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.hasBit
 
@@ -31,6 +32,8 @@ enum class ProcessFile(val fileName: String) {
     STATUS("status"),
     MAPS("maps"),
     MOUNTS("mounts"),
+    MOUNT_INFO("mountinfo"),
+    CGROUP("cgroup"),
     ;
 
     fun render(process: Process): ByteArray = when (this) {
@@ -45,6 +48,8 @@ enum class ProcessFile(val fileName: String) {
         STATUS -> process.status().encodeToByteArray()
         MAPS -> process.maps().encodeToByteArray()
         MOUNTS -> MountsFile.render(process)
+        MOUNT_INFO -> MountsFile.render(process, mountInfo = true)
+        CGROUP -> "0::".encodeToByteArray() + Cgroups.path(process) + '\n'.code.toByte()
     }
 }
 

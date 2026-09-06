@@ -37,7 +37,7 @@ abstract class FileSystemType(
         is VfsResult.Err -> options
     }
 
-    internal fun createSuperBlock(
+    internal open fun createSuperBlock(
         source: String?,
         options: FileSystemOptions,
     ): VfsResult<SuperBlock> {
@@ -50,7 +50,7 @@ abstract class FileSystemType(
         }
     }
 
-    internal fun createSuperBlock(request: MountRequest): VfsResult<SuperBlock> {
+    internal open fun createSuperBlock(request: MountRequest): VfsResult<SuperBlock> {
         if (requiresDevice && request.source == null) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
@@ -64,6 +64,9 @@ abstract class FileSystemType(
 }
 
 interface SuperBlockBackend {
+    val mountOptions: List<String>
+        get() = emptyList()
+
     val deviceNumber: DeviceNumber?
         get() = null
 
@@ -509,6 +512,10 @@ interface FileContent {
 }
 
 interface OpenFileBackend {
+    /** Regular virtual files can explicitly provide epoll notifications. */
+    val supportsEpoll: Boolean
+        get() = false
+
     val fileSystemMagic: ULong?
         get() = null
 

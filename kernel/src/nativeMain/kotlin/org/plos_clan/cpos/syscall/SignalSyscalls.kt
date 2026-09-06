@@ -2,6 +2,9 @@
 
 package org.plos_clan.cpos.syscall
 
+import org.plos_clan.cpos.tasks.cgroup.Cgroups
+import org.plos_clan.cpos.tasks.ProcessState
+
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.FileSystemManager
@@ -645,6 +648,10 @@ internal object SignalDelivery {
         returnMask: ULong? = null,
     ): Boolean {
         while (true) {
+            Cgroups.awaitThaw(thread)
+            if (thread.process.state == ProcessState.STOPPED) {
+                thread.process.signals.stop(thread.process, thread, Signal.STOP)
+            }
             val accepted = thread.signals.mask.inv()
             val info = thread.takePendingSignal(accepted) ?: return false
             val action = thread.process.signals.actionForDelivery(info.signal)

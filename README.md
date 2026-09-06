@@ -19,6 +19,7 @@
 - network & unix socket
 - devtmpfs & procfs & sysfs & erofs & fuse3
 - Signal Delivery and Handling
+- Unified cgroup v2 hierarchy, threaded groups, freezer and pids controller
 - Linux programs binary compatible (glibc)
 - GC & Coroutine & runtime exception
 
