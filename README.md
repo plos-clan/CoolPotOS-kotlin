@@ -34,6 +34,7 @@ This project uses Gradle for kernel build, ISO packaging, and QEMU run.
 **Available Gradle tasks:**
 - `./gradlew build`: Build kernel ELF
 - `./gradlew prepareUserland`: Build the CachyOS EROFS root filesystem
+- `./gradlew buildSima`: Build SIMA and update the EROFS root filesystem
 - `./gradlew buildIso`: Build the UEFI ISO image
 - `./gradlew run`: Run the ISO image in QEMU
 - `./gradlew nativeTest`: Run host-side Kotlin/Native unit tests
@@ -84,13 +85,22 @@ You need to install:
 - `qemu-system-x86_64` (for emulation)
 - Git and Gradle (included with Kotlin/Native)
 
-Userland preparation runs `cargo build --release --locked` in `vendor/SIMA`,
+Both `buildSima` and `prepareUserland` run `cargo build --release --locked` in `vendor/SIMA`,
 letting Cargo reuse its build cache and track source, dependency, and toolchain
-changes. Gradle tracks the complete `vendor/SIMA/target/artifacts/` directory
-alongside `assets/init` and `assets/userland.sh`; unchanged contents skip the
-container and EROFS rebuild. Added, changed, renamed, or removed artifacts
-invalidate the image. All artifacts are installed together under
-`/usr/lib/sima` in the rootfs, preserving SIMA's `$ORIGIN` library lookup.
+changes. Gradle's `stageUserland` task maps the complete
+`vendor/SIMA/target/artifacts/` directory to `/usr/lib/sima/`, the complete
+`vendor/SIMA/tests/` directory contents to `/etc/`, and `assets/init` to `/init`.
+Subdirectories, hidden files, permissions, and symbolic links are preserved;
+removed files are also removed from the staging directory. Changes to these
+inputs or `assets/userland.sh` invalidate the image; unchanged contents skip
+staging and the container/EROFS rebuild. The packaging script only merges the
+staged tree into the rootfs. The artifact location matches SIMA's fixed absolute
+library search path.
+The vendored SIMA build must use `/usr/lib/sima`, not `$ORIGIN`, because procfs
+may not be available inside the new root when the loader starts. Changes made
+in a separate SIMA checkout do not automatically update `vendor/SIMA`.
+`buildSima` updates the EROFS archive; run `./gradlew buildIso` to also update the
+bootable ISO before testing it.
 
 **Overridable environment variables:**
 

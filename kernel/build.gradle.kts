@@ -538,7 +538,7 @@ val downloadFreestndHeaders = tasks.register<DownloadFileTask>("downloadFreestnd
     destinationFile.set(config.paths.freestandingArchive.file)
 }
 
-val buildSima = tasks.register<Exec>("buildSima") {
+val compileSima = tasks.register<Exec>("compileSima") {
     group = "build"
     description = "Incrementally builds SIMA and exports its deployment artifacts."
 
@@ -550,6 +550,35 @@ val buildSima = tasks.register<Exec>("buildSima") {
     outputs.upToDateWhen { false }
 }
 
+val stageUserland = tasks.register<Exec>("stageUserland") {
+    group = "build"
+    description = "Stages local userland files at their root filesystem paths."
+
+    val artifacts = compileSima.map { it.outputs.files.singleFile }
+    val tests = rootProject.file("vendor/SIMA/tests")
+    val overlay = layout.buildDirectory.dir("generated/userland/overlay")
+    inputs.dir(artifacts).withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.dir(tests).withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file(config.paths.initScript).withPathSensitivity(PathSensitivity.NONE)
+    outputs.dir(overlay)
+
+    commandLine(
+        "bash", "-euc",
+        """
+        rm -rf -- "${'$'}1"
+        install -d -m 0755 "${'$'}1/usr/lib/sima" "${'$'}1/etc"
+        cp -a -- "${'$'}2/." "${'$'}1/usr/lib/sima/"
+        cp -a -- "${'$'}3/." "${'$'}1/etc/"
+        install -m 0755 "${'$'}4" "${'$'}1/init"
+        """.trimIndent(),
+        "stage-userland",
+        overlay.get().asFile.absolutePath,
+        artifacts.get().absolutePath,
+        tests.absolutePath,
+        config.paths.initScript.absolutePath,
+    )
+}
+
 val prepareUserland = tasks.register<Exec>("prepareUserland") {
     group = "build"
     description = "Builds a zstd-compressed CachyOS EROFS root filesystem."
@@ -557,9 +586,8 @@ val prepareUserland = tasks.register<Exec>("prepareUserland") {
     inputs.property("image", config.userland.image)
     inputs.property("platform", config.userland.platform)
     inputs.file(config.userland.script).withPathSensitivity(PathSensitivity.NONE)
-    inputs.file(config.paths.initScript).withPathSensitivity(PathSensitivity.NONE)
-    val artifacts = buildSima.map { it.outputs.files.singleFile }
-    inputs.dir(artifacts).withPathSensitivity(PathSensitivity.RELATIVE)
+    val overlay = stageUserland.map { it.outputs.files.singleFile }
+    inputs.dir(overlay).withPathSensitivity(PathSensitivity.RELATIVE)
     outputs.file(config.userland.archive)
 
     commandLine(
@@ -569,13 +597,18 @@ val prepareUserland = tasks.register<Exec>("prepareUserland") {
             "--platform", config.userland.platform,
             "--volume", "${config.userland.archive.parentFile.absolutePath}:/output:rw,Z",
             "--volume", "${config.userland.script.absolutePath}:/usr/local/bin/cpos-userland:ro,Z",
-            "--volume", "${config.paths.initScript.absolutePath}:/usr/local/share/cpos/init:ro,Z",
-            "--volume", "${artifacts.get().absolutePath}:/usr/local/share/cpos/artifacts:ro,Z",
+            "--volume", "${overlay.get().absolutePath}:/usr/local/share/cpos/rootfs:ro,Z",
             config.userland.image,
             "/usr/local/bin/cpos-userland",
             config.userland.name,
         )
     )
+}
+
+tasks.register("buildSima") {
+    group = "build"
+    description = "Builds SIMA and updates the EROFS root filesystem."
+    dependsOn(prepareUserland)
 }
 
 val prepareFreestndHeaders = tasks.register<Sync>("prepareFreestndHeaders") {

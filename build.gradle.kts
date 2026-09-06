@@ -28,6 +28,7 @@ tasks.register<Delete>("cleanAll") {
 listOf(
     "buildIso",
     "buildMlibc",
+    "buildSima",
     "compileC",
     "linkKernel",
     "nativeTest",

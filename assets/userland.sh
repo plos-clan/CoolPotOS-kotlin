@@ -60,7 +60,6 @@ sed -i '/^hosts:/c\hosts: files dns' "$rootfs/etc/nsswitch.conf"
 grep -qx 'hosts: files dns' "$rootfs/etc/nsswitch.conf"
 
 install -d -m 0700 "$keyring"
-install -Dm755 /usr/local/share/cpos/init "$rootfs/init"
 pacman-key --gpgdir "$keyring" --init
 pacman-key --gpgdir "$keyring" --populate archlinux cachyos
 gpgconf --homedir "$keyring" --kill all
@@ -83,8 +82,7 @@ rm -rf \
 find "$rootfs" -type f \( -name '*.a' -o -name '*.o' -o -name '*.debug' \) -delete
 rm -rf "$rootfs/var/log"/* "$rootfs/var/tmp"/*
 
-install -d -m 0755 "$rootfs/usr/lib/sima"
-cp -a --no-preserve=ownership /usr/local/share/cpos/artifacts/. "$rootfs/usr/lib/sima/"
+cp -a --no-preserve=ownership /usr/local/share/cpos/rootfs/. "$rootfs/"
 
 mkfs.erofs \
     -x-1 \
