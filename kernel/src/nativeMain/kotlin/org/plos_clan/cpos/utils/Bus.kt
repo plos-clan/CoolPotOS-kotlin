@@ -6,6 +6,8 @@ object VTModeConstants {
 
     const val KD_TEXT = 0x00     // 文本模式
     const val KD_GRAPHICS = 0x01 // 图形模式
+    const val KD_TEXT0 = 0x02
+    const val KD_TEXT1 = 0x03
 
 
     const val KDGKBMODE = 0x4B44 // gets current keyboard mode
@@ -15,6 +17,7 @@ object VTModeConstants {
     const val K_XLATE = 0x01     // 转换模式（生成 ASCII）
     const val K_MEDIUMRAW = 0x02 // 中等原始模式
     const val K_UNICODE = 0x03   // Unicode 模式
+    const val K_OFF = 0x04
 
     const val VT_OPENQRY = 0x5600   // get next available vt
     const val VT_GETMODE = 0x5601   // get mode of active vt
@@ -25,6 +28,9 @@ object VTModeConstants {
 
     const val VT_ACTIVATE = 0x5606   // make vt active
     const val VT_WAITACTIVE = 0x5607 // wait for vt active
+    const val VT_DISALLOCATE = 0x5608
+
+    const val MAX_NR_CONSOLES = 63
 }
 
 object TermiosConstants {

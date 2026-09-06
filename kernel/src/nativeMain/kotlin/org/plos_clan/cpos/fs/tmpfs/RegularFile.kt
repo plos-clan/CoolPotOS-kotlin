@@ -411,8 +411,6 @@ internal class TmpfsRegularFile(
                     space.invalidateFile(inode, start, end, privateFrames)
                     visited += space
                 }
-                // Fork can publish a child while its parent's invalidation waits for the VMA lock.
-                // Visit those children too; forks of already visited parents inherit fresh PTEs.
             }
         } finally {
             retired.forEach { it.release() }

@@ -71,18 +71,20 @@ internal class TerminalInput(
     }
 
     fun read(
-        session: TtySession,
+        file: TtySession.OpenFile,
         buffer: PreparedBufferDestination,
         offset: Int,
         count: ULong,
     ): Long {
+        if (offset < 0 || count > Int.MAX_VALUE.toULong()) return -Errno.EINVAL.toLong()
         val limit = count.toInt()
-        if (limit == 0) return 0L
+        if (limit == 0 || file.isHungUp) return 0L
+        val session = file.session
         val canonical = session.hasLocalFlag(TermiosConstants.ICANON)
         val result = if (canonical) {
-            readCanonical(buffer, offset, limit)
+            readCanonical(file, buffer, offset, limit)
         } else {
-            readNonCanonical(session, buffer, offset, limit)
+            readNonCanonical(file, buffer, offset, limit)
         }
         if (input.transaction { isReadable(canonical) }) wakeReader()
         return result
@@ -103,8 +105,13 @@ internal class TerminalInput(
         return returned
     }
 
-    fun flush() {
+    fun flush() = receiveLock.withLock {
         input.transaction { clearInput() }
+    }
+
+    fun hangup() {
+        flush()
+        waiterLock.withLock { readWaiters.wakeAll() }
     }
 
     private fun ByteRingBuffer.Transaction.clearInput() {
@@ -196,13 +203,16 @@ internal class TerminalInput(
     }
 
     private fun readCanonical(
+        file: TtySession.OpenFile,
         buffer: PreparedBufferDestination,
         offset: Int,
         limit: Int,
     ): Long {
         while (true) {
             val result = input.transaction {
-                if (canonicalRecordCount == 0) {
+                if (file.isHungUp) {
+                    0
+                } else if (canonicalRecordCount == 0) {
                     null
                 } else {
                     val recordLength = dequeueCanonicalRecordLocked()
@@ -221,85 +231,37 @@ internal class TerminalInput(
             if (result != null) {
                 return result.toLong()
             }
-            if (interrupted() || !waitForInput(canonical = true)) {
-                return -Errno.EINTR.toLong()
+            if (interrupted() || !waitForInput(file, canonical = true)) {
+                return if (file.isHungUp) 0L else -Errno.EINTR.toLong()
             }
         }
     }
 
     private fun readNonCanonical(
-        session: TtySession,
+        file: TtySession.OpenFile,
         buffer: PreparedBufferDestination,
         offset: Int,
         limit: Int,
     ): Long {
-        val minimum = minOf(session.controlCharacter(TermiosConstants.VMIN), limit)
-        val timeout = session.controlCharacter(TermiosConstants.VTIME)
-
-        if (minimum == 0 && timeout == 0) {
-            return drainAvailable(buffer, offset, limit).toLong()
-        }
-
-        if (minimum == 0) {
-            val deadline = timeoutDeadline(timeout)
-            while (!hasInput()) {
-                if (deadlineReached(deadline)) {
-                    return 0L
-                }
-                if (interrupted() || !waitForInput(canonical = false, deadlineNanos = deadline)) {
-                    return -Errno.EINTR.toLong()
-                }
-            }
-            return drainAvailable(buffer, offset, limit).toLong()
-        }
-
+        val minimum = minOf(file.session.controlCharacter(TermiosConstants.VMIN), limit)
+        val timeout = file.session.controlCharacter(TermiosConstants.VTIME)
+        var deadline = if (minimum == 0 && timeout != 0) timeoutDeadline(timeout) else null
         var transferred = 0
-        while (transferred == 0) {
-            transferred += drainAvailable(buffer, offset + transferred, limit - transferred)
-            if (transferred == 0) {
-                if (interrupted() || !waitForInput(canonical = false)) {
-                    return -Errno.EINTR.toLong()
-                }
+        while (true) {
+            val copied = input.transaction {
+                if (file.isHungUp) 0 else read(buffer, offset + transferred, minOf(limit - transferred, available))
+            }
+            transferred += copied
+            if (file.isHungUp || transferred >= maxOf(minimum, 1) || minimum == 0 && timeout == 0) {
+                return transferred.toLong()
+            }
+            if (copied != 0 && timeout != 0) deadline = timeoutDeadline(timeout)
+            if (deadline != null && deadlineReached(deadline)) return transferred.toLong()
+            if (interrupted() || !waitForInput(file, canonical = false, deadlineNanos = deadline)) {
+                return if (transferred != 0 || file.isHungUp) transferred.toLong() else -Errno.EINTR.toLong()
             }
         }
-
-        if (timeout == 0) {
-            while (transferred < minimum) {
-                val current = drainAvailable(buffer, offset + transferred, limit - transferred)
-                transferred += current
-                if (transferred < minimum &&
-                    (interrupted() || !waitForInput(canonical = false))
-                ) {
-                    return transferred.toLong()
-                }
-            }
-            return transferred.toLong()
-        }
-
-        var deadline = timeoutDeadline(timeout)
-        while (transferred < minimum) {
-            val current = drainAvailable(buffer, offset + transferred, limit - transferred)
-            if (current != 0) {
-                transferred += current
-                deadline = timeoutDeadline(timeout)
-            } else {
-                if (deadlineReached(deadline)) {
-                    break
-                }
-                if (interrupted() || !waitForInput(canonical = false, deadlineNanos = deadline)) {
-                    return transferred.toLong()
-                }
-            }
-        }
-        return transferred.toLong()
     }
-
-    private fun drainAvailable(buffer: PreparedBufferDestination, offset: Int, limit: Int): Int =
-        input.transaction {
-            read(buffer, offset, minOf(limit, available))
-        }
-
-    private fun hasInput(): Boolean = input.available != 0
 
     private fun enqueueCanonicalRecordLocked(length: Int): Boolean {
         if (canonicalRecordCount == canonicalRecords.size) {
@@ -347,10 +309,18 @@ internal class TerminalInput(
     private fun deadlineReached(deadline: ULong): Boolean =
         TscClock.isReady && TscClock.nanoTime() >= deadline
 
-    private fun waitForInput(canonical: Boolean, deadlineNanos: ULong? = null): Boolean {
+    private fun waitForInput(
+        file: TtySession.OpenFile,
+        canonical: Boolean,
+        deadlineNanos: ULong? = null,
+    ): Boolean {
         val thread = ProcessManager.currentThread() ?: return false
         val waiter = waiterLock.withLock { readWaiters.add(thread) }
-        if (input.transaction { isReadable(canonical) }) wakeReader()
+        if (file.isHungUp) {
+            waiterLock.withLock { readWaiters.wakeAll() }
+        } else if (input.transaction { isReadable(canonical) }) {
+            wakeReader()
+        }
         return readWaiters.await(waiterLock, waiter, deadlineNanos)
     }
 

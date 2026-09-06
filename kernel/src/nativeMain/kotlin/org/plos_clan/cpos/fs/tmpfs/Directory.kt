@@ -379,7 +379,6 @@ internal class TmpfsDirectory(
     private fun unlink(inode: Inode) {
         val directory = inode.backend as? TmpfsDirectory
         directory?.parent = null
-        // Like Linux tmpfs, each extra hard link consumes an inode quota slot.
         if (directory == null && inode.metadata().linkCount > 1u) fileSystem.releaseInode()
         inode.updateMetadata {
             it.copy(linkCount = if (directory == null) it.linkCount - 1u else 0u)

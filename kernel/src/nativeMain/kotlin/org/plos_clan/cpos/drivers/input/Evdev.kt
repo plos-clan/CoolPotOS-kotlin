@@ -4,6 +4,7 @@ import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceBackend
 import org.plos_clan.cpos.drivers.DeviceIoEvent
 import org.plos_clan.cpos.drivers.WaitablePositionlessDeviceBackend
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
@@ -19,12 +20,6 @@ internal enum class InputEventType(val value: UShort) {
     SYNCHRONIZATION(0u),
     KEY(1u),
     REPEAT(20u),
-}
-
-internal enum class KeyAction(val value: Int) {
-    RELEASED(0),
-    PRESSED(1),
-    REPEATED(2),
 }
 
 internal data class InputId(
@@ -101,9 +96,8 @@ internal class EvdevDevice(
         supportedKeys.forEach { keyCapabilities.setBit(it.linuxCode.toInt(), true) }
     }
 
-    override fun open(device: Device): DeviceBackend = EvdevClient(this).also { client ->
-        lock.withLock { clients += client }
-    }
+    override fun open(device: Device): VfsResult<DeviceBackend> =
+        VfsResult.Ok(EvdevClient(this).also { client -> lock.withLock { clients += client } })
 
     override fun receive(event: InputEvent) {
         lock.withLock {

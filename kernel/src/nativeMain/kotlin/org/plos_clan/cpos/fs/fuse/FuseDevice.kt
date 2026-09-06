@@ -41,7 +41,7 @@ internal object FuseDevice : PositionlessDeviceBackend {
         ),
     ) != null
 
-    override fun open(device: Device): DeviceBackend = FuseSession()
+    override fun open(device: Device): VfsResult<DeviceBackend> = VfsResult.Ok(FuseSession())
 
     override fun ioctl(device: Device, command: Int, args: UserMemory): Long =
         -Errno.ENOTTY.toLong()

@@ -13,6 +13,7 @@ import org.plos_clan.cpos.drivers.char.FrameBufferTerminal
 import org.plos_clan.cpos.drivers.char.tty.TtyDriver
 import org.plos_clan.cpos.drivers.char.tty.TtyEndpoint
 import org.plos_clan.cpos.drivers.char.tty.TtyManager
+import org.plos_clan.cpos.utils.VTModeConstants
 
 class TtyGraphicsDevice(
     val address: CPointer<out CPointed>?,
@@ -31,27 +32,17 @@ private class FrameBufferTtyDriver(
     consoleName: String,
     private val device: TtyGraphicsDevice,
 ) : TtyDriver(consoleName, terminalType = "linux", bufferedOutput = true) {
-    override fun createEndpoints(invalidate: () -> Unit): List<TtyEndpoint>? {
-        val endpoints = ArrayList<TtyEndpoint>(VIRTUAL_TERMINAL_COUNT)
-        repeat(VIRTUAL_TERMINAL_COUNT) { index ->
-            val backend = FrameBufferTerminal.create(device, invalidate) ?: run {
-                endpoints.asReversed().forEach { it.backend.destroy() }
-                return null
-            }
-            endpoints += TtyEndpoint(
-                name = "tty$index",
+    override fun createEndpoints(invalidate: () -> Unit): List<TtyEndpoint> =
+        (1..VTModeConstants.MAX_NR_CONSOLES).map { number ->
+            TtyEndpoint(
+                name = "tty$number",
                 major = LinuxDeviceMajor.TTY.number,
-                minor = index.toUInt(),
-                backend = backend,
-                virtualTerminalIndex = index,
+                minor = number.toUInt(),
+                createBackend = { FrameBufferTerminal.create(device, invalidate) },
+                virtualTerminalNumber = number,
             )
         }
-        return endpoints
-    }
 
-    private companion object {
-        const val VIRTUAL_TERMINAL_COUNT = 7
-    }
 }
 
 object FrameBuffer {

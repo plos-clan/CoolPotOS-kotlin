@@ -43,7 +43,6 @@ internal value class MemFdFlags private constructor(val bits: UInt) {
             if (bits and allowed.inv() != 0u || bits and (NOEXEC_SEAL or EXEC) == (NOEXEC_SEAL or EXEC)) {
                 return VfsResult.Err(VfsError.INVALID_ARGUMENT)
             }
-            // The VM has no hugetlb pool; do not silently substitute ordinary pages.
             if (huge) return VfsResult.Err(VfsError.NOT_SUPPORTED)
             return VfsResult.Ok(MemFdFlags(bits))
         }

@@ -106,9 +106,10 @@ internal class DeviceNode(
         val deviceType = if (type == InodeType.BLOCK_DEVICE) DeviceType.BLOCK else DeviceType.CHARACTER
         val device = DeviceManager.find(deviceType, number)
             ?: return VfsResult.Err(VfsError.NO_SUCH_DEVICE_OR_ADDRESS)
-        val backend = device.backend.open(device)
-            ?: return VfsResult.Err(VfsError.NO_DEVICE)
-        return VfsResult.Ok(DeviceOpenFile.open(device, backend))
+        return when (val result = device.backend.open(device)) {
+            is VfsResult.Ok -> VfsResult.Ok(DeviceOpenFile.open(device, result.value))
+            is VfsResult.Err -> result
+        }
     }
 
     fun matches(device: Device): Boolean = device.number == number &&

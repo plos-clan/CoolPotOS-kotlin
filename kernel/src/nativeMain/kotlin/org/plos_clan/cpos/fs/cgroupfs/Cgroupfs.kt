@@ -29,8 +29,6 @@ object Cgroupfs : FileSystemType("cgroup2", 0x63677270uL) {
 
     override fun configure(source: String?, data: ByteArray?): VfsResult<FileSystemOptions> {
         val names = data?.decodeToString()?.split(',')?.filter(String::isNotEmpty).orEmpty()
-        // These options affect cgroup namespaces and memory protection respectively;
-        // neither subsystem is exposed yet, so they need no additional policy here.
         if (names.any { it != "nsdelegate" && it != "memory_recursiveprot" && it != "favordynmods" }) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
@@ -439,7 +437,6 @@ private class CgroupHandle(private val control: CgroupControl, private val opene
             if (!live(inode)) VfsResult.Err(VfsError.NO_DEVICE) else control.store(caller, opener, inode, text)
         }
         if (result is VfsResult.Err) return IoResult.failure(result.error)
-        // kernfs treats every write as one command, independently of f_pos/O_APPEND.
         position.value += count
         content = null
         return IoResult.success(count)

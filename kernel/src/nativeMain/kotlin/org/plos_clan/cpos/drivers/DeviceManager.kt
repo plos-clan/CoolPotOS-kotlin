@@ -31,7 +31,7 @@ enum class LinuxDeviceMajor(val number: UInt) {
 }
 
 interface DeviceBackend {
-    fun open(device: Device): DeviceBackend? = this
+    fun open(device: Device): VfsResult<DeviceBackend> = VfsResult.Ok(this)
 
     fun close(device: Device) {}
 

@@ -3,6 +3,7 @@ package org.plos_clan.cpos.drivers.char
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
 import org.plos_clan.cpos.drivers.char.terminal.NativeTerminal
 import org.plos_clan.cpos.drivers.char.terminal.TerminalInput
+import org.plos_clan.cpos.drivers.char.tty.ConsoleDisplayMode
 import org.plos_clan.cpos.drivers.char.tty.IoctlConstants
 import org.plos_clan.cpos.drivers.char.tty.Termios
 import org.plos_clan.cpos.drivers.char.tty.Termios2
@@ -19,8 +20,8 @@ import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.TermiosConstants
 
 abstract class TerminalBackend : TtySessionBackend {
-    private val input = TerminalInput(::echo)
-    private val outputLock = KernelMutex()
+    internal val input = TerminalInput(::echo)
+    protected val outputLock = KernelMutex()
     private val transferBuffer = ByteArray(OUTPUT_CHUNK_SIZE)
     private val processedOutput = ByteArray(OUTPUT_CHUNK_SIZE * 2)
     private var outputColumn = 0
@@ -61,85 +62,88 @@ abstract class TerminalBackend : TtySessionBackend {
     }
 
     final override fun read(
-        session: TtySession,
+        file: TtySession.OpenFile,
         buffer: PreparedBufferDestination,
         offset: Int,
         count: ULong,
-    ): Long = input.read(session, buffer, offset, count)
+    ): Long = input.read(file, buffer, offset, count)
 
     final override fun ioctl(
-        session: TtySession,
+        file: TtySession.OpenFile,
         command: Int,
         args: UserMemory,
-    ): Int = when (command) {
-        IoctlConstants.TIOCGWINSZ ->
-            if (args.copyToUser(windowSize().toNativeBytes())) Errno.EOK else -Errno.EFAULT
+    ): Int {
+        consoleIoctl(file, command, args)?.let { return it }
+        return file.control(command) {
+            val session = file.session
+            when (command) {
+                IoctlConstants.TIOCGWINSZ ->
+                    if (args.copyToUser(windowSize().toNativeBytes())) Errno.EOK else -Errno.EFAULT
 
-        IoctlConstants.TIOCSCTTY ->
-            if (session.attachCurrentProcess()) Errno.EOK else -Errno.ENOTTY
+                IoctlConstants.TIOCSCTTY ->
+                    if (session.attachCurrentProcess()) Errno.EOK else -Errno.ENOTTY
 
-        IoctlConstants.TIOCGPGRP ->
-            copyIntToUser(args, session.foregroundProcessGroup)
+                IoctlConstants.TIOCGPGRP ->
+                    copyIntToUser(args, session.foregroundProcessGroup)
 
-        IoctlConstants.TIOCSPGRP -> {
-            val processGroup = copyIntFromUser(args)
-            val process = ProcessManager.currentProcess()
-            when {
-                processGroup == null -> -Errno.EFAULT
-                process == null -> -Errno.ESRCH
-                session.sessionId != process.sessionId -> -Errno.ENOTTY
-                !session.setForegroundProcessGroup(process, processGroup) -> -Errno.EINVAL
-                else -> Errno.EOK
+                IoctlConstants.TIOCSPGRP -> {
+                    val processGroup = args.readUIntLE()?.toInt()
+                    val process = ProcessManager.currentProcess()
+                    when {
+                        processGroup == null -> -Errno.EFAULT
+                        process == null -> -Errno.ESRCH
+                        session.sessionId != process.sessionId -> -Errno.ENOTTY
+                        !session.setForegroundProcessGroup(process, processGroup) -> -Errno.EINVAL
+                        else -> Errno.EOK
+                    }
+                }
+
+                IoctlConstants.TIOCGSID -> {
+                    val sessionId = session.sessionId
+                    if (sessionId == 0) -Errno.ENOTTY else copyIntToUser(args, sessionId)
+                }
+
+                IoctlConstants.TIOCNOTTY ->
+                    if (session.detachCurrentProcess()) Errno.EOK else -Errno.ENOTTY
+
+                IoctlConstants.TCGETS ->
+                    if (args.copyToUser(session.termios.toNativeBytes())) Errno.EOK else -Errno.EFAULT
+
+                IoctlConstants.TCGETS2.toInt() ->
+                    if (args.copyToUser(session.termios2.toNativeBytes())) Errno.EOK else -Errno.EFAULT
+
+                IoctlConstants.TCSETS,
+                IoctlConstants.TCSETSW -> updateTermiosFromUser(session, args)
+
+                IoctlConstants.TCSETSF -> {
+                    val result = updateTermiosFromUser(session, args)
+                    if (result == Errno.EOK) input.flush()
+                    result
+                }
+
+                IoctlConstants.TCSETS2,
+                IoctlConstants.TCSETSW2 -> updateTermios2FromUser(session, args)
+
+                IoctlConstants.TCSETSF2 -> {
+                    val result = updateTermios2FromUser(session, args)
+                    if (result == Errno.EOK) input.flush()
+                    result
+                }
+
+                IoctlConstants.TCFLSH -> {
+                    input.flush()
+                    Errno.EOK
+                }
+
+                IoctlConstants.FIONREAD -> copyIntToUser(args, input.availableBytes)
+
+                IoctlConstants.TIOCSWINSZ,
+                IoctlConstants.TCSBRK,
+                IoctlConstants.TCSBRKP,
+                IoctlConstants.TIOCNXCL -> Errno.EOK
+
+                else -> -Errno.ENOTTY
             }
-        }
-
-        IoctlConstants.TIOCGSID -> {
-            val sessionId = session.sessionId
-            if (sessionId == 0) -Errno.ENOTTY else copyIntToUser(args, sessionId)
-        }
-
-        IoctlConstants.TIOCNOTTY ->
-            if (session.detachCurrentProcess()) Errno.EOK else -Errno.ENOTTY
-
-        IoctlConstants.TCGETS ->
-            if (args.copyToUser(session.termios.toNativeBytes())) Errno.EOK else -Errno.EFAULT
-
-        IoctlConstants.TCGETS2.toInt() ->
-            if (args.copyToUser(session.termios2.toNativeBytes())) Errno.EOK else -Errno.EFAULT
-
-        IoctlConstants.TCSETS,
-        IoctlConstants.TCSETSW -> updateTermiosFromUser(session, args)
-
-        IoctlConstants.TCSETSF -> {
-            val result = updateTermiosFromUser(session, args)
-            if (result == Errno.EOK) input.flush()
-            result
-        }
-
-        IoctlConstants.TCSETS2,
-        IoctlConstants.TCSETSW2 -> updateTermios2FromUser(session, args)
-
-        IoctlConstants.TCSETSF2 -> {
-            val result = updateTermios2FromUser(session, args)
-            if (result == Errno.EOK) input.flush()
-            result
-        }
-
-        IoctlConstants.TCFLSH -> {
-            input.flush()
-            Errno.EOK
-        }
-
-        IoctlConstants.FIONREAD -> copyIntToUser(args, input.availableBytes)
-
-        IoctlConstants.TIOCSWINSZ,
-        IoctlConstants.TCSBRK,
-        IoctlConstants.TCSBRKP,
-        IoctlConstants.TIOCNXCL -> Errno.EOK
-
-        else -> {
-            println("warn: no implement tty ioctl 0x${command.toString(16)}")
-            -Errno.ENOTTY
         }
     }
 
@@ -147,6 +151,11 @@ abstract class TerminalBackend : TtySessionBackend {
         input.poll(session, events)
 
     final override fun flushIfDirty() = outputLock.withLock(::flushOutput)
+
+    override fun hangup(session: TtySession) = input.hangup()
+
+    protected open fun consoleIoctl(file: TtySession.OpenFile, command: Int, args: UserMemory): Int? =
+        null
 
     final override fun destroy() = outputLock.withLock(::closeOutput)
 
@@ -250,12 +259,7 @@ abstract class TerminalBackend : TtySessionBackend {
         return Errno.EOK
     }
 
-    private fun copyIntFromUser(args: UserMemory): Int? {
-        val data = args.copyFromUser(Int.SIZE_BYTES) ?: return null
-        return LittleEndianBuffer(data).readU32(0).toInt()
-    }
-
-    private fun copyIntToUser(args: UserMemory, value: Int): Int {
+    protected fun copyIntToUser(args: UserMemory, value: Int): Int {
         val data = ByteArray(Int.SIZE_BYTES)
         LittleEndianBuffer(data).writeU32(0, value.toUInt())
         return if (args.copyToUser(data)) Errno.EOK else -Errno.EFAULT
@@ -269,9 +273,10 @@ abstract class TerminalBackend : TtySessionBackend {
 
 internal class FrameBufferTerminal private constructor(
     private val terminal: NativeTerminal,
-) : TerminalBackend() {
-    override fun writeOutput(data: ByteArray, offset: Int, count: Int) =
-        terminal.process(data, offset, count)
+) : VirtualTerminal() {
+    override fun writeOutput(data: ByteArray, offset: Int, count: Int) {
+        if (displayMode == ConsoleDisplayMode.TEXT) terminal.process(data, offset, count)
+    }
 
     override fun windowSize(): WinSize {
         val dimensions = terminal.dimensions()
@@ -283,7 +288,11 @@ internal class FrameBufferTerminal private constructor(
         )
     }
 
-    override fun flushOutput() = terminal.flushIfDirty()
+    override fun flushOutput() {
+        if (displayMode == ConsoleDisplayMode.TEXT) terminal.flushIfDirty()
+    }
+
+    override fun redrawOutput() = terminal.redraw()
 
     override fun closeOutput() = terminal.destroy()
 

@@ -88,7 +88,6 @@ internal class CgroupHierarchy(
         fun commonAncestor(other: Group): Group {
             var first: Group? = this
             var second: Group? = other
-            // Equalize path lengths without allocating an ancestor set.
             while (first !== second) {
                 first = if (first == null) other else first.parent
                 second = if (second == null) this else second.parent
@@ -266,8 +265,6 @@ internal class CgroupHierarchy(
     fun move(group: Group, selected: Collection<Task>, thread: Boolean): VfsResult<Unit> {
         val error = destinationError(group, selected, thread)
         if (error != null) return VfsResult.Err(error)
-        // Migration is organizational: it may exceed pids.max. Charge only changed
-        // ancestry, so a move within a populated subtree never emits a false empty event.
         for (task in selected) {
             val source = task.group
             if (source === group) continue

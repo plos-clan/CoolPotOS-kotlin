@@ -16,12 +16,16 @@ import kotlinx.cinterop.staticCFunction
 import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
 import org.plos_clan.cpos.utils.IrqSpinLock
+import platform.posix.memcpy
+import platform.posix.memset
 
 private val terminalMalloc = staticCFunction { size: ULong -> bridge.malloc(size) }
 private val terminalFree = staticCFunction { pointer: COpaquePointer? -> bridge.free(pointer) }
 
 internal class NativeTerminal private constructor(
     private val handle: COpaquePointer,
+    private val framebuffer: COpaquePointer,
+    private val device: TtyGraphicsDevice,
     private val invalidate: () -> Unit,
 ) {
     data class Dimensions(val rows: ULong, val columns: ULong)
@@ -53,14 +57,21 @@ internal class NativeTerminal private constructor(
         )
     }
 
+    fun redraw() {
+        lock.withLock { dirty = true }
+        invalidate()
+    }
+
     fun flushIfDirty() = lock.withLock {
         if (!dirty) return@withLock
         bridge.terminal_flush(handle)
+        memcpy(device.address, framebuffer, device.pitch * device.height)
         dirty = false
     }
 
     fun destroy() = lock.withLock {
         bridge.terminal_destroy(handle)
+        bridge.free(framebuffer)
     }
 
     companion object {
@@ -91,10 +102,16 @@ internal class NativeTerminal private constructor(
             device: TtyGraphicsDevice,
             invalidate: () -> Unit,
         ): NativeTerminal? = memScoped {
+            if (device.address == null || device.height == 0uL || device.pitch == 0uL ||
+                device.height > ULong.MAX_VALUE / device.pitch
+            ) return@memScoped null
+            val size = device.pitch * device.height
+            val framebuffer = bridge.malloc(size) ?: return@memScoped null
+            memset(framebuffer, 0, size)
             val display = alloc<TerminalDisplay> {
                 width = device.width
                 height = device.height
-                buffer = device.address?.reinterpret()
+                buffer = framebuffer.reinterpret()
                 pitch = device.pitch
                 red_mask_size = device.redMaskSize
                 red_mask_shift = device.redMaskShift
@@ -108,7 +125,10 @@ internal class NativeTerminal private constructor(
                 font_size = FONT_SIZE,
                 malloc = terminalMalloc,
                 free = terminalFree,
-            ) ?: return@memScoped null
+            ) ?: run {
+                bridge.free(framebuffer)
+                return@memScoped null
+            }
 
             bridge.terminal_set_auto_flush(handle, false)
             val palette = alloc<TerminalPalette> {
@@ -120,7 +140,7 @@ internal class NativeTerminal private constructor(
             }
             bridge.terminal_set_custom_color_scheme(handle, palette.ptr)
             bridge.terminal_set_crnl_mapping(handle, false)
-            NativeTerminal(handle, invalidate)
+            NativeTerminal(handle, framebuffer, device, invalidate).also { it.redraw() }
         }
     }
 }

@@ -1,6 +1,7 @@
 package org.plos_clan.cpos.drivers
 
 import org.plos_clan.cpos.fs.sysfs.SysfsDevicePublication
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.Errno
@@ -52,8 +53,8 @@ internal enum class MemoryDevice(
     URANDOM("urandom", 9u),
     ;
 
-    override fun open(device: Device): DeviceBackend =
-        if (this == RANDOM || this == URANDOM) RandomOpenFile() else this
+    override fun open(device: Device): VfsResult<DeviceBackend> =
+        VfsResult.Ok(if (this == RANDOM || this == URANDOM) RandomOpenFile() else this)
 
     override fun read(
         device: Device,

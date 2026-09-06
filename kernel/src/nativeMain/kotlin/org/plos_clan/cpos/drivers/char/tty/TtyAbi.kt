@@ -2,6 +2,7 @@ package org.plos_clan.cpos.drivers.char.tty
 
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct
+import org.plos_clan.cpos.utils.TermiosConstants
 
 private const val NCCS = 19
 private const val TERMIOS2_NCCS = NCCS
@@ -178,6 +179,31 @@ class Termios(
     }
 
     companion object {
+        fun defaults() = Termios(
+            cIflag = TermiosConstants.BRKINT or TermiosConstants.ICRNL or TermiosConstants.IXON,
+            cOflag = TermiosConstants.OPOST or TermiosConstants.ONLCR,
+            cCflag = TermiosConstants.CS8 or TermiosConstants.CREAD or TermiosConstants.CLOCAL,
+            cLflag = TermiosConstants.ECHO or TermiosConstants.ECHOE or TermiosConstants.ECHOK or
+                TermiosConstants.ICANON or TermiosConstants.IEXTEN or TermiosConstants.ISIG,
+            cLine = 0,
+            cCc = ByteArray(19).apply {
+                this[TermiosConstants.VINTR] = 3
+                this[TermiosConstants.VQUIT] = 28
+                this[TermiosConstants.VERASE] = 127
+                this[TermiosConstants.VKILL] = 21
+                this[TermiosConstants.VEOF] = 4
+                this[TermiosConstants.VTIME] = 0
+                this[TermiosConstants.VMIN] = 1
+                this[TermiosConstants.VSTART] = 17
+                this[TermiosConstants.VSTOP] = 19
+                this[TermiosConstants.VSUSP] = 26
+                this[TermiosConstants.VREPRINT] = 18
+                this[TermiosConstants.VDISCARD] = 15
+                this[TermiosConstants.VWERASE] = 23
+                this[TermiosConstants.VLNEXT] = 22
+            },
+        )
+
         private const val LINE_OFFSET = 16
         private const val CONTROL_CHARACTERS_OFFSET = 17
         const val NATIVE_SIZE = CONTROL_CHARACTERS_OFFSET + NCCS
@@ -194,6 +220,11 @@ class Termios2(
     var cIspeed: Int,   /* input speed */
     var cOspeed: Int    /* output speed */
 ) : NativeStruct {
+    constructor(termios: Termios, inputSpeed: Int = 0, outputSpeed: Int = inputSpeed) : this(
+        termios.cIflag, termios.cOflag, termios.cCflag, termios.cLflag,
+        termios.cLine, termios.cCc.copyOf(), inputSpeed, outputSpeed,
+    )
+
     init {
         require(cCc.size == TERMIOS2_NCCS) { "c_cc length must be $TERMIOS2_NCCS" }
     }
@@ -238,11 +269,3 @@ class Termios2(
         const val NATIVE_SIZE = OUTPUT_SPEED_OFFSET + Int.SIZE_BYTES
     }
 }
-
-data class VtMode(
-    val mode: Byte,     // 终端模式
-    val waitvval: Byte, // 垂直同步
-    val relsig: Short,  // 释放信号
-    val acqsig: Short,  // 获取信号
-    val frsig: Short    // 强制释放信号
-)

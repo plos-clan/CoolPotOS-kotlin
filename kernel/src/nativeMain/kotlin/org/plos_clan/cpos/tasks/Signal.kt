@@ -28,6 +28,7 @@ internal value class Signal private constructor(val number: Int) {
         const val MAX = 64
         const val REALTIME_MIN = 32
 
+        val HANGUP = Signal(1)
         val INTERRUPT = Signal(2)
         val QUIT = Signal(3)
         val ILLEGAL_INSTRUCTION = Signal(4)

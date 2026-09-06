@@ -170,7 +170,7 @@ private class SerialTtyDriver(
             name = configuration.deviceName,
             major = LinuxDeviceMajor.TTY.number,
             minor = SERIAL_MINOR_BASE + configuration.index.toUInt(),
-            backend = SerialTerminal(configuration),
+            createBackend = { SerialTerminal(configuration) },
             inputSpeed = configuration.line.baudRate,
         ),
     )

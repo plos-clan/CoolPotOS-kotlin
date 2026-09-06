@@ -924,7 +924,7 @@ internal class SysfsRegistry(
 
         fun <T> withLock(block: () -> T): T {
             while (!held.compareAndSet(expectedValue = false, newValue = true)) {
-                // Registry operations never run from IRQ context; contention is short-lived.
+                bridge.asm_pause()
             }
             return try {
                 block()

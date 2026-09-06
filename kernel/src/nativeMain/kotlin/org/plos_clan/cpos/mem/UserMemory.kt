@@ -22,7 +22,7 @@ import platform.posix.memset
 
 class UserMemory private constructor(
     private val pageDirectory: PageDirectory,
-    private val address: ULong,
+    val address: ULong,
     private val addressSpace: AddressSpace?,
 ) : IoBuffer {
     private var preparedVirtualPage = ULong.MAX_VALUE

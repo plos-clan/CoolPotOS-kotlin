@@ -22,6 +22,7 @@ enum class CapEnum(val id: Int) {
     NET_RAW(13),
     SYS_PTRACE(19),
     SYS_ADMIN(21),
+    SYS_TTY_CONFIG(26),
     AUDIT_WRITE(29),
 }
 

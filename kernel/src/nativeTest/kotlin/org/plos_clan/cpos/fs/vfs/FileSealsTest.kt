@@ -40,7 +40,6 @@ class FileSealsTest {
     @Test
     fun writeSealWaitsForAllMappingsThatMayBecomeWritable() {
         val seals = FileSeals(0)
-        // A read-only VMA opened from an O_RDWR descriptor may later gain PROT_WRITE.
         assertEquals(VfsResult.Ok(7uL), seals.acquireMapping(true, 1uL, 7uL))
         assertEquals(VfsResult.Ok(7uL), seals.acquireMapping(true, 3uL, 7uL))
         assertEquals(VfsResult.Err(VfsError.BUSY), seals.add(FileSeals.WRITE or FileSeals.SEAL, data))
