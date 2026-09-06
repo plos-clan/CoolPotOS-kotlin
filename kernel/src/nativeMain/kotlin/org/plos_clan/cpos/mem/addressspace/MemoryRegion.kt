@@ -2,6 +2,8 @@ package org.plos_clan.cpos.mem.addressspace
 
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.mem.PageCacheSource
+import org.plos_clan.cpos.mem.PageCache
+import org.plos_clan.cpos.mem.PageCacheAcquireResult
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
@@ -66,7 +68,7 @@ abstract class FileRegionBacking(
         check(file.retain())
     }
 
-    final override fun close() = file.release()
+    override fun close() = file.release()
 }
 
 data class MemoryMapRequest(
@@ -91,10 +93,20 @@ abstract class MemoryRegionBacking : PageCacheSource {
     internal open val sharedMemoryIdentity: Any
         get() = this
 
-    internal fun retain(): Boolean {
+    internal open fun acquirePage(offset: ULong, scratch: ByteArray): PageCacheAcquireResult =
+        PageCache.acquire(cacheSource, offset, scratch)
+
+    internal open fun isPageCurrent(offset: ULong, frame: ULong): Boolean = true
+
+    internal open fun attached(addressSpace: AddressSpace) {}
+
+    internal open fun detached(addressSpace: AddressSpace) {}
+
+    internal fun retain(addressSpace: AddressSpace? = null): Boolean {
         var observed = references.load()
         while (observed in 1 until Int.MAX_VALUE) {
             if (references.compareAndSet(observed, observed + 1)) {
+                if (addressSpace != null) attached(addressSpace)
                 return true
             }
             observed = references.load()
@@ -102,7 +114,8 @@ abstract class MemoryRegionBacking : PageCacheSource {
         return false
     }
 
-    internal fun release() {
+    internal fun release(addressSpace: AddressSpace? = null) {
+        if (addressSpace != null) detached(addressSpace)
         var observed = references.load()
         while (observed > 0) {
             if (!references.compareAndSet(observed, observed - 1)) {

@@ -57,6 +57,20 @@ internal class ByteCircularBuffer(capacity: Int) : BufferSource {
         return count
     }
 
+    override fun copyTo(sourceOffset: Int, destination: CPointer<UByteVar>, count: Int): Int {
+        require(sourceOffset >= 0 && count >= 0 && sourceOffset <= size - count)
+        if (count == 0) return 0
+        val start = (readOffset + sourceOffset) % capacity
+        val firstChunk = minOf(count, capacity - start)
+        bytes.usePinned { source ->
+            memcpy(destination, source.addressOf(start), firstChunk.toULong())
+            if (firstChunk < count) {
+                memcpy(requireNotNull(destination + firstChunk), source.addressOf(0), (count - firstChunk).toULong())
+            }
+        }
+        return count
+    }
+
     fun read(
         destination: PreparedBufferDestination,
         offset: Int,

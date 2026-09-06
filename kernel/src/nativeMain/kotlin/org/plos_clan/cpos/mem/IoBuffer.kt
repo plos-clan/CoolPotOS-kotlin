@@ -17,6 +17,8 @@ interface BufferSource {
         destinationOffset: Int,
         count: Int,
     ): Int
+
+    fun copyTo(sourceOffset: Int, destination: CPointer<UByteVar>, count: Int): Int
 }
 
 interface BufferDestination {
@@ -45,6 +47,9 @@ value class PreparedBufferSource internal constructor(
         destinationOffset: Int,
         count: Int,
     ): Int = source.copyTo(sourceOffset, destination, destinationOffset, count)
+
+    fun copyTo(sourceOffset: Int, destination: CPointer<UByteVar>, count: Int): Int =
+        source.copyTo(sourceOffset, destination, count)
 }
 
 value class PreparedBufferDestination internal constructor(
@@ -65,6 +70,14 @@ value class PreparedBufferDestination internal constructor(
 }
 
 class ByteArrayBuffer(private val bytes: ByteArray) : IoBuffer {
+    override fun copyTo(sourceOffset: Int, destination: CPointer<UByteVar>, count: Int): Int {
+        require(validRange(sourceOffset, count))
+        if (count != 0) bytes.usePinned { source ->
+            memcpy(destination, source.addressOf(sourceOffset), count.toULong())
+        }
+        return count
+    }
+
     override fun prepareRead(offset: Int, count: Int): PreparedBufferSource? =
         if (validRange(offset, count)) PreparedBufferSource(this) else null
 

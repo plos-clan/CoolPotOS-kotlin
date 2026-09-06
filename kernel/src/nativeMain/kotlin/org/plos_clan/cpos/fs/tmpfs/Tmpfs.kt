@@ -25,6 +25,7 @@ import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 
 abstract class TmpfsFileSystemType protected constructor(
     name: String,
@@ -60,9 +61,6 @@ internal open class TmpfsInstance(
     private val spaceQuota = TmpfsQuota(options.sizeLimit)
     private val inodeQuota = TmpfsQuota(options.inodeLimit.takeUnless { it == 0uL })
 
-    val pageSize: Int
-        get() = options.pageSize
-
     override fun createRoot(superBlock: SuperBlock): Inode = checkNotNull(
         newNode(
             superBlock,
@@ -74,7 +72,7 @@ internal open class TmpfsInstance(
     override fun statistics(caller: VfsOperationContext): VfsResult<FileSystemStatistics> =
         lock.withLock {
             val total = options.sizeLimit ?: BuddyFrameAllocator.statistics().totalBytes
-            val blockSize = pageSize.toULong()
+            val blockSize = PAGE_SIZE_BYTES
             VfsResult.Ok(
                 FileSystemStatistics(
                     blockSize = blockSize,

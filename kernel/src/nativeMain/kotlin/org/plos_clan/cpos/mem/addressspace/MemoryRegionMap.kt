@@ -9,6 +9,7 @@ internal class MemoryRegionMap(
     private val allocationStart: ULong,
     private val allocationEnd: ULong,
     private val addressLimit: ULong,
+    private val owner: AddressSpace? = null,
 ) : Iterable<MemoryRegion> {
     private val entries = mutableListOf<MemoryRegion>()
 
@@ -25,8 +26,8 @@ internal class MemoryRegionMap(
         val retained = mutableListOf<MemoryRegionBacking>()
         for (region in entries) {
             val backing = region.backing ?: continue
-            if (!backing.retain()) {
-                retained.asReversed().forEach(MemoryRegionBacking::release)
+            if (!backing.retain(target.owner)) {
+                retained.asReversed().forEach { it.release(target.owner) }
                 error("Memory region backing is unavailable")
             }
             retained += backing
@@ -53,8 +54,8 @@ internal class MemoryRegionMap(
         val retained = mutableListOf<MemoryRegionBacking>()
         for (addition in additions) {
             val backing = addition.backing ?: continue
-            if (!backing.retain()) {
-                retained.asReversed().forEach(MemoryRegionBacking::release)
+            if (!backing.retain(owner)) {
+                retained.asReversed().forEach { it.release(owner) }
                 return false
             }
             retained += backing
@@ -128,7 +129,7 @@ internal class MemoryRegionMap(
         val index = entries.indexOfFirst { address > it.start && address < it.end }
         if (index < 0) return
         val left = entries[index]
-        check(left.backing?.retain() != false)
+        check(left.backing?.retain(owner) != false)
         val right = left.copy(
             start = address,
             offset = left.offset + (address - left.start),
@@ -171,7 +172,7 @@ internal class MemoryRegionMap(
         val left = entries[leftIndex]
         val right = entries.removeAt(leftIndex + 1)
         left.end = right.end
-        right.backing?.release()
+        right.backing?.release(owner)
     }
 
     private fun canMerge(left: MemoryRegion, right: MemoryRegion): Boolean =

@@ -375,6 +375,7 @@ internal fun fallocate(regs: PtraceRegisters, process: Process): Long {
     val mode = when (rawMode) {
         0uL -> FileAllocationMode.EXTEND
         FALLOC_FL_KEEP_SIZE.toULong() -> FileAllocationMode.KEEP_SIZE
+        FileAllocationMode.PUNCH_HOLE.bits.toULong() -> FileAllocationMode.PUNCH_HOLE
         else -> return errno(Errno.EOPNOTSUPP)
     }
     val offset = regs[PtraceRegisters.IDX_RDX]

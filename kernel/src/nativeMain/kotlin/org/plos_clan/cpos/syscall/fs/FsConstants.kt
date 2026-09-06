@@ -42,6 +42,8 @@ internal object FsConstants {
     const val F_GETOWN = 9
     const val F_SETOWN = 8
     const val F_DUPFD_CLOEXEC = 1_030
+    const val F_ADD_SEALS = 1_033
+    const val F_GET_SEALS = 1_034
     const val F_GETFD_FLAGS = FileDescriptorFlags.FD_CLOEXEC
 
     const val CLOSE_RANGE_CLOEXEC = 0x4u

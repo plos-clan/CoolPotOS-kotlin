@@ -4,20 +4,14 @@ import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FileSystemOptions
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 
 data class TmpfsOptions(
     val sizeLimit: ULong? = null,
     val inodeLimit: ULong = 0uL,
-    val pageSize: Int = PAGE_SIZE_BYTES.toInt(),
     val rootMode: FileMode = FileMode(0x1EDu),
     val rootUid: UInt = 0u,
     val rootGid: UInt = 0u,
 ) : FileSystemOptions {
-    init {
-        require(pageSize > 0 && pageSize and (pageSize - 1) == 0)
-    }
-
     companion object {
         internal fun parse(data: ByteArray?, totalBytes: ULong): VfsResult<TmpfsOptions> {
             if (data == null || data.isEmpty()) return VfsResult.Ok(TmpfsOptions())

@@ -1471,7 +1471,7 @@ private class FuseFileHandle(
             writeU64(0, handle ?: 0uL)
             writeU64(8, offset)
             writeU64(16, length)
-            writeU32(24, if (mode.keepsSize) 1u else 0u)
+            writeU32(24, mode.bits)
         }
         return when (val result = instance.request(caller, request)) {
             is VfsResult.Ok -> {

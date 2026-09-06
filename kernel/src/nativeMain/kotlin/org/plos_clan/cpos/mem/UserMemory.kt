@@ -17,6 +17,7 @@ import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.toVirtualPointer
 import platform.posix.memcpy
+import platform.posix.memmove
 import platform.posix.memset
 
 class UserMemory private constructor(
@@ -81,6 +82,13 @@ class UserMemory private constructor(
         }
     }
 
+    override fun copyTo(sourceOffset: Int, destination: CPointer<UByteVar>, count: Int): Int =
+        transfer(sourceOffset, count, false) { source, copied, chunk ->
+            bridge.close_smap()
+            memmove(requireNotNull(destination + copied), source, chunk.toULong())
+            bridge.open_smap()
+        }
+
     override fun copyFrom(
         destinationOffset: Int,
         source: ByteArray,
@@ -116,7 +124,7 @@ class UserMemory private constructor(
         count: Int,
     ): Int = transfer(destinationOffset, count, true) { destination, copied, chunk ->
         bridge.close_smap()
-        memcpy(destination, requireNotNull(source + copied), chunk.toULong())
+        memmove(destination, requireNotNull(source + copied), chunk.toULong())
         bridge.open_smap()
     }
 

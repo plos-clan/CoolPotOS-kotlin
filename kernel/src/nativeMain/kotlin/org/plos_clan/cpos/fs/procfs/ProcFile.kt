@@ -172,7 +172,7 @@ fun Process.maps(): String {
                 MemoryRegionType.FILE, MemoryRegionType.IMAGE -> {
                     val file = (region.backing as FileRegionBacking).file
 
-                    val path = when (val res = FileSystemManager.vfs.absolutePath(
+                    val path = file.inode.backend.displayName?.toString() ?: when (val res = FileSystemManager.vfs.absolutePath(
                         context = process.getFSContext(),
                         initial = file.path,
                     )) {
@@ -180,7 +180,7 @@ fun Process.maps(): String {
                         is VfsResult.Err -> ""
                     }
                     append(
-                        " ${file.offset.toString(16).padStart(8, '0')} 00:00 ${
+                        " ${region.offset.toString(16).padStart(8, '0')} 00:00 ${
                             file.inode.id.value.toString().padStart(7, '0')
                         } $path"
                     ) //TODO: 需要实现 st_dev

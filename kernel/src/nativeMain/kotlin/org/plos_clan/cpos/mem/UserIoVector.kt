@@ -49,6 +49,11 @@ internal class UserIoVector private constructor(
         }
     }
 
+    override fun copyTo(sourceOffset: Int, destination: CPointer<UByteVar>, count: Int): Int =
+        transfer(sourceOffset, count) { segment, segmentOffset, copied, chunk ->
+            segment.memory.copyTo(segmentOffset, requireNotNull(destination + copied), chunk)
+        }
+
     override fun copyFrom(
         destinationOffset: Int,
         source: CPointer<UByteVar>,

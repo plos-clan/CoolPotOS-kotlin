@@ -3,12 +3,12 @@
 package org.plos_clan.cpos.syscall
 
 import kotlinx.cinterop.ExperimentalForeignApi
+import org.plos_clan.cpos.fs.OpenFlags
+import org.plos_clan.cpos.fs.vfs.MappableFile
+import org.plos_clan.cpos.fs.vfs.MappedFile
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.MountFlag
-import org.plos_clan.cpos.fs.vfs.OpenFileDescription
-import org.plos_clan.cpos.fs.vfs.VfsOperationContext
-import org.plos_clan.cpos.mem.ByteArrayBuffer
-import org.plos_clan.cpos.mem.addressspace.FileRegionBacking
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_ACCESS_MASK
 import org.plos_clan.cpos.mem.addressspace.MemoryMapRequest
 import org.plos_clan.cpos.mem.addressspace.MemoryMapResult
@@ -16,7 +16,6 @@ import org.plos_clan.cpos.mem.addressspace.MemoryRegionType
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.tasks.Process
-import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
 import org.plos_clan.cpos.utils.isPageAligned
@@ -44,31 +43,6 @@ private const val PROT_READ = 0x1uL
 private const val PROT_WRITE = 0x2uL
 private const val PROT_EXEC = 0x4uL
 private const val SUPPORTED_PROT = 0x7uL
-
-private class MappedFile(file: OpenFileDescription) : FileRegionBacking(file) {
-
-    override val cacheSource
-        get() = file.cacheSource ?: this
-
-    override val identity
-        get() = file.inode
-
-    override val sharedMemoryIdentity: Any
-        get() = file.inode
-
-    override fun read(offset: ULong, destination: ByteArray): Int {
-        val caller = ProcessManager.currentProcess()?.vfsOperationContext
-            ?: VfsOperationContext.KERNEL
-        val result = file.readAt(
-            caller,
-            offset,
-            ByteArrayBuffer(destination),
-            0,
-            destination.size,
-        )
-        return if (result.isSuccess) result.bytesTransferred else result.raw.toInt()
-    }
-}
 
 private fun mmapResult(result: MemoryMapResult<ULong>): Long = when (result) {
     is MemoryMapResult.Ok -> result.value.toLong()
@@ -171,26 +145,37 @@ internal fun mmap(regs: PtraceRegisters, process: Process): Long {
         if (!file.access.canRead) {
             return errno(Errno.EACCES)
         }
-        if (shared && access and PROT_WRITE != 0uL) {
-            if (!file.access.canWrite) return errno(Errno.EACCES)
-            return errno(Errno.ENOTSUP)
+        if (offset > Long.MAX_VALUE.toULong() || length > Long.MAX_VALUE.toULong() - offset) {
+            return errno(Errno.EOVERFLOW)
         }
+        val mappable = file.inode.backend as? MappableFile
+        if (shared && access and PROT_WRITE != 0uL) {
+            if (!file.access.canWrite || file.getStatusFlags() and OpenFlags.O_APPEND != 0) {
+                return errno(Errno.EACCES)
+            }
+            if (MountFlag.READ_ONLY in file.path.mount.flags) return errno(Errno.EROFS)
+            if (mappable == null) return errno(Errno.ENOTSUP)
+        }
+        val prohibitsWrite = shared && (!file.access.canWrite || mappable == null ||
+            MountFlag.READ_ONLY in file.path.mount.flags || file.getStatusFlags() and OpenFlags.O_APPEND != 0)
         val prohibitedAccess =
             (if (MountFlag.NO_EXEC in file.path.mount.flags) PROT_EXEC else 0uL) or
-                (if (shared) PROT_WRITE else 0uL)
+                (if (prohibitsWrite) PROT_WRITE else 0uL)
         val maximumAccess = SUPPORTED_PROT and prohibitedAccess.inv()
-        if (access and maximumAccess.inv() != 0uL) {
-            return errno(Errno.EACCES)
-        }
+        if (access and maximumAccess.inv() != 0uL) return errno(Errno.EACCES)
 
-        val backing = MappedFile(file)
+        val backing = when (val result = mappable?.map(file, shared, access, maximumAccess)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return errno(result.error.errno)
+            null -> MappedFile(file, maximumAccess)
+        }
         return try {
             val result = process.addressSpace.map(
                 MemoryMapRequest(
                     hint = hint,
                     length = length,
                     access = access,
-                    maximumAccess = maximumAccess,
+                    maximumAccess = backing.maximumAccess,
                     fixed = fixed,
                     noReplace = noReplace,
                     shared = shared,

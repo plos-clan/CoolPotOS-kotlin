@@ -174,6 +174,9 @@ class SuperBlock internal constructor(
 interface InodeBackend {
     val type: InodeType
 
+    val displayName: VfsPathname?
+        get() = null
+
     fun open(
         caller: VfsOperationContext,
         inode: Inode,
@@ -327,9 +330,14 @@ interface MutableInodeBackend : InodeBackend {
     ): VfsResult<Unit> = inode.removeExtendedAttribute(name)
 }
 
-enum class FileAllocationMode(val keepsSize: Boolean) {
-    EXTEND(false),
-    KEEP_SIZE(true),
+enum class FileAllocationMode(val bits: UInt) {
+    EXTEND(0u),
+    KEEP_SIZE(1u),
+    PUNCH_HOLE(3u),
+    ;
+
+    val keepsSize: Boolean
+        get() = bits and 1u != 0u
 }
 
 abstract class RegularFileBackend : InodeBackend {

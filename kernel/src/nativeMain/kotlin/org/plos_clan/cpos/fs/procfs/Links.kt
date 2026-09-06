@@ -22,6 +22,7 @@ internal class ProcFileSymlink(
 ) : MagicLinkBackend {
     override fun readLink(caller: VfsOperationContext, inode: Inode): VfsResult<VfsPathname> =
         withFile(caller) { file ->
+            file.inode.backend.displayName?.let { return@withFile VfsResult.Ok(it) }
             val fileInode = file.inode
             val inodeId = fileInode.id.value
             val anonymousName = (file.backend as? AnonymousFileBackend)?.anonymousName

@@ -10,6 +10,7 @@ import org.plos_clan.cpos.module.Vdso
 import org.plos_clan.cpos.syscall.fs.EventFdSyscalls
 import org.plos_clan.cpos.syscall.fs.EpollSyscalls
 import org.plos_clan.cpos.syscall.fs.InotifySyscalls
+import org.plos_clan.cpos.syscall.fs.MemFdSyscalls
 import org.plos_clan.cpos.syscall.fs.TimerFdSyscalls
 import org.plos_clan.cpos.syscall.fs.access
 import org.plos_clan.cpos.syscall.fs.chdir
@@ -300,6 +301,7 @@ private enum class LinuxSyscall(
     GETCPU(309, ::getCPU),
     RENAMEAT2(316, ::renameAt2),
     GETRANDOM(318, ::getRandom, restartable = true),
+    MEMFD_CREATE(319, MemFdSyscalls::create),
     COPY_FILE_RANGE(326, ::copyFileRange, restartable = true),
     STATX(332, ::statx),
     RSEQ(334, ::rseq),

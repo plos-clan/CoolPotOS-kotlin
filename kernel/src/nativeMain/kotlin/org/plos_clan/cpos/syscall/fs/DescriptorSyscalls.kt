@@ -11,6 +11,7 @@ import org.plos_clan.cpos.fs.vfs.AccessMode
 import org.plos_clan.cpos.fs.vfs.AnonymousFileBackend
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.SeekOrigin
+import org.plos_clan.cpos.fs.vfs.SealableFile
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
@@ -20,6 +21,8 @@ import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.syscall.TimeSpec
 import org.plos_clan.cpos.syscall.fs.FsConstants.CLOSE_RANGE_CLOEXEC
+import org.plos_clan.cpos.syscall.fs.FsConstants.F_ADD_SEALS
+import org.plos_clan.cpos.syscall.fs.FsConstants.F_GET_SEALS
 import org.plos_clan.cpos.syscall.fs.FsConstants.F_DUPFD
 import org.plos_clan.cpos.syscall.fs.FsConstants.F_DUPFD_CLOEXEC
 import org.plos_clan.cpos.syscall.fs.FsConstants.F_GETFD
@@ -191,6 +194,24 @@ internal fun fcntl(regs: PtraceRegisters, process: Process): Long {
         F_GETOWN,
         F_SETOWN,
         -> if (process.fdTable.contains(fd)) 0L else errno(Errno.EBADF)
+
+        F_ADD_SEALS,
+        F_GET_SEALS,
+        -> {
+            val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
+            try {
+                if (file.access == AccessMode.PATH) return errno(Errno.EBADF)
+                val sealable = file.inode.backend as? SealableFile ?: return errno(Errno.EINVAL)
+                if (command.toInt() == F_GET_SEALS) return sealable.getSeals().toLong()
+                if (!file.access.canWrite) return errno(Errno.EPERM)
+                when (val result = sealable.addSeals(file.inode, argument.toInt())) {
+                    is VfsResult.Ok -> 0L
+                    is VfsResult.Err -> errno(result.error.errno)
+                }
+            } finally {
+                file.release()
+            }
+        }
 
         else -> errno(Errno.EINVAL)
     }
