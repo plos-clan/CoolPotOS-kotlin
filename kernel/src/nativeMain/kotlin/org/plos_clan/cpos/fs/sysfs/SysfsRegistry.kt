@@ -1,7 +1,8 @@
-@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+@file:OptIn(ExperimentalAtomicApi::class, ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.fs.sysfs
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceType
 import org.plos_clan.cpos.fs.vfs.CacheValidity
@@ -17,6 +18,7 @@ import org.plos_clan.cpos.fs.vfs.VfsTimestamp
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import kotlin.concurrent.atomics.AtomicBoolean
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 value class SysfsObjectHandle internal constructor(val id: ULong)
 

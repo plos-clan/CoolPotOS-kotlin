@@ -71,17 +71,7 @@ internal class VfsNodeOperations(
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        if (pathname.requiresDirectory && node.kind != NodeKind.Directory &&
-            !parent.name.isDot && !parent.name.isDotDot
-        ) {
-            return when (
-                val existing = paths.lookupChild(caller, context, parent.path, parent.name)
-            ) {
-                is VfsResult.Ok -> VfsResult.Err(VfsError.ALREADY_EXISTS)
-                is VfsResult.Err -> existing
-            }
-        }
-        return createChild(caller, parent.path, parent.name, node)
+        return createChild(caller, parent.path, parent.name, node, pathname.requiresDirectory)
     }
 
     fun createNode(
@@ -555,9 +545,17 @@ internal class VfsNodeOperations(
         directory: VfsPath,
         name: VfsName,
         node: NodeCreation,
+        requiresDirectory: Boolean = false,
     ): VfsResult<VfsPath> {
         if (name.isDot || name.isDotDot) {
             return VfsResult.Err(VfsError.ALREADY_EXISTS)
+        }
+        when (val existing = directory.dentry.lookupChild(caller, name)) {
+            is VfsResult.Ok -> return VfsResult.Err(VfsError.ALREADY_EXISTS)
+            is VfsResult.Err -> if (existing.error != VfsError.NOT_FOUND) return existing
+        }
+        if (requiresDirectory && node.kind != NodeKind.Directory) {
+            return VfsResult.Err(VfsError.NOT_FOUND)
         }
         if (MountFlag.READ_ONLY in directory.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)

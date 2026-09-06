@@ -337,9 +337,28 @@ class Dentry internal constructor(
     val isUnlinked: Boolean
         get() = lock.withLock { unlinked }
 
-    internal fun cachedChild(name: VfsName): Dentry? = lock.withLock {
-        val child = children[name] ?: return@withLock null
-        child.dentry.takeIf { child.validity.isValid(TscClock.nanoTime()) }
+    internal fun lookupChild(caller: VfsOperationContext, name: VfsName): VfsResult<Dentry> {
+        val directory = inode() ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val backend = directory.backend as? DirectoryBackend
+            ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        when (val access = backend.checkAccess(caller, directory, AccessPermissions.EXECUTE)) {
+            is VfsResult.Ok -> Unit
+            is VfsResult.Err -> return access
+        }
+        val cached = lock.withLock {
+            children[name]?.takeIf { it.validity.isValid(TscClock.nanoTime()) }?.dentry
+        }
+        if (cached != null) {
+            return if (cached.inode() != null) VfsResult.Ok(cached)
+            else VfsResult.Err(VfsError.NOT_FOUND)
+        }
+        val lookup = when (val result = backend.lookup(caller, directory, name)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        val child = cacheChild(name, lookup)
+        return if (lookup.inode != null) VfsResult.Ok(child)
+        else VfsResult.Err(VfsError.NOT_FOUND)
     }
 
     internal fun cacheChild(name: VfsName, lookup: DirectoryLookup): Dentry {

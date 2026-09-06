@@ -240,31 +240,10 @@ internal class VfsPathResolver(
         name: VfsName,
         followMount: Boolean = true,
     ): VfsResult<VfsPath> {
-        val directory = parent.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val backend = directory.backend as? DirectoryBackend
-            ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        when (val access = backend.checkAccess(caller, directory, AccessPermissions.EXECUTE)) {
-            is VfsResult.Ok -> Unit
-            is VfsResult.Err -> return access
-        }
-        parent.dentry.cachedChild(name)?.let { cached ->
-            cached.inode() ?: return VfsResult.Err(VfsError.NOT_FOUND)
-            val path = VfsPath(parent.mount, cached)
-            return VfsResult.Ok(
-                if (followMount) followMounts(context.namespace, path) else path,
-            )
-        }
-
-        val lookup = when (val result = backend.lookup(caller, directory, name)) {
+        val dentry = when (val result = parent.dentry.lookupChild(caller, name)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        val inode = lookup.inode
-        if (inode == null) {
-            parent.dentry.cacheChild(name, lookup)
-            return VfsResult.Err(VfsError.NOT_FOUND)
-        }
-        val dentry = parent.dentry.cacheChild(name, lookup)
         val path = VfsPath(parent.mount, dentry)
         return VfsResult.Ok(if (followMount) followMounts(context.namespace, path) else path)
     }
