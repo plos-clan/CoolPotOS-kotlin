@@ -24,6 +24,7 @@ value class VfsError private constructor(val errno: Int) {
         val NOT_DIRECTORY = VfsError(20)
         val IS_DIRECTORY = VfsError(21)
         val INVALID_ARGUMENT = VfsError(22)
+        val TOO_MANY_OPEN_FILES = VfsError(24)
         val NOT_TTY = VfsError(25)
         val FILE_TOO_LARGE = VfsError(27)
         val NO_SPACE = VfsError(28)

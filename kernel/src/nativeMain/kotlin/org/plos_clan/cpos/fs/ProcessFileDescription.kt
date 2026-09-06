@@ -110,8 +110,7 @@ class FileDescriptorTable {
         flags: ULong,
         limit: ULong,
     ): Reservation? = lock.withLock {
-        val fd = entries.firstEmpty(0)?.takeIf { it.toULong() < limit }
-            ?: return@withLock null
+        val fd = entries.firstEmpty(0, limit) ?: return@withLock null
         Reservation(fd, file, flags).also { entries[fd] = it }
     }
 
@@ -146,18 +145,13 @@ class FileDescriptorTable {
         true
     }
 
-    fun duplicate(fd: Int, minimum: Int, flags: ULong): Int? = lock.withLock {
-        val source = entries[fd] ?: return@withLock null
-        if (!source.file.retain()) {
-            return@withLock null
-        }
-        val target = entries.firstEmpty(minimum)
-        if (target == null) {
-            source.file.release()
-            return@withLock null
-        }
+    fun duplicate(fd: Int, minimum: Int, flags: ULong, limit: ULong): VfsResult<Int> = lock.withLock {
+        val source = entries[fd] ?: return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
+        val target = entries.firstEmpty(minimum, limit)
+            ?: return@withLock VfsResult.Err(VfsError.TOO_MANY_OPEN_FILES)
+        if (!source.file.retain()) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
         entries[target] = FileDescriptor(source.file, flags)
-        target
+        VfsResult.Ok(target)
     }
 
     fun acquire(fd: Int): OpenFileDescription? {
@@ -172,19 +166,29 @@ class FileDescriptorTable {
 
     fun snapshotDescriptors(): IntArray = lock.withLock { entries.occupiedIndices() }
 
-    fun dup2(caller: VfsOperationContext, oldFd: Int, newFd: Int): VfsResult<Unit> {
+    fun duplicateTo(
+        caller: VfsOperationContext,
+        oldFd: Int,
+        newFd: Int,
+        flags: ULong = 0uL,
+        limit: ULong = LIMIT.toULong(),
+    ): VfsResult<Int> {
         var replaced: OpenFileDescription? = null
         val result = lock.withLock {
-            if (newFd !in entries.indices) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
             val source = entries[oldFd] ?: return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
-            if (oldFd == newFd) return@withLock VfsResult.Ok(Unit)
-            if (entries.slot(newFd) is Reservation) return@withLock VfsResult.Err(VfsError.BUSY)
+            if (oldFd == newFd) return@withLock VfsResult.Ok(newFd)
+            if (newFd !in entries.indices || newFd.toULong() >= limit) {
+                return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
+            }
+            val target = entries.slot(newFd)
+            if (target is Reservation) return@withLock VfsResult.Err(VfsError.BUSY)
             if (!source.file.retain()) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
 
-            replaced = entries[newFd]?.file
-            entries[newFd] = FileDescriptor(source.file, 0uL)
-            VfsResult.Ok(Unit)
+            replaced = (target as? FileDescriptor)?.file
+            entries[newFd] = FileDescriptor(source.file, flags)
+            VfsResult.Ok(newFd)
         }
+        // Closing can block; dup2/dup3 deliberately ignore the displaced descriptor's close errors.
         replaced?.closeDescriptor(caller)
         return result
     }
@@ -291,13 +295,15 @@ class FileDescriptorTable {
             segments[segment].store(updated)
         }
 
-        fun firstEmpty(minimum: Int): Int? {
-            if (minimum !in indices) return null
+        fun firstEmpty(minimum: Int, limit: ULong = size.toULong()): Int? {
+            val end = minOf(limit, size.toULong()).toInt()
+            if (minimum !in 0 until end) return null
             var index = minimum
-            while (index < size) {
+            while (index < end) {
                 val segmentIndex = index / SEGMENT_SIZE
                 val snapshot = segments[segmentIndex].load()
-                for (offset in index % SEGMENT_SIZE until snapshot.size) {
+                val segmentEnd = minOf(snapshot.size, end - segmentIndex * SEGMENT_SIZE)
+                for (offset in index % SEGMENT_SIZE until segmentEnd) {
                     if (snapshot[offset] == null) return segmentIndex * SEGMENT_SIZE + offset
                 }
                 index = (segmentIndex + 1) * SEGMENT_SIZE

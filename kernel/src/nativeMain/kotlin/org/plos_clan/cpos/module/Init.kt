@@ -38,8 +38,8 @@ object Init {
         }
 
         val caller = process.vfsOperationContext
-        if (process.fdTable.dup2(caller, 0, 1) is VfsResult.Err ||
-            process.fdTable.dup2(caller, 0, 2) is VfsResult.Err
+        if (process.fdTable.duplicateTo(caller, 0, 1) is VfsResult.Err ||
+            process.fdTable.duplicateTo(caller, 0, 2) is VfsResult.Err
         ) {
             process.fdTable.close(caller, 0)
             process.fdTable.close(caller, 1)

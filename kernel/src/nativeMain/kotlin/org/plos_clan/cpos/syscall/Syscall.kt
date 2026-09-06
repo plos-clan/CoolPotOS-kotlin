@@ -22,6 +22,7 @@ import org.plos_clan.cpos.syscall.fs.closeRange
 import org.plos_clan.cpos.syscall.fs.copyFileRange
 import org.plos_clan.cpos.syscall.fs.dup
 import org.plos_clan.cpos.syscall.fs.dup2
+import org.plos_clan.cpos.syscall.fs.dup3
 import org.plos_clan.cpos.syscall.fs.faccessAt
 import org.plos_clan.cpos.syscall.fs.faccessAt2
 import org.plos_clan.cpos.syscall.fs.fadvise64
@@ -291,6 +292,7 @@ private enum class LinuxSyscall(
     SIGNALFD4(289, SignalSyscalls::signalfd4),
     EVENTFD2(290, EventFdSyscalls::eventfd2),
     EPOLL_CREATE1(291, EpollSyscalls::create1),
+    DUP3(292, ::dup3),
     PIPE2(293, ::pipe2),
     INOTIFY_INIT1(294, InotifySyscalls::init1),
     RT_TGSIGQUEUEINFO(297, SignalSyscalls::rtTgsigqueueinfo),

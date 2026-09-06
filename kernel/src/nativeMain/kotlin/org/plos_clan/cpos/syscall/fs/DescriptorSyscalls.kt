@@ -5,6 +5,7 @@ package org.plos_clan.cpos.syscall.fs
 import bridge.wait_for_interrupt
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.TscClock
+import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.FileDescriptorTable
 import org.plos_clan.cpos.fs.OpenFlags
 import org.plos_clan.cpos.fs.vfs.AccessMode
@@ -37,6 +38,7 @@ import org.plos_clan.cpos.syscall.fs.FsConstants.NANOSECONDS_PER_MILLISECOND
 import org.plos_clan.cpos.syscall.fs.FsConstants.POLL_FD_SIZE
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.Signal
 import org.plos_clan.cpos.utils.Errno
@@ -80,24 +82,39 @@ internal fun lseek(regs: PtraceRegisters, process: Process): Long {
 }
 
 internal fun dup(regs: PtraceRegisters, process: Process): Long {
-    val oldFd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
-        ?: return errno(Errno.EBADF)
-    val file = process.fdTable.acquire(oldFd) ?: return errno(Errno.EBADF)
-    val newFd = process.fdTable.install(file, 0uL)
-    if (newFd == null) {
-        file.release()
-        return errno(Errno.EMFILE)
+    val oldFd = regs[PtraceRegisters.IDX_RDI].toInt()
+    val limit = process.resourceLimits.get(ProcessResource.OPEN_FILES).soft
+    return when (val result = process.fdTable.duplicate(oldFd, 0, 0uL, limit)) {
+        is VfsResult.Ok -> result.value.toLong()
+        is VfsResult.Err -> errno(result.error.errno)
     }
-    return newFd.toLong()
 }
 
 internal fun dup2(regs: PtraceRegisters, process: Process): Long {
-    val oldFd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
-        ?: return errno(Errno.EBADF)
-    val newFd = fileDescriptor(regs[PtraceRegisters.IDX_RSI])
-        ?: return errno(Errno.EBADF)
-    return when (val result = process.fdTable.dup2(process.vfsOperationContext, oldFd, newFd)) {
-        is VfsResult.Ok -> newFd.toLong()
+    val oldFd = regs[PtraceRegisters.IDX_RDI].toInt()
+    val newFd = regs[PtraceRegisters.IDX_RSI].toInt()
+    val limit = process.resourceLimits.get(ProcessResource.OPEN_FILES).soft
+    return when (val result = process.fdTable.duplicateTo(
+        process.vfsOperationContext, oldFd, newFd, limit = limit,
+    )) {
+        is VfsResult.Ok -> result.value.toLong()
+        is VfsResult.Err -> errno(result.error.errno)
+    }
+}
+
+internal fun dup3(regs: PtraceRegisters, process: Process): Long {
+    val oldFd = regs[PtraceRegisters.IDX_RDI].toInt()
+    val newFd = regs[PtraceRegisters.IDX_RSI].toInt()
+    val flags = regs[PtraceRegisters.IDX_RDX].toInt()
+    if (oldFd == newFd || flags and OpenFlags.O_CLOEXEC.inv() != 0) {
+        return errno(Errno.EINVAL)
+    }
+    val descriptorFlags = if (flags and OpenFlags.O_CLOEXEC != 0) FileDescriptorFlags.FD_CLOEXEC else 0uL
+    val limit = process.resourceLimits.get(ProcessResource.OPEN_FILES).soft
+    return when (val result = process.fdTable.duplicateTo(
+        process.vfsOperationContext, oldFd, newFd, descriptorFlags, limit,
+    )) {
+        is VfsResult.Ok -> result.value.toLong()
         is VfsResult.Err -> errno(result.error.errno)
     }
 }
@@ -131,12 +148,16 @@ internal fun fcntl(regs: PtraceRegisters, process: Process): Long {
         F_DUPFD,
         F_DUPFD_CLOEXEC,
         -> {
-            if (argument > Int.MAX_VALUE.toULong()) {
+            if (!process.fdTable.contains(fd)) return errno(Errno.EBADF)
+            val limit = process.resourceLimits.get(ProcessResource.OPEN_FILES).soft
+            if (argument > Int.MAX_VALUE.toULong() || argument >= limit) {
                 return errno(Errno.EINVAL)
             }
             val flags = if (command.toInt() == F_DUPFD_CLOEXEC) F_GETFD_FLAGS else 0uL
-            process.fdTable.duplicate(fd, argument.toInt(), flags)?.toLong()
-                ?: errno(Errno.EBADF)
+            when (val result = process.fdTable.duplicate(fd, argument.toInt(), flags, limit)) {
+                is VfsResult.Ok -> result.value.toLong()
+                is VfsResult.Err -> errno(result.error.errno)
+            }
         }
 
         F_GETFD -> process.fdTable.descriptorFlags(fd)?.toLong() ?: errno(Errno.EBADF)
