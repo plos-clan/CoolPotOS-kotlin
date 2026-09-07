@@ -1,8 +1,9 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.mem.page
 
 import bridge.read_cr3
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.set

@@ -1,7 +1,8 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.fs.erofs
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.vfs.DeviceNumber
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.InodeMetadata

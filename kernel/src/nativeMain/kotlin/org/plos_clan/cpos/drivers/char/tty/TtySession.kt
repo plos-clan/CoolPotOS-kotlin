@@ -1,4 +1,4 @@
-@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+@file:OptIn(ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.drivers.char.tty
 
@@ -21,6 +21,7 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.KernelMutex
 import org.plos_clan.cpos.utils.PollEvents
 import kotlin.concurrent.atomics.AtomicLong
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 class TtySession(
     private val createBackend: () -> TtySessionBackend?,

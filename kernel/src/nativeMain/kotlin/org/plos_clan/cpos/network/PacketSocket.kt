@@ -1,4 +1,4 @@
-@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+@file:OptIn(ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.network
 
@@ -18,6 +18,7 @@ import org.plos_clan.cpos.tasks.IoWaitQueue
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.PollEvents
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 internal object PacketSocketProtocol {
     private val sockets = AtomicReference<List<PacketSocket>>(emptyList())
@@ -29,11 +30,11 @@ internal object PacketSocketProtocol {
     ).also(::register)
 
     fun receive(
-        interface_: NetworkInterface,
+        intfc: NetworkInterface,
         frame: ByteArray,
         ethernet: EthernetHeader,
     ) {
-        sockets.load().forEach { it.enqueue(interface_, frame, ethernet) }
+        sockets.load().forEach { it.enqueue(intfc, frame, ethernet) }
     }
 
     fun unregister(socket: PacketSocket) {
@@ -72,10 +73,10 @@ internal class PacketSocket internal constructor(
     override fun bindSocket(process: Process, address: SocketAddress): VfsResult<Unit> {
         val requested = address as? PacketSocketAddress
             ?: return VfsResult.Err(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
-        val interface_ = requested.interfaceIndex.takeIf { it != 0 }?.let {
+        val intfc = requested.interfaceIndex.takeIf { it != 0 }?.let {
             NetworkStack.interfaceByIndex(it) ?: return VfsResult.Err(VfsError.NO_DEVICE)
         }
-        if (interface_ != null && interface_.kind != NetworkInterfaceKind.ETHERNET) {
+        if (intfc != null && intfc.kind != NetworkInterfaceKind.ETHERNET) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
         return lock.withLock {
@@ -83,8 +84,8 @@ internal class PacketSocket internal constructor(
             binding = PacketSocketAddress(
                 requested.interfaceIndex,
                 requested.protocol,
-                interface_?.kind?.hardwareType ?: 0u,
-                hardwareAddress = interface_?.hardwareAddress,
+                intfc?.kind?.hardwareType ?: 0u,
+                hardwareAddress = intfc?.hardwareAddress,
             )
             VfsResult.Ok(Unit)
         }
@@ -115,13 +116,13 @@ internal class PacketSocket internal constructor(
         if (destination.interfaceIndex == 0 || destination.protocol == 0.toUShort() ||
             destination.hardwareAddress == null
         ) return IoResult.failure(VfsError.INVALID_ARGUMENT)
-        val interface_ = NetworkStack.interfaceByIndex(destination.interfaceIndex)
+        val intfc = NetworkStack.interfaceByIndex(destination.interfaceIndex)
             ?: return IoResult.failure(VfsError.NO_DEVICE)
-        if (interface_.kind != NetworkInterfaceKind.ETHERNET) {
+        if (intfc.kind != NetworkInterfaceKind.ETHERNET) {
             return IoResult.failure(VfsError.INVALID_ARGUMENT)
         }
-        if (!interface_.running) return IoResult.failure(VfsError.NETWORK_UNREACHABLE)
-        if (request.count > interface_.mtu) return IoResult.failure(VfsError.MESSAGE_TOO_LONG)
+        if (!intfc.running) return IoResult.failure(VfsError.NETWORK_UNREACHABLE)
+        if (request.count > intfc.mtu) return IoResult.failure(VfsError.MESSAGE_TOO_LONG)
 
         val frame = ByteArray(EthernetHeader.SIZE + request.count)
         if (request.source.copyTo(
@@ -133,10 +134,10 @@ internal class PacketSocket internal constructor(
         ) return IoResult.failure(VfsError.FAULT)
         EthernetHeader(
             destination.hardwareAddress,
-            interface_.hardwareAddress,
+            intfc.hardwareAddress,
             destination.protocol,
         ).writeTo(frame)
-        return if (interface_.transmit(frame)) IoResult.success(request.count)
+        return if (intfc.transmit(frame)) IoResult.success(request.count)
         else IoResult.failure(VfsError.NO_BUFFER_SPACE)
     }
 
@@ -201,14 +202,14 @@ internal class PacketSocket internal constructor(
     }
 
     internal fun enqueue(
-        interface_: NetworkInterface,
+        intfc: NetworkInterface,
         frame: ByteArray,
         ethernet: EthernetHeader,
     ) = lock.withLock {
         val bound = binding
         val protocol = bound?.protocol ?: socketProtocol
         if (closed || protocol == 0.toUShort() || protocol != ethernet.type ||
-            bound != null && bound.interfaceIndex != 0 && bound.interfaceIndex != interface_.index
+            bound != null && bound.interfaceIndex != 0 && bound.interfaceIndex != intfc.index
         ) return@withLock
         val packetLength = frame.size - EthernetHeader.SIZE
         val capturedLength = filterPacketLocked(frame, EthernetHeader.SIZE, packetLength)
@@ -223,9 +224,9 @@ internal class PacketSocket internal constructor(
         messages += Datagram(
             frame.copyOfRange(EthernetHeader.SIZE, EthernetHeader.SIZE + capturedLength),
             PacketSocketAddress(
-                interface_.index,
+                intfc.index,
                 ethernet.type,
-                interface_.kind.hardwareType,
+                intfc.kind.hardwareType,
                 packetType,
                 ethernet.source,
             ),

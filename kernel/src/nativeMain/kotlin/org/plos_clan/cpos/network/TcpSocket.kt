@@ -782,7 +782,7 @@ internal class TcpSocket internal constructor(
         child.inheritOptions(socketOptions())
         val transmission = child.initializePassive(
             this,
-            packet.interface_.mtu,
+            packet.intfc.mtu,
             segment,
             local,
             remote,

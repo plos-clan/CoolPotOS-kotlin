@@ -1,7 +1,8 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.module
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE

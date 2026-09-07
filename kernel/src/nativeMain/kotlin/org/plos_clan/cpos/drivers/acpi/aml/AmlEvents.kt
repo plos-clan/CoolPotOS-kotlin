@@ -1,7 +1,8 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.drivers.acpi.aml
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.coroutines.KernelEvent
 import org.plos_clan.cpos.drivers.acpi.apic.IoApic
 import org.plos_clan.cpos.drivers.acpi.fadt.Fadt

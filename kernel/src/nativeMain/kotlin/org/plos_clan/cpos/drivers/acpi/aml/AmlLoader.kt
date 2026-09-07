@@ -1,7 +1,8 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.drivers.acpi.aml
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.acpi.AcpiTable
 import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_ALIAS_OP
 import org.plos_clan.cpos.drivers.acpi.aml.evaluator.AML_BREAK_OP

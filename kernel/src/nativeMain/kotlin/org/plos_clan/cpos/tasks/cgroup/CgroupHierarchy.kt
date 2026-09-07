@@ -1,4 +1,4 @@
-@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+@file:OptIn(ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.tasks.cgroup
 
@@ -6,6 +6,7 @@ import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import kotlin.concurrent.atomics.AtomicBoolean
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 internal class CgroupHierarchy(
     private val changed: (Group, Event) -> Unit = { _, _ -> },

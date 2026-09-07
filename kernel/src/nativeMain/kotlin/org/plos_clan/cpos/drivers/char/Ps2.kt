@@ -1,8 +1,9 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.drivers.char
 
 import bridge.io_in8
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.yield
 import org.plos_clan.cpos.coroutines.KernelCoroutines

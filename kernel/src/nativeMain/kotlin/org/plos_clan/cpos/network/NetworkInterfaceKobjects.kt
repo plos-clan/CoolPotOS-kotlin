@@ -15,26 +15,26 @@ internal object NetworkInterfaceKobjects : NetworkConfigurationListener {
     private val lock = IrqSpinLock()
     private val publications = mutableMapOf<NetworkInterface, Publication>()
 
-    override fun linkChanged(interface_: NetworkInterface, removed: Boolean) = lock.withLock {
+    override fun linkChanged(intfc: NetworkInterface, removed: Boolean) = lock.withLock {
         if (removed) {
-            val publication = publications.remove(interface_) ?: return@withLock
+            val publication = publications.remove(intfc) ?: return@withLock
             publication.kobject.publish(KobjectAction.REMOVE)
             val result = Sysfs.unregisterObject(publication.handle)
             if (result is VfsResult.Err && result.error != VfsError.NOT_FOUND) {
-                println("net: failed to remove sysfs object ${interface_.name}: ${result.error}")
+                println("net: failed to remove sysfs object ${intfc.name}: ${result.error}")
             }
             return@withLock
         }
 
-        if (publications.containsKey(interface_)) return@withLock
-        val kobject = NetworkInterfaceKobject(interface_, KobjectUeventNetlinkProtocol)
+        if (publications.containsKey(intfc)) return@withLock
+        val kobject = NetworkInterfaceKobject(intfc, KobjectUeventNetlinkProtocol)
         when (val result = Sysfs.registerObject(kobject.specification)) {
             is VfsResult.Ok -> {
-                publications[interface_] = Publication(kobject, result.value)
+                publications[intfc] = Publication(kobject, result.value)
                 kobject.publish(KobjectAction.ADD)
             }
             is VfsResult.Err -> println(
-                "net: failed to publish sysfs object ${interface_.name}: ${result.error}",
+                "net: failed to publish sysfs object ${intfc.name}: ${result.error}",
             )
         }
     }

@@ -1,10 +1,11 @@
-@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+@file:OptIn(ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.fs.vfs
 
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PollEvents
 import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 internal enum class EpollControlOperation {
     ADD,

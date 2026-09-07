@@ -1,7 +1,8 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.syscall
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.FileSystemManager

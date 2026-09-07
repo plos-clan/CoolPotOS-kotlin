@@ -10,6 +10,7 @@ import org.plos_clan.cpos.drivers.DeviceRegistration
 import org.plos_clan.cpos.drivers.DeviceType
 import org.plos_clan.cpos.drivers.LinuxDeviceMajor
 import org.plos_clan.cpos.fs.sysfs.SysfsDevicePublication
+import org.plos_clan.cpos.fs.sysfs.SysfsTextAttribute
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.tasks.Process
@@ -112,8 +113,9 @@ object TtyManager {
         for ((endpoint, session) in endpointSessions.sortedBy { it.first.virtualTerminalNumber }) {
             endpoint.virtualTerminalNumber?.let { virtualTerminals[it] = session }
         }
+        val (consoleEndpoint, console) = endpointSessions.first()
         activeVirtualTerminal = virtualTerminals.values.firstOrNull()
-        systemConsole = endpointSessions.first().second
+        systemConsole = console
         terminalType = driver.terminalType
 
         val registered = ArrayList<Device>(endpoints.size + 3)
@@ -131,7 +133,6 @@ object TtyManager {
             registered += device
         }
 
-        val console = checkNotNull(systemConsole)
         val aliases = buildList {
             if (virtualTerminals.isNotEmpty()) {
                 add(DeviceRegistration(
@@ -157,7 +158,11 @@ object TtyManager {
                 major = LinuxDeviceMajor.TTY_AUXILIARY.number,
                 minor = 1u,
                 backend = console,
-                sysfs = SysfsDevicePublication.virtual("tty", "console"),
+                sysfs = SysfsDevicePublication.virtual(
+                    "tty",
+                    "console",
+                    attributes = listOf(SysfsTextAttribute.constant("active", "${consoleEndpoint.name}\n")),
+                ),
             ))
         }
         for (registration in aliases) {

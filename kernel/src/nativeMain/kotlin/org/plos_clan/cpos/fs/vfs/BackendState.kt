@@ -1,8 +1,9 @@
-@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+@file:OptIn(ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.fs.vfs
 
 import kotlin.concurrent.atomics.AtomicBoolean
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 sealed interface CacheValidity {
     fun isValid(nowNanoseconds: ULong): Boolean

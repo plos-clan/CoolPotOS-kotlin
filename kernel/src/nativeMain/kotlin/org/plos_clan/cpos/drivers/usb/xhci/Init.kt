@@ -1,7 +1,8 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.drivers.usb.xhci
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.pcie.PciDevice
 import org.plos_clan.cpos.drivers.usb.xhci.core.resetController

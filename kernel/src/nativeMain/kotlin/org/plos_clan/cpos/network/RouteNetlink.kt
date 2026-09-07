@@ -18,9 +18,9 @@ internal object RouteNetlinkProtocol :
         RTM_GETLINK -> getLink(request)
         RTM_NEWLINK, RTM_SETLINK -> mutate(request) { echo -> setLink(request.message, echo) }
         RTM_GETADDR -> dump(request, IFADDR_SIZE, AF_INET) {
-            NetworkStack.snapshotInterfaces().flatMap { interface_ ->
-                NetworkStack.interfaceAddresses(interface_.index).map {
-                    addressReply(interface_, it, removed = false)
+            NetworkStack.snapshotInterfaces().flatMap { intfc ->
+                NetworkStack.interfaceAddresses(intfc.index).map {
+                    addressReply(intfc, it, removed = false)
                 }
             }
         }
@@ -51,16 +51,16 @@ internal object RouteNetlinkProtocol :
         else -> NetlinkResult.Failure(VfsError.NOT_SUPPORTED)
     }
 
-    override fun linkChanged(interface_: NetworkInterface, removed: Boolean) {
-        notify(RTNLGRP_LINK) { linkReply(interface_, removed) }
+    override fun linkChanged(intfc: NetworkInterface, removed: Boolean) {
+        notify(RTNLGRP_LINK) { linkReply(intfc, removed) }
     }
 
     override fun addressChanged(
-        interface_: NetworkInterface,
+        intfc: NetworkInterface,
         address: NetworkInterfaceAddress,
         removed: Boolean,
     ) {
-        notify(RTNLGRP_IPV4_IFADDR) { addressReply(interface_, address, removed) }
+        notify(RTNLGRP_IPV4_IFADDR) { addressReply(intfc, address, removed) }
     }
 
     override fun routeChanged(route: NetworkRoute, removed: Boolean) {
@@ -81,11 +81,11 @@ internal object RouteNetlinkProtocol :
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return NetlinkResult.Failure(result.error)
         }
-        val interface_ = when (val result = resolveInterface(decoded)) {
+        val intfc = when (val result = resolveInterface(decoded)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return NetlinkResult.Failure(result.error)
         }
-        return NetlinkResult.Success(listOf(linkReply(interface_, removed = false)))
+        return NetlinkResult.Success(listOf(linkReply(intfc, removed = false)))
     }
 
     private fun dump(
@@ -144,18 +144,18 @@ internal object RouteNetlinkProtocol :
             if (value > Int.MAX_VALUE.toUInt()) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
             value.toInt()
         }
-        val interface_ = when (val result = resolveInterface(request)) {
+        val intfc = when (val result = resolveInterface(request)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
         val up = if (request.change and NetworkInterface.UP_FLAG != 0u) {
             request.flags and NetworkInterface.UP_FLAG != 0u
         } else {
-            interface_.administrativeUp
+            intfc.administrativeUp
         }
-        return when (val result = NetworkStack.setLink(interface_.index, up, mtu)) {
+        return when (val result = NetworkStack.setLink(intfc.index, up, mtu)) {
             is VfsResult.Ok -> VfsResult.Ok(
-                if (echo) NetworkStack.interfaceByIndex(interface_.index)?.let {
+                if (echo) NetworkStack.interfaceByIndex(intfc.index)?.let {
                     linkReply(it, removed = false)
                 } else {
                     null
@@ -221,7 +221,7 @@ internal object RouteNetlinkProtocol :
         }
         val address = Ipv4Address.from(addressAttribute.payload.copy())
             ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        val interface_ = NetworkStack.interfaceByIndex(index)
+        val intfc = NetworkStack.interfaceByIndex(index)
             ?: return VfsResult.Err(VfsError.NO_DEVICE)
         val flagsAttribute = attributes[IFA_FLAGS]
         val flags = flagsAttribute?.u32()
@@ -236,7 +236,7 @@ internal object RouteNetlinkProtocol :
         else NetworkStack.addAddress(index, configured)
         return when (result) {
             is VfsResult.Ok -> VfsResult.Ok(
-                if (echo) addressReply(interface_, configured, removed) else null,
+                if (echo) addressReply(intfc, configured, removed) else null,
             )
             is VfsResult.Err -> result
         }
@@ -366,33 +366,33 @@ internal object RouteNetlinkProtocol :
         }
     }
 
-    private fun linkReply(interface_: NetworkInterface, removed: Boolean): NetlinkReply {
+    private fun linkReply(intfc: NetworkInterface, removed: Boolean): NetlinkReply {
         val fixed = ByteArray(IFINFO_SIZE)
         LittleEndianBuffer(fixed).apply {
             writeU8(0, AF_UNSPEC.toUByte())
-            writeU16(2, interface_.kind.hardwareType)
-            writeU32(4, interface_.index.toUInt())
-            writeU32(8, interface_.flags)
+            writeU16(2, intfc.kind.hardwareType)
+            writeU32(4, intfc.index.toUInt())
+            writeU32(8, intfc.flags)
             writeU32(12, 0u)
         }
-        val address = ByteArray(MacAddress.SIZE_BYTES).also(interface_.hardwareAddress::copyTo)
+        val address = ByteArray(MacAddress.SIZE_BYTES).also(intfc.hardwareAddress::copyTo)
         return NetlinkReply(
             if (removed) RTM_DELLINK else RTM_NEWLINK,
             NetlinkCodec.payload(
                 fixed,
                 listOf(
-                    NetlinkAttribute.string(IFLA_IFNAME, interface_.name),
+                    NetlinkAttribute.string(IFLA_IFNAME, intfc.name),
                     NetlinkAttribute.binary(IFLA_ADDRESS, address),
                     NetlinkAttribute.binary(
                         IFLA_BROADCAST,
                         ByteArray(MacAddress.SIZE_BYTES).also(
-                            interface_.kind.broadcastAddress::copyTo,
+                            intfc.kind.broadcastAddress::copyTo,
                         ),
                     ),
-                    NetlinkAttribute.u32(IFLA_MTU, interface_.mtu.toUInt()),
+                    NetlinkAttribute.u32(IFLA_MTU, intfc.mtu.toUInt()),
                     NetlinkAttribute.u8(
                         IFLA_OPERSTATE,
-                        interface_.operationalState.abiValue,
+                        intfc.operationalState.abiValue,
                     ),
                 ),
             ),
@@ -400,7 +400,7 @@ internal object RouteNetlinkProtocol :
     }
 
     private fun addressReply(
-        interface_: NetworkInterface,
+        intfc: NetworkInterface,
         address: NetworkInterfaceAddress,
         removed: Boolean,
     ): NetlinkReply {
@@ -411,16 +411,16 @@ internal object RouteNetlinkProtocol :
             writeU8(2, 0u)
             writeU8(
                 3,
-                (if (interface_.kind == NetworkInterfaceKind.LOOPBACK) RT_SCOPE_HOST
+                (if (intfc.kind == NetworkInterfaceKind.LOOPBACK) RT_SCOPE_HOST
                 else RT_SCOPE_UNIVERSE).toUByte(),
             )
-            writeU32(4, interface_.index.toUInt())
+            writeU32(4, intfc.index.toUInt())
         }
         val nativeAddress = ByteArray(Ipv4Address.SIZE_BYTES).also(address.address::writeTo)
         val attributes = mutableListOf(
             NetlinkAttribute.binary(IFA_ADDRESS, nativeAddress),
             NetlinkAttribute.binary(IFA_LOCAL, nativeAddress),
-            NetlinkAttribute.string(IFA_LABEL, interface_.name),
+            NetlinkAttribute.string(IFA_LABEL, intfc.name),
         )
         if (!address.automaticPrefixRoute) {
             attributes += NetlinkAttribute.u32(IFA_FLAGS, IFA_F_NOPREFIXROUTE)

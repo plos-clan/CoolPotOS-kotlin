@@ -83,7 +83,7 @@ internal object UdpProtocol : IpProtocolHandler {
         val candidates = lock.withLock { bindings[segment.destinationPort]?.toList().orEmpty() }
             .filter { binding ->
                 (binding.address.address.isAny || binding.address.address == packet.destination) &&
-                    binding.socket.accepts(packet.interface_.index, source)
+                    binding.socket.accepts(packet.intfc.index, source)
             }
         val recipients =
             if (NetworkStack.isBroadcast(packet.destination) || packet.destination.isMulticast) {
@@ -130,7 +130,7 @@ internal object UdpProtocol : IpProtocolHandler {
         val recipient = lock.withLock { bindings[sourcePort]?.toList().orEmpty() }
             .firstOrNull { binding ->
                 (binding.address.address.isAny || binding.address.address == packet.source) &&
-                    binding.socket.accepts(packet.interface_.index, remote)
+                    binding.socket.accepts(packet.intfc.index, remote)
             }?.socket ?: return
         recipient.reportError(
             when (error) {

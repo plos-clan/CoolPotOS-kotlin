@@ -1,7 +1,8 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.syscall
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.tasks.cgroup.Cgroups
 import org.plos_clan.cpos.tasks.ProcessState
 

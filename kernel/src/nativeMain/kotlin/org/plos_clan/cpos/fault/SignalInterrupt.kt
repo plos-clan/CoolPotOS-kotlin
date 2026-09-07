@@ -1,8 +1,9 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.fault
 
 import kotlinx.cinterop.COpaquePointer
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.staticCFunction
 import org.plos_clan.cpos.syscall.SignalGateway

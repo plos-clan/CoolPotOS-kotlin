@@ -1,14 +1,16 @@
 @file:OptIn(
-    kotlinx.cinterop.ExperimentalForeignApi::class,
-    kotlin.concurrent.atomics.ExperimentalAtomicApi::class,
+    ExperimentalForeignApi::class,
+    ExperimentalAtomicApi::class,
 )
 
 package org.plos_clan.cpos.drivers.net
 
 import kotlinx.cinterop.CPointer
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
 import org.plos_clan.cpos.utils.IrqSpinLock
 import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 value class MacAddress private constructor(private val value: ULong) {
     val isUnicast: Boolean

@@ -1,7 +1,8 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.drivers.pcie
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.fault.IrqController
 import org.plos_clan.cpos.fault.IrqControllerType

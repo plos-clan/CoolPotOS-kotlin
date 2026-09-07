@@ -1,10 +1,11 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.mem
 
 import bridge.hhdm_request
 import kotlinx.cinterop.CPointed
 import kotlinx.cinterop.CPointer
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.pointed
 import org.plos_clan.cpos.utils.hex
 import org.plos_clan.cpos.utils.toPointer

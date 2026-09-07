@@ -1,11 +1,12 @@
 @file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
 @file:OptIn(
-    kotlinx.cinterop.ExperimentalForeignApi::class,
-    kotlin.native.internal.InternalForKotlinNative::class,
+    ExperimentalForeignApi::class,
+    InternalForKotlinNative::class,
 )
 
 package org.plos_clan.cpos.syscall
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.tasks.Process
@@ -17,6 +18,7 @@ import org.plos_clan.cpos.tasks.TaskState
 import org.plos_clan.cpos.tasks.TaskReaper
 import org.plos_clan.cpos.tasks.Thread
 import kotlin.native.internal.GCUnsafeCall
+import kotlin.native.internal.InternalForKotlinNative
 
 @GCUnsafeCall("deinitRuntimeIfNeeded")
 private external fun deinitializeRuntime()

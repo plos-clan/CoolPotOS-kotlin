@@ -1,7 +1,8 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.syscall.fs
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.fs.vfs.VfsError

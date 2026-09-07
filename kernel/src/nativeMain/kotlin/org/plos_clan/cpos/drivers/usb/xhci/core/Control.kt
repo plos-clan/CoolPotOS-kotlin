@@ -1,8 +1,9 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.drivers.usb.xhci.core
 
 import bridge.asm_pause
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.usb.xhci.regs.LegacySupport
 
 private fun Xhci.waitReady(): Boolean {

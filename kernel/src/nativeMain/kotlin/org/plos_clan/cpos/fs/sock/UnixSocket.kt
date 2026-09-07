@@ -1,7 +1,8 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.fs.sock
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.vfs.AccessPermissions
 import org.plos_clan.cpos.fs.vfs.AccessMode
 import org.plos_clan.cpos.fs.vfs.AnonymousFileFactory

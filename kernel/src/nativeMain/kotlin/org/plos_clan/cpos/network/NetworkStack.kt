@@ -59,10 +59,10 @@ internal data class NetworkPath(
 )
 
 internal interface NetworkConfigurationListener {
-    fun linkChanged(interface_: NetworkInterface, removed: Boolean) {}
+    fun linkChanged(intfc: NetworkInterface, removed: Boolean) {}
 
     fun addressChanged(
-        interface_: NetworkInterface,
+        intfc: NetworkInterface,
         address: NetworkInterfaceAddress,
         removed: Boolean,
     ) {}
@@ -73,7 +73,7 @@ internal interface NetworkConfigurationListener {
 }
 
 internal data class IpPacketContext(
-    val interface_: NetworkInterface,
+    val intfc: NetworkInterface,
     val bytes: ByteArray,
     val source: Ipv4Address,
     val destination: Ipv4Address,
@@ -239,7 +239,7 @@ internal object NetworkStack : EthernetProtocol {
     }
 
     private data class SelectedRoute(
-        val interface_: NetworkInterface,
+        val intfc: NetworkInterface,
         val source: Ipv4Address,
         val nextHop: Ipv4Address,
     )
@@ -417,13 +417,13 @@ internal object NetworkStack : EthernetProtocol {
     }
 
     fun setLink(index: Int, up: Boolean, mtu: Int? = null): VfsResult<Unit> {
-        val interface_ = lock.withLock { interfaces[index] }
+        val intfc = lock.withLock { interfaces[index] }
             ?: return VfsResult.Err(VfsError.NO_DEVICE)
-        if (mtu != null && !interface_.setMtu(mtu)) {
+        if (mtu != null && !intfc.setMtu(mtu)) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
-        val changed = interface_.setAdministrativeUp(up) || mtu != null
-        if (changed) notifyListeners { it.linkChanged(interface_, removed = false) }
+        val changed = intfc.setAdministrativeUp(up) || mtu != null
+        if (changed) notifyListeners { it.linkChanged(intfc, removed = false) }
         return VfsResult.Ok(Unit)
     }
 
@@ -431,7 +431,7 @@ internal object NetworkStack : EthernetProtocol {
         if (address.address.isAny || address.address.isLimitedBroadcast ||
             address.address.isMulticast
         ) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        val interface_ = lock.withLock {
+        val intfc = lock.withLock {
             val selected = interfaces[index] ?: return@withLock null
             val assigned = addresses.getOrPut(index) { mutableListOf() }
             if (assigned.any { it.address == address.address &&
@@ -441,16 +441,16 @@ internal object NetworkStack : EthernetProtocol {
             assigned += address
             selected
         } ?: return VfsResult.Err(VfsError.NO_DEVICE)
-        notifyListeners { it.addressChanged(interface_, address, removed = false) }
-        if (interface_.kind == NetworkInterfaceKind.ETHERNET && interface_.running) {
-            sendArpAnnouncement(interface_, address.address)
+        notifyListeners { it.addressChanged(intfc, address, removed = false) }
+        if (intfc.kind == NetworkInterfaceKind.ETHERNET && intfc.running) {
+            sendArpAnnouncement(intfc, address.address)
         }
         return VfsResult.Ok(Unit)
     }
 
     fun removeAddress(index: Int, address: Ipv4Address, prefixLength: Int? = null): VfsResult<Unit> {
         var removed: NetworkInterfaceAddress? = null
-        val interface_ = lock.withLock {
+        val intfc = lock.withLock {
             val selected = interfaces[index] ?: return@withLock null
             val assigned = addresses[index] ?: return VfsResult.Err(VfsError.ADDRESS_NOT_AVAILABLE)
             val position = assigned.indexOfFirst {
@@ -460,7 +460,7 @@ internal object NetworkStack : EthernetProtocol {
             removed = assigned.removeAt(position)
             selected
         } ?: return VfsResult.Err(VfsError.NO_DEVICE)
-        notifyListeners { it.addressChanged(interface_, checkNotNull(removed), removed = true) }
+        notifyListeners { it.addressChanged(intfc, checkNotNull(removed), removed = true) }
         return VfsResult.Ok(Unit)
     }
 
@@ -528,7 +528,7 @@ internal object NetworkStack : EthernetProtocol {
         interfaceIndex: Int? = null,
     ): VfsResult<NetworkPath> =
         lock.withLock { selectRouteLocked(source, destination, interfaceIndex) }?.let {
-            VfsResult.Ok(NetworkPath(it.source, it.interface_.mtu))
+            VfsResult.Ok(NetworkPath(it.source, it.intfc.mtu))
         } ?: VfsResult.Err(
             if (source.isAny) VfsError.NETWORK_UNREACHABLE else VfsError.ADDRESS_NOT_AVAILABLE,
         )
@@ -560,7 +560,7 @@ internal object NetworkStack : EthernetProtocol {
                 if (source.isAny) VfsError.NETWORK_UNREACHABLE else VfsError.ADDRESS_NOT_AVAILABLE,
             )
         val identification = nextIdentification.fetchAndAdd(1).toUShort()
-        if (route.interface_.kind == NetworkInterfaceKind.LOOPBACK) {
+        if (route.intfc.kind == NetworkInterfaceKind.LOOPBACK) {
             val packet = ByteArray(Ipv4Codec.MIN_HEADER_SIZE + payloadLength)
             payload.copyInto(
                 packet,
@@ -581,7 +581,7 @@ internal object NetworkStack : EthernetProtocol {
             )
             dispatchIpv4(
                 IpPacketContext(
-                    route.interface_,
+                    route.intfc,
                     packet,
                     route.source,
                     destination,
@@ -594,8 +594,8 @@ internal object NetworkStack : EthernetProtocol {
             )
             return VfsResult.Ok(route.source)
         }
-        if (!route.interface_.running) return VfsResult.Err(VfsError.NETWORK_UNREACHABLE)
-        val maximumPayload = route.interface_.mtu - Ipv4Codec.MIN_HEADER_SIZE
+        if (!route.intfc.running) return VfsResult.Err(VfsError.NETWORK_UNREACHABLE)
+        val maximumPayload = route.intfc.mtu - Ipv4Codec.MIN_HEADER_SIZE
         if (maximumPayload <= 0 || dontFragment && payloadLength > maximumPayload) {
             return VfsResult.Err(VfsError.MESSAGE_TOO_LONG)
         }
@@ -644,23 +644,23 @@ internal object NetworkStack : EthernetProtocol {
     }
 
     override fun attach(device: EthernetDevice) {
-        val interface_ = NetworkInterface(
+        val intfc = NetworkInterface(
             nextInterfaceIndex.fetchAndAdd(1),
             "eth${nextInterfaceIndex.load() - 3}",
             NetworkInterfaceKind.ETHERNET,
             device,
         )
         lock.withLock {
-            interfaces[interface_.index] = interface_
-            deviceInterfaces[device] = interface_
-            addresses[interface_.index] = mutableListOf()
+            interfaces[intfc.index] = intfc
+            deviceInterfaces[device] = intfc
+            addresses[intfc.index] = mutableListOf()
         }
-        notifyListeners { it.linkChanged(interface_, removed = false) }
+        notifyListeners { it.linkChanged(intfc, removed = false) }
     }
 
     override fun detach(device: EthernetDevice) {
         val removedRoutes = mutableListOf<NetworkRoute>()
-        val interface_ = lock.withLock {
+        val intfc = lock.withLock {
             val selected = deviceInterfaces.remove(device) ?: return
             interfaces.remove(selected.index)
             addresses.remove(selected.index)
@@ -671,35 +671,35 @@ internal object NetworkStack : EthernetProtocol {
             pendingNeighbors.keys.removeAll { it.interfaceIndex == selected.index }
             selected
         }
-        interface_.detach()
+        intfc.detach()
         removedRoutes.forEach { route -> notifyListeners { it.routeChanged(route, true) } }
-        notifyListeners { it.linkChanged(interface_, removed = true) }
+        notifyListeners { it.linkChanged(intfc, removed = true) }
     }
 
     override fun receive(device: EthernetDevice, frame: CPointer<UByteVar>, length: UInt) {
         if (length > Int.MAX_VALUE.toUInt()) return
-        val interface_ = lock.withLock { deviceInterfaces[device] } ?: return
+        val intfc = lock.withLock { deviceInterfaces[device] } ?: return
         val size = length.toInt()
-        if (!interface_.running || size < EthernetHeader.SIZE ||
+        if (!intfc.running || size < EthernetHeader.SIZE ||
             size > device.maximumFrameSize.toInt()
         ) return
-        receiveFrame(interface_, frame.readBytes(size))
+        receiveFrame(intfc, frame.readBytes(size))
     }
 
-    private fun receiveFrame(interface_: NetworkInterface, frame: ByteArray) {
+    private fun receiveFrame(intfc: NetworkInterface, frame: ByteArray) {
         val ethernet = EthernetHeader.decode(frame) ?: return
-        if (ethernet.destination != interface_.hardwareAddress &&
+        if (ethernet.destination != intfc.hardwareAddress &&
             ethernet.destination != MacAddress.BROADCAST &&
             ethernet.destination[0].toUInt() and 1u != 1u
         ) return
-        PacketSocketProtocol.receive(interface_, frame, ethernet)
+        PacketSocketProtocol.receive(intfc, frame, ethernet)
         when (ethernet.type) {
-            EthernetType.ARP.value -> receiveArp(interface_, frame)
-            EthernetType.IPV4.value -> receiveIpv4(interface_, frame)
+            EthernetType.ARP.value -> receiveArp(intfc, frame)
+            EthernetType.IPV4.value -> receiveIpv4(intfc, frame)
         }
     }
 
-    private fun receiveArp(interface_: NetworkInterface, frame: ByteArray) {
+    private fun receiveArp(intfc: NetworkInterface, frame: ByteArray) {
         val packet = ArpPacket.decode(
             frame,
             EthernetHeader.SIZE,
@@ -710,19 +710,19 @@ internal object NetworkStack : EthernetProtocol {
             packet.senderProtocolAddress.isMulticast
         ) return
         if (!packet.senderProtocolAddress.isAny) {
-            learnNeighbor(interface_, packet.senderProtocolAddress, packet.senderHardwareAddress)
+            learnNeighbor(intfc, packet.senderProtocolAddress, packet.senderHardwareAddress)
         }
         if (packet.operation != ArpOperation.REQUEST) return
         val ownsTarget = lock.withLock {
-            addresses[interface_.index]?.any { it.address == packet.targetProtocolAddress } == true
+            addresses[intfc.index]?.any { it.address == packet.targetProtocolAddress } == true
         }
         if (!ownsTarget) return
         sendArp(
-            interface_,
+            intfc,
             packet.senderHardwareAddress,
             ArpPacket(
                 ArpOperation.REPLY,
-                interface_.hardwareAddress,
+                intfc.hardwareAddress,
                 packet.targetProtocolAddress,
                 packet.senderHardwareAddress,
                 packet.senderProtocolAddress,
@@ -731,12 +731,12 @@ internal object NetworkStack : EthernetProtocol {
     }
 
     private fun learnNeighbor(
-        interface_: NetworkInterface,
+        intfc: NetworkInterface,
         address: Ipv4Address,
         hardwareAddress: MacAddress,
     ) {
-        val key = NeighborKey(interface_.index, address)
-        val neighbor = NetworkNeighbor(interface_.index, address, hardwareAddress, reachable = true)
+        val key = NeighborKey(intfc.index, address)
+        val neighbor = NetworkNeighbor(intfc.index, address, hardwareAddress, reachable = true)
         val pending = lock.withLock {
             neighbors[key] = NeighborEntry(
                 hardwareAddress,
@@ -747,25 +747,25 @@ internal object NetworkStack : EthernetProtocol {
         pending?.frames?.forEach { frame ->
             EthernetHeader(
                 hardwareAddress,
-                interface_.hardwareAddress,
+                intfc.hardwareAddress,
                 EthernetType.IPV4.value,
             ).writeTo(frame)
-            interface_.transmit(frame)
+            intfc.transmit(frame)
         }
         notifyListeners { it.neighborChanged(neighbor, removed = false) }
     }
 
-    private fun receiveIpv4(interface_: NetworkInterface, frame: ByteArray) {
+    private fun receiveIpv4(intfc: NetworkInterface, frame: ByteArray) {
         val packet = Ipv4Codec.decode(
             frame,
             EthernetHeader.SIZE,
             frame.size - EthernetHeader.SIZE,
         ) ?: return
-        if (packet.ttl == 0.toUByte() || !acceptsDestination(interface_, packet.destination)) return
+        if (packet.ttl == 0.toUByte() || !acceptsDestination(intfc, packet.destination)) return
         if (packet.fragmentOffset == 0 && !packet.moreFragments) {
             dispatchIpv4(
                 IpPacketContext(
-                    interface_,
+                    intfc,
                     frame,
                     packet.source,
                     packet.destination,
@@ -783,7 +783,7 @@ internal object NetworkStack : EthernetProtocol {
             packet.payloadOffset + packet.payloadLength,
         )
         val key = FragmentKey(
-            interface_.index,
+            intfc.index,
             packet.source,
             packet.destination,
             packet.protocol,
@@ -813,7 +813,7 @@ internal object NetworkStack : EthernetProtocol {
         )
         dispatchIpv4(
             IpPacketContext(
-                interface_,
+                intfc,
                 reassembledPacket,
                 packet.source,
                 packet.destination,
@@ -884,7 +884,7 @@ internal object NetworkStack : EthernetProtocol {
         val handler = lock.withLock { handlers[quoted.protocol] } ?: return
         handler.receiveError(
             IpPacketContext(
-                packet.interface_,
+                packet.intfc,
                 packet.bytes,
                 quoted.source,
                 quoted.destination,
@@ -934,7 +934,7 @@ internal object NetworkStack : EthernetProtocol {
         frame: ByteArray,
     ): Boolean {
         val directHardware = when {
-            destination.isLimitedBroadcast || isDirectedBroadcast(route.interface_, destination) ->
+            destination.isLimitedBroadcast || isDirectedBroadcast(route.intfc, destination) ->
                 MacAddress.BROADCAST
             destination.isMulticast -> multicastHardwareAddress(destination)
             else -> null
@@ -942,12 +942,12 @@ internal object NetworkStack : EthernetProtocol {
         if (directHardware != null) {
             EthernetHeader(
                 directHardware,
-                route.interface_.hardwareAddress,
+                route.intfc.hardwareAddress,
                 EthernetType.IPV4.value,
             ).writeTo(frame)
-            return route.interface_.transmit(frame)
+            return route.intfc.transmit(frame)
         }
-        val key = NeighborKey(route.interface_.index, route.nextHop)
+        val key = NeighborKey(route.intfc.index, route.nextHop)
         var resolved: MacAddress? = null
         var request = false
         var queued = false
@@ -974,37 +974,37 @@ internal object NetworkStack : EthernetProtocol {
         if (hardware != null) {
             EthernetHeader(
                 hardware,
-                route.interface_.hardwareAddress,
+                route.intfc.hardwareAddress,
                 EthernetType.IPV4.value,
             ).writeTo(frame)
-            return route.interface_.transmit(frame)
+            return route.intfc.transmit(frame)
         }
-        if (request) sendArpRequest(route.interface_, route.source, route.nextHop)
+        if (request) sendArpRequest(route.intfc, route.source, route.nextHop)
         return queued
     }
 
     private fun sendArpRequest(
-        interface_: NetworkInterface,
+        intfc: NetworkInterface,
         source: Ipv4Address,
         target: Ipv4Address,
     ) = sendArp(
-        interface_,
+        intfc,
         MacAddress.BROADCAST,
         ArpPacket(
             ArpOperation.REQUEST,
-            interface_.hardwareAddress,
+            intfc.hardwareAddress,
             source,
             MacAddress.ZERO,
             target,
         ),
     )
 
-    private fun sendArpAnnouncement(interface_: NetworkInterface, address: Ipv4Address) = sendArp(
-        interface_,
+    private fun sendArpAnnouncement(intfc: NetworkInterface, address: Ipv4Address) = sendArp(
+        intfc,
         MacAddress.BROADCAST,
         ArpPacket(
             ArpOperation.REQUEST,
-            interface_.hardwareAddress,
+            intfc.hardwareAddress,
             address,
             MacAddress.ZERO,
             address,
@@ -1012,14 +1012,14 @@ internal object NetworkStack : EthernetProtocol {
     )
 
     private fun sendArp(
-        interface_: NetworkInterface,
+        intfc: NetworkInterface,
         destination: MacAddress,
         packet: ArpPacket,
     ) {
         val frame = ByteArray(EthernetHeader.SIZE + ArpPacket.SIZE)
-        EthernetHeader(destination, interface_.hardwareAddress, EthernetType.ARP.value).writeTo(frame)
+        EthernetHeader(destination, intfc.hardwareAddress, EthernetType.ARP.value).writeTo(frame)
         packet.writeTo(frame, EthernetHeader.SIZE)
-        interface_.transmit(frame)
+        intfc.transmit(frame)
     }
 
     private fun selectRouteLocked(
@@ -1038,13 +1038,13 @@ internal object NetworkStack : EthernetProtocol {
             return SelectedRoute(loopback, source, destination)
         }
         if (destination.isLimitedBroadcast) {
-            val interface_ = interfaces.values.firstOrNull {
+            val intfc = interfaces.values.firstOrNull {
                 (interfaceIndex == null || it.index == interfaceIndex) &&
                     it.kind == NetworkInterfaceKind.ETHERNET && it.running &&
                     !addresses[it.index].isNullOrEmpty()
             } ?: return null
-            val source = selectSourceLocked(interface_, requestedSource, destination) ?: return null
-            return SelectedRoute(interface_, source, destination)
+            val source = selectSourceLocked(intfc, requestedSource, destination) ?: return null
+            return SelectedRoute(intfc, source, destination)
         }
         val route = allRoutesLocked()
             .asSequence()
@@ -1053,9 +1053,9 @@ internal object NetworkStack : EthernetProtocol {
                     (interfaceIndex == null || it.interfaceIndex == interfaceIndex)
             }
             .mapNotNull { candidate ->
-                val interface_ = interfaces[candidate.interfaceIndex]
+                val intfc = interfaces[candidate.interfaceIndex]
                     ?.takeIf(NetworkInterface::running) ?: return@mapNotNull null
-                Triple(candidate, interface_, candidate.destination.length)
+                Triple(candidate, intfc, candidate.destination.length)
             }
             .sortedWith(
                 compareByDescending<Triple<NetworkRoute, NetworkInterface, Int>> { it.third }
@@ -1080,12 +1080,12 @@ internal object NetworkStack : EthernetProtocol {
     }
 
     private fun selectSourceLocked(
-        interface_: NetworkInterface,
+        intfc: NetworkInterface,
         requested: Ipv4Address,
         destination: Ipv4Address,
     ): Ipv4Address? {
         if (!requested.isAny) return requested.takeIf(::hasAddressLocked)
-        val assigned = addresses[interface_.index].orEmpty()
+        val assigned = addresses[intfc.index].orEmpty()
         return assigned.firstOrNull { it.prefix.contains(destination) }?.address
             ?: assigned.firstOrNull()?.address
     }
@@ -1129,21 +1129,21 @@ internal object NetworkStack : EthernetProtocol {
         addresses.values.any { assigned -> assigned.any { it.address == address } }
 
     private fun acceptsDestination(
-        interface_: NetworkInterface,
+        intfc: NetworkInterface,
         destination: Ipv4Address,
     ): Boolean = lock.withLock {
         destination.isLimitedBroadcast || destination.isMulticast ||
             hasAddressLocked(destination) ||
-            addresses[interface_.index].orEmpty().any { address ->
+            addresses[intfc.index].orEmpty().any { address ->
                 address.prefixLength < 31 && address.prefix.broadcast == destination
             }
     }
 
     private fun isDirectedBroadcast(
-        interface_: NetworkInterface,
+        intfc: NetworkInterface,
         destination: Ipv4Address,
     ): Boolean = lock.withLock {
-        addresses[interface_.index].orEmpty().any {
+        addresses[intfc.index].orEmpty().any {
             it.prefixLength < 31 && it.prefix.broadcast == destination
         }
     }

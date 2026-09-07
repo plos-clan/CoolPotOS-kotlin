@@ -1,4 +1,4 @@
-@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+@file:OptIn(ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.fs
 
@@ -8,6 +8,7 @@ import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.utils.IrqSpinLock
 import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 object OpenFlags {
     const val O_ACCMODE = 0x000003

@@ -1,9 +1,10 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.drivers.acpi.aml
 
 import bridge.io_in8
 import bridge.io_out8
+import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.pcie.Pcie
 import org.plos_clan.cpos.mem.CachedMmioRegion
 import org.plos_clan.cpos.utils.IrqSpinLock

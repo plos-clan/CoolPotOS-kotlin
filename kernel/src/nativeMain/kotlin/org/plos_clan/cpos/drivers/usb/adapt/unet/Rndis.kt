@@ -1,7 +1,8 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.drivers.usb.adapt.unet
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.delay
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.coroutines.KernelOneShot
@@ -263,21 +264,21 @@ class RndisDevice private constructor(
     }
 }
 
-suspend fun probeRndis(interface_: UsbInterface): UsbDriver? {
-    val descriptor = interface_.desc
-    val matchesWireless = interface_.matches(
+suspend fun probeRndis(intfc: UsbInterface): UsbDriver? {
+    val descriptor = intfc.desc
+    val matchesWireless = intfc.matches(
         CLASS_WIRELESS,
         0x01u.toUByte(),
         0x03u.toUByte(),
     )
-    val matchesCdc = interface_.matches(CLASS_COMM, 0x02u.toUByte(), 0xffu.toUByte())
+    val matchesCdc = intfc.matches(CLASS_COMM, 0x02u.toUByte(), 0xffu.toUByte())
     if (!matchesWireless && !matchesCdc) return null
 
-    val dataInterface = interface_.findAssociatedInterface(CLASS_DATA) ?: run {
+    val dataInterface = intfc.findAssociatedInterface(CLASS_DATA) ?: run {
         println("RNDIS: control interface ${descriptor.interfaceNumber} has no CDC data interface")
         return null
     }
-    val notification = interface_.findEndpoint(EP_TYPE_INT, true) ?: run {
+    val notification = intfc.findEndpoint(EP_TYPE_INT, true) ?: run {
         println("RNDIS: no response notification endpoint")
         return null
     }
@@ -291,19 +292,19 @@ suspend fun probeRndis(interface_: UsbInterface): UsbDriver? {
     }
 
     val function = RndisUsbFunction(
-        interface_,
+        intfc,
         dataInterface,
         notification.desc.endpointAddress,
         bulkIn.desc.endpointAddress,
         bulkOut.desc.endpointAddress,
     )
     val device = RndisDevice.create(function) ?: return null
-    interface_.driver = device
+    intfc.driver = device
     dataInterface.driver = device
     if (device.start()) return device
 
     device.stop()
-    if (interface_.driver === device) interface_.driver = null
+    if (intfc.driver === device) intfc.driver = null
     if (dataInterface.driver === device) dataInterface.driver = null
     device.disconnect()
     return null

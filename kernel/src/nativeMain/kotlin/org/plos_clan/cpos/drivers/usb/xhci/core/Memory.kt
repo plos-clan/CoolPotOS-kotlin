@@ -1,7 +1,8 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.drivers.usb.xhci.core
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.set
 import org.plos_clan.cpos.drivers.usb.xhci.regs.Interrupter
