@@ -28,6 +28,7 @@ import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.TaskReaper
+import org.plos_clan.cpos.utils.BootIdentity
 import org.plos_clan.cpos.utils.Cmdline
 import org.plos_clan.cpos.utils.KernelRandom
 import org.plos_clan.cpos.utils.hex
@@ -78,6 +79,7 @@ fun kernelMain() {
     }
     Cmdline.initialize()
     KernelRandom.initialize()
+    BootIdentity.initialize(KernelRandom.uuidV4())
     if (!FileSystemManager.initialize()) {
         return
     }

@@ -10,6 +10,7 @@ import kotlinx.cinterop.ptr
 import kotlinx.cinterop.value
 import org.plos_clan.cpos.drivers.TscClock
 import kotlin.experimental.ExperimentalNativeApi
+import kotlin.uuid.Uuid
 
 object KernelRandom {
     private const val GOLDEN_RATIO = 0x9e37_79b9_7f4a_7c15uL
@@ -72,6 +73,11 @@ object KernelRandom {
     fun bytes(size: Int, salt: ULong = 0uL): ByteArray = ByteArray(size).also {
         fill(it, salt = salt)
     }
+
+    internal fun uuidV4(): Uuid = Uuid.fromByteArray(bytes(Uuid.SIZE_BYTES).apply {
+        this[6] = ((this[6].toInt() and 0x0f) or 0x40).toByte()
+        this[8] = ((this[8].toInt() and 0x3f) or 0x80).toByte()
+    })
 
     fun fill(
         destination: ByteArray,

@@ -1,8 +1,7 @@
-@file:OptIn(ExperimentalAtomicApi::class, ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.fs.sysfs
 
-import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceType
 import org.plos_clan.cpos.fs.vfs.CacheValidity
@@ -926,7 +925,7 @@ internal class SysfsRegistry(
 
         fun <T> withLock(block: () -> T): T {
             while (!held.compareAndSet(expectedValue = false, newValue = true)) {
-                bridge.asm_pause()
+                while (held.load()) {}
             }
             return try {
                 block()

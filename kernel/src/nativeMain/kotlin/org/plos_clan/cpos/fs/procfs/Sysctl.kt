@@ -7,6 +7,7 @@ import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.SuperBlock
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.utils.BootIdentity
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
@@ -27,12 +28,26 @@ internal object ProcSysTree {
         override val fileName = "kernel"
         override val inodeId = KERNEL_INODE
         override val type = InodeType.DIRECTORY
+        private val entries: List<ProcStaticEntry> = KernelSetting.entries + RandomDirectory
 
         override fun create(fileSystem: ProcfsInstance, superBlock: SuperBlock): Inode =
             fileSystem.directory(
                 superBlock,
                 inodeId,
-                ProcStaticDirectory(fileSystem, KernelSetting.entries),
+                ProcStaticDirectory(fileSystem, entries),
+            )
+    }
+
+    private object RandomDirectory : ProcStaticEntry {
+        override val fileName = "random"
+        override val inodeId = KERNEL_INODE + KernelSetting.entries.size.toULong() + 1uL
+        override val type = InodeType.DIRECTORY
+
+        override fun create(fileSystem: ProcfsInstance, superBlock: SuperBlock): Inode =
+            fileSystem.directory(
+                superBlock,
+                inodeId,
+                ProcStaticDirectory(fileSystem, RandomFile.entries),
             )
     }
 
@@ -67,6 +82,22 @@ internal object ProcSysTree {
             value.store(replacement)
             return VfsResult.Ok(Unit)
         }
+    }
+
+    private enum class RandomFile(
+        override val fileName: String,
+    ) : ProcStaticEntry {
+        BOOT_ID("boot_id"),
+        ;
+
+        override val inodeId: ULong
+            get() = RandomDirectory.inodeId + ordinal.toULong() + 1uL
+        override val type: InodeType
+            get() = InodeType.REGULAR
+        private val content = "${BootIdentity.id}\n".encodeToByteArray()
+
+        override fun create(fileSystem: ProcfsInstance, superBlock: SuperBlock): Inode =
+            fileSystem.text(superBlock, inodeId) { content }
     }
 }
 
