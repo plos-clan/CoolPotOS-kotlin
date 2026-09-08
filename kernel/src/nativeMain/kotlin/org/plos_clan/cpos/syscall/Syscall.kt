@@ -317,6 +317,7 @@ private enum class LinuxSyscall(
     CLOSE_RANGE(436, ::closeRange),
     FACCESSAT2(439, ::faccessAt2),
     EPOLL_PWAIT2(441, EpollSyscalls::pwait2),
+    MOUNT_SETATTR(442, NewMountSyscalls::mountSetattr),
     FCHMODAT2(452, ::fchmodAt2),
 }
 

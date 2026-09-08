@@ -8,8 +8,10 @@ import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.vfs.AccessMode
 import org.plos_clan.cpos.fs.vfs.FileSystemCreation
 import org.plos_clan.cpos.fs.vfs.FileSystemParameter
+import org.plos_clan.cpos.fs.vfs.MountAttributeUpdate
 import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.fs.vfs.MountFlags
+import org.plos_clan.cpos.fs.vfs.MountPropagation
 import org.plos_clan.cpos.fs.vfs.MountResources
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.fs.vfs.OpenOptions
@@ -19,12 +21,18 @@ import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_EMPTY_PATH
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_NO_AUTOMOUNT
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_RECURSIVE
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_SYMLINK_NOFOLLOW
 import org.plos_clan.cpos.syscall.fs.FsPathResolver.resolveAt
 import org.plos_clan.cpos.tasks.CapEnum
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.utils.Errno
+import org.plos_clan.cpos.utils.LittleEndianBuffer
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PtraceRegisters
 
 internal object NewMountSyscalls {
@@ -52,37 +60,116 @@ internal object NewMountSyscalls {
         }
     }
 
-    private value class MountAttributes private constructor(val flags: MountFlags) {
-        companion object {
-            private const val READ_ONLY = 0x000001uL
-            private const val NO_SUID = 0x000002uL
-            private const val NO_DEVICE = 0x000004uL
-            private const val NO_EXEC = 0x000008uL
-            private const val ATIME_MASK = 0x000070uL
-            private const val NO_ATIME = 0x000010uL
-            private const val STRICT_ATIME = 0x000020uL
-            private const val NO_DIRECTORY_ATIME = 0x000080uL
-            private const val NO_SYMLINK_FOLLOW = 0x200000uL
-            private val SUPPORTED = READ_ONLY or NO_SUID or NO_DEVICE or NO_EXEC or
-                ATIME_MASK or NO_DIRECTORY_ATIME or NO_SYMLINK_FOLLOW
+    internal object MountAttributeCodec {
+        const val IDMAP = 0x100000uL
 
-            fun from(bits: ULong): MountAttributes? {
-                if (bits and SUPPORTED.inv() != 0uL) return null
-                val atime = when (bits and ATIME_MASK) {
-                    0uL -> null
+        private const val READ_ONLY = 0x000001uL
+        private const val NO_SUID = 0x000002uL
+        private const val NO_DEVICE = 0x000004uL
+        private const val NO_EXEC = 0x000008uL
+        private const val ATIME_MASK = 0x000070uL
+        private const val NO_ATIME = 0x000010uL
+        private const val STRICT_ATIME = 0x000020uL
+        private const val NO_DIRECTORY_ATIME = 0x000080uL
+        private const val NO_SYMLINK_FOLLOW = 0x200000uL
+        private val flagAttributes = READ_ONLY or NO_SUID or NO_DEVICE or NO_EXEC or
+            ATIME_MASK or NO_DIRECTORY_ATIME or NO_SYMLINK_FOLLOW
+        private val setattrAttributes = flagAttributes or IDMAP
+        private val atimeFlags = MountFlags.of(
+            MountFlag.RELATIVE_ATIME,
+            MountFlag.NO_ATIME,
+            MountFlag.STRICT_ATIME,
+        )
+
+        fun initial(bits: ULong): MountFlags? {
+            if (bits and flagAttributes.inv() != 0uL) return null
+            val atime = when (bits and ATIME_MASK) {
+                0uL -> MountFlag.RELATIVE_ATIME
+                NO_ATIME -> MountFlag.NO_ATIME
+                STRICT_ATIME -> MountFlag.STRICT_ATIME
+                else -> return null
+            }
+            return commonFlags(bits) + atime
+        }
+
+        fun update(
+            set: ULong,
+            clear: ULong,
+            propagation: MountPropagation? = null,
+        ): MountAttributeUpdate? {
+            if ((set or clear) and setattrAttributes.inv() != 0uL) return null
+
+            val atimeClear = clear and ATIME_MASK
+            if (atimeClear != 0uL && atimeClear != ATIME_MASK ||
+                atimeClear == 0uL && set and ATIME_MASK != 0uL
+            ) {
+                return null
+            }
+
+            var setFlags = commonFlags(set)
+            var clearFlags = commonFlags(clear)
+            if (atimeClear == ATIME_MASK) {
+                clearFlags += atimeFlags
+                setFlags += when (set and ATIME_MASK) {
+                    0uL -> MountFlag.RELATIVE_ATIME
                     NO_ATIME -> MountFlag.NO_ATIME
                     STRICT_ATIME -> MountFlag.STRICT_ATIME
                     else -> return null
                 }
-                var flags = MountFlags.NONE
-                if (bits and READ_ONLY != 0uL) flags += MountFlag.READ_ONLY
-                if (bits and NO_SUID != 0uL) flags += MountFlag.NO_SUID
-                if (bits and NO_DEVICE != 0uL) flags += MountFlag.NO_DEVICE
-                if (bits and NO_EXEC != 0uL) flags += MountFlag.NO_EXEC
-                if (bits and NO_DIRECTORY_ATIME != 0uL) flags += MountFlag.NO_DIRECTORY_ATIME
-                if (bits and NO_SYMLINK_FOLLOW != 0uL) flags += MountFlag.NO_SYMLINK_FOLLOW
-                if (atime != null) flags += atime
-                return MountAttributes(flags)
+            }
+            return MountAttributeUpdate(setFlags, clearFlags, propagation)
+        }
+
+        private fun commonFlags(bits: ULong): MountFlags {
+            var flags = MountFlags.NONE
+            if (bits and READ_ONLY != 0uL) flags += MountFlag.READ_ONLY
+            if (bits and NO_SUID != 0uL) flags += MountFlag.NO_SUID
+            if (bits and NO_DEVICE != 0uL) flags += MountFlag.NO_DEVICE
+            if (bits and NO_EXEC != 0uL) flags += MountFlag.NO_EXEC
+            if (bits and NO_DIRECTORY_ATIME != 0uL) flags += MountFlag.NO_DIRECTORY_ATIME
+            if (bits and NO_SYMLINK_FOLLOW != 0uL) flags += MountFlag.NO_SYMLINK_FOLLOW
+            return flags
+        }
+    }
+
+    private data class MountAttributeArguments(
+        val set: ULong,
+        val clear: ULong,
+        val propagation: ULong,
+        val userNamespaceFd: ULong,
+    ) {
+        val isNoOperation: Boolean
+            get() = set == 0uL && clear == 0uL && propagation == 0uL
+
+        val hasValidPropagation: Boolean
+            get() = propagation and PROPAGATION_MASK.inv() == 0uL &&
+                propagation.countOneBits() <= 1
+
+        val decodedPropagation: MountPropagation?
+            get() = when (propagation) {
+                PRIVATE -> MountPropagation.PRIVATE
+                SHARED -> MountPropagation.SHARED
+                SLAVE -> MountPropagation.SLAVE
+                UNBINDABLE -> MountPropagation.UNBINDABLE
+                else -> null
+            }
+
+        companion object {
+            const val SIZE = 32
+            private const val UNBINDABLE = 0x020000uL
+            private const val PRIVATE = 0x040000uL
+            private const val SLAVE = 0x080000uL
+            private const val SHARED = 0x100000uL
+            private const val PROPAGATION_MASK = 0x1e0000uL
+
+            fun decode(bytes: ByteArray): MountAttributeArguments {
+                val input = LittleEndianBuffer(bytes)
+                return MountAttributeArguments(
+                    set = input.readU64(0),
+                    clear = input.readU64(8),
+                    propagation = input.readU64(16),
+                    userNamespaceFd = input.readU64(24),
+                )
             }
         }
     }
@@ -182,7 +269,7 @@ internal object NewMountSyscalls {
         if (flags and (FSMOUNT_CLOEXEC or FSMOUNT_NAMESPACE).inv() != 0uL) {
             return errno(Errno.EINVAL)
         }
-        val attributes = MountAttributes.from(registers[PtraceRegisters.IDX_RDX])
+        val attributes = MountAttributeCodec.initial(registers[PtraceRegisters.IDX_RDX])
             ?: return errno(Errno.EINVAL)
         if (ProcessManager.currentThread()?.capabilities?.hasEffective(CapEnum.SYS_ADMIN) != true) {
             return errno(Errno.EPERM)
@@ -205,7 +292,7 @@ internal object NewMountSyscalls {
             reservation.use {
                 val mountedFile = when (val result = configuration.mount(
                     caller = process.vfsOperationContext,
-                    flags = attributes.flags,
+                    flags = attributes,
                     createNamespace = flags and FSMOUNT_NAMESPACE != 0uL,
                 )) {
                     is VfsResult.Ok -> result.value
@@ -215,6 +302,86 @@ internal object NewMountSyscalls {
             }
         } finally {
             source.release()
+        }
+    }
+
+    fun mountSetattr(registers: PtraceRegisters, process: Process): Long {
+        val flags = registers[PtraceRegisters.IDX_RDX].toUInt()
+        val supportedFlags = (AT_EMPTY_PATH or AT_RECURSIVE or AT_SYMLINK_NOFOLLOW or
+            AT_NO_AUTOMOUNT).toUInt()
+        if (flags and supportedFlags.inv() != 0u) return errno(Errno.EINVAL)
+
+        val attributeSize = registers[PtraceRegisters.IDX_R8]
+        if (attributeSize > PAGE_SIZE_BYTES) return errno(Errno.E2BIG)
+        if (attributeSize < MountAttributeArguments.SIZE.toULong()) return errno(Errno.EINVAL)
+        if (ProcessManager.currentThread()?.capabilities?.hasEffective(CapEnum.SYS_ADMIN) != true) {
+            return errno(Errno.EPERM)
+        }
+
+        val attributeBytes = UserMemory(
+            process.addressSpace,
+            registers[PtraceRegisters.IDX_R10],
+        ).copyFromUser(attributeSize.toInt()) ?: return errno(Errno.EFAULT)
+        if ((MountAttributeArguments.SIZE until attributeBytes.size).any {
+            attributeBytes[it] != 0.toByte()
+        }) {
+            return errno(Errno.E2BIG)
+        }
+
+        val arguments = MountAttributeArguments.decode(attributeBytes)
+        if (arguments.isNoOperation) return 0L
+        if (!arguments.hasValidPropagation) return errno(Errno.EINVAL)
+        val attributes = MountAttributeCodec.update(
+            arguments.set,
+            arguments.clear,
+            arguments.decodedPropagation,
+        ) ?: return errno(Errno.EINVAL)
+
+        if (arguments.clear and MountAttributeCodec.IDMAP != 0uL) {
+            return errno(Errno.EINVAL)
+        }
+        if (arguments.set and MountAttributeCodec.IDMAP != 0uL) {
+            if (arguments.userNamespaceFd > Int.MAX_VALUE.toULong()) {
+                return errno(Errno.EINVAL)
+            }
+            val namespace = process.fdTable.acquire(arguments.userNamespaceFd.toInt())
+                ?: return errno(Errno.EBADF)
+            namespace.release()
+            return errno(Errno.EINVAL)
+        }
+        val pathname = when (val result = copyCString(
+            process,
+            registers[PtraceRegisters.IDX_RSI],
+            MAX_PATH_LENGTH,
+            VfsError.NAME_TOO_LONG,
+        )) {
+            is VfsResult.Ok -> VfsPathname.fromBytes(result.value)
+            is VfsResult.Err -> return errno(result.error.errno)
+        }
+        val atPath = when (val result = FsPathResolver.atPath(
+            process = process,
+            dirFd = registers[PtraceRegisters.IDX_RDI].toUInt().toInt(),
+            pathname = pathname,
+            caller = process.vfsOperationContext,
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return errno(result.error.errno)
+        }
+        val target = when (val result = atPath.resolve(
+            followFinalSymlink = flags and AT_SYMLINK_NOFOLLOW.toUInt() == 0u,
+            allowEmpty = flags and AT_EMPTY_PATH.toUInt() != 0u,
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return errno(result.error.errno)
+        }
+        return when (val result = FileSystemManager.vfs.setMountAttributes(
+            context = atPath.context,
+            target = target,
+            attributes = attributes,
+            recursive = flags and AT_RECURSIVE.toUInt() != 0u,
+        )) {
+            is VfsResult.Ok -> 0L
+            is VfsResult.Err -> errno(result.error.errno)
         }
     }
 

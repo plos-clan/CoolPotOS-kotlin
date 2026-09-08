@@ -350,6 +350,10 @@ enum class MountFlag(bit: Int, internal val optionName: String? = null) {
 value class MountFlags private constructor(private val bits: UInt) {
     operator fun contains(flag: MountFlag): Boolean = bits and flag.mask != 0u
     operator fun plus(flag: MountFlag): MountFlags = MountFlags(bits or flag.mask)
+    internal operator fun plus(flags: MountFlags): MountFlags = MountFlags(bits or flags.bits)
+
+    internal val storage: Int
+        get() = bits.toInt()
 
     internal fun withDefaultAtimePolicy(): MountFlags {
         val policies = MountFlag.NO_ATIME.mask or MountFlag.RELATIVE_ATIME.mask or
@@ -373,7 +377,26 @@ value class MountFlags private constructor(private val bits: UInt) {
             ?.toUInt()
             ?.takeIf { it and supported.bits.inv() == 0u }
             ?.let(::MountFlags)
+
+        internal fun fromStorage(bits: Int) = MountFlags(bits.toUInt())
     }
+}
+
+internal enum class MountPropagation {
+    PRIVATE,
+    SHARED,
+    SLAVE,
+    UNBINDABLE,
+}
+
+internal class MountAttributeUpdate(
+    internal val set: MountFlags,
+    internal val clear: MountFlags,
+    internal val propagation: MountPropagation? = null,
+) {
+    internal fun applyTo(flags: MountFlags): MountFlags = MountFlags.fromStorage(
+        flags.storage and clear.storage.inv() or set.storage,
+    ).withDefaultAtimePolicy()
 }
 
 interface FileSystemOptions

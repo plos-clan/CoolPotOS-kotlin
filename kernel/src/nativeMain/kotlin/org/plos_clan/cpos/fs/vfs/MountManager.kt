@@ -142,6 +142,23 @@ internal class VfsMountManager(
         return context.namespace.bind(sourcePath, targetPath)
     }
 
+    fun setAttributes(
+        context: FileSystemContext,
+        target: VfsPath,
+        attributes: MountAttributeUpdate,
+        recursive: Boolean,
+    ): VfsResult<Unit> {
+        val mount = target.mount
+        if (target.dentry !== mount.root) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        if (!mount.retain()) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        return try {
+            context.namespace.setAttributes(mount, attributes, recursive)
+            VfsResult.Ok(Unit)
+        } finally {
+            mount.release()
+        }
+    }
+
     private fun findFileSystem(name: String): FileSystemType? {
         lock.withLock { fileSystems[name] }?.let { return it }
         val candidates = lock.withLock { fileSystems.values.toList() }

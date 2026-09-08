@@ -14,12 +14,19 @@ class Mount internal constructor(
     val source: String,
     val root: Dentry = superBlock.root,
     flags: MountFlags = MountFlags.NONE,
+    propagation: MountPropagation = MountPropagation.PRIVATE,
     attachment: VfsPath? = null,
 ) {
     val id = nextId.fetchAndAdd(1L).toULong()
     private val references = AtomicInt(1)
     private val attachmentReference = AtomicReference(attachment)
-    val flags = flags.withDefaultAtimePolicy()
+    private val attributeState = AtomicLong(pack(flags.withDefaultAtimePolicy(), propagation))
+
+    val flags: MountFlags
+        get() = MountFlags.fromStorage(attributeState.load().toInt())
+
+    internal val propagation: MountPropagation
+        get() = unpackPropagation(attributeState.load())
 
     init {
         require(root.superBlock === superBlock)
@@ -71,15 +78,27 @@ class Mount internal constructor(
         return current === ancestor
     }
 
+    internal fun setAttributes(attributes: MountAttributeUpdate) {
+        var observed = attributeState.load()
+        while (true) {
+            val flags = attributes.applyTo(MountFlags.fromStorage(observed.toInt()))
+            val propagation = attributes.propagation ?: unpackPropagation(observed)
+            val updated = pack(flags, propagation)
+            if (updated == observed || attributeState.compareAndSet(observed, updated)) return
+            observed = attributeState.load()
+        }
+    }
+
     internal fun recordAccess(caller: VfsOperationContext, inode: Inode) {
+        val attributes = flags
         val update = when {
-            MountFlag.READ_ONLY in flags || MountFlag.NO_ATIME in flags ->
+            MountFlag.READ_ONLY in attributes || MountFlag.NO_ATIME in attributes ->
                 InodeTimestampEvent.NONE
-            inode.type == InodeType.DIRECTORY && MountFlag.NO_DIRECTORY_ATIME in flags ->
+            inode.type == InodeType.DIRECTORY && MountFlag.NO_DIRECTORY_ATIME in attributes ->
                 InodeTimestampEvent.NONE
             inode.type != InodeType.REGULAR && inode.type != InodeType.DIRECTORY &&
                 inode.type != InodeType.SYMLINK -> InodeTimestampEvent.NONE
-            MountFlag.STRICT_ATIME in flags -> InodeTimestampEvent.ACCESSED
+            MountFlag.STRICT_ATIME in attributes -> InodeTimestampEvent.ACCESSED
             else -> InodeTimestampEvent.RELATIVE_ACCESS
         }
         if (update != InodeTimestampEvent.NONE) {
@@ -93,7 +112,16 @@ class Mount internal constructor(
     }
 
     private companion object {
+        private const val PROPAGATION_SHIFT = UInt.SIZE_BITS
         private val nextId = AtomicLong(1L)
+
+        private fun pack(flags: MountFlags, propagation: MountPropagation): Long = (
+            flags.storage.toUInt().toULong() or
+                (propagation.ordinal.toULong() shl PROPAGATION_SHIFT)
+        ).toLong()
+
+        private fun unpackPropagation(attributes: Long): MountPropagation =
+            MountPropagation.entries[(attributes.toULong() shr PROPAGATION_SHIFT).toInt()]
     }
 }
 
@@ -163,6 +191,9 @@ class MountNamespace internal constructor(val root: Mount) {
             return@withLock VfsResult.Err(VfsError.NOT_FOUND)
         }
         if (mounts.containsKey(target)) return@withLock VfsResult.Err(VfsError.BUSY)
+        if (source.mount.propagation == MountPropagation.UNBINDABLE) {
+            return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
         if (!source.mount.superBlock.retain()) {
             return@withLock VfsResult.Err(VfsError.NOT_FOUND)
         }
@@ -173,6 +204,7 @@ class MountNamespace internal constructor(val root: Mount) {
             source = source.mount.source,
             root = source.dentry,
             flags = source.mount.flags,
+            propagation = source.mount.propagation,
             attachment = target,
         )
         VfsResult.Ok(Unit)
@@ -214,6 +246,22 @@ class MountNamespace internal constructor(val root: Mount) {
                 VfsResult.Ok(Unit)
             }
             is VfsResult.Err -> previous
+        }
+    }
+
+    internal fun setAttributes(
+        mount: Mount,
+        attributes: MountAttributeUpdate,
+        recursive: Boolean,
+    ) {
+        lock.withLock {
+            mount.setAttributes(attributes)
+            if (!recursive || !contains(mount)) return@withLock
+            mounts.values.forEach { candidate ->
+                if (candidate !== mount && candidate.isDescendantOf(mount)) {
+                    candidate.setAttributes(attributes)
+                }
+            }
         }
     }
 
