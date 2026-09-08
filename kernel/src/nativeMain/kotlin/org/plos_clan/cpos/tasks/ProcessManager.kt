@@ -8,6 +8,7 @@ import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.FileDescriptorTable
 import org.plos_clan.cpos.fs.FileSystemManager
+import org.plos_clan.cpos.fs.vfs.AnonymousFileIdentity
 import org.plos_clan.cpos.fs.vfs.FileSystemContext
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsError
@@ -57,13 +58,16 @@ internal enum class ProcessGroupResult {
     NOT_PERMITTED,
 }
 
-internal class PidHandle(
+internal class PidHandle private constructor(
     val scope: Scope,
+    internal val fileIdentity: AnonymousFileIdentity,
 ) {
     lateinit var thread: Thread
         private set
 
-    constructor(thread: Thread, scope: Scope) : this(scope) {
+    constructor(scope: Scope) : this(scope, AnonymousFileIdentity.create())
+
+    constructor(thread: Thread, scope: Scope) : this(scope, thread.pidFileIdentity) {
         attach(thread)
     }
 
@@ -85,6 +89,7 @@ internal class PidHandle(
     fun attach(thread: Thread) {
         check(!::thread.isInitialized)
         require(scope == Scope.THREAD || thread.id == thread.process.id)
+        require(fileIdentity == thread.pidFileIdentity)
         this.thread = thread
     }
 
@@ -244,6 +249,7 @@ class Thread internal constructor(
     val affinityMask: ULong = 0UL,
     val capabilities: CapabilityState = CapabilityState(),
     internal val cgroup: CgroupHierarchy.Task? = null,
+    internal val pidFileIdentity: AnonymousFileIdentity,
 ) {
     private val scheduledCpu = AtomicLong(-1)
     private val parentDeathSignalNumber = AtomicInt(0)
@@ -445,6 +451,7 @@ class Process internal constructor(
     internal val state: ProcessState
         get() = lifecycle.load().state
     val resourceLimits = ProcessLimits()
+    internal val oomScoreAdjustment = OomScoreAdjustment()
     internal val signals = ProcessSignalState(
         uid = { credentials.userIds.real },
         limit = { resourceLimits.get(ProcessResource.PENDING_SIGNALS).soft },
@@ -555,6 +562,7 @@ class Process internal constructor(
         membershipState.store(parent.membership)
         signals.inherit(parent.signals)
         resourceLimits.inherit(parent.resourceLimits)
+        oomScoreAdjustment.inherit(parent.oomScoreAdjustment)
         commandLine = parent.commandLine.copyOf()
     }
 
@@ -679,6 +687,7 @@ object ProcessManager {
         registers: ULongArray? = null,
         signals: ThreadSignalState? = null,
         placement: CgroupPlacement? = null,
+        pidHandle: PidHandle? = null,
         prepare: (Int) -> VfsResult<Unit> = { VfsResult.Ok(Unit) },
     ): VfsResult<Thread> {
         if (process.isKernelProcess || entryPoint == 0uL || stackPointer == 0uL) {
@@ -715,6 +724,7 @@ object ProcessManager {
                 kernelFsBase = kernelFsBase,
                 signals = signals,
                 cgroup = cgroup,
+                pidHandle = pidHandle,
             )
             if (registers == null) thread.initializeUserContext(entryPoint, stackPointer, fsBase)
             else thread.initializeUserContext(registers, stackPointer, fsBase)
@@ -978,8 +988,9 @@ object ProcessManager {
         kernelFsBase: ULong = 0uL,
         signals: ThreadSignalState? = null,
         cgroup: CgroupHierarchy.Task? = null,
-    ): Thread =
-        Thread(
+        pidHandle: PidHandle? = null,
+    ): Thread {
+        val thread = Thread(
             id = cgroup?.id ?: if (process.threads.isEmpty()) process.id else nextTaskId.fetchAndAdd(1),
             process = process,
             parentThread = parentThread,
@@ -989,10 +1000,13 @@ object ProcessManager {
             kernelFsBase = kernelFsBase,
             signals = signals ?: process.signals.newThread(),
             cgroup = cgroup,
-        ).also { thread ->
-            process.addThread(thread)
-            threadTableLock.withLock { threadTable[thread.id] = thread }
-        }
+            pidFileIdentity = pidHandle?.fileIdentity ?: AnonymousFileIdentity.create(),
+        )
+        pidHandle?.attach(thread)
+        process.addThread(thread)
+        threadTableLock.withLock { threadTable[thread.id] = thread }
+        return thread
+    }
 }
 
 private data class KernelStack(

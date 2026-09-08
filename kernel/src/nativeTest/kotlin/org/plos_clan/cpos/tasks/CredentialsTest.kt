@@ -87,7 +87,7 @@ class CapabilityStateTest {
             Credentials.Identity.ROOT,
             Credentials.Identity(81, 81, 81),
         )
-        val state = CapabilityState(keepAcrossUserIdChange = true)
+        val state = CapabilityState(secureBits = SecureBit.KEEP_CAPS.mask)
 
         state.applyUserIdChange(transition)
         assertEquals(TASK_CAP_FULL_MASK, state.permitted)
@@ -117,7 +117,7 @@ class CapabilityStateTest {
             effective = 0uL,
             permitted = 0uL,
             bounding = network,
-            keepAcrossUserIdChange = true,
+            secureBits = SecureBit.KEEP_CAPS.mask,
         )
 
         state.applyExec(execution)
@@ -125,7 +125,24 @@ class CapabilityStateTest {
         assertEquals(network, state.permitted)
         assertEquals(network, state.effective)
         assertEquals(0uL, state.ambient)
-        assertFalse(state.keepAcrossUserIdChange)
+        assertFalse(state.hasSecureBit(SecureBit.KEEP_CAPS))
+    }
+
+    @Test
+    fun rootExecCombinesInheritableAndBoundedCapabilities() {
+        val bounded = bit(CapEnum.NET_ADMIN)
+        val inherited = bit(CapEnum.AUDIT_WRITE)
+        val state = CapabilityState(
+            effective = 0uL,
+            permitted = inherited,
+            inheritable = inherited,
+            bounding = bounded,
+        )
+
+        state.applyExec(Credentials().prepareExec())
+
+        assertEquals(bounded or inherited, state.permitted)
+        assertEquals(bounded or inherited, state.effective)
     }
 
     @Test
@@ -147,6 +164,85 @@ class CapabilityStateTest {
         assertEquals(audit, state.permitted)
         assertEquals(audit, state.effective)
         assertEquals(audit, state.ambient)
+    }
+
+    @Test
+    fun secureBitLocksAreImmutable() {
+        val keepCaps = SecureBit.KEEP_CAPS
+        val locked = keepCaps.mask or keepCaps.lockMask
+        val state = CapabilityState()
+
+        assertTrue(state.replaceSecureBits(locked.toULong()))
+        assertTrue(state.replaceSecureBits(locked.toULong()))
+        assertFalse(state.replaceSecureBits(keepCaps.lockMask.toULong()))
+        assertFalse(state.replaceSecureBits(keepCaps.mask.toULong()))
+        assertFalse(state.setSecureBit(keepCaps, enabled = false))
+        assertFalse(state.replaceSecureBits(ULong.MAX_VALUE))
+        assertEquals(locked, state.secureBits)
+
+        val child = CapabilityState().also { it.inherit(state) }
+        assertEquals(locked, child.secureBits)
+        assertFalse(child.setSecureBit(keepCaps, enabled = false))
+    }
+
+    @Test
+    fun noSetuidFixupPreservesCapabilitySets() {
+        val ambient = bit(CapEnum.NET_RAW)
+        val transition = Credentials.UserIdChange(
+            Credentials.Identity.ROOT,
+            Credentials.Identity(81, 81, 81),
+        )
+        val state = CapabilityState(
+            inheritable = ambient,
+            ambient = ambient,
+            secureBits = SecureBit.NO_SETUID_FIXUP.mask,
+        )
+
+        state.applyUserIdChange(transition)
+
+        assertEquals(TASK_CAP_FULL_MASK, state.permitted)
+        assertEquals(TASK_CAP_FULL_MASK, state.effective)
+        assertEquals(ambient, state.ambient)
+    }
+
+    @Test
+    fun norootDisablesRootCapabilityGrantOnExec() {
+        val network = bit(CapEnum.NET_ADMIN) or bit(CapEnum.NET_RAW)
+        val state = CapabilityState(
+            bounding = network,
+            secureBits = SecureBit.NOROOT.mask,
+        )
+
+        state.applyExec(Credentials().prepareExec())
+
+        assertEquals(0uL, state.permitted)
+        assertEquals(0uL, state.effective)
+    }
+
+    @Test
+    fun ambientRaiseCanBePermanentlyDisabled() {
+        val audit = bit(CapEnum.AUDIT_WRITE)
+        val secureBits = SecureBit.NO_CAP_AMBIENT_RAISE.let { it.mask or it.lockMask }
+        val state = CapabilityState(
+            permitted = audit,
+            inheritable = audit,
+            secureBits = secureBits,
+        )
+
+        assertFalse(state.raiseAmbient(CapEnum.AUDIT_WRITE.id))
+        assertFalse(state.setSecureBit(SecureBit.NO_CAP_AMBIENT_RAISE, enabled = false))
+    }
+
+    @Test
+    fun execClearsKeepCapsButPreservesItsLock() {
+        val keepCaps = SecureBit.KEEP_CAPS
+        val state = CapabilityState(secureBits = keepCaps.mask or keepCaps.lockMask)
+
+        state.applyExec(Credentials().prepareExec())
+
+        assertFalse(state.hasSecureBit(keepCaps))
+        assertEquals(keepCaps.lockMask, state.secureBits)
+        assertFalse(state.setSecureBit(keepCaps, enabled = true))
     }
 
     private fun bit(capability: CapEnum): ULong = 1uL shl capability.id

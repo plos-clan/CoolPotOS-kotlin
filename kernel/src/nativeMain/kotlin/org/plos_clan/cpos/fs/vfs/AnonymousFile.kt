@@ -22,16 +22,24 @@ internal abstract class AnonymousFileBackend(
     ): VfsResult<Unit> = VfsResult.Err(VfsError.INVALID_ARGUMENT)
 }
 
-internal class AnonymousFileFactory {
-    private val lock = IrqSpinLock()
-    private var nextInodeId = ULong.MAX_VALUE
+internal value class AnonymousFileIdentity private constructor(val inodeId: InodeId) {
+    companion object {
+        private val lock = IrqSpinLock()
+        private var nextInodeId = ULong.MAX_VALUE
 
+        fun create(): AnonymousFileIdentity =
+            lock.withLock { AnonymousFileIdentity(InodeId(nextInodeId--)) }
+    }
+}
+
+internal class AnonymousFileFactory {
     fun createInode(
         context: FileSystemContext,
         backend: InodeBackend,
         metadata: InodeMetadata,
+        identity: AnonymousFileIdentity = AnonymousFileIdentity.create(),
     ): Inode = Inode(
-        id = lock.withLock { InodeId(nextInodeId--) },
+        id = identity.inodeId,
         superBlock = context.root.mount.superBlock,
         backend = backend,
         initialAttributes = InodeAttributeSnapshot(
@@ -47,10 +55,11 @@ internal class AnonymousFileFactory {
         options: OpenOptions,
         metadata: InodeMetadata = InodeMetadata(mode = FileMode(0x1FFu), linkCount = 0u),
         initialStatusFlags: Int = 0,
+        identity: AnonymousFileIdentity = AnonymousFileIdentity.create(),
     ): VfsResult<OpenFileDescription> = OpenFileDescription.open(
         caller,
         context.root,
-        createInode(context, backend, metadata),
+        createInode(context, backend, metadata, identity),
         options,
         initialStatusFlags = initialStatusFlags,
     )

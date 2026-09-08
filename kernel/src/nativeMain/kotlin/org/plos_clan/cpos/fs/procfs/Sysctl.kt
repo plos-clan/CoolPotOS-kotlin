@@ -68,8 +68,7 @@ internal object ProcSysTree {
             fileSystem.text(
                 superBlock = superBlock,
                 id = inodeId,
-                mode = SYSCTL_MODE,
-                write = ::update,
+                write = { _, input -> update(input) },
             ) {
                 "${value.load()}\n".encodeToByteArray()
             }
@@ -104,4 +103,3 @@ internal object ProcSysTree {
 private val KERNEL_INODE = SYS_INODE + 1uL
 private const val DEFAULT_OVERFLOW_ID = 65_534
 private const val MAX_OLD_ID = 65_535
-private const val SYSCTL_MODE = 0x1a4u

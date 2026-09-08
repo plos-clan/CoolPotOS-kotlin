@@ -96,15 +96,7 @@ internal class ProcfsInstance : SuperBlockBackend {
         val pid = process.id
         val fileName = name.toString()
         val file = ProcessFile.entries.firstOrNull { it.fileName == fileName }
-        if (file != null) {
-            return text(
-                superBlock = superBlock,
-                id = ProcInode.process(pid, file.ordinal.toUInt() + 1u),
-                owner = process,
-            ) {
-                process.takeUnless { it.state == ProcessState.DEAD }?.let(file::render)
-            }
-        }
+        if (file != null) return file.create(this, superBlock, target)
         return ProcessNode.entries.firstOrNull { it.fileName == fileName }
             ?.create(this, superBlock, target)
     }
@@ -167,14 +159,15 @@ internal class ProcfsInstance : SuperBlockBackend {
     internal fun text(
         superBlock: SuperBlock,
         id: ULong,
-        mode: UInt = FILE_MODE,
         owner: Process? = null,
-        write: ((ByteArray) -> VfsResult<Unit>)? = null,
+        write: ((VfsOperationContext, ByteArray) -> VfsResult<Unit>)? = null,
+        mode: UInt = if (write == null) FILE_MODE else WRITABLE_FILE_MODE,
+        positionedWrite: Boolean = true,
         render: () -> ByteArray?,
     ): Inode = Inode(
         id = InodeId(id),
         superBlock = superBlock,
-        backend = ProcTextFile(render, write),
+        backend = ProcTextFile(render, write, positionedWrite),
         initialAttributes = InodeAttributeSnapshot(
             InodeAttributes(
                 InodeMetadata(
@@ -350,7 +343,8 @@ private class ProcDirectoryHandle(
 
 private class ProcTextFile(
     private val render: () -> ByteArray?,
-    private val write: ((ByteArray) -> VfsResult<Unit>)?,
+    private val write: ((VfsOperationContext, ByteArray) -> VfsResult<Unit>)?,
+    private val positionedWrite: Boolean,
 ) : RegularFileBackend() {
 
     override fun resize(
@@ -370,13 +364,11 @@ private class ProcTextFile(
         inode: Inode,
         options: OpenOptions
     ): VfsResult<OpenFileBackend> {
-        if (options.access.canWrite &&
-            (write == null || !caller.privileged)
-        ) {
+        if (options.access.canWrite && write == null) {
             return VfsResult.Err(VfsError.PERMISSION_DENIED)
         }
         return render()?.let {
-            VfsResult.Ok(ProcTextHandle(it, render, write))
+            VfsResult.Ok(ProcTextHandle(it, render, write, positionedWrite))
         }
             ?: VfsResult.Err(VfsError.NOT_FOUND)
     }
@@ -385,7 +377,8 @@ private class ProcTextFile(
 private class ProcTextHandle(
     private var content: ByteArray,
     private val refresh: () -> ByteArray?,
-    private val write: ((ByteArray) -> VfsResult<Unit>)?,
+    private val write: ((VfsOperationContext, ByteArray) -> VfsResult<Unit>)?,
+    private val positionedWrite: Boolean,
 ) : OpenFileBackend {
     override fun read(
         caller: VfsOperationContext,
@@ -422,16 +415,16 @@ private class ProcTextHandle(
     ): IoResult {
         val update = write ?: return IoResult.failure(VfsError.PERMISSION_DENIED)
         if (count == 0) return IoResult.success(0)
-        if (position.value != 0L || count >= PAGE_SIZE_BYTES.toInt()) {
+        if ((positionedWrite && position.value != 0L) || count >= PAGE_SIZE_BYTES.toInt()) {
             return IoResult.failure(VfsError.INVALID_ARGUMENT)
         }
         val input = ByteArray(count)
         if (source.copyTo(sourceOffset, input, 0, count) != count) {
             return IoResult.failure(VfsError.FAULT)
         }
-        return when (val result = update(input)) {
+        return when (val result = update(caller, input)) {
             is VfsResult.Ok -> {
-                position.value = count.toLong()
+                if (positionedWrite) position.value = count.toLong()
                 inode.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED)
                 IoResult.success(count)
             }
@@ -590,6 +583,7 @@ internal const val SYS_INODE = 13uL
 private const val DIRECTORY_MODE = 0x16du
 private const val DESCRIPTOR_DIRECTORY_MODE = 0x140u
 private const val FILE_MODE = 0x124u
+private const val WRITABLE_FILE_MODE = 0x1a4u
 private const val SYMLINK_MODE = 0x1ffu
 const val MAX_COMM_LENGTH = 15
 const val KIBIBYTE = 1024uL

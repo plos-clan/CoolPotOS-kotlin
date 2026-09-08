@@ -131,6 +131,7 @@ internal data class CloneRequest(
                     registers = snapshot,
                     signals = threadSignals,
                     placement = placement,
+                    pidHandle = target,
                     prepare = { id ->
                         val bytes = ByteArray(Int.SIZE_BYTES)
                         val output = LittleEndianBuffer(bytes)
@@ -154,7 +155,6 @@ internal data class CloneRequest(
             }
             childThread.capabilities.inherit(current.capabilities)
             if (has(Flag.CHILD_CLEARTID)) childThread.clearChildTid = childTid
-            target?.attach(childThread)
             descriptor?.install()
 
             Scheduler.enqueueThread(childThread)

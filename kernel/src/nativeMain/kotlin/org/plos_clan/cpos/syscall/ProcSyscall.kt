@@ -27,6 +27,7 @@ import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.tasks.ResourceLimit
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.Scheduler
+import org.plos_clan.cpos.tasks.SecureBit
 import org.plos_clan.cpos.tasks.Signal
 import org.plos_clan.cpos.tasks.SignalStack
 import org.plos_clan.cpos.tasks.Thread
@@ -60,6 +61,8 @@ private const val PR_SET_NAME = 15UL
 private const val PR_GET_NAME = 16UL
 private const val PR_CAPBSET_READ = 23UL
 private const val PR_CAPBSET_DROP = 24UL
+private const val PR_GET_SECUREBITS = 27UL
+private const val PR_SET_SECUREBITS = 28UL
 private const val PR_SET_NO_NEW_PRIVS = 38UL
 private const val PR_GET_NO_NEW_PRIVS = 39UL
 private const val PR_CAP_AMBIENT = 47UL
@@ -404,17 +407,12 @@ internal fun prctl(regs: PtraceRegisters, process: Process): Long {
             else -> errno(Errno.EINVAL)
         }
 
-        PR_GET_KEEPCAPS -> if (capabilities.keepAcrossUserIdChange) 1L else 0L
+        PR_GET_KEEPCAPS -> if (capabilities.hasSecureBit(SecureBit.KEEP_CAPS)) 1L else 0L
 
         PR_SET_KEEPCAPS -> when {
-            argument == 0uL -> {
-                capabilities.keepAcrossUserIdChange = false
-                0L
-            }
-            argument == 1uL -> {
-                capabilities.keepAcrossUserIdChange = true
-                0L
-            }
+            argument == 0uL || argument == 1uL ->
+                if (capabilities.setSecureBit(SecureBit.KEEP_CAPS, argument == 1uL)) 0L
+                else errno(Errno.EPERM)
             else -> errno(Errno.EINVAL)
         }
 
@@ -429,6 +427,13 @@ internal fun prctl(regs: PtraceRegisters, process: Process): Long {
             capabilities.dropBounding(requested)
             0L
         }
+
+        PR_GET_SECUREBITS -> capabilities.secureBits.toLong()
+
+        PR_SET_SECUREBITS ->
+            if (capabilities.hasEffective(CapEnum.SETPCAP) &&
+                capabilities.replaceSecureBits(argument)
+            ) 0L else errno(Errno.EPERM)
 
         PR_GET_NO_NEW_PRIVS -> if (capabilities.noNewPrivileges) 1L else 0L
 

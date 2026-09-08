@@ -2,13 +2,21 @@ package org.plos_clan.cpos.fs.procfs
 
 import org.plos_clan.cpos.drivers.char.tty.TtyManager
 import org.plos_clan.cpos.fs.FileSystemManager
+import org.plos_clan.cpos.fs.vfs.Inode
+import org.plos_clan.cpos.fs.vfs.SuperBlock
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.addressspace.FileRegionBacking
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_EXECUTABLE
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_WRITABLE
 import org.plos_clan.cpos.mem.addressspace.MemoryRegionType
+import org.plos_clan.cpos.tasks.CapEnum
+import org.plos_clan.cpos.tasks.OomScoreAdjustment
+import org.plos_clan.cpos.tasks.PidHandle
 import org.plos_clan.cpos.tasks.Process
+import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.tasks.ProcessState
 import org.plos_clan.cpos.tasks.TaskState
@@ -24,7 +32,7 @@ val Process.isRunnable: Boolean
         it.state == TaskState.READY || it.state == TaskState.RUNNING
     }
 
-enum class ProcessFile(val fileName: String) {
+internal enum class ProcessFile(val fileName: String) {
     COMMAND_LINE("cmdline"),
     COMMAND_NAME("comm"),
     MEMORY("statm"),
@@ -34,9 +42,28 @@ enum class ProcessFile(val fileName: String) {
     MOUNTS("mounts"),
     MOUNT_INFO("mountinfo"),
     CGROUP("cgroup"),
+    OOM_SCORE_ADJUSTMENT("oom_score_adj"),
     ;
 
-    fun render(process: Process): ByteArray = when (this) {
+    fun create(fileSystem: ProcfsInstance, superBlock: SuperBlock, target: PidHandle): Inode {
+        val process = target.thread.process
+        val write = if (this == OOM_SCORE_ADJUSTMENT) {
+            { caller: VfsOperationContext, input: ByteArray -> update(process, caller, input) }
+        } else {
+            null
+        }
+        return fileSystem.text(
+            superBlock = superBlock,
+            id = ProcInode.process(process.id, ordinal.toUInt() + 1u),
+            owner = process,
+            write = write,
+            positionedWrite = this != OOM_SCORE_ADJUSTMENT,
+        ) {
+            process.takeUnless { it.state == ProcessState.DEAD }?.let(::render)
+        }
+    }
+
+    private fun render(process: Process): ByteArray = when (this) {
         COMMAND_LINE -> process.commandLine.copyOf()
         COMMAND_NAME -> "${process.comm}\n".encodeToByteArray()
         MEMORY -> {
@@ -50,6 +77,26 @@ enum class ProcessFile(val fileName: String) {
         MOUNTS -> MountsFile.render(process)
         MOUNT_INFO -> MountsFile.render(process, mountInfo = true)
         CGROUP -> "0::".encodeToByteArray() + Cgroups.path(process) + '\n'.code.toByte()
+        OOM_SCORE_ADJUSTMENT -> "${process.oomScoreAdjustment.value}\n".encodeToByteArray()
+    }
+
+    private fun update(
+        process: Process,
+        caller: VfsOperationContext,
+        input: ByteArray,
+    ): VfsResult<Unit> {
+        if (process.state == ProcessState.DEAD) return VfsResult.Err(VfsError.NO_SUCH_PROCESS)
+        val replacement = OomScoreAdjustment.parse(input)
+            ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        val maySetMinimum = ProcessManager.currentThread()
+            ?.capabilities
+            ?.hasEffective(CapEnum.SYS_RESOURCE)
+            ?: caller.privileged
+        return if (process.oomScoreAdjustment.update(replacement, maySetMinimum)) {
+            VfsResult.Ok(Unit)
+        } else {
+            VfsResult.Err(VfsError.PERMISSION_DENIED)
+        }
     }
 }
 

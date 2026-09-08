@@ -22,8 +22,26 @@ enum class CapEnum(val id: Int) {
     NET_RAW(13),
     SYS_PTRACE(19),
     SYS_ADMIN(21),
+    SYS_RESOURCE(24),
     SYS_TTY_CONFIG(26),
     AUDIT_WRITE(29),
+}
+
+enum class SecureBit(val mask: UInt) {
+    NOROOT(1u shl 0),
+    NO_SETUID_FIXUP(1u shl 2),
+    KEEP_CAPS(1u shl 4),
+    NO_CAP_AMBIENT_RAISE(1u shl 6),
+    ;
+
+    val lockMask: UInt
+        get() = mask shl 1
+
+    companion object {
+        val valueMask = entries.fold(0u) { mask, bit -> mask or bit.mask }
+        val locksMask = valueMask shl 1
+        val supportedMask = valueMask or locksMask
+    }
 }
 
 class CapabilityState(
@@ -32,20 +50,45 @@ class CapabilityState(
     var inheritable: ULong = 0uL,
     var bounding: ULong = TASK_CAP_FULL_MASK,
     var ambient: ULong = 0uL,
-    var keepAcrossUserIdChange: Boolean = false,
+    secureBits: UInt = 0u,
     var noNewPrivileges: Boolean = false,
 ) {
+    var secureBits = secureBits
+        private set
+
+    init {
+        require(secureBits and SecureBit.supportedMask.inv() == 0u)
+    }
+
     fun inherit(parent: CapabilityState) {
         effective = parent.effective
         permitted = parent.permitted
         inheritable = parent.inheritable
         bounding = parent.bounding
         ambient = parent.ambient
-        keepAcrossUserIdChange = parent.keepAcrossUserIdChange
+        secureBits = parent.secureBits
         noNewPrivileges = parent.noNewPrivileges
     }
 
     fun hasEffective(capability: CapEnum): Boolean = has(effective, capability.id)
+
+    fun hasSecureBit(bit: SecureBit): Boolean = secureBits and bit.mask != 0u
+
+    fun replaceSecureBits(requested: ULong): Boolean {
+        if (requested and SecureBit.supportedMask.toULong().inv() != 0uL) return false
+        val replacement = requested.toUInt()
+        val locks = secureBits and SecureBit.locksMask
+        val immutable = locks or (locks shr 1)
+        if ((secureBits xor replacement) and immutable != 0u) return false
+        secureBits = replacement
+        return true
+    }
+
+    fun setSecureBit(bit: SecureBit, enabled: Boolean): Boolean {
+        if (secureBits and bit.lockMask != 0u) return false
+        secureBits = if (enabled) secureBits or bit.mask else secureBits and bit.mask.inv()
+        return true
+    }
 
     fun containsBounding(capability: Int): Boolean = has(bounding, capability)
 
@@ -56,6 +99,7 @@ class CapabilityState(
     fun containsAmbient(capability: Int): Boolean = has(ambient, capability)
 
     fun raiseAmbient(capability: Int): Boolean {
+        if (hasSecureBit(SecureBit.NO_CAP_AMBIENT_RAISE)) return false
         val mask = bit(capability)
         if ((permitted and inheritable and mask) == 0uL) return false
         ambient = ambient or mask
@@ -93,13 +137,14 @@ class CapabilityState(
     }
 
     fun applyUserIdChange(change: Credentials.UserIdChange) {
+        if (hasSecureBit(SecureBit.NO_SETUID_FIXUP)) return
         val previous = change.previous
         val current = change.current
         val hadRootIdentity = previous.real == 0 || previous.effective == 0 || previous.saved == 0
         val hasRootIdentity = current.real == 0 || current.effective == 0 || current.saved == 0
         when {
             hadRootIdentity && !hasRootIdentity -> {
-                if (!keepAcrossUserIdChange) permitted = 0uL
+                if (!hasSecureBit(SecureBit.KEEP_CAPS)) permitted = 0uL
                 effective = 0uL
                 ambient = 0uL
             }
@@ -111,11 +156,12 @@ class CapabilityState(
 
     fun applyExec(execution: Credentials.Execution) {
         val inheritedAmbient = if (execution.privileged) 0uL else ambient
-        val root = execution.userIds.real == 0 || execution.userIds.effective == 0
-        permitted = (if (root) bounding else 0uL) or inheritedAmbient
-        effective = if (execution.userIds.effective == 0) permitted else inheritedAmbient
+        val root = !hasSecureBit(SecureBit.NOROOT) &&
+            (execution.userIds.real == 0 || execution.userIds.effective == 0)
+        permitted = (if (root) bounding or inheritable else 0uL) or inheritedAmbient
+        effective = if (root && execution.userIds.effective == 0) permitted else inheritedAmbient
         ambient = inheritedAmbient
-        keepAcrossUserIdChange = false
+        secureBits = secureBits and SecureBit.KEEP_CAPS.mask.inv()
     }
 
     companion object {

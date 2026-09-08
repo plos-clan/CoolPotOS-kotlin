@@ -108,6 +108,7 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         OpenOptions(access = AccessMode.READ_WRITE),
         InodeMetadata(mode = FileMode(0x1c0u), linkCount = 1u),
         initialStatusFlags = statusFlags,
+        identity = target.fileIdentity,
     )
 
     internal fun createUnixSocket(
