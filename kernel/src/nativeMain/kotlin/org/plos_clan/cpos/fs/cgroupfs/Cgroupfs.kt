@@ -25,13 +25,21 @@ object Cgroupfs : FileSystemType("cgroup2", 0x63677270uL) {
         })
     }
 
-    override fun configure(source: String?, data: ByteArray?): VfsResult<FileSystemOptions> {
-        val names = data?.decodeToString()?.split(',')?.filter(String::isNotEmpty).orEmpty()
-        if (names.any { it != "nsdelegate" && it != "memory_recursiveprot" && it != "favordynmods" }) {
-            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        }
-        return VfsResult.Ok(Options(names.distinct()))
+    override fun configure(
+        source: String?,
+        parameters: FileSystemParameters,
+    ): VfsResult<FileSystemOptions> = if (parameters.all(::supported)) {
+        VfsResult.Ok(Options(parameters.map(FileSystemParameter::key).distinct()))
+    } else {
+        VfsResult.Err(VfsError.INVALID_ARGUMENT)
     }
+
+    override fun validateParameter(
+        existing: List<FileSystemParameter>,
+        parameter: FileSystemParameter,
+    ): VfsResult<Unit> =
+        if (supported(parameter)) VfsResult.Ok(Unit)
+        else VfsResult.Err(VfsError.INVALID_ARGUMENT)
 
     override fun createBackend(options: FileSystemOptions): VfsResult<SuperBlockBackend> =
         when (options) {
@@ -40,31 +48,51 @@ object Cgroupfs : FileSystemType("cgroup2", 0x63677270uL) {
             else -> VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
 
-    override fun createSuperBlock(source: String?, options: FileSystemOptions): VfsResult<SuperBlock> =
-        Cgroups.lock.withLock {
-            if (options !is Options && options !== EmptyFileSystemOptions) {
-                return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
-            }
-            val existing = shared
-            if (existing != null) {
-                check(existing.retain())
-                return@withLock VfsResult.Ok(existing)
-            }
-            when (val result = super.createSuperBlock(source, options)) {
-                is VfsResult.Ok -> {
-                    shared = result.value
-                    check(result.value.retain()) // The unified hierarchy outlives its mounts.
-                    result
-                }
-                is VfsResult.Err -> result
-            }
-        }
+    override fun createSuperBlock(
+        source: String?,
+        options: FileSystemOptions,
+    ): VfsResult<SuperBlock> = createSharedSuperBlock(source, options, exclusive = false)
 
-    override fun createSuperBlock(request: MountRequest): VfsResult<SuperBlock> =
-        when (val options = configure(request.source, request.data)) {
-            is VfsResult.Ok -> createSuperBlock(request.source, options.value)
+    override fun createSuperBlock(
+        configuration: FileSystemConfiguration,
+    ): VfsResult<SuperBlock> =
+        when (val options = configure(configuration.source, configuration.parameters)) {
+            is VfsResult.Ok -> createSharedSuperBlock(
+                configuration.source,
+                options.value,
+                configuration.exclusive,
+            )
             is VfsResult.Err -> options
         }
+
+    private fun createSharedSuperBlock(
+        source: String?,
+        options: FileSystemOptions,
+        exclusive: Boolean,
+    ): VfsResult<SuperBlock> = Cgroups.lock.withLock {
+        if (options !is Options && options !== EmptyFileSystemOptions) {
+            return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+        val existing = shared
+        if (existing != null) {
+            if (exclusive) return@withLock VfsResult.Err(VfsError.ALREADY_EXISTS)
+            check(existing.retain())
+            return@withLock VfsResult.Ok(existing)
+        }
+        when (val result = super.createSuperBlock(source, options)) {
+            is VfsResult.Ok -> {
+                shared = result.value
+                check(result.value.retain()) // The unified hierarchy outlives its mounts.
+                result
+            }
+            is VfsResult.Err -> result
+        }
+    }
+
+    private fun supported(parameter: FileSystemParameter): Boolean =
+        parameter is FileSystemParameter.Flag && parameter.key in supportedOptions
+
+    private val supportedOptions = setOf("nsdelegate", "memory_recursiveprot", "favordynmods")
 }
 
 private enum class ControlFile(fileName: String, val mode: UInt = 0x124u, val controller: Controller? = null) {

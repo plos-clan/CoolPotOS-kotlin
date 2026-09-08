@@ -1,6 +1,8 @@
 package org.plos_clan.cpos.fs.tmpfs
 
 import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.FileSystemParameter
+import org.plos_clan.cpos.fs.vfs.FileSystemParameters
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import kotlin.test.Test
@@ -85,6 +87,29 @@ class TmpfsOptionsTest {
         assertEquals(
             VfsResult.Err(VfsError.INVALID_ARGUMENT),
             TmpfsOptions.parse("size=101%".encodeToByteArray(), 0uL),
+        )
+    }
+
+    @Test
+    fun parsesTypedFsconfigParameters() {
+        val parameters = FileSystemParameters.copyOf(listOf(
+            FileSystemParameter.StringValue("mode", "0750"),
+            FileSystemParameter.StringValue("uid", "1000"),
+            FileSystemParameter.StringValue("size", "64m"),
+        ))
+        val options = assertIs<VfsResult.Ok<TmpfsOptions>>(
+            TmpfsOptions.parse(parameters, ULong.MAX_VALUE),
+        ).value
+
+        assertEquals(FileMode(0x1E8u), options.rootMode)
+        assertEquals(1000u, options.rootUid)
+        assertEquals(64uL shl 20, options.sizeLimit)
+        assertEquals(
+            VfsResult.Err(VfsError.INVALID_ARGUMENT),
+            TmpfsOptions.parse(
+                FileSystemParameters.copyOf(listOf(FileSystemParameter.Flag("size"))),
+                ULong.MAX_VALUE,
+            ),
         )
     }
 }

@@ -22,21 +22,26 @@ abstract class FileSystemType(
 
     protected open fun configure(
         source: String?,
-        data: ByteArray?,
+        parameters: FileSystemParameters,
     ): VfsResult<FileSystemOptions> =
-        if (data == null || data.isEmpty()) VfsResult.Ok(
+        if (parameters.isEmpty()) VfsResult.Ok(
             EmptyFileSystemOptions
         )
         else VfsResult.Err(VfsError.INVALID_ARGUMENT)
 
     protected open fun createMountedBackend(
-        request: MountRequest,
+        configuration: FileSystemConfiguration,
     ): VfsResult<SuperBlockBackend> = when (
-        val options = configure(request.source, request.data)
+        val options = configure(configuration.source, configuration.parameters)
     ) {
         is VfsResult.Ok -> createBackend(options.value)
         is VfsResult.Err -> options
     }
+
+    internal open fun validateParameter(
+        existing: List<FileSystemParameter>,
+        parameter: FileSystemParameter,
+    ): VfsResult<Unit> = VfsResult.Err(VfsError.INVALID_ARGUMENT)
 
     internal open fun createSuperBlock(
         source: String?,
@@ -51,11 +56,13 @@ abstract class FileSystemType(
         }
     }
 
-    internal open fun createSuperBlock(request: MountRequest): VfsResult<SuperBlock> {
-        if (requiresDevice && request.source == null) {
+    internal open fun createSuperBlock(
+        configuration: FileSystemConfiguration,
+    ): VfsResult<SuperBlock> {
+        if (requiresDevice && configuration.source == null) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
-        return when (val result = createMountedBackend(request)) {
+        return when (val result = createMountedBackend(configuration)) {
             is VfsResult.Ok -> VfsResult.Ok(SuperBlock(this, result.value))
             is VfsResult.Err -> result
         }

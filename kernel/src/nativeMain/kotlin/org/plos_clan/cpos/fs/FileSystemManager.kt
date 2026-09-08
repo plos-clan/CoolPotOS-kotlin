@@ -7,11 +7,11 @@ import org.plos_clan.cpos.fs.fuse.Fuse
 import org.plos_clan.cpos.fs.procfs.Procfs
 import org.plos_clan.cpos.fs.sysfs.Sysfs
 import org.plos_clan.cpos.fs.tmpfs.Tmpfs
+import org.plos_clan.cpos.fs.vfs.FileSystemConfiguration
 import org.plos_clan.cpos.fs.vfs.FileSystemContext
 import org.plos_clan.cpos.fs.vfs.FileSystemType
 import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.fs.vfs.MountFlags
-import org.plos_clan.cpos.fs.vfs.MountRequest
 import org.plos_clan.cpos.fs.vfs.RootMountOptions
 import org.plos_clan.cpos.fs.vfs.Vfs
 import org.plos_clan.cpos.fs.vfs.VfsError
@@ -67,7 +67,7 @@ object FileSystemManager {
             VfsOperationContext.KERNEL,
             context,
             VfsPathname.fromString("/dev"),
-            MountRequest(Devtmpfs.name, flags = devFlags),
+            FileSystemConfiguration(Devtmpfs.name, flags = devFlags),
         )) {
             is VfsResult.Ok -> Unit
             is VfsResult.Err -> {

@@ -56,14 +56,16 @@ class FileDescriptorTable {
 
     internal inner class Reservation internal constructor(
         val fd: Int,
-        file: OpenFileDescription,
-        flags: ULong,
+        private var file: OpenFileDescription?,
+        private val flags: ULong,
     ) : Entry, AutoCloseable {
-        private val descriptor = FileDescriptor(file, flags)
+        fun install(): Int = install(checkNotNull(file))
 
-        fun install(): Int = lock.withLock {
+        fun install(file: OpenFileDescription): Int = lock.withLock {
             check(entries.slot(fd) === this) { "Descriptor reservation is no longer pending" }
-            entries[fd] = descriptor
+            check(this.file == null || this.file === file) { "A different file was reserved" }
+            entries[fd] = FileDescriptor(file, flags)
+            this.file = null
             fd
         }
 
@@ -73,7 +75,8 @@ class FileDescriptorTable {
                 entries[fd] = null
                 true
             }
-            if (cancelled) descriptor.file.release()
+            if (cancelled) file?.release()
+            file = null
         }
     }
 
@@ -110,6 +113,17 @@ class FileDescriptorTable {
         file: OpenFileDescription,
         flags: ULong,
         limit: ULong,
+    ): Reservation? = reserve(flags, limit, file)
+
+    internal fun reserve(
+        flags: ULong,
+        limit: ULong,
+    ): Reservation? = reserve(flags, limit, null)
+
+    private fun reserve(
+        flags: ULong,
+        limit: ULong,
+        file: OpenFileDescription?,
     ): Reservation? = lock.withLock {
         val fd = entries.firstEmpty(0, limit) ?: return@withLock null
         Reservation(fd, file, flags).also { entries[fd] = it }

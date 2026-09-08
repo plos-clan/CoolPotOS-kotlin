@@ -181,38 +181,34 @@ class UserMemory private constructor(
             return null
         }
         bridge.close_smap()
+        return try {
+            val result = ByteArray(maxLength)
+            var copied = 0
+            var currentAddress = address
+            while (copied < maxLength && currentAddress < USER_VIRTUAL_ADDRESS_LIMIT) {
+                val physicalAddress = resolveUserPhysicalAddress(
+                    virtualAddress = currentAddress,
+                    requireWritable = false,
+                ) ?: return null
+                val source = physicalAddress.toVirtualPointer<UByteVar>() ?: return null
+                val pageOffset = currentAddress - currentAddress.alignDown(PAGE_SIZE_BYTES)
+                val chunkLength = minOf(
+                    maxLength - copied,
+                    (PAGE_SIZE_BYTES - pageOffset).toInt(),
+                )
 
-        val result = ByteArray(maxLength)
-        var copied = 0
-        var currentAddress = address
-        while (copied < maxLength && currentAddress < USER_VIRTUAL_ADDRESS_LIMIT) {
-            val physicalAddress = resolveUserPhysicalAddress(
-                virtualAddress = currentAddress,
-                requireWritable = false,
-            ) ?: return null
-            val source = physicalAddress.toVirtualPointer<UByteVar>() ?: run {
-                bridge.open_smap()
-                return null
-            }
-            val pageOffset = currentAddress - currentAddress.alignDown(PAGE_SIZE_BYTES)
-            val chunkLength = minOf(
-                maxLength - copied,
-                (PAGE_SIZE_BYTES - pageOffset).toInt(),
-            )
-
-            repeat(chunkLength) { index ->
-                val byte = source[index].toByte()
-                if (byte == 0.toByte()) {
-                    bridge.open_smap()
-                    return result.copyOf(copied + index)
+                repeat(chunkLength) { index ->
+                    val byte = source[index].toByte()
+                    if (byte == 0.toByte()) return result.copyOf(copied + index)
+                    result[copied + index] = byte
                 }
-                result[copied + index] = byte
+                copied += chunkLength
+                currentAddress += chunkLength.toULong()
             }
-            copied += chunkLength
-            currentAddress += chunkLength.toULong()
+            null
+        } finally {
+            bridge.open_smap()
         }
-        bridge.open_smap()
-        return null
     }
 
     fun copyNativeStructArrayToUser(

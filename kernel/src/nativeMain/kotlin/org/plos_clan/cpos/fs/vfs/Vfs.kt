@@ -174,8 +174,33 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         caller: VfsOperationContext,
         context: FileSystemContext,
         target: VfsPathname,
-        request: MountRequest,
-    ): VfsResult<Unit> = mounts.mount(caller, context, target, request)
+        configuration: FileSystemConfiguration,
+    ): VfsResult<Unit> = mounts.mount(caller, context, target, configuration)
+
+    internal fun openFileSystem(
+        caller: VfsOperationContext,
+        context: FileSystemContext,
+        fileSystemName: String,
+        resources: MountResources,
+    ): VfsResult<OpenFileDescription> {
+        val creation = when (val result = mounts.createFileSystem(fileSystemName, resources)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        return when (val result = anonymousFiles.open(
+            caller,
+            context,
+            creation,
+            OpenOptions(access = AccessMode.READ_WRITE),
+            InodeMetadata(mode = FileMode(0x180u), linkCount = 1u),
+        )) {
+            is VfsResult.Ok -> result
+            is VfsResult.Err -> {
+                creation.release()
+                result
+            }
+        }
+    }
 
     fun moveMount(
         caller: VfsOperationContext,

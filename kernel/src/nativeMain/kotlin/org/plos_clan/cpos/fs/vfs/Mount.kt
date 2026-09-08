@@ -261,6 +261,10 @@ class MountNamespace internal constructor(val root: Mount) {
     }
 }
 
+internal class MountNamespaceHandle(val namespace: MountNamespace) : OpenFileBackend {
+    override fun release() = namespace.release()
+}
+
 class FileSystemContext internal constructor(
     val namespace: MountNamespace,
     root: VfsPath = VfsPath(namespace.root, namespace.root.root),

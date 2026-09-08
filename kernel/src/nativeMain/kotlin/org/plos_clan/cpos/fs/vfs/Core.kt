@@ -386,12 +386,68 @@ data class RootMountOptions(
     val fileSystemOptions: FileSystemOptions = EmptyFileSystemOptions,
 )
 
-data class MountRequest(
+sealed class FileSystemParameter(open val key: String) {
+    data class Flag(override val key: String) : FileSystemParameter(key)
+
+    data class StringValue(
+        override val key: String,
+        val value: String,
+    ) : FileSystemParameter(key)
+
+    class BinaryValue(
+        override val key: String,
+        val value: ByteArray,
+    ) : FileSystemParameter(key)
+
+    class PathValue(
+        override val key: String,
+        val file: OpenFileDescription,
+    ) : FileSystemParameter(key)
+
+    class FileValue(
+        override val key: String,
+        val file: OpenFileDescription,
+    ) : FileSystemParameter(key)
+
+    internal fun release() {
+        when (this) {
+            is PathValue -> file.release()
+            is FileValue -> file.release()
+            else -> Unit
+        }
+    }
+}
+
+class FileSystemParameters private constructor(
+    private val values: List<FileSystemParameter>,
+) : List<FileSystemParameter> by values {
+    companion object {
+        val EMPTY = FileSystemParameters(emptyList())
+
+        fun fromMountData(data: ByteArray?): FileSystemParameters {
+            if (data == null || data.isEmpty()) return EMPTY
+            return FileSystemParameters(data.decodeToString().split(',').map { option ->
+                val separator = option.indexOf('=')
+                if (separator < 0) FileSystemParameter.Flag(option)
+                else FileSystemParameter.StringValue(
+                    option.substring(0, separator),
+                    option.substring(separator + 1),
+                )
+            })
+        }
+
+        internal fun copyOf(values: List<FileSystemParameter>): FileSystemParameters =
+            if (values.isEmpty()) EMPTY else FileSystemParameters(values.toList())
+    }
+}
+
+data class FileSystemConfiguration(
     val fileSystemName: String,
     val source: String? = null,
     val flags: MountFlags = MountFlags.NONE,
-    val data: ByteArray? = null,
+    val parameters: FileSystemParameters = FileSystemParameters.EMPTY,
     val resources: MountResources = MountResources.NONE,
+    val exclusive: Boolean = false,
 )
 
 class MountResources internal constructor(

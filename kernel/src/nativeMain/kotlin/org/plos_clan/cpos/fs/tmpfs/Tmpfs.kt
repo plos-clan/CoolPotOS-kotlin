@@ -7,6 +7,8 @@ import org.plos_clan.cpos.fs.vfs.EmptyFileSystemOptions
 import org.plos_clan.cpos.fs.vfs.FifoBackend
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FileSystemOptions
+import org.plos_clan.cpos.fs.vfs.FileSystemParameter
+import org.plos_clan.cpos.fs.vfs.FileSystemParameters
 import org.plos_clan.cpos.fs.vfs.FileSystemStatistics
 import org.plos_clan.cpos.fs.vfs.FileSystemType
 import org.plos_clan.cpos.fs.vfs.Inode
@@ -33,9 +35,21 @@ abstract class TmpfsFileSystemType protected constructor(
 ) : FileSystemType(name, 0x0102_1994uL) {
     final override fun configure(
         source: String?,
-        data: ByteArray?,
+        parameters: FileSystemParameters,
     ): VfsResult<TmpfsOptions> =
-        TmpfsOptions.parse(data, BuddyFrameAllocator.statistics().totalBytes)
+        TmpfsOptions.parse(parameters, BuddyFrameAllocator.statistics().totalBytes)
+
+    final override fun validateParameter(
+        existing: List<FileSystemParameter>,
+        parameter: FileSystemParameter,
+    ): VfsResult<Unit> =
+        when (TmpfsOptions.parse(
+            FileSystemParameters.copyOf(listOf(parameter)),
+            BuddyFrameAllocator.statistics().totalBytes,
+        )) {
+            is VfsResult.Ok -> VfsResult.Ok(Unit)
+            is VfsResult.Err -> VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
 
     final override fun createBackend(
         options: FileSystemOptions,

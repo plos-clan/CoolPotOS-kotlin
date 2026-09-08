@@ -10,10 +10,11 @@ import org.plos_clan.cpos.fs.vfs.AccessPermissions
 import org.plos_clan.cpos.fs.vfs.CreateDisposition
 import org.plos_clan.cpos.fs.vfs.FileAllocationMode
 import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.FileSystemConfiguration
+import org.plos_clan.cpos.fs.vfs.FileSystemParameters
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.fs.vfs.MountFlags
-import org.plos_clan.cpos.fs.vfs.MountRequest
 import org.plos_clan.cpos.fs.vfs.MountResources
 import org.plos_clan.cpos.fs.vfs.OpenOptions
 import org.plos_clan.cpos.fs.vfs.UnmountMode
@@ -249,11 +250,11 @@ internal fun mount(regs: PtraceRegisters, process: Process): Long {
         caller = process.vfsOperationContext,
         context = context,
         target = VfsPathname.fromBytes(target),
-        request = MountRequest(
+        configuration = FileSystemConfiguration(
             fileSystemName = fileSystemName.decodeToString(),
             source = source?.decodeToString(),
             flags = flags,
-            data = data,
+            parameters = FileSystemParameters.fromMountData(data),
             resources = MountResources(process.fdTable::acquire),
         ),
     )) {

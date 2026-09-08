@@ -44,9 +44,9 @@ internal class VfsMountManager(
         caller: VfsOperationContext,
         context: FileSystemContext,
         target: VfsPathname,
-        request: MountRequest,
+        configuration: FileSystemConfiguration,
     ): VfsResult<Unit> {
-        val fileSystem = findFileSystem(request.fileSystemName)
+        val fileSystem = findFileSystem(configuration.fileSystemName)
             ?: return VfsResult.Err(VfsError.NO_DEVICE)
         val path = when (val result = paths.resolve(caller, context, target)) {
             is VfsResult.Ok -> result.value
@@ -57,7 +57,7 @@ internal class VfsMountManager(
         }
 
         val superBlock = when (
-            val result = fileSystem.createSuperBlock(request)
+            val result = fileSystem.createSuperBlock(configuration)
         ) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
@@ -65,9 +65,9 @@ internal class VfsMountManager(
         return when (val attached = context.namespace.attach(
             target = path,
             superBlock = superBlock,
-            fileSystemName = request.fileSystemName,
-            source = request.source ?: request.fileSystemName,
-            flags = request.flags,
+            fileSystemName = configuration.fileSystemName,
+            source = configuration.source ?: configuration.fileSystemName,
+            flags = configuration.flags,
         )) {
             is VfsResult.Ok -> attached
             is VfsResult.Err -> {
@@ -75,6 +75,15 @@ internal class VfsMountManager(
                 attached
             }
         }
+    }
+
+    fun createFileSystem(
+        fileSystemName: String,
+        resources: MountResources,
+    ): VfsResult<FileSystemCreation> {
+        val fileSystem = findFileSystem(fileSystemName)
+            ?: return VfsResult.Err(VfsError.NO_DEVICE)
+        return VfsResult.Ok(FileSystemCreation(fileSystem, fileSystemName, resources))
     }
 
     fun move(

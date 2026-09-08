@@ -2,6 +2,8 @@ package org.plos_clan.cpos.fs.tmpfs
 
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FileSystemOptions
+import org.plos_clan.cpos.fs.vfs.FileSystemParameter
+import org.plos_clan.cpos.fs.vfs.FileSystemParameters
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 
@@ -13,21 +15,25 @@ data class TmpfsOptions(
     val rootGid: UInt = 0u,
 ) : FileSystemOptions {
     companion object {
-        internal fun parse(data: ByteArray?, totalBytes: ULong): VfsResult<TmpfsOptions> {
-            if (data == null || data.isEmpty()) return VfsResult.Ok(TmpfsOptions())
+        internal fun parse(data: ByteArray?, totalBytes: ULong): VfsResult<TmpfsOptions> =
+            parse(FileSystemParameters.fromMountData(data), totalBytes)
+
+        internal fun parse(
+            parameters: FileSystemParameters,
+            totalBytes: ULong,
+        ): VfsResult<TmpfsOptions> {
+            if (parameters.isEmpty()) return VfsResult.Ok(TmpfsOptions())
 
             var sizeLimit: ULong? = null
             var inodeLimit = 0uL
             var mode = 0x1EDu
             var uid = 0u
             var gid = 0u
-            for (option in data.decodeToString().split(',')) {
-                val separator = option.indexOf('=')
-                if (separator <= 0 || separator == option.lastIndex) {
-                    return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-                }
-                val value = option.substring(separator + 1)
-                when (option.substring(0, separator)) {
+            for (parameter in parameters) {
+                val value = (parameter as? FileSystemParameter.StringValue)?.value
+                    ?.takeIf(String::isNotEmpty)
+                    ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                when (parameter.key) {
                     "size" -> sizeLimit = parseLimit(value, totalBytes)
                         ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
                     "nr_inodes" -> inodeLimit = parseLimit(value)

@@ -20,7 +20,9 @@ import org.plos_clan.cpos.fs.vfs.FifoBackend
 import org.plos_clan.cpos.fs.vfs.FileAllocationMode
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FilePosition
+import org.plos_clan.cpos.fs.vfs.FileSystemConfiguration
 import org.plos_clan.cpos.fs.vfs.FileSystemOptions
+import org.plos_clan.cpos.fs.vfs.FileSystemParameter
 import org.plos_clan.cpos.fs.vfs.FileSystemStatistics
 import org.plos_clan.cpos.fs.vfs.FileSystemType
 import org.plos_clan.cpos.fs.vfs.Inode
@@ -34,10 +36,11 @@ import org.plos_clan.cpos.fs.vfs.InodeTimestampSet
 import org.plos_clan.cpos.fs.vfs.InodeTimestampUpdate
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.IoResult
-import org.plos_clan.cpos.fs.vfs.MountRequest
+import org.plos_clan.cpos.fs.vfs.MountResources
 import org.plos_clan.cpos.fs.vfs.NodeCreation
 import org.plos_clan.cpos.fs.vfs.NodeKind
 import org.plos_clan.cpos.fs.vfs.OpenFileBackend
+import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.fs.vfs.OpenOptions
 import org.plos_clan.cpos.fs.vfs.RegularFileBackend
 import org.plos_clan.cpos.fs.vfs.RemoveMode
@@ -73,68 +76,122 @@ object Fuse : FileSystemType("fuse", FuseAbi.SUPER_MAGIC) {
     override fun createBackend(options: FileSystemOptions): VfsResult<SuperBlockBackend> =
         VfsResult.Err(VfsError.INVALID_ARGUMENT)
 
-    override fun createMountedBackend(request: MountRequest): VfsResult<SuperBlockBackend> {
-        val options = when (val parsed = FuseMountOptions.parse(request)) {
-            is VfsResult.Ok -> parsed.value
-            is VfsResult.Err -> return parsed
+    override fun validateParameter(
+        existing: List<FileSystemParameter>,
+        parameter: FileSystemParameter,
+    ): VfsResult<Unit> {
+        val valid = existing.none { it.key == parameter.key } && when (parameter.key) {
+            "fd" -> parameter is FileSystemParameter.FileValue ||
+                parameter.stringValue()?.toIntOrNull()?.let { it >= 0 } == true
+            "rootmode" -> parameter.stringValue()?.toUIntOrNull(8)
+                ?.let { it and FuseAbi.S_IFMT == FuseAbi.S_IFDIR } == true
+            "user_id", "group_id" -> parameter.stringValue()?.toUIntOrNull() != null
+            "max_read" -> parameter.stringValue()?.toIntOrNull()
+                ?.let { it in 1..FuseAbi.MAX_TRANSFER_SIZE } == true
+            "blksize" -> parameter.stringValue()?.toIntOrNull()
+                ?.let { it in 512..PAGE_SIZE_BYTES.toInt() && it and (it - 1) == 0 } == true
+            "default_permissions", "allow_other" -> parameter is FileSystemParameter.Flag
+            "subtype" -> !parameter.stringValue().isNullOrEmpty()
+            else -> false
         }
-        return request.resources.withResource(options.descriptor) { resource ->
-            val session = resource as? FuseSession
-                ?: return@withResource VfsResult.Err(VfsError.NO_DEVICE)
-            val instance = FuseInstance(session, options)
-            when (val attached = session.attach(options.maxRead, instance)) {
+        return if (valid) VfsResult.Ok(Unit) else VfsResult.Err(VfsError.INVALID_ARGUMENT)
+    }
+
+    override fun createMountedBackend(
+        configuration: FileSystemConfiguration,
+    ): VfsResult<SuperBlockBackend> {
+        configuration.parameters.forEachIndexed { index, parameter ->
+            if (validateParameter(configuration.parameters.subList(0, index), parameter)
+                is VfsResult.Err
+            ) {
+                return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            }
+        }
+        val parsed = when (val result = FuseMountConfiguration.parse(configuration)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        return parsed.device.withSession(configuration.resources) { session ->
+            val instance = FuseInstance(session, parsed.options)
+            when (val attached = session.attach(parsed.options.maxRead, instance)) {
                 is VfsResult.Ok -> VfsResult.Ok(instance)
                 is VfsResult.Err -> attached
             }
         }
     }
+
+    private fun FileSystemParameter.stringValue(): String? =
+        (this as? FileSystemParameter.StringValue)?.value
 }
 
-private data class FuseMountOptions(
-    val descriptor: Int,
-    val rootMode: UInt,
-    val userId: UInt,
-    val groupId: UInt,
-    val defaultPermissions: Boolean,
-    val allowOther: Boolean,
-    val maxRead: Int,
-    val blockSize: Int,
+private sealed interface FuseMountDevice {
+    fun <T> withSession(
+        resources: MountResources,
+        use: (FuseSession) -> VfsResult<T>,
+    ): VfsResult<T>
+
+    class Descriptor(private val descriptor: Int) : FuseMountDevice {
+        override fun <T> withSession(
+            resources: MountResources,
+            use: (FuseSession) -> VfsResult<T>,
+        ): VfsResult<T> = resources.withResource(descriptor) { resource ->
+            val session = resource as? FuseSession
+                ?: return@withResource VfsResult.Err(VfsError.NO_DEVICE)
+            use(session)
+        }
+    }
+
+    class File(private val file: OpenFileDescription) : FuseMountDevice {
+        override fun <T> withSession(
+            resources: MountResources,
+            use: (FuseSession) -> VfsResult<T>,
+        ): VfsResult<T> {
+            val session = file.mountResource as? FuseSession
+                ?: return VfsResult.Err(VfsError.NO_DEVICE)
+            return use(session)
+        }
+    }
+}
+
+private data class FuseMountConfiguration(
+    val device: FuseMountDevice,
+    val options: FuseMountOptions,
 ) {
     companion object {
-        fun parse(request: MountRequest): VfsResult<FuseMountOptions> {
-            val values = mutableMapOf<String, String?>()
-            val text = request.data?.decodeToString() ?: ""
-            for (option in text.split(',').filter(String::isNotEmpty)) {
-                val separator = option.indexOf('=')
-                val name = if (separator < 0) option else option.substring(0, separator)
-                val value = if (separator < 0) null else option.substring(separator + 1)
-                if (name.isEmpty() || values.containsKey(name)) {
+        fun parse(configuration: FileSystemConfiguration): VfsResult<FuseMountConfiguration> {
+            val values = mutableMapOf<String, FileSystemParameter>()
+            for (parameter in configuration.parameters) {
+                if (parameter.key.isEmpty() || values.put(parameter.key, parameter) != null) {
                     return VfsResult.Err(VfsError.INVALID_ARGUMENT)
                 }
-                values[name] = value
             }
 
-            val descriptor = values.remove("fd")?.toIntOrNull()
-                ?.takeIf { it >= 0 }
-                ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-            val rootMode = values.remove("rootmode")?.toUIntOrNull(8)
+            val device = when (val parameter = values.remove("fd")) {
+                is FileSystemParameter.FileValue -> FuseMountDevice.File(parameter.file)
+                is FileSystemParameter.StringValue -> parameter.value.toIntOrNull()
+                    ?.takeIf { it >= 0 }
+                    ?.let(FuseMountDevice::Descriptor)
+                    ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                else -> return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            }
+            val rootMode = values.removeString("rootmode")?.toUIntOrNull(8)
                 ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
             if (rootMode and FuseAbi.S_IFMT != FuseAbi.S_IFDIR) {
                 return VfsResult.Err(VfsError.INVALID_ARGUMENT)
             }
-            val userId = values.remove("user_id")?.toUIntOrNull()
+            val userId = values.removeString("user_id")?.toUIntOrNull()
                 ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-            val groupId = values.remove("group_id")?.toUIntOrNull()
+            val groupId = values.removeString("group_id")?.toUIntOrNull()
                 ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-            val maxReadOption = values.remove("max_read")
+            val maxReadOption = values.removeString("max_read")
             val maxRead = maxReadOption?.toIntOrNull()
                 ?.takeIf { it in 1..FuseAbi.MAX_TRANSFER_SIZE }
                 ?.coerceAtLeast(4096)
                 ?: if (maxReadOption == null) FuseAbi.MAX_TRANSFER_SIZE
                 else return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-            val isBlock = request.fileSystemName == "fuseblk" ||
-                request.fileSystemName.startsWith("fuseblk.")
-            val blockSizeOption = values.remove("blksize")
+            val isBlock = configuration.fileSystemName == "fuseblk" ||
+                configuration.fileSystemName.startsWith("fuseblk.")
+            val blockSizeOption = values.removeString("blksize")
             if (blockSizeOption != null && !isBlock) {
                 return VfsResult.Err(VfsError.INVALID_ARGUMENT)
             }
@@ -142,35 +199,51 @@ private data class FuseMountOptions(
                 ?.takeIf { it in 512..PAGE_SIZE_BYTES.toInt() && it and (it - 1) == 0 }
                 ?: if (blockSizeOption == null) PAGE_SIZE_BYTES.toInt()
                 else return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-            val hasDefaultPermissions = values.containsKey("default_permissions")
-            if (hasDefaultPermissions && values.remove("default_permissions") != null) {
-                return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            val defaultPermissions = when (val parameter = values.remove("default_permissions")) {
+                null -> false
+                is FileSystemParameter.Flag -> true
+                else -> return VfsResult.Err(VfsError.INVALID_ARGUMENT)
             }
-            val hasAllowOther = values.containsKey("allow_other")
-            if (hasAllowOther && values.remove("allow_other") != null) {
-                return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            val allowOther = when (val parameter = values.remove("allow_other")) {
+                null -> false
+                is FileSystemParameter.Flag -> true
+                else -> return VfsResult.Err(VfsError.INVALID_ARGUMENT)
             }
-            if (values.containsKey("subtype")) {
-                val subtype = values.remove("subtype")
-                if (subtype.isNullOrEmpty()) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            if (values.containsKey("subtype") && values.removeString("subtype").isNullOrEmpty()) {
+                return VfsResult.Err(VfsError.INVALID_ARGUMENT)
             }
             if (values.isNotEmpty()) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
 
             return VfsResult.Ok(
-                FuseMountOptions(
-                    descriptor,
-                    rootMode,
-                    userId,
-                    groupId,
-                    hasDefaultPermissions,
-                    hasAllowOther,
-                    maxRead,
-                    blockSize,
+                FuseMountConfiguration(
+                    device,
+                    FuseMountOptions(
+                        rootMode,
+                        userId,
+                        groupId,
+                        defaultPermissions,
+                        allowOther,
+                        maxRead,
+                        blockSize,
+                    ),
                 ),
             )
         }
+
+        private fun MutableMap<String, FileSystemParameter>.removeString(name: String): String? =
+            (remove(name) as? FileSystemParameter.StringValue)?.value
     }
 }
+
+private data class FuseMountOptions(
+    val rootMode: UInt,
+    val userId: UInt,
+    val groupId: UInt,
+    val defaultPermissions: Boolean,
+    val allowOther: Boolean,
+    val maxRead: Int,
+    val blockSize: Int,
+)
 
 private data class FuseAttributeUpdate(
     val mode: FileMode? = null,

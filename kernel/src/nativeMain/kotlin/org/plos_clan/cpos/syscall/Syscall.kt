@@ -11,6 +11,7 @@ import org.plos_clan.cpos.syscall.fs.EventFdSyscalls
 import org.plos_clan.cpos.syscall.fs.EpollSyscalls
 import org.plos_clan.cpos.syscall.fs.InotifySyscalls
 import org.plos_clan.cpos.syscall.fs.MemFdSyscalls
+import org.plos_clan.cpos.syscall.fs.NewMountSyscalls
 import org.plos_clan.cpos.syscall.fs.TimerFdSyscalls
 import org.plos_clan.cpos.syscall.fs.access
 import org.plos_clan.cpos.syscall.fs.chdir
@@ -308,6 +309,9 @@ private enum class LinuxSyscall(
     STATX(332, ::statx),
     RSEQ(334, ::rseq),
     PIDFD_SEND_SIGNAL(424, SignalSyscalls::pidfdSendSignal),
+    FSOPEN(430, NewMountSyscalls::fsopen),
+    FSCONFIG(431, NewMountSyscalls::fsconfig),
+    FSMOUNT(432, NewMountSyscalls::fsmount),
     PIDFD_OPEN(434, PidFdSyscalls::open),
     CLONE3(435, ::clone3),
     CLOSE_RANGE(436, ::closeRange),
