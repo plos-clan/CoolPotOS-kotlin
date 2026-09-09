@@ -77,6 +77,7 @@ internal object SocketSyscalls {
         SEND_BUFFER(SocketConstants.SO_SNDBUF, Int.SIZE_BYTES),
         RECEIVE_BUFFER(SocketConstants.SO_RCVBUF, Int.SIZE_BYTES),
         PASS_CREDENTIALS(SocketConstants.SO_PASSCRED, Int.SIZE_BYTES),
+        RECEIVE_TIMESTAMP(SocketConstants.SO_TIMESTAMP, Int.SIZE_BYTES),
         RECEIVE_LOW_WATERMARK(SocketConstants.SO_RCVLOWAT, Int.SIZE_BYTES),
         RECEIVE_TIMEOUT(SocketConstants.SO_RCVTIMEO, Long.SIZE_BYTES * 2),
         SEND_TIMEOUT(SocketConstants.SO_SNDTIMEO, Long.SIZE_BYTES * 2),
@@ -541,6 +542,7 @@ internal object SocketSyscalls {
                 socket.setReceiveBufferSize(value)
             }
             SetSocketOption.PASS_CREDENTIALS -> socket.setPassCredentials(value != 0)
+            SetSocketOption.RECEIVE_TIMESTAMP -> socket.setReceiveTimestamp(value != 0)
             SetSocketOption.RECEIVE_LOW_WATERMARK -> if (value <= 0) {
                 VfsResult.Err(VfsError.INVALID_ARGUMENT)
             } else {
@@ -593,6 +595,7 @@ internal object SocketSyscalls {
                 SocketConstants.SO_SNDBUF -> intOption(options.sendBufferSize)
                 SocketConstants.SO_RCVBUF -> intOption(options.receiveBufferSize)
                 SocketConstants.SO_PASSCRED -> intOption(if (options.passCredentials) 1 else 0)
+                SocketConstants.SO_TIMESTAMP -> intOption(if (options.receiveTimestamp) 1 else 0)
                 SocketConstants.SO_RCVLOWAT -> intOption(options.receiveLowWatermark)
                 SocketConstants.SO_SNDLOWAT -> intOption(1)
                 SocketConstants.SO_RCVTIMEO -> timevalOption(options.receiveTimeoutNanos)
@@ -736,7 +739,7 @@ internal object SocketSyscalls {
         if (header.controlLength != 0 && header.controlAddress == 0uL) {
             return errno(Errno.EFAULT)
         }
-        val passCredentials = socket.socketOptions().passCredentials
+        val options = socket.socketOptions()
         val received = socket.receiveSocket(
             SocketReceiveRequest(
                 destination,
@@ -765,7 +768,8 @@ internal object SocketSyscalls {
             header.controlAddress,
             header.controlLength,
             result,
-            passCredentials,
+            options.passCredentials,
+            options.receiveTimestamp,
             flags and MSG_CMSG_CLOEXEC != 0,
         )) {
             is VfsResult.Ok -> written.value

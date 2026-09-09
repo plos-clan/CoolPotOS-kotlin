@@ -476,6 +476,7 @@ internal class NetlinkSocket internal constructor(
         val sourcePort: UInt,
         val group: Int,
         val senderCredentials: UnixCredentials,
+        val receivedAtNanos: ULong?,
     ) {
         val source: NetlinkSocketAddress
             get() = NetlinkSocketAddress(
@@ -575,6 +576,7 @@ internal class NetlinkSocket internal constructor(
                             senderCredentials = datagram.senderCredentials,
                             truncated = copied < datagram.bytes.size,
                             endOfRecord = true,
+                            receivedAtNanos = datagram.receivedAtNanos,
                             controlMessages = if (netlinkOptions.packetInfo) {
                                 listOf(SocketControlMessage.Integers(
                                     NetlinkAbi.SOL_NETLINK,
@@ -681,7 +683,13 @@ internal class NetlinkSocket internal constructor(
             }
             return@withLock false
         }
-        messages += Datagram(bytes, sourcePort, group, senderCredentials)
+        messages += Datagram(
+            bytes,
+            sourcePort,
+            group,
+            senderCredentials,
+            captureReceiveTimestampLocked(),
+        )
         queuedBytes += bytes.size
         readWaiters.wakeOne()
         true

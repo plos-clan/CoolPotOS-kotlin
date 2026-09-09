@@ -172,6 +172,7 @@ internal class UdpSocket internal constructor(
         val bytes: ByteArray,
         val source: Ipv4SocketAddress,
         val destination: Ipv4SocketAddress,
+        val receivedAtNanos: ULong?,
     )
 
     private data class Transmission(
@@ -374,6 +375,7 @@ internal class UdpSocket internal constructor(
                             datagram.source,
                             truncated = copied < datagram.bytes.size,
                             endOfRecord = true,
+                            receivedAtNanos = datagram.receivedAtNanos,
                         ),
                     )
                 }
@@ -461,7 +463,7 @@ internal class UdpSocket internal constructor(
         if (closed || !readOpen || queuedBytes > optionsLocked().receiveBufferSize - bytes.size) {
             return@withLock
         }
-        messages.addLast(Datagram(bytes, source, destination))
+        messages.addLast(Datagram(bytes, source, destination, captureReceiveTimestampLocked()))
         queuedBytes += bytes.size
         readWaiters.wakeReady(1)
     }

@@ -91,7 +91,11 @@ internal object IcmpProtocol {
 internal class IcmpSocket internal constructor(
     private val subsystem: IcmpProtocol,
 ) : AbstractSocket(SocketDomain.IPV4, SocketType.DATAGRAM, IpProtocol.ICMP.number.toInt()) {
-    private data class Datagram(val bytes: ByteArray, val source: Ipv4SocketAddress)
+    private data class Datagram(
+        val bytes: ByteArray,
+        val source: Ipv4SocketAddress,
+        val receivedAtNanos: ULong?,
+    )
 
     private var binding: Ipv4SocketAddress? = null
     private var selectedSource = Ipv4Address.ANY
@@ -259,6 +263,7 @@ internal class IcmpSocket internal constructor(
                             datagram.source,
                             truncated = copied < datagram.bytes.size,
                             endOfRecord = true,
+                            receivedAtNanos = datagram.receivedAtNanos,
                         ),
                     )
                 }
@@ -330,7 +335,7 @@ internal class IcmpSocket internal constructor(
         if (closed || !readOpen || queuedBytes > optionsLocked().receiveBufferSize - bytes.size) {
             return@withLock
         }
-        messages += Datagram(bytes, source)
+        messages += Datagram(bytes, source, captureReceiveTimestampLocked())
         queuedBytes += bytes.size
         readWaiters.wakeOne()
     }

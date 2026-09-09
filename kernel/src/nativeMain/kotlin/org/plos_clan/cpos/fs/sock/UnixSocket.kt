@@ -157,6 +157,7 @@ internal data class UnixReceiveResult(
     val senderCredentials: UnixCredentials? = null,
     val truncated: Boolean = false,
     val endOfRecord: Boolean = false,
+    val receivedAtNanos: ULong? = null,
 )
 
 internal sealed interface UnixSocketBinding {
@@ -401,6 +402,7 @@ internal abstract class UnixSocket(
                     received.senderCredentials,
                     received.truncated,
                     received.endOfRecord,
+                    received.receivedAtNanos,
                 ),
             )
         }

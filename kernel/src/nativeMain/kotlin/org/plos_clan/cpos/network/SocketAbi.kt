@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.network
 
+import org.plos_clan.cpos.drivers.RealtimeClock
 import org.plos_clan.cpos.drivers.net.MacAddress
 import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.sock.SocketAddress
@@ -35,6 +36,7 @@ internal object SocketConstants {
     const val SOL_SOCKET = 1
     const val SCM_RIGHTS = 1
     const val SCM_CREDENTIALS = 2
+    const val SCM_TIMESTAMP = 29
 
     const val SO_REUSEADDR = 2
     const val SO_TYPE = 3
@@ -51,6 +53,7 @@ internal object SocketConstants {
     const val SO_RCVTIMEO = 20
     const val SO_SNDTIMEO = 21
     const val SO_ATTACH_FILTER = 26
+    const val SO_TIMESTAMP = SCM_TIMESTAMP
     const val SO_ACCEPTCONN = 30
     const val SO_PROTOCOL = 38
     const val SO_DOMAIN = 39
@@ -447,6 +450,7 @@ internal object SocketControlMessages {
         capacity: Int,
         result: SocketReceiveResult,
         passCredentials: Boolean,
+        receiveTimestamp: Boolean,
         closeOnExec: Boolean,
     ): VfsResult<ControlWriteResult> {
         val ancillary = result.ancillary
@@ -461,12 +465,44 @@ internal object SocketControlMessages {
         }
         val memory = UserMemory(process.addressSpace, address)
 
-        val messages = if (credentials == null) result.controlMessages else {
-            result.controlMessages + SocketControlMessage.Integers(
-                SocketConstants.SOL_SOCKET,
-                SocketConstants.SCM_CREDENTIALS,
-                intArrayOf(credentials.processId, credentials.userId.toInt(), credentials.groupId.toInt()),
-            )
+        val timestamp = if (receiveTimestamp &&
+            (result.copiedBytes != 0 || result.endOfRecord)
+        ) {
+            result.receivedAtNanos?.let(RealtimeClock::atMonotonic) ?: RealtimeClock.now()
+        } else {
+            null
+        }
+        val messages = if (credentials == null && timestamp == null) {
+            result.controlMessages
+        } else {
+            ArrayList<SocketControlMessage>(result.controlMessages.size + 2).apply {
+                addAll(result.controlMessages)
+                timestamp?.let { receivedAt ->
+                    add(
+                        SocketControlMessage.Longs(
+                            SocketConstants.SOL_SOCKET,
+                            SocketConstants.SCM_TIMESTAMP,
+                            longArrayOf(
+                                receivedAt.seconds,
+                                (receivedAt.nanoseconds / NANOSECONDS_PER_MICROSECOND).toLong(),
+                            ),
+                        ),
+                    )
+                }
+                credentials?.let { sender ->
+                    add(
+                        SocketControlMessage.Integers(
+                            SocketConstants.SOL_SOCKET,
+                            SocketConstants.SCM_CREDENTIALS,
+                            intArrayOf(
+                                sender.processId,
+                                sender.userId.toInt(),
+                                sender.groupId.toInt(),
+                            ),
+                        ),
+                    )
+                }
+            }
         }
         val originalRights = ancillary?.fileCount ?: 0
         val required = messages.sumOf(SocketControlMessage::space) +
@@ -532,4 +568,6 @@ internal object SocketControlMessages {
     private fun alignControl(length: ULong): ULong =
         (length + ULong.SIZE_BYTES.toULong() - 1uL) and
             (ULong.SIZE_BYTES.toULong() - 1uL).inv()
+
+    private const val NANOSECONDS_PER_MICROSECOND = 1_000u
 }

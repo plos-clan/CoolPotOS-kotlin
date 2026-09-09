@@ -1,6 +1,7 @@
 package org.plos_clan.cpos.syscall
 
 import org.plos_clan.cpos.fs.sock.SocketAddress
+import org.plos_clan.cpos.fs.sock.SocketControlMessage
 import org.plos_clan.cpos.fs.sock.UnspecifiedSocketAddress
 import org.plos_clan.cpos.fs.sock.UnixSocketAddress
 import org.plos_clan.cpos.fs.vfs.VfsResult
@@ -80,6 +81,24 @@ class SocketAbiTest {
         assertEquals(address, assertIs<VfsResult.Ok<SocketAddress>>(
             SocketAddressAbi.decode(encoded),
         ).value)
+    }
+
+    @Test
+    fun encodesTimestampControlMessageAsNativeTimeval() {
+        val timestamp = SocketControlMessage.Longs(
+            SocketConstants.SOL_SOCKET,
+            SocketConstants.SCM_TIMESTAMP,
+            longArrayOf(1_725_840_000L, 123_456L),
+        )
+        val bytes = ByteArray(timestamp.space)
+
+        assertEquals(32, timestamp.writeTo(bytes, 0))
+        val input = LittleEndianBuffer(bytes)
+        assertEquals(32uL, input.readU64(0))
+        assertEquals(SocketConstants.SOL_SOCKET.toUInt(), input.readU32(8))
+        assertEquals(SocketConstants.SCM_TIMESTAMP.toUInt(), input.readU32(12))
+        assertEquals(1_725_840_000uL, input.readU64(16))
+        assertEquals(123_456uL, input.readU64(24))
     }
 
     private fun nativeAddress(path: ByteArray): ByteArray =

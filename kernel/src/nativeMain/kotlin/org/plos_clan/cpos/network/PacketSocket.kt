@@ -61,6 +61,7 @@ internal class PacketSocket internal constructor(
     private data class Datagram(
         val bytes: ByteArray,
         val source: PacketSocketAddress,
+        val receivedAtNanos: ULong?,
     )
 
     private var binding: PacketSocketAddress? = null
@@ -168,6 +169,7 @@ internal class PacketSocket internal constructor(
                             datagram.source,
                             truncated = copied < datagram.bytes.size,
                             endOfRecord = true,
+                            receivedAtNanos = datagram.receivedAtNanos,
                         ),
                     )
                 }
@@ -230,6 +232,7 @@ internal class PacketSocket internal constructor(
                 packetType,
                 ethernet.source,
             ),
+            captureReceiveTimestampLocked(),
         )
         queuedBytes += capturedLength
         readWaiters.wakeReady(1)

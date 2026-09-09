@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.fs.sock
 
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.vfs.ByteCircularBuffer
 import org.plos_clan.cpos.fs.vfs.IoEvent
 import org.plos_clan.cpos.fs.vfs.IoResult
@@ -251,6 +252,7 @@ internal class UnixConnectionSocket(
         var ancillary: UnixAncillaryData? = null
         var truncated = false
         var endOfRecord = false
+        var receivedAtNanos: ULong? = null
         val options = socketOptions()
         val deadline = if (request.nonBlocking) null else SocketDeadline.earliest(
             request.deadline,
@@ -287,6 +289,9 @@ internal class UnixConnectionSocket(
                     ancillary = current.ancillary
                     truncated = current.truncated
                     endOfRecord = current.endOfRecord
+                    if (current.copiedBytes != 0 || current.endOfRecord) {
+                        receivedAtNanos = current.receivedAtNanos
+                    }
                     if (current.copiedBytes == 0 || request.peek || current.ancillary != null ||
                         current.endOfRecord || !request.waitAll || copied == request.count
                     ) {
@@ -319,6 +324,7 @@ internal class UnixConnectionSocket(
                 senderCredentials = endpoint.peerCredentials,
                 truncated = truncated,
                 endOfRecord = endOfRecord,
+                receivedAtNanos = receivedAtNanos,
             ),
         )
     }
@@ -462,10 +468,7 @@ internal class UnixConnectionSocket(
 
     override fun optionsChangedLocked(options: SocketOptions) {
         when (val current = state) {
-            is State.Connected -> current.connection.setReceivePassCredentials(
-                current.side,
-                options.passCredentials,
-            )
+            is State.Connected -> current.connection.updateReceiveOptions(current.side, options)
             is State.Listening -> current.listener.updateOptions(options)
             else -> Unit
         }
@@ -673,6 +676,7 @@ private data class UnixBufferReceive(
     val ancillary: UnixAncillaryData? = null,
     val truncated: Boolean = false,
     val endOfRecord: Boolean = false,
+    val receivedAtNanos: ULong? = null,
 )
 
 private sealed class UnixConnectionBuffer(capacity: Int) {
@@ -688,6 +692,7 @@ private sealed class UnixConnectionBuffer(capacity: Int) {
         offset: Int,
         count: Int,
         ancillary: UnixAncillaryData?,
+        receiveTimestamp: Boolean,
     ): IoResult
 
     abstract fun receive(
@@ -714,6 +719,7 @@ private class UnixStreamBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
 
     private val bytes = ByteCircularBuffer(minOf(capacity, INITIAL_CAPACITY))
     private val controls = ArrayDeque<ControlMarker>()
+    private var timestamps: SocketTimestampQueue? = null
     private var readSequence = 0uL
     private var writeSequence = 0uL
 
@@ -728,6 +734,7 @@ private class UnixStreamBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
         offset: Int,
         count: Int,
         ancillary: UnixAncillaryData?,
+        receiveTimestamp: Boolean,
     ): IoResult {
         if (count == 0) return IoResult.success(0)
         val writable = minOf(count, remaining)
@@ -741,6 +748,15 @@ private class UnixStreamBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
         }
         val transferred = bytes.write(source, offset, writable)
         if (transferred == 0) return IoResult.failure(VfsError.WOULD_BLOCK)
+        val receivedAtNanos = if (receiveTimestamp) TscClock.nanoTime() else null
+        val queuedTimestamps = timestamps
+        if (queuedTimestamps != null) {
+            queuedTimestamps.append(transferred, receivedAtNanos)
+        } else if (receivedAtNanos != null) {
+            timestamps = SocketTimestampQueue(bytes.size - transferred).also {
+                it.append(transferred, receivedAtNanos)
+            }
+        }
         val consumed = ancillary != null && !ancillary.isEmpty
         if (consumed) controls += ControlMarker(writeSequence, ancillary)
         writeSequence += transferred.toULong()
@@ -761,6 +777,8 @@ private class UnixStreamBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
         val requested = beforeMarker?.let { minOf(count, it) } ?: count
         val transferred = bytes.read(destination, offset, requested, peek)
         if (transferred == 0) return VfsResult.Err(VfsError.FAULT)
+        val receivedAtNanos = timestamps?.read(transferred, consume = !peek)
+        if (!peek && bytes.size == 0) timestamps = null
 
         val ancillary = if (marker == null) {
             null
@@ -776,12 +794,14 @@ private class UnixStreamBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
                 bytes = transferred,
                 copiedBytes = transferred,
                 ancillary = ancillary,
+                receivedAtNanos = receivedAtNanos,
             ),
         )
     }
 
     override fun clear(): List<UnixAncillaryData> {
         bytes.clear()
+        timestamps = null
         val discarded = if (controls.isEmpty()) emptyList() else {
             ArrayList<UnixAncillaryData>(controls.size).also { result ->
                 controls.forEach { result += it.ancillary }
@@ -801,6 +821,7 @@ private class UnixPacketBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
     private data class Packet(
         val bytes: ByteArray,
         val ancillary: UnixAncillaryData?,
+        val receivedAtNanos: ULong?,
     ) {
         val accountedSize: Int
             get() = maxOf(1, bytes.size)
@@ -813,6 +834,7 @@ private class UnixPacketBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
 
             if (!bytes.contentEquals(other.bytes)) return false
             if (ancillary != other.ancillary) return false
+            if (receivedAtNanos != other.receivedAtNanos) return false
             if (accountedSize != other.accountedSize) return false
 
             return true
@@ -821,6 +843,7 @@ private class UnixPacketBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
         override fun hashCode(): Int {
             var result = bytes.contentHashCode()
             result = 31 * result + (ancillary?.hashCode() ?: 0)
+            result = 31 * result + (receivedAtNanos?.hashCode() ?: 0)
             result = 31 * result + accountedSize
             return result
         }
@@ -840,6 +863,7 @@ private class UnixPacketBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
         offset: Int,
         count: Int,
         ancillary: UnixAncillaryData?,
+        receiveTimestamp: Boolean,
     ): IoResult {
         val accountedSize = maxOf(1, count)
         if (accountedSize > capacity) {
@@ -853,7 +877,11 @@ private class UnixPacketBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
             return IoResult.failure(VfsError.FAULT)
         }
         val consumed = ancillary != null && !ancillary.isEmpty
-        packets += Packet(data, ancillary.takeIf { consumed })
+        packets += Packet(
+            data,
+            ancillary.takeIf { consumed },
+            if (receiveTimestamp) TscClock.nanoTime() else null,
+        )
         used += accountedSize
         return IoResult.success(count)
     }
@@ -886,6 +914,7 @@ private class UnixPacketBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
                 ancillary = ancillary,
                 truncated = copied < packet.bytes.size,
                 endOfRecord = true,
+                receivedAtNanos = packet.receivedAtNanos,
             ),
         )
     }
@@ -919,6 +948,7 @@ private class UnixDuplexConnection(
         var sendBufferSize: Int,
         var receiveBufferSize: Int,
         var passCredentials: Boolean,
+        var receiveTimestamp: Boolean,
     ) {
         var writerOpen = true
         var readerOpen = true
@@ -938,12 +968,14 @@ private class UnixDuplexConnection(
             firstOptions.sendBufferSize,
             secondOptions.receiveBufferSize,
             secondOptions.passCredentials,
+            secondOptions.receiveTimestamp,
         ),
         Direction(
             newBuffer(type, minOf(secondOptions.sendBufferSize, firstOptions.receiveBufferSize)),
             secondOptions.sendBufferSize,
             firstOptions.receiveBufferSize,
             firstOptions.passCredentials,
+            firstOptions.receiveTimestamp,
         ),
     )
 
@@ -966,7 +998,13 @@ private class UnixDuplexConnection(
             return@withLock IoResult.failure(VfsError.BROKEN_PIPE)
         }
         if (direction.passCredentials) ancillary?.attachCredentials(credentials)
-        val result = direction.buffer.send(source, offset, count, ancillary)
+        val result = direction.buffer.send(
+            source,
+            offset,
+            count,
+            ancillary,
+            direction.receiveTimestamp,
+        )
         if (result.isSuccess) direction.readWaiters.wakeOne()
         result
     }
@@ -1057,8 +1095,10 @@ private class UnixDuplexConnection(
         direction.writeWaiters.wakeAll()
     }
 
-    fun setReceivePassCredentials(side: Side, enabled: Boolean) = lock.withLock {
-        incoming(side).passCredentials = enabled
+    fun updateReceiveOptions(side: Side, options: SocketOptions) = lock.withLock {
+        val incoming = incoming(side)
+        incoming.passCredentials = options.passCredentials
+        incoming.receiveTimestamp = options.receiveTimestamp
     }
 
     fun updateOptions(side: Side, options: SocketOptions) = lock.withLock {
@@ -1070,6 +1110,7 @@ private class UnixDuplexConnection(
         val incoming = incoming(side)
         incoming.receiveBufferSize = options.receiveBufferSize
         incoming.passCredentials = options.passCredentials
+        incoming.receiveTimestamp = options.receiveTimestamp
         incoming.resize()
         incoming.writeWaiters.wakeAll()
     }

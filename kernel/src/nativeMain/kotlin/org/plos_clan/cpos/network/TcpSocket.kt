@@ -12,6 +12,7 @@ import org.plos_clan.cpos.fs.sock.SocketReceiveRequest
 import org.plos_clan.cpos.fs.sock.SocketReceiveResult
 import org.plos_clan.cpos.fs.sock.SocketSendRequest
 import org.plos_clan.cpos.fs.sock.SocketShutdownMode
+import org.plos_clan.cpos.fs.sock.SocketTimestampQueue
 import org.plos_clan.cpos.fs.sock.SocketType
 import org.plos_clan.cpos.fs.vfs.ByteCircularBuffer
 import org.plos_clan.cpos.fs.vfs.IoResult
@@ -353,6 +354,7 @@ internal class TcpSocket internal constructor(
         val sequence: UInt,
         val payload: ByteArray,
         val fin: Boolean,
+        val receivedAtNanos: ULong?,
     )
 
     private data class SegmentActions(
@@ -370,6 +372,7 @@ internal class TcpSocket internal constructor(
     private var children = mutableSetOf<TcpSocket>()
     private var accepted = ArrayDeque<TcpSocket>()
     private val receiveBuffer = ByteCircularBuffer(DEFAULT_BUFFER_SIZE)
+    private var receiveTimestamps: SocketTimestampQueue? = null
     private val sendBuffer = ByteCircularBuffer(DEFAULT_BUFFER_SIZE)
     private val outstanding = ArrayDeque<Outstanding>()
     private val outOfOrder = mutableListOf<OutOfOrder>()
@@ -582,6 +585,7 @@ internal class TcpSocket internal constructor(
             if (mode.reads) {
                 readOpen = false
                 receiveBuffer.clear()
+                receiveTimestamps = null
                 outOfOrder.clear()
                 readWaiters.wakeAll()
             }
@@ -662,6 +666,11 @@ internal class TcpSocket internal constructor(
                         request.count,
                         request.peek,
                     )
+                    val receivedAtNanos = receiveTimestamps?.read(
+                        copied,
+                        consume = !request.peek,
+                    )
+                    if (!request.peek && receiveBuffer.size == 0) receiveTimestamps = null
                     if (!request.peek && copied != 0 && remote != null) {
                         windowUpdate = acknowledgmentLocked()
                     }
@@ -670,6 +679,7 @@ internal class TcpSocket internal constructor(
                             copied,
                             copied,
                             remote ?: Ipv4SocketAddress(Ipv4Address.ANY, 0u),
+                            receivedAtNanos = receivedAtNanos,
                         ),
                     )
                 }
@@ -924,6 +934,7 @@ internal class TcpSocket internal constructor(
                 ttl = ttl.toUByte(),
             )
             receiveBuffer.clear()
+            receiveTimestamps = null
             sendBuffer.clear()
             outstanding.clear()
             outOfOrder.clear()
@@ -1177,6 +1188,7 @@ internal class TcpSocket internal constructor(
     }
 
     private fun receiveDataLocked(packet: IpPacketContext, segment: TcpSegment): Boolean {
+        val receivedAtNanos = captureReceiveTimestampLocked()
         var sequence = segment.sequenceNumber
         var payloadOffset = segment.payloadOffset
         var payloadLength = segment.payloadLength
@@ -1205,7 +1217,7 @@ internal class TcpSocket internal constructor(
                     TcpSequence.before(sequence, existingEnd) && TcpSequence.before(existing.sequence, end)
                 }
             ) return true
-            outOfOrder += OutOfOrder(sequence, payload, fin)
+            outOfOrder += OutOfOrder(sequence, payload, fin, receivedAtNanos)
             outOfOrder.sortWith { first, second ->
                 when {
                     first.sequence == second.sequence -> 0
@@ -1215,20 +1227,32 @@ internal class TcpSocket internal constructor(
             }
             return true
         }
-        if (!appendReceivedLocked(payload, fin)) return true
+        if (!appendReceivedLocked(payload, fin, receivedAtNanos)) return true
         while (true) {
             val next = outOfOrder.firstOrNull { it.sequence == rcvNxt } ?: break
             outOfOrder.remove(next)
-            if (!appendReceivedLocked(next.payload, next.fin)) break
+            if (!appendReceivedLocked(next.payload, next.fin, next.receivedAtNanos)) break
         }
         return true
     }
 
-    private fun appendReceivedLocked(payload: ByteArray, fin: Boolean): Boolean {
+    private fun appendReceivedLocked(
+        payload: ByteArray,
+        fin: Boolean,
+        receivedAtNanos: ULong?,
+    ): Boolean {
         if (payload.size > optionsLocked().receiveBufferSize - receiveBuffer.size) return false
         if (payload.isNotEmpty() && readOpen) {
             val source = ByteArrayBuffer(payload).prepareRead(0, payload.size) ?: return false
             if (receiveBuffer.write(source, 0, payload.size) != payload.size) return false
+            val timestamps = receiveTimestamps
+            if (timestamps != null) {
+                timestamps.append(payload.size, receivedAtNanos)
+            } else if (receivedAtNanos != null) {
+                receiveTimestamps = SocketTimestampQueue(receiveBuffer.size - payload.size).also {
+                    it.append(payload.size, receivedAtNanos)
+                }
+            }
             rcvNxt += payload.size.toUInt()
             readWaiters.wakeReady(receiveBuffer.size)
         } else if (payload.isNotEmpty()) {

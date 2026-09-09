@@ -46,6 +46,26 @@ internal abstract class SocketControlMessage(
         }
     }
 
+    class Longs(level: Int, type: Int, private val values: LongArray) : SocketControlMessage(
+        level,
+        type,
+        values.size * Long.SIZE_BYTES,
+    ) {
+        override fun writePayload(output: LittleEndianBuffer, offset: Int, length: Int) {
+            val complete = length / Long.SIZE_BYTES
+            repeat(complete) { index ->
+                output.writeU64(offset + index * Long.SIZE_BYTES, values[index].toULong())
+            }
+            for (index in complete * Long.SIZE_BYTES until length) {
+                output.writeU8(
+                    offset + index,
+                    (values[complete].toULong() shr
+                        ((index % Long.SIZE_BYTES) * Byte.SIZE_BITS)).toUByte(),
+                )
+            }
+        }
+    }
+
     companion object {
         const val HEADER_SIZE = ULong.SIZE_BYTES + Int.SIZE_BYTES * 2
 

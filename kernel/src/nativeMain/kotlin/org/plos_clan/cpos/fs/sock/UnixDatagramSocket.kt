@@ -17,13 +17,15 @@ internal class UnixDatagramSocket(
         val credentials: UnixCredentials,
     )
 
-    private data class Datagram(
+    private class Datagram(
         val bytes: ByteArray,
         val sourceSocket: UnixDatagramSocket,
         val sourceAddress: UnixSocketAddress,
         val credentials: UnixCredentials,
         val ancillary: UnixAncillaryData?,
     ) {
+        var receivedAtNanos: ULong? = null
+
         val accountedSize: Int
             get() = maxOf(1, bytes.size)
     }
@@ -197,6 +199,7 @@ internal class UnixDatagramSocket(
                             senderCredentials = message.credentials,
                             truncated = copied < message.bytes.size,
                             endOfRecord = true,
+                            receivedAtNanos = message.receivedAtNanos,
                         ),
                     )
                 }
@@ -304,6 +307,7 @@ internal class UnixDatagramSocket(
                     return@withLock VfsResult.Err(VfsError.MESSAGE_TOO_LONG)
                 }
                 if (message.accountedSize <= capacity - queuedBytes) {
+                    message.receivedAtNanos = captureReceiveTimestampLocked()
                     messages += message
                     queuedBytes += message.accountedSize
                     readWaiters.wakeOne()
