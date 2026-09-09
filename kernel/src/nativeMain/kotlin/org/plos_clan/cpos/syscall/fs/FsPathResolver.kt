@@ -2,6 +2,8 @@ package org.plos_clan.cpos.syscall.fs
 
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.vfs.FileSystemContext
+import org.plos_clan.cpos.fs.vfs.PathResolution
+import org.plos_clan.cpos.fs.vfs.PathResolutionBoundary
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPath
@@ -21,6 +23,7 @@ internal object FsPathResolver {
             followFinalSymlink: Boolean = true,
             allowEmpty: Boolean = false,
             followFinalMount: Boolean = true,
+            resolution: PathResolution = PathResolution.DEFAULT,
         ): VfsResult<VfsPath> = FileSystemManager.vfs.resolveAt(
             caller,
             context,
@@ -29,6 +32,7 @@ internal object FsPathResolver {
             followFinalSymlink,
             allowEmpty,
             followFinalMount,
+            resolution,
         )
     }
 
@@ -37,9 +41,12 @@ internal object FsPathResolver {
         dirFd: Int,
         pathname: VfsPathname,
         caller: VfsOperationContext,
+        resolution: PathResolution = PathResolution.DEFAULT,
     ): VfsResult<AtPath> {
         val context = process.context ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        if (pathname.isAbsolute || dirFd == AT_FDCWD) {
+        if (dirFd == AT_FDCWD ||
+            pathname.isAbsolute && resolution.boundary != PathResolutionBoundary.IN_ROOT
+        ) {
             return VfsResult.Ok(
                 AtPath(caller, context, context.workingDirectory, pathname),
             )
@@ -62,11 +69,15 @@ internal object FsPathResolver {
         allowEmpty: Boolean = false,
         followFinalMount: Boolean = true,
         caller: VfsOperationContext,
-    ): VfsResult<VfsPath> = when (val result = atPath(process, dirFd, pathname, caller)) {
+        resolution: PathResolution = PathResolution.DEFAULT,
+    ): VfsResult<VfsPath> = when (
+        val result = atPath(process, dirFd, pathname, caller, resolution)
+    ) {
         is VfsResult.Ok -> result.value.resolve(
             followFinalSymlink,
             allowEmpty,
             followFinalMount,
+            resolution,
         )
         is VfsResult.Err -> result
     }

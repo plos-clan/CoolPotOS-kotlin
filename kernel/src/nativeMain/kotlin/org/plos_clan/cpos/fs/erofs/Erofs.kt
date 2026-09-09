@@ -305,6 +305,7 @@ private class ErofsInstance private constructor(
         override fun readLink(
             caller: VfsOperationContext,
             inode: Inode,
+            cachedOnly: Boolean,
         ): VfsResult<VfsPathname> = VfsResult.Ok(target)
 
         override fun open(

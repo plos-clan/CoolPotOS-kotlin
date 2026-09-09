@@ -316,6 +316,29 @@ enum class CreateDisposition {
     CREATE_NEW,
 }
 
+enum class PathResolutionBoundary {
+    NONE,
+    BENEATH,
+    IN_ROOT,
+}
+
+enum class SymlinkResolution {
+    FOLLOW,
+    NO_MAGIC_LINKS,
+    NO_SYMLINKS,
+}
+
+data class PathResolution(
+    val boundary: PathResolutionBoundary = PathResolutionBoundary.NONE,
+    val symlinks: SymlinkResolution = SymlinkResolution.FOLLOW,
+    val allowMountCrossing: Boolean = true,
+    val cachedOnly: Boolean = false,
+) {
+    companion object {
+        val DEFAULT = PathResolution()
+    }
+}
+
 data class OpenOptions(
     val access: AccessMode = AccessMode.READ,
     val create: CreateDisposition = CreateDisposition.OPEN_EXISTING,
@@ -328,6 +351,7 @@ data class OpenOptions(
     val followFinalSymlink: Boolean = true,
     val nonBlocking: Boolean = false,
     val noAtime: Boolean = false,
+    val resolution: PathResolution = PathResolution.DEFAULT,
 )
 
 enum class MountFlag(bit: Int, internal val optionName: String? = null) {

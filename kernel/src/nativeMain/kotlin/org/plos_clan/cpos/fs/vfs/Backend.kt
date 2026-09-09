@@ -235,9 +235,10 @@ interface InodeBackend {
         caller: VfsOperationContext,
         inode: Inode,
         requested: AccessPermissions,
+        cachedOnly: Boolean = false,
     ): VfsResult<Unit> {
         if (requested == AccessPermissions.NONE) return VfsResult.Ok(Unit)
-        val metadata = when (val result = inode.attributes(caller)) {
+        val metadata = when (val result = inode.attributes(caller, cachedOnly = cachedOnly)) {
             is VfsResult.Ok -> result.value.metadata
             is VfsResult.Err -> return result
         }
@@ -390,7 +391,11 @@ interface SymlinkBackend : InodeBackend {
     override val type: InodeType
         get() = InodeType.SYMLINK
 
-    fun readLink(caller: VfsOperationContext, inode: Inode): VfsResult<VfsPathname>
+    fun readLink(
+        caller: VfsOperationContext,
+        inode: Inode,
+        cachedOnly: Boolean = false,
+    ): VfsResult<VfsPathname>
 
     override fun open(
         caller: VfsOperationContext,
@@ -400,7 +405,11 @@ interface SymlinkBackend : InodeBackend {
 }
 
 interface MagicLinkBackend : SymlinkBackend {
-    fun resolveLink(caller: VfsOperationContext, inode: Inode): VfsResult<VfsPath>
+    fun resolveLink(
+        caller: VfsOperationContext,
+        inode: Inode,
+        cachedOnly: Boolean = false,
+    ): VfsResult<VfsPath>
 }
 
 sealed class NodeKind {

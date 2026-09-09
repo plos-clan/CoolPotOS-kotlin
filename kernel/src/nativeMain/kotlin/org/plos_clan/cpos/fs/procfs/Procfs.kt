@@ -439,6 +439,7 @@ private class ProcSymlink(
     override fun readLink(
         caller: VfsOperationContext,
         inode: Inode,
+        cachedOnly: Boolean,
     ): VfsResult<VfsPathname> =
         target()?.let { VfsResult.Ok(it) } ?: VfsResult.Err(VfsError.NOT_FOUND)
 }

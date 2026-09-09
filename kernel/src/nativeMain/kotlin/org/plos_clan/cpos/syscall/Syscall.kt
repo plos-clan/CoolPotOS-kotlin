@@ -67,6 +67,7 @@ import org.plos_clan.cpos.syscall.fs.nameToHandleAt
 import org.plos_clan.cpos.syscall.fs.newFstatAt
 import org.plos_clan.cpos.syscall.fs.open
 import org.plos_clan.cpos.syscall.fs.openAt
+import org.plos_clan.cpos.syscall.fs.openAt2
 import org.plos_clan.cpos.syscall.fs.pipe
 import org.plos_clan.cpos.syscall.fs.pipe2
 import org.plos_clan.cpos.syscall.fs.poll
@@ -316,6 +317,7 @@ private enum class LinuxSyscall(
     PIDFD_OPEN(434, PidFdSyscalls::open),
     CLONE3(435, ::clone3),
     CLOSE_RANGE(436, ::closeRange),
+    OPENAT2(437, ::openAt2, restartable = true),
     FACCESSAT2(439, ::faccessAt2),
     EPOLL_PWAIT2(441, EpollSyscalls::pwait2),
     MOUNT_SETATTR(442, NewMountSyscalls::mountSetattr),

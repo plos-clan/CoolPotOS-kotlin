@@ -351,5 +351,6 @@ private class SysfsSymlink(
     override fun readLink(
         caller: VfsOperationContext,
         inode: Inode,
+        cachedOnly: Boolean,
     ): VfsResult<VfsPathname> = registry.readLink(node)
 }

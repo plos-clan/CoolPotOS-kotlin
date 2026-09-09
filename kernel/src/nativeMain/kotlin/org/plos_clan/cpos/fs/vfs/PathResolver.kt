@@ -13,6 +13,7 @@ internal class VfsPathResolver(
         pathname: VfsPathname,
         followFinalSymlink: Boolean = true,
         followFinalMount: Boolean = true,
+        resolution: PathResolution = PathResolution.DEFAULT,
     ): VfsResult<VfsPath> = resolveAt(
         caller = caller,
         context = context,
@@ -20,6 +21,7 @@ internal class VfsPathResolver(
         pathname = pathname,
         followFinalSymlink = followFinalSymlink,
         followFinalMount = followFinalMount,
+        resolution = resolution,
     )
 
     fun resolveAt(
@@ -30,15 +32,27 @@ internal class VfsPathResolver(
         followFinalSymlink: Boolean = true,
         allowEmpty: Boolean = false,
         followFinalMount: Boolean = true,
+        resolution: PathResolution = PathResolution.DEFAULT,
     ): VfsResult<VfsPath> {
         if (pathname.size == 0) {
             return if (allowEmpty) VfsResult.Ok(directory)
             else VfsResult.Err(VfsError.NOT_FOUND)
         }
+        if (pathname.isAbsolute &&
+            resolution.boundary == PathResolutionBoundary.BENEATH
+        ) {
+            return VfsResult.Err(VfsError.CROSS_DEVICE)
+        }
+        val boundary = directory.takeUnless {
+            resolution.boundary == PathResolutionBoundary.NONE
+        }
         val start = when {
+            resolution.boundary == PathResolutionBoundary.IN_ROOT -> directory
             pathname.isAbsolute -> context.root
-            directory.inode?.type == InodeType.DIRECTORY -> directory
-            else -> return VfsResult.Err(VfsError.NOT_DIRECTORY)
+            else -> directory
+        }
+        if (start.inode?.type != InodeType.DIRECTORY) {
+            return VfsResult.Err(VfsError.NOT_DIRECTORY)
         }
         val components = when (val result = pathname.components()) {
             is VfsResult.Ok -> result.value
@@ -51,6 +65,10 @@ internal class VfsPathResolver(
             components,
             followFinalSymlink || pathname.requiresDirectory,
             followFinalMount,
+            resolution,
+            boundary,
+            followStartMount = pathname.isAbsolute && boundary == null &&
+                (components.isNotEmpty() || followFinalMount),
         )
         if (result is VfsResult.Ok && pathname.requiresDirectory &&
             result.value.inode?.type != InodeType.DIRECTORY
@@ -117,6 +135,7 @@ internal class VfsPathResolver(
         context: FileSystemContext,
         directory: VfsPath,
         pathname: VfsPathname,
+        resolution: PathResolution = PathResolution.DEFAULT,
     ): VfsResult<ParentPath> {
         if (pathname.size == 0) {
             return VfsResult.Err(VfsError.NOT_FOUND)
@@ -128,10 +147,34 @@ internal class VfsPathResolver(
         if (components.isEmpty()) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
+        if (pathname.isAbsolute &&
+            resolution.boundary == PathResolutionBoundary.BENEATH
+        ) {
+            return VfsResult.Err(VfsError.CROSS_DEVICE)
+        }
         val name = components.last()
-        val start = if (pathname.isAbsolute) context.root else directory
+        val boundary = directory.takeUnless {
+            resolution.boundary == PathResolutionBoundary.NONE
+        }
+        val start = when {
+            resolution.boundary == PathResolutionBoundary.IN_ROOT -> directory
+            pathname.isAbsolute -> context.root
+            else -> directory
+        }
+        if (start.inode?.type != InodeType.DIRECTORY) {
+            return VfsResult.Err(VfsError.NOT_DIRECTORY)
+        }
         val parent = when (
-            val result = walk(caller, context, start, components.dropLast(1), true)
+            val result = walk(
+                caller,
+                context,
+                start,
+                components.dropLast(1),
+                followFinalSymlink = true,
+                resolution = resolution,
+                boundary = boundary,
+                followStartMount = pathname.isAbsolute && boundary == null,
+            )
         ) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
@@ -149,11 +192,21 @@ internal class VfsPathResolver(
         components: List<VfsName>,
         followFinalSymlink: Boolean,
         followFinalMount: Boolean = true,
+        resolution: PathResolution = PathResolution.DEFAULT,
+        boundary: VfsPath? = null,
+        followStartMount: Boolean = false,
     ): VfsResult<VfsPath> {
-        var current = if (components.isEmpty() && !followFinalMount) {
-            start
+        var current = if (followStartMount) {
+            when (val result = followMounts(
+                context.namespace,
+                start,
+                resolution.allowMountCrossing,
+            )) {
+                is VfsResult.Ok -> result.value
+                is VfsResult.Err -> return result
+            }
         } else {
-            followMounts(context.namespace, start)
+            start
         }
         var symlinkDepth = 0
         var requireDirectory = false
@@ -163,17 +216,25 @@ internal class VfsPathResolver(
             val name = remaining.removeFirst()
             when {
                 name.isDot -> {
-                    when (val access = current.requireSearch(caller)) {
+                    when (val access = current.requireSearch(caller, resolution.cachedOnly)) {
                         is VfsResult.Ok -> continue
                         is VfsResult.Err -> return access
                     }
                 }
                 name.isDotDot -> {
-                    when (val access = current.requireSearch(caller)) {
+                    when (val access = current.requireSearch(caller, resolution.cachedOnly)) {
                         is VfsResult.Ok -> Unit
                         is VfsResult.Err -> return access
                     }
-                    current = walkUp(context, current)
+                    current = when (val result = walkUp(
+                        context,
+                        current,
+                        boundary,
+                        resolution,
+                    )) {
+                        is VfsResult.Ok -> result.value
+                        is VfsResult.Err -> return result
+                    }
                     continue
                 }
             }
@@ -185,6 +246,7 @@ internal class VfsPathResolver(
                 parent,
                 name,
                 followMount = remaining.isNotEmpty() || followFinalMount,
+                resolution = resolution,
             )) {
                 is VfsResult.Ok -> result.value
                 is VfsResult.Err -> return result
@@ -196,6 +258,9 @@ internal class VfsPathResolver(
                 current = next
                 continue
             }
+            if (resolution.symlinks == SymlinkResolution.NO_SYMLINKS) {
+                return VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
+            }
             if (MountFlag.NO_SYMLINK_FOLLOW in next.mount.flags) {
                 return VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
             }
@@ -206,13 +271,28 @@ internal class VfsPathResolver(
             val symlink = inode.backend as? SymlinkBackend
                 ?: return VfsResult.Err(VfsError.NOT_SUPPORTED)
             if (symlink is MagicLinkBackend) {
-                current = when (val result = symlink.resolveLink(caller, inode)) {
+                if (resolution.symlinks != SymlinkResolution.FOLLOW) {
+                    return VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
+                }
+                if (boundary != null) return VfsResult.Err(VfsError.CROSS_DEVICE)
+                current = when (val result = symlink.resolveLink(
+                    caller,
+                    inode,
+                    resolution.cachedOnly,
+                )) {
                     is VfsResult.Ok -> result.value.also { next.mount.recordAccess(caller, inode) }
                     is VfsResult.Err -> return result
                 }
+                if (!resolution.allowMountCrossing && current.mount !== parent.mount) {
+                    return VfsResult.Err(VfsError.CROSS_DEVICE)
+                }
                 continue
             }
-            val target = when (val result = symlink.readLink(caller, inode)) {
+            val target = when (val result = symlink.readLink(
+                caller,
+                inode,
+                resolution.cachedOnly,
+            )) {
                 is VfsResult.Ok -> result.value.also { next.mount.recordAccess(caller, inode) }
                 is VfsResult.Err -> return result
             }
@@ -222,7 +302,28 @@ internal class VfsPathResolver(
                 is VfsResult.Ok -> result.value
                 is VfsResult.Err -> return result
             }
-            current = if (target.isAbsolute) context.root else parent
+            current = if (!target.isAbsolute) {
+                parent
+            } else when (resolution.boundary) {
+                PathResolutionBoundary.NONE -> context.root
+                PathResolutionBoundary.BENEATH -> return VfsResult.Err(VfsError.CROSS_DEVICE)
+                PathResolutionBoundary.IN_ROOT -> checkNotNull(boundary)
+            }
+            if (!resolution.allowMountCrossing && current.mount !== parent.mount) {
+                return VfsResult.Err(VfsError.CROSS_DEVICE)
+            }
+            if (target.isAbsolute && boundary == null &&
+                (targetComponents.isNotEmpty() || remaining.isNotEmpty() || followFinalMount)
+            ) {
+                current = when (val result = followMounts(
+                    context.namespace,
+                    current,
+                    resolution.allowMountCrossing,
+                )) {
+                    is VfsResult.Ok -> result.value
+                    is VfsResult.Err -> return result
+                }
+            }
             for (index in targetComponents.indices.reversed()) {
                 remaining.addFirst(targetComponents[index])
             }
@@ -239,19 +340,30 @@ internal class VfsPathResolver(
         parent: VfsPath,
         name: VfsName,
         followMount: Boolean = true,
+        resolution: PathResolution = PathResolution.DEFAULT,
     ): VfsResult<VfsPath> {
-        val dentry = when (val result = parent.dentry.lookupChild(caller, name)) {
+        val dentry = when (val result = parent.dentry.lookupChild(
+            caller,
+            name,
+            cachedOnly = resolution.cachedOnly,
+        )) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
         val path = VfsPath(parent.mount, dentry)
-        return VfsResult.Ok(if (followMount) followMounts(context.namespace, path) else path)
+        if (!followMount) return VfsResult.Ok(path)
+        return followMounts(context.namespace, path, resolution.allowMountCrossing)
     }
 
-    private fun followMounts(namespace: MountNamespace, initial: VfsPath): VfsPath {
+    private fun followMounts(
+        namespace: MountNamespace,
+        initial: VfsPath,
+        allowMountCrossing: Boolean,
+    ): VfsResult<VfsPath> {
         var current = initial
         while (true) {
-            val mounted = namespace.mountedAt(current) ?: return current
+            val mounted = namespace.mountedAt(current) ?: return VfsResult.Ok(current)
+            if (!allowMountCrossing) return VfsResult.Err(VfsError.CROSS_DEVICE)
             current = VfsPath(mounted, mounted.root)
         }
     }
@@ -265,27 +377,46 @@ internal class VfsPathResolver(
         return false
     }
 
-    private fun VfsPath.requireSearch(caller: VfsOperationContext): VfsResult<Unit> {
+    private fun VfsPath.requireSearch(
+        caller: VfsOperationContext,
+        cachedOnly: Boolean,
+    ): VfsResult<Unit> {
         val inode = inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = inode.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        return backend.checkAccess(caller, inode, AccessPermissions.EXECUTE)
+        return backend.checkAccess(caller, inode, AccessPermissions.EXECUTE, cachedOnly)
     }
 
-    private fun walkUp(context: FileSystemContext, initial: VfsPath): VfsPath {
+    private fun walkUp(
+        context: FileSystemContext,
+        initial: VfsPath,
+        boundary: VfsPath?,
+        resolution: PathResolution,
+    ): VfsResult<VfsPath> {
         var current = initial
+        if (current == boundary) {
+            return when (resolution.boundary) {
+                PathResolutionBoundary.BENEATH -> VfsResult.Err(VfsError.CROSS_DEVICE)
+                PathResolutionBoundary.IN_ROOT -> VfsResult.Ok(current)
+                PathResolutionBoundary.NONE -> error("unbounded resolution has a boundary")
+            }
+        }
         if (current == context.root) {
-            return current
+            return VfsResult.Ok(current)
         }
 
         while (current.dentry === current.mount.root) {
-            current = current.mount.attachment ?: return current
+            val attachment = current.mount.attachment ?: return VfsResult.Ok(current)
+            if (!resolution.allowMountCrossing) {
+                return VfsResult.Err(VfsError.CROSS_DEVICE)
+            }
+            current = attachment
             if (current == context.root) {
-                return current
+                return VfsResult.Ok(current)
             }
         }
 
-        val parent = current.dentry.parent ?: return current
-        return VfsPath(current.mount, parent)
+        val parent = current.dentry.parent ?: return VfsResult.Ok(current)
+        return VfsResult.Ok(VfsPath(current.mount, parent))
     }
 }

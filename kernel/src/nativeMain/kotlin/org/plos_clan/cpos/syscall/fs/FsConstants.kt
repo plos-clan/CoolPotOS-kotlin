@@ -1,7 +1,6 @@
 package org.plos_clan.cpos.syscall.fs
 
 import org.plos_clan.cpos.fs.FileDescriptorFlags
-import org.plos_clan.cpos.fs.OpenFlags
 
 internal object FsConstants {
     const val IO_CHUNK_SIZE = 64 * 1024
@@ -27,14 +26,6 @@ internal object FsConstants {
     const val POLL_FD_SIZE = 8
     const val MAX_POLL_FDS = 1024
     const val NANOSECONDS_PER_MILLISECOND = 1_000_000uL
-    const val SUPPORTED_OPEN_FLAGS =
-        OpenFlags.O_ACCMODE or OpenFlags.O_CREAT or OpenFlags.O_EXCL or
-            OpenFlags.O_NOCTTY or OpenFlags.O_TRUNC or OpenFlags.O_APPEND or
-            OpenFlags.O_NONBLOCK or OpenFlags.O_DSYNC or OpenFlags.O_SYNC or
-            OpenFlags.O_ASYNC or OpenFlags.O_DIRECT or OpenFlags.O_LARGEFILE or
-            OpenFlags.O_DIRECTORY or OpenFlags.O_NOFOLLOW or OpenFlags.O_NOATIME or
-            OpenFlags.O_CLOEXEC or OpenFlags.O_PATH or OpenFlags.O_TMPFILE
-
     const val F_DUPFD = 0
     const val F_GETFD = 1
     const val F_SETFD = 2

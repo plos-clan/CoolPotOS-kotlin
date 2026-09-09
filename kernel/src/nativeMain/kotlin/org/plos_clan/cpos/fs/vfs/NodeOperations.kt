@@ -407,15 +407,33 @@ internal class VfsNodeOperations(
         pathname: VfsPathname,
         options: OpenOptions,
     ): VfsResult<OpenedPath> {
+        if (pathname.isAbsolute &&
+            options.resolution.boundary == PathResolutionBoundary.BENEATH
+        ) {
+            return VfsResult.Err(VfsError.CROSS_DEVICE)
+        }
         if (pathname.isRoot) {
             return if (options.create == CreateDisposition.CREATE_NEW) {
                 VfsResult.Err(VfsError.ALREADY_EXISTS)
             } else {
-                resolveExisting(caller, context, directory, pathname, options.followFinalSymlink)
+                resolveExisting(
+                    caller,
+                    context,
+                    directory,
+                    pathname,
+                    options.followFinalSymlink,
+                    options.resolution,
+                )
             }
         }
         val parent = when (
-            val result = paths.resolveParent(caller, context, directory, pathname)
+            val result = paths.resolveParent(
+                caller,
+                context,
+                directory,
+                pathname,
+                options.resolution,
+            )
         ) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
@@ -424,7 +442,14 @@ internal class VfsNodeOperations(
             return if (options.create == CreateDisposition.CREATE_NEW) {
                 VfsResult.Err(VfsError.ALREADY_EXISTS)
             } else {
-                resolveExisting(caller, context, directory, pathname, options.followFinalSymlink)
+                resolveExisting(
+                    caller,
+                    context,
+                    directory,
+                    pathname,
+                    options.followFinalSymlink,
+                    options.resolution,
+                )
             }
         }
 
@@ -432,7 +457,13 @@ internal class VfsNodeOperations(
         val backend = parentInode.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
 
-        when (val existing = paths.lookupChild(caller, context, parent.path, parent.name)) {
+        when (val existing = paths.lookupChild(
+            caller,
+            context,
+            parent.path,
+            parent.name,
+            resolution = options.resolution,
+        )) {
             is VfsResult.Ok -> {
                 if (options.create == CreateDisposition.CREATE_NEW) {
                     return VfsResult.Err(VfsError.ALREADY_EXISTS)
@@ -444,6 +475,7 @@ internal class VfsNodeOperations(
                         directory,
                         pathname,
                         followSymlink = true,
+                        resolution = options.resolution,
                     )
                 }
                 return VfsResult.Ok(OpenedPath(existing.value, created = false))
@@ -452,6 +484,7 @@ internal class VfsNodeOperations(
         }
 
         if (pathname.requiresDirectory) return VfsResult.Err(VfsError.NOT_FOUND)
+        if (options.resolution.cachedOnly) return VfsResult.Err(VfsError.WOULD_BLOCK)
 
         if (MountFlag.READ_ONLY in parent.path.mount.flags) {
             return VfsResult.Err(VfsError.READ_ONLY)
@@ -513,6 +546,7 @@ internal class VfsNodeOperations(
                         directory,
                         pathname,
                         options.followFinalSymlink,
+                        options.resolution,
                     )
                 }
                 return created
@@ -533,8 +567,16 @@ internal class VfsNodeOperations(
         directory: VfsPath,
         pathname: VfsPathname,
         followSymlink: Boolean,
+        resolution: PathResolution,
     ): VfsResult<OpenedPath> = when (
-        val result = paths.resolveAt(caller, context, directory, pathname, followSymlink)
+        val result = paths.resolveAt(
+            caller,
+            context,
+            directory,
+            pathname,
+            followSymlink,
+            resolution = resolution,
+        )
     ) {
         is VfsResult.Ok -> VfsResult.Ok(OpenedPath(result.value, created = false))
         is VfsResult.Err -> result

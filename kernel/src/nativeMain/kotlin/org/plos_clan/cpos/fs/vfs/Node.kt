@@ -34,8 +34,9 @@ class Inode internal constructor(
     fun attributes(
         caller: VfsOperationContext,
         forceRefresh: Boolean = false,
+        cachedOnly: Boolean = false,
     ): VfsResult<InodeAttributes> = when (
-        val result = attributeSnapshot(caller, forceRefresh)
+        val result = attributeSnapshot(caller, forceRefresh, cachedOnly)
     ) {
         is VfsResult.Ok -> VfsResult.Ok(result.value.attributes)
         is VfsResult.Err -> result
@@ -44,6 +45,7 @@ class Inode internal constructor(
     internal fun attributeSnapshot(
         caller: VfsOperationContext,
         forceRefresh: Boolean = false,
+        cachedOnly: Boolean = false,
     ): VfsResult<InodeAttributeSnapshot> {
         val request = lock.withLock {
             if (!forceRefresh) {
@@ -51,6 +53,7 @@ class Inode internal constructor(
                     it.validity.isValid(TscClock.nanoTime())
                 }?.let { return VfsResult.Ok(it) }
             }
+            if (cachedOnly) return VfsResult.Err(VfsError.WOULD_BLOCK)
             ++attributeGeneration to currentMetadata
         }
         val loaded = when (val result = backend.loadAttributes(caller, this)) {
@@ -338,11 +341,20 @@ class Dentry internal constructor(
     val isUnlinked: Boolean
         get() = lock.withLock { unlinked }
 
-    internal fun lookupChild(caller: VfsOperationContext, name: VfsName): VfsResult<Dentry> {
+    internal fun lookupChild(
+        caller: VfsOperationContext,
+        name: VfsName,
+        cachedOnly: Boolean = false,
+    ): VfsResult<Dentry> {
         val directory = inode() ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = directory.backend as? DirectoryBackend
             ?: return VfsResult.Err(VfsError.NOT_DIRECTORY)
-        when (val access = backend.checkAccess(caller, directory, AccessPermissions.EXECUTE)) {
+        when (val access = backend.checkAccess(
+            caller,
+            directory,
+            AccessPermissions.EXECUTE,
+            cachedOnly,
+        )) {
             is VfsResult.Ok -> Unit
             is VfsResult.Err -> return access
         }
@@ -353,6 +365,7 @@ class Dentry internal constructor(
             return if (cached.inode() != null) VfsResult.Ok(cached)
             else VfsResult.Err(VfsError.NOT_FOUND)
         }
+        if (cachedOnly) return VfsResult.Err(VfsError.WOULD_BLOCK)
         val lookup = when (val result = backend.lookup(caller, directory, name)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result

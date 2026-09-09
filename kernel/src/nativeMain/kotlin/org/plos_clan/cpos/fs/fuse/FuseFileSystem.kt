@@ -767,16 +767,17 @@ private sealed interface FuseNode : InodeBackend {
         caller: VfsOperationContext,
         inode: Inode,
         requested: AccessPermissions,
+        cachedOnly: Boolean,
     ): VfsResult<Unit> {
         when (val allowed = instance.authorize(caller)) {
             is VfsResult.Ok -> Unit
             is VfsResult.Err -> return allowed
         }
         if (instance.options.defaultPermissions) {
-            return super.checkAccess(caller, inode, requested)
+            return super.checkAccess(caller, inode, requested, cachedOnly)
         }
         return if (AccessPermission.EXECUTE in requested && inode.type == InodeType.REGULAR) {
-            super.checkAccess(caller, inode, AccessPermissions.EXECUTE)
+            super.checkAccess(caller, inode, AccessPermissions.EXECUTE, cachedOnly)
         } else {
             VfsResult.Ok(Unit)
         }
@@ -1271,7 +1272,11 @@ private class FuseSymlinkNode(
     private var cachedTarget: VfsPathname? = null
     private var cacheGeneration = 0uL
 
-    override fun readLink(caller: VfsOperationContext, inode: Inode): VfsResult<VfsPathname> {
+    override fun readLink(
+        caller: VfsOperationContext,
+        inode: Inode,
+        cachedOnly: Boolean,
+    ): VfsResult<VfsPathname> {
         val cacheable = instance.supports(FuseFeature.CACHE_SYMLINKS)
         val generation = if (cacheable) {
             lock.withLock {
@@ -1281,6 +1286,7 @@ private class FuseSymlinkNode(
         } else {
             0uL
         }
+        if (cachedOnly) return VfsResult.Err(VfsError.WOULD_BLOCK)
         val reply = when (val result = instance.request(
             caller,
             FuseRequest(FuseOpcode.READLINK, nodeId),

@@ -243,7 +243,14 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         context: FileSystemContext,
         pathname: VfsPathname,
         followFinalSymlink: Boolean = true,
-    ): VfsResult<VfsPath> = paths.resolve(caller, context, pathname, followFinalSymlink)
+        resolution: PathResolution = PathResolution.DEFAULT,
+    ): VfsResult<VfsPath> = paths.resolve(
+        caller,
+        context,
+        pathname,
+        followFinalSymlink,
+        resolution = resolution,
+    )
 
     fun resolveAt(
         caller: VfsOperationContext,
@@ -253,6 +260,7 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         followFinalSymlink: Boolean = true,
         allowEmpty: Boolean = false,
         followFinalMount: Boolean = true,
+        resolution: PathResolution = PathResolution.DEFAULT,
     ): VfsResult<VfsPath> = paths.resolveAt(
         caller,
         context,
@@ -261,6 +269,7 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         followFinalSymlink,
         allowEmpty,
         followFinalMount,
+        resolution,
     )
 
     fun open(
@@ -320,6 +329,7 @@ class Vfs(maxSymlinkDepth: Int = 40) {
                     directory,
                     pathname,
                     options.followFinalSymlink,
+                    resolution = options.resolution,
                 )
             ) {
                 is VfsResult.Ok -> OpenedPath(result.value, created = false)
@@ -339,7 +349,10 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         val path = opened.path
         val inode = path.inode ?: return opened.reject(VfsError.NOT_FOUND)
         if (options.noAtime && !caller.privileged) {
-            val owner = when (val result = inode.attributes(caller)) {
+            val owner = when (val result = inode.attributes(
+                caller,
+                cachedOnly = options.resolution.cachedOnly,
+            )) {
                 is VfsResult.Ok -> result.value.metadata.uid
                 is VfsResult.Err -> return opened.reject(result.error)
             }
@@ -372,7 +385,12 @@ class Vfs(maxSymlinkDepth: Int = 40) {
             AccessMode.PATH -> AccessPermissions.NONE
         }
         if (!opened.created) {
-            when (val result = inode.backend.checkAccess(caller, inode, requestedAccess)) {
+            when (val result = inode.backend.checkAccess(
+                caller,
+                inode,
+                requestedAccess,
+                options.resolution.cachedOnly,
+            )) {
                 is VfsResult.Ok -> Unit
                 is VfsResult.Err -> return opened.reject(result.error)
             }

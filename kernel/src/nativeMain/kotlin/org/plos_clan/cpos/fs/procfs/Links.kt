@@ -20,7 +20,11 @@ internal class ProcFileSymlink(
     private val target: PidHandle,
     private val acquire: () -> OpenFileDescription?,
 ) : MagicLinkBackend {
-    override fun readLink(caller: VfsOperationContext, inode: Inode): VfsResult<VfsPathname> =
+    override fun readLink(
+        caller: VfsOperationContext,
+        inode: Inode,
+        cachedOnly: Boolean,
+    ): VfsResult<VfsPathname> =
         withFile(caller) { file ->
             file.inode.backend.displayName?.let { return@withFile VfsResult.Ok(it) }
             val fileInode = file.inode
@@ -49,7 +53,11 @@ internal class ProcFileSymlink(
             VfsResult.Ok(VfsPathname.fromBytes(targetPath))
         }
 
-    override fun resolveLink(caller: VfsOperationContext, inode: Inode): VfsResult<VfsPath> =
+    override fun resolveLink(
+        caller: VfsOperationContext,
+        inode: Inode,
+        cachedOnly: Boolean,
+    ): VfsResult<VfsPath> =
         withFile(caller) { file ->
             if (file.path.inode?.sameIdentity(file.inode) == true) VfsResult.Ok(file.path)
             else VfsResult.Err(VfsError.NO_SUCH_DEVICE_OR_ADDRESS)

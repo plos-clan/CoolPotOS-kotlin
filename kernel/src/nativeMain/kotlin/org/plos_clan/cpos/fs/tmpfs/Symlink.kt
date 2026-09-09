@@ -13,5 +13,6 @@ internal class TmpfsSymlink(
     override fun readLink(
         caller: VfsOperationContext,
         inode: Inode,
+        cachedOnly: Boolean,
     ): VfsResult<VfsPathname> = VfsResult.Ok(target)
 }
