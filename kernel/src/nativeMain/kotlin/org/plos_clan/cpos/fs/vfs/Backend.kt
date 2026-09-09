@@ -115,6 +115,7 @@ class SuperBlock internal constructor(
     val backend: SuperBlockBackend,
 ) {
     private val references = AtomicInt(1)
+    private val attributeState = AtomicInt(0)
     private val observerLock = IrqSpinLock()
     private var observedInodes: MutableSet<Inode>? = mutableSetOf()
 
@@ -125,6 +126,18 @@ class SuperBlock internal constructor(
         parent = null,
         inode = backend.createRoot(this).also { require(it.superBlock === this) },
     )
+
+    internal val flags: MountFlags
+        get() = MountFlags.fromStorage(attributeState.load())
+
+    internal fun setAttributes(attributes: MountFlagUpdate) {
+        var observed = attributeState.load()
+        while (true) {
+            val updated = attributes.applyTo(MountFlags.fromStorage(observed)).storage
+            if (updated == observed || attributeState.compareAndSet(observed, updated)) return
+            observed = attributeState.load()
+        }
+    }
 
     internal fun trackObservedInode(inode: Inode): Boolean = observerLock.withLock {
         val observed = observedInodes ?: return@withLock false

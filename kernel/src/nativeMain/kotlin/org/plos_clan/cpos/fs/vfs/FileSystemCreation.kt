@@ -13,7 +13,28 @@ internal class FileSystemCreation(
         CREATED,
         MOUNTING,
         MOUNTED,
+        RECONFIGURING,
         CLOSED,
+    }
+
+    private enum class SuperBlockOption(
+        val parameter: String,
+        val flag: MountFlag,
+        val enabled: Boolean,
+    ) {
+        READ_ONLY("ro", MountFlag.READ_ONLY, true),
+        READ_WRITE("rw", MountFlag.READ_ONLY, false),
+        SYNCHRONOUS("sync", MountFlag.SYNCHRONOUS, true),
+        ASYNCHRONOUS("async", MountFlag.SYNCHRONOUS, false),
+        DIRECTORY_SYNC("dirsync", MountFlag.DIRECTORY_SYNC, true),
+        LAZY_TIME("lazytime", MountFlag.LAZY_TIME, true),
+        NO_LAZY_TIME("nolazytime", MountFlag.LAZY_TIME, false);
+
+        companion object {
+            private val byParameter = entries.associateBy(SuperBlockOption::parameter)
+
+            fun from(parameter: String): SuperBlockOption? = byParameter[parameter]
+        }
     }
 
     private val lock = IrqSpinLock()
@@ -21,22 +42,46 @@ internal class FileSystemCreation(
     private var state = State.CONFIGURING
     private var source: String? = null
     private var superBlock: SuperBlock? = null
+    private var attributes = MountFlagUpdate.NONE
 
     override val seekable = false
 
     fun configure(parameter: FileSystemParameter): VfsResult<Unit> {
         val result = lock.withLock {
-            if (state != State.CONFIGURING) return@withLock VfsResult.Err(VfsError.BUSY)
-            if (parameter.key == SOURCE_PARAMETER) {
-                val value = parameter as? FileSystemParameter.StringValue
-                    ?: return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
-                if (source != null) return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
-                source = value.value
-            } else {
-                when (val validated = fileSystem.validateParameter(parameters, parameter)) {
-                    is VfsResult.Ok -> parameters += parameter
-                    is VfsResult.Err -> return@withLock validated
+            val option = SuperBlockOption.from(parameter.key)
+            when (state) {
+                State.CONFIGURING -> when {
+                    option != null -> {
+                        if (parameter !is FileSystemParameter.Flag) {
+                            return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                        }
+                        attributes = attributes.with(option.flag, option.enabled)
+                    }
+                    parameter.key == SOURCE_PARAMETER -> {
+                        val value = parameter as? FileSystemParameter.StringValue
+                            ?: return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                        if (source != null) {
+                            return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                        }
+                        source = value.value
+                    }
+                    else -> when (
+                        val validated = fileSystem.validateParameter(parameters, parameter)
+                    ) {
+                        is VfsResult.Ok -> parameters += parameter
+                        is VfsResult.Err -> return@withLock validated
+                    }
                 }
+                State.MOUNTED,
+                State.RECONFIGURING,
+                -> {
+                    if (option == null || parameter !is FileSystemParameter.Flag) {
+                        return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                    }
+                    attributes = attributes.with(option.flag, option.enabled)
+                    state = State.RECONFIGURING
+                }
+                else -> return@withLock VfsResult.Err(VfsError.BUSY)
             }
             VfsResult.Ok(Unit)
         }
@@ -62,6 +107,8 @@ internal class FileSystemCreation(
             check(state == State.CREATING)
             when (result) {
                 is VfsResult.Ok -> {
+                    result.value.setAttributes(attributes)
+                    attributes = MountFlagUpdate.NONE
                     superBlock = result.value
                     state = State.CREATED
                 }
@@ -93,34 +140,39 @@ internal class FileSystemCreation(
         } ?: return VfsResult.Err(VfsError.BUSY)
 
         val path = VfsPath(mount, mount.root)
-        val namespaceHandle = if (createNamespace) {
+        val mountHandle = if (createNamespace) {
             val namespace = MountNamespace(mount)
             check(namespace.retain())
             MountNamespaceHandle(namespace)
         } else {
-            null
+            DetachedMountHandle
         }
         val result = OpenFileDescription.open(
             caller,
             path,
             checkNotNull(path.inode),
             OpenOptions(access = AccessMode.PATH),
-            openedBackend = namespaceHandle,
+            openedBackend = mountHandle,
         )
         if (!createNamespace) mount.release()
 
-        val createdSuperBlock = lock.withLock {
+        lock.withLock {
             check(state == State.MOUNTING)
             if (result is VfsResult.Err) {
                 state = State.CREATED
-                null
             } else {
                 state = State.MOUNTED
-                checkNotNull(superBlock).also { superBlock = null }
             }
         }
-        createdSuperBlock?.release()
         return result
+    }
+
+    fun reconfigure(): VfsResult<Unit> = lock.withLock {
+        if (state != State.RECONFIGURING) return@withLock VfsResult.Err(VfsError.BUSY)
+        checkNotNull(superBlock).setAttributes(attributes)
+        attributes = MountFlagUpdate.NONE
+        state = State.MOUNTED
+        VfsResult.Ok(Unit)
     }
 
     override fun release() {

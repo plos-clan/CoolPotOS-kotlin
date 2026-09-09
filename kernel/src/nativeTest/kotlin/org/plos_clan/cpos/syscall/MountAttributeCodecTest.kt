@@ -1,6 +1,7 @@
 package org.plos_clan.cpos.syscall
 
 import org.plos_clan.cpos.fs.vfs.MountFlag
+import org.plos_clan.cpos.fs.vfs.MountFlagUpdate
 import org.plos_clan.cpos.fs.vfs.MountFlags
 import org.plos_clan.cpos.syscall.fs.NewMountSyscalls.MountAttributeCodec
 import kotlin.test.Test
@@ -55,5 +56,18 @@ class MountAttributeCodecTest {
         val flags = overlap.applyTo(MountFlags.NONE)
         assertTrue(MountFlag.READ_ONLY in flags)
         assertTrue(MountFlag.RELATIVE_ATIME in flags)
+    }
+
+    @Test
+    fun composesSuperBlockFlagTransitions() {
+        val update = MountFlagUpdate.NONE
+            .with(MountFlag.READ_ONLY, true)
+            .with(MountFlag.SYNCHRONOUS, true)
+            .with(MountFlag.READ_ONLY, false)
+        val flags = update.applyTo(MountFlags.of(MountFlag.LAZY_TIME))
+
+        assertFalse(MountFlag.READ_ONLY in flags)
+        assertTrue(MountFlag.SYNCHRONOUS in flags)
+        assertTrue(MountFlag.LAZY_TIME in flags)
     }
 }

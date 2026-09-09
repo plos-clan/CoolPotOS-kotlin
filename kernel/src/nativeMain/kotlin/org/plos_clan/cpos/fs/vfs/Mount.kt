@@ -23,7 +23,7 @@ class Mount internal constructor(
     private val attributeState = AtomicLong(pack(flags.withDefaultAtimePolicy(), propagation))
 
     val flags: MountFlags
-        get() = MountFlags.fromStorage(attributeState.load().toInt())
+        get() = MountFlags.fromStorage(attributeState.load().toInt()) + superBlock.flags
 
     internal val propagation: MountPropagation
         get() = unpackPropagation(attributeState.load())
@@ -70,6 +70,13 @@ class Mount internal constructor(
         return attachmentReference.exchange(target).also {
             if (it == null) target.mount.release()
         }
+    }
+
+    internal fun attachTo(target: VfsPath): Boolean {
+        if (!target.mount.retain()) return false
+        if (attachmentReference.compareAndSet(null, target)) return true
+        target.mount.release()
+        return false
     }
 
     internal fun isDescendantOf(ancestor: Mount): Boolean {
@@ -183,6 +190,21 @@ class MountNamespace internal constructor(val root: Mount) {
             flags = flags,
             attachment = target,
         )
+        VfsResult.Ok(Unit)
+    }
+
+    internal fun attach(target: VfsPath, mount: Mount): VfsResult<Unit> = lock.withLock {
+        if (!contains(target.mount)) return@withLock VfsResult.Err(VfsError.NOT_FOUND)
+        if (mount.attachment != null || target.mount.isDescendantOf(mount)) {
+            return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+        if (mounts.containsKey(target)) return@withLock VfsResult.Err(VfsError.BUSY)
+        if (!mount.retain()) return@withLock VfsResult.Err(VfsError.NOT_FOUND)
+        if (!mount.attachTo(target)) {
+            mount.release()
+            return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+        mounts[target] = mount
         VfsResult.Ok(Unit)
     }
 
@@ -312,6 +334,8 @@ class MountNamespace internal constructor(val root: Mount) {
 internal class MountNamespaceHandle(val namespace: MountNamespace) : OpenFileBackend {
     override fun release() = namespace.release()
 }
+
+internal data object DetachedMountHandle : OpenFileBackend
 
 class FileSystemContext internal constructor(
     val namespace: MountNamespace,

@@ -209,6 +209,13 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         target: VfsPathname,
     ): VfsResult<Unit> = mounts.move(caller, context, source, target)
 
+    internal fun moveMount(
+        context: FileSystemContext,
+        source: VfsPath,
+        target: VfsPath,
+        detached: Boolean,
+    ): VfsResult<Unit> = mounts.move(context, source, target, detached)
+
     fun bindMount(
         caller: VfsOperationContext,
         context: FileSystemContext,
@@ -245,6 +252,7 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         pathname: VfsPathname,
         followFinalSymlink: Boolean = true,
         allowEmpty: Boolean = false,
+        followFinalMount: Boolean = true,
     ): VfsResult<VfsPath> = paths.resolveAt(
         caller,
         context,
@@ -252,6 +260,7 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         pathname,
         followFinalSymlink,
         allowEmpty,
+        followFinalMount,
     )
 
     fun open(

@@ -96,10 +96,6 @@ internal class VfsMountManager(
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        if (mounted.mount === context.namespace.root || mounted.dentry !== mounted.mount.root) {
-            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        }
-
         val mountpoint = when (val result = paths.resolve(
             caller,
             context,
@@ -109,10 +105,25 @@ internal class VfsMountManager(
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        if (mounted.inode?.type != mountpoint.inode?.type) {
+        return move(context, mounted, mountpoint)
+    }
+
+    fun move(
+        context: FileSystemContext,
+        source: VfsPath,
+        target: VfsPath,
+        detached: Boolean = false,
+    ): VfsResult<Unit> {
+        if (!detached && source.mount === context.namespace.root ||
+            source.dentry !== source.mount.root
+        ) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
-        return context.namespace.move(mounted.mount, mountpoint)
+        if (source.inode?.type != target.inode?.type) {
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+        return if (detached) context.namespace.attach(target, source.mount)
+        else context.namespace.move(source.mount, target)
     }
 
     fun bind(

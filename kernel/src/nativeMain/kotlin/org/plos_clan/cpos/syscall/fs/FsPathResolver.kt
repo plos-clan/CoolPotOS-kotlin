@@ -20,6 +20,7 @@ internal object FsPathResolver {
         fun resolve(
             followFinalSymlink: Boolean = true,
             allowEmpty: Boolean = false,
+            followFinalMount: Boolean = true,
         ): VfsResult<VfsPath> = FileSystemManager.vfs.resolveAt(
             caller,
             context,
@@ -27,6 +28,7 @@ internal object FsPathResolver {
             pathname,
             followFinalSymlink,
             allowEmpty,
+            followFinalMount,
         )
     }
 
@@ -58,9 +60,14 @@ internal object FsPathResolver {
         pathname: VfsPathname,
         followFinalSymlink: Boolean,
         allowEmpty: Boolean = false,
+        followFinalMount: Boolean = true,
         caller: VfsOperationContext,
     ): VfsResult<VfsPath> = when (val result = atPath(process, dirFd, pathname, caller)) {
-        is VfsResult.Ok -> result.value.resolve(followFinalSymlink, allowEmpty)
+        is VfsResult.Ok -> result.value.resolve(
+            followFinalSymlink,
+            allowEmpty,
+            followFinalMount,
+        )
         is VfsResult.Err -> result
     }
 

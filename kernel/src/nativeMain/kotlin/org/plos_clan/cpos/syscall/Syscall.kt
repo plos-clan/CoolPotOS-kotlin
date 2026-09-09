@@ -309,6 +309,7 @@ private enum class LinuxSyscall(
     STATX(332, ::statx),
     RSEQ(334, ::rseq),
     PIDFD_SEND_SIGNAL(424, SignalSyscalls::pidfdSendSignal),
+    MOVE_MOUNT(429, NewMountSyscalls::moveMount),
     FSOPEN(430, NewMountSyscalls::fsopen),
     FSCONFIG(431, NewMountSyscalls::fsconfig),
     FSMOUNT(432, NewMountSyscalls::fsmount),

@@ -351,6 +351,7 @@ value class MountFlags private constructor(private val bits: UInt) {
     operator fun contains(flag: MountFlag): Boolean = bits and flag.mask != 0u
     operator fun plus(flag: MountFlag): MountFlags = MountFlags(bits or flag.mask)
     internal operator fun plus(flags: MountFlags): MountFlags = MountFlags(bits or flags.bits)
+    internal operator fun minus(flag: MountFlag): MountFlags = MountFlags(bits and flag.mask.inv())
 
     internal val storage: Int
         get() = bits.toInt()
@@ -389,14 +390,30 @@ internal enum class MountPropagation {
     UNBINDABLE,
 }
 
-internal class MountAttributeUpdate(
-    internal val set: MountFlags,
-    internal val clear: MountFlags,
-    internal val propagation: MountPropagation? = null,
+internal open class MountFlagUpdate(
+    private val set: MountFlags,
+    private val clear: MountFlags,
 ) {
-    internal fun applyTo(flags: MountFlags): MountFlags = MountFlags.fromStorage(
+    internal open fun applyTo(flags: MountFlags): MountFlags = MountFlags.fromStorage(
         flags.storage and clear.storage.inv() or set.storage,
-    ).withDefaultAtimePolicy()
+    )
+
+    internal fun with(flag: MountFlag, enabled: Boolean): MountFlagUpdate =
+        if (enabled) MountFlagUpdate(set + flag, clear - flag)
+        else MountFlagUpdate(set - flag, clear + flag)
+
+    companion object {
+        val NONE = MountFlagUpdate(MountFlags.NONE, MountFlags.NONE)
+    }
+}
+
+internal class MountAttributeUpdate(
+    set: MountFlags,
+    clear: MountFlags,
+    internal val propagation: MountPropagation? = null,
+) : MountFlagUpdate(set, clear) {
+    override fun applyTo(flags: MountFlags): MountFlags =
+        super.applyTo(flags).withDefaultAtimePolicy()
 }
 
 interface FileSystemOptions

@@ -6,6 +6,7 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.vfs.AccessMode
+import org.plos_clan.cpos.fs.vfs.DetachedMountHandle
 import org.plos_clan.cpos.fs.vfs.FileSystemCreation
 import org.plos_clan.cpos.fs.vfs.FileSystemParameter
 import org.plos_clan.cpos.fs.vfs.MountAttributeUpdate
@@ -22,6 +23,7 @@ import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.syscall.fs.FsConstants.AT_EMPTY_PATH
+import org.plos_clan.cpos.syscall.fs.FsConstants.AT_FDCWD
 import org.plos_clan.cpos.syscall.fs.FsConstants.AT_NO_AUTOMOUNT
 import org.plos_clan.cpos.syscall.fs.FsConstants.AT_RECURSIVE
 import org.plos_clan.cpos.syscall.fs.FsConstants.AT_SYMLINK_NOFOLLOW
@@ -39,6 +41,15 @@ internal object NewMountSyscalls {
     private const val FSOPEN_CLOEXEC = 0x1uL
     private const val FSMOUNT_CLOEXEC = 0x1uL
     private const val FSMOUNT_NAMESPACE = 0x2uL
+    private const val MOVE_MOUNT_F_SYMLINKS = 0x000001uL
+    private const val MOVE_MOUNT_F_AUTOMOUNTS = 0x000002uL
+    private const val MOVE_MOUNT_F_EMPTY_PATH = 0x000004uL
+    private const val MOVE_MOUNT_T_SYMLINKS = 0x000010uL
+    private const val MOVE_MOUNT_T_AUTOMOUNTS = 0x000020uL
+    private const val MOVE_MOUNT_T_EMPTY_PATH = 0x000040uL
+    private val MOVE_MOUNT_SUPPORTED = MOVE_MOUNT_F_SYMLINKS or
+        MOVE_MOUNT_F_AUTOMOUNTS or MOVE_MOUNT_F_EMPTY_PATH or MOVE_MOUNT_T_SYMLINKS or
+        MOVE_MOUNT_T_AUTOMOUNTS or MOVE_MOUNT_T_EMPTY_PATH
     private const val MAX_PARAMETER_LENGTH = 256
     private const val MAX_PATH_LENGTH = 4096
     private const val MAX_BINARY_PARAMETER_SIZE = 1024 * 1024
@@ -232,12 +243,14 @@ internal object NewMountSyscalls {
                     if (keyAddress != 0uL || valueAddress != 0uL || auxiliary != 0) {
                         return errno(Errno.EINVAL)
                     }
-                    if (command == ConfigurationCommand.RECONFIGURE) {
-                        return errno(Errno.EINVAL)
+                    val result = if (command == ConfigurationCommand.RECONFIGURE) {
+                        configuration.reconfigure()
+                    } else {
+                        configuration.create(
+                            exclusive = command == ConfigurationCommand.CREATE_EXCLUSIVE,
+                        )
                     }
-                    when (val result = configuration.create(
-                        exclusive = command == ConfigurationCommand.CREATE_EXCLUSIVE,
-                    )) {
+                    when (result) {
                         is VfsResult.Ok -> 0L
                         is VfsResult.Err -> errno(result.error.errno)
                     }
@@ -302,6 +315,93 @@ internal object NewMountSyscalls {
             }
         } finally {
             source.release()
+        }
+    }
+
+    fun moveMount(registers: PtraceRegisters, process: Process): Long {
+        val flags = registers[PtraceRegisters.IDX_R8]
+        if (flags and MOVE_MOUNT_SUPPORTED.inv() != 0uL) return errno(Errno.EINVAL)
+        if (ProcessManager.currentThread()?.capabilities?.hasEffective(CapEnum.SYS_ADMIN) != true) {
+            return errno(Errno.EPERM)
+        }
+        val sourcePathname = when (val result = copyCString(
+            process,
+            registers[PtraceRegisters.IDX_RSI],
+            MAX_PATH_LENGTH,
+            VfsError.NAME_TOO_LONG,
+        )) {
+            is VfsResult.Ok -> VfsPathname.fromBytes(result.value)
+            is VfsResult.Err -> return errno(result.error.errno)
+        }
+        val targetPathname = when (val result = copyCString(
+            process,
+            registers[PtraceRegisters.IDX_R10],
+            MAX_PATH_LENGTH,
+            VfsError.NAME_TOO_LONG,
+        )) {
+            is VfsResult.Ok -> VfsPathname.fromBytes(result.value)
+            is VfsResult.Err -> return errno(result.error.errno)
+        }
+        val allowEmptySource = flags and MOVE_MOUNT_F_EMPTY_PATH != 0uL
+        val allowEmptyTarget = flags and MOVE_MOUNT_T_EMPTY_PATH != 0uL
+        if (sourcePathname.size == 0 && !allowEmptySource ||
+            targetPathname.size == 0 && !allowEmptyTarget
+        ) {
+            return errno(Errno.ENOENT)
+        }
+
+        val caller = process.vfsOperationContext
+        val context = process.context ?: return errno(Errno.ENOENT)
+        val sourceDescriptor = registers[PtraceRegisters.IDX_RDI].toUInt().toInt()
+        val targetDescriptor = registers[PtraceRegisters.IDX_RDX].toUInt().toInt()
+        val sourceFile = if (sourcePathname.size == 0 && sourceDescriptor != AT_FDCWD) {
+            process.fdTable.acquire(sourceDescriptor)
+                ?: return errno(Errno.EBADF)
+        } else {
+            null
+        }
+        val targetFile = if (targetPathname.size == 0 && targetDescriptor != AT_FDCWD) {
+            process.fdTable.acquire(targetDescriptor) ?: run {
+                sourceFile?.release()
+                return errno(Errno.EBADF)
+            }
+        } else {
+            null
+        }
+        return try {
+            val source = sourceFile?.path ?: when (val result = FsPathResolver.resolveAt(
+                process = process,
+                dirFd = sourceDescriptor,
+                pathname = sourcePathname,
+                followFinalSymlink = flags and MOVE_MOUNT_F_SYMLINKS != 0uL,
+                allowEmpty = allowEmptySource,
+                caller = caller,
+            )) {
+                is VfsResult.Ok -> result.value
+                is VfsResult.Err -> return errno(result.error.errno)
+            }
+            val target = targetFile?.path ?: when (val result = FsPathResolver.resolveAt(
+                process = process,
+                dirFd = targetDescriptor,
+                pathname = targetPathname,
+                followFinalSymlink = flags and MOVE_MOUNT_T_SYMLINKS != 0uL,
+                allowEmpty = allowEmptyTarget,
+                followFinalMount = false,
+                caller = caller,
+            )) {
+                is VfsResult.Ok -> result.value
+                is VfsResult.Err -> return errno(result.error.errno)
+            }
+            val detached = sourceFile?.backend === DetachedMountHandle &&
+                source.mount.attachment == null
+            val result = FileSystemManager.vfs.moveMount(context, source, target, detached)
+            when (result) {
+                is VfsResult.Ok -> 0L
+                is VfsResult.Err -> errno(result.error.errno)
+            }
+        } finally {
+            targetFile?.release()
+            sourceFile?.release()
         }
     }
 
