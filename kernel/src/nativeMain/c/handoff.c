@@ -494,6 +494,24 @@ static enum fast_schedule_result fast_handoff_schedule(
     return result;
 }
 
+static enum fast_schedule_result fast_handoff_schedule_current(
+    fast_cpu_t *cpu,
+    enum fast_schedule_request request,
+    fast_sleep_t *sleep
+) {
+    xstate_t xstate;
+    const uint64_t flags = interrupt_save();
+    const enum fast_schedule_result result = fast_handoff_schedule(
+        cpu,
+        &xstate,
+        request,
+        sleep
+    );
+    if (result == schedule_switched) restore_xstate(&xstate);
+    interrupt_restore(flags);
+    return result;
+}
+
 void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base) {
     lapic_x2apic = x2apic != 0;
     lapic_mmio_base = mmio_base;
@@ -533,9 +551,8 @@ bool fast_handoff_configure_timer(uint8_t vector, uint32_t frequency_hz) {
 bool fast_handoff_yield(void) {
     fast_cpu_t *cpu = current_schedulable_cpu();
     if (!cpu) return false;
-    return fast_handoff_schedule(
+    return fast_handoff_schedule_current(
         cpu,
-        NULL,
         schedule_reschedule,
         NULL
     ) == schedule_switched;
@@ -544,9 +561,8 @@ bool fast_handoff_yield(void) {
 bool fast_handoff_park_current(void) {
     fast_cpu_t *cpu = current_schedulable_cpu();
     if (!cpu) return false;
-    return fast_handoff_schedule(
+    return fast_handoff_schedule_current(
         cpu,
-        NULL,
         schedule_park,
         NULL
     ) != schedule_rejected;
@@ -560,9 +576,8 @@ bool fast_handoff_park_current_until(uint64_t deadline_ns) {
         .deadline = runtime_clock_deadline(deadline_ns),
     };
     if (!sleep.deadline) return false;
-    return fast_handoff_schedule(
+    return fast_handoff_schedule_current(
         cpu,
-        NULL,
         schedule_park,
         &sleep
     ) != schedule_rejected;
@@ -619,7 +634,7 @@ void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence) {
     fast_cpu_t *cpu = current_cpu();
     if (__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) &&
         cpu->state != cpu_offline)
-        fast_handoff_schedule(cpu, NULL, schedule_reschedule, NULL);
+        fast_handoff_schedule_current(cpu, schedule_reschedule, NULL);
     lock_cpu(cpu);
     const bool idle = cpu->state == cpu_online && cpu->current == cpu->idle &&
         !cpu->head && wake_sequence ==
