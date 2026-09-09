@@ -642,10 +642,8 @@ internal fun execve(regs: PtraceRegisters, process: Process): Long {
     process.signals.resetForExec()
     thread.signals.replaceStack(SignalStack.DISABLED)
 
-    regs[PtraceRegisters.IDX_RIP] = image.entryPoint
-    regs[PtraceRegisters.IDX_RSP] = image.stackPointer
-    regs[PtraceRegisters.IDX_RAX] = 0uL
-    regs[PtraceRegisters.IDX_FS_BASE] = 0uL
+    regs.resetForExec(image.entryPoint, image.stackPointer)
+    bridge.wrmsr(MSR_KERNEL_GS_BASE, 0uL)
     bridge.fast_handoff_reset_user_xstate()
     return 0L
 }

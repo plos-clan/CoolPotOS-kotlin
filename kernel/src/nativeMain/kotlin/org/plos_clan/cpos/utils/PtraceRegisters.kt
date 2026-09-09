@@ -11,6 +11,11 @@ import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.set
 import kotlinx.cinterop.usePinned
 import platform.posix.memcpy
+import platform.posix.memset
+
+private const val USER_CODE_SELECTOR = 0x23uL
+private const val USER_DATA_SELECTOR = 0x1buL
+private const val USER_ENTRY_FLAGS = 0x202uL
 
 @ExperimentalForeignApi
 class PtraceRegisters(private val registers: CPointer<ULongVar>) {
@@ -78,6 +83,17 @@ class PtraceRegisters(private val registers: CPointer<ULongVar>) {
         repeat(minOf(source.size, REGISTER_COUNT)) { index ->
             registers[index] = source[index]
         }
+
+    fun resetForExec(entryPoint: ULong, stackPointer: ULong) {
+        memset(registers, 0, (REGISTER_COUNT * ULong.SIZE_BYTES).toULong())
+        registers[IDX_DS] = USER_DATA_SELECTOR
+        registers[IDX_ES] = USER_DATA_SELECTOR
+        registers[IDX_RIP] = entryPoint
+        registers[IDX_CS] = USER_CODE_SELECTOR
+        registers[IDX_RFLAGS] = USER_ENTRY_FLAGS
+        registers[IDX_RSP] = stackPointer
+        registers[IDX_SS] = USER_DATA_SELECTOR
+    }
 
     fun copyExtendedStateTo(destination: ByteArray, offset: Int) {
         require(offset >= 0 && offset <= destination.size - EXTENDED_STATE_SIZE)
