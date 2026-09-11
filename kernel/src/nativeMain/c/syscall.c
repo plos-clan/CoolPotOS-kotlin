@@ -343,10 +343,13 @@ static long mmap_call(void *hint, size_t size, int prot, int flags, int fd, int6
 
     void *result;
     if (!fixed) {
+        const bool use_runtime = can_use_runtime();
+
         spin_lock(&vm_lock);
-        vm_allocate_fn allocate = runtime_vm_allocate;
+        vm_allocate_fn allocate = use_runtime ? runtime_vm_allocate : NULL;
         result = allocate ? NULL : bootstrap_vm_alloc_locked(size);
         spin_unlock(&vm_lock);
+
         if (allocate) result = allocate(size);
     } else {
         const uintptr_t address = (uintptr_t)hint;

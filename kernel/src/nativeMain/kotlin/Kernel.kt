@@ -43,6 +43,7 @@ val KERNEL_NAME = "CP_Kernel-x86_64-v0.0.1_{$KERNEL_RUNTIME}"
 @CName("kernel_main")
 fun kernelMain() {
     bridge.disable_interrupt()
+    bridge.set_runtime_use_mask(true)
     println("Kernel booting...")
     println("CoolPotOS $KERNEL_NAME")
     bridge.gdt_setup()

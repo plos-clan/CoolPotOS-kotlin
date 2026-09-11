@@ -75,6 +75,7 @@ internal object ProcessExit {
 
         val nativeContext = current.nativeContext
         val zombieState = TaskState.ZOMBIE.ordinal.toUByte()
+        bridge.set_runtime_use_mask(false)
         bridge.irq_save()
         deinitializeRuntime()
         markNativeTaskExited(nativeContext, zombieState)

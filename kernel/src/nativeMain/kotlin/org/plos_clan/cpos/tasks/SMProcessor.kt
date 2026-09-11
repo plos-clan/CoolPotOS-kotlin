@@ -38,6 +38,7 @@ data class CpuLocal(
 @CName("kt_ap_start")
 fun apStart() {
     bridge.disable_interrupt()
+    bridge.set_runtime_use_mask(true)
     val lapicId = LocalApic.localApicId
     bridge.ap_gdt_setup(lapicId.toULong())
     Syscall.initialize(lapicId.toULong(), false)

@@ -329,6 +329,7 @@ private enum class LinuxSyscall(
 @Suppress("unused")
 @CName("syscall_handler")
 fun syscallHandler(frame: COpaquePointer?) {
+    bridge.set_runtime_use_mask(true)
     Syscall.syscallHandle(PtraceRegisters(requireNotNull(frame).reinterpret()))
 }
 
