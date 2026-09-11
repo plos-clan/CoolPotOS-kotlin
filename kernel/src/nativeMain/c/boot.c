@@ -182,6 +182,7 @@ void _start(void) {
 
     setup_xstate();
     __dlapi_enter(entry_stack);
+    create_global_key();
     kernel_main();
     halt_forever();
 }

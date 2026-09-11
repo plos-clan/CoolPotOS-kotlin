@@ -255,7 +255,7 @@ private class KernelConfig(
 ) {
     val sources = listOf(
         "boot.c", "shim.c", "clock.c", "syscall.c", "gdt.c",
-        "idt.c", "handoff.c", "smp.c", "zstd_bridge.c",
+        "idt.c", "handoff.c", "smp.c", "tls.c", "zstd_bridge.c",
     ).map(paths.kernelC::resolve)
     val objects = sources.map { paths.cObjects.resolve("${it.nameWithoutExtension}.o") }
     val kotlinLinkTask = if (debug) "linkDebugStaticNative" else "linkReleaseStaticNative"
@@ -284,6 +284,8 @@ private class KernelConfig(
         paths.root,
         paths.mlibcSyscallHeader.parentFile,
         paths.limineInclude,
+        mlibc.prefix.resolve("include"),
+        paths.mlibc.resolve("sysdeps/template/include"),
         paths.freestandingInclude,
     ).map { "-I${it.absolutePath}" } + if (debug) listOf("-Og") else listOf("-O3")
     val linkArgs = FullLto.linkerArgs + listOf(
@@ -291,7 +293,7 @@ private class KernelConfig(
         "-z", "max-page-size=0x1000", "--gc-sections",
         "-u", "sched_yield", "-u", "frg_panic",
         "-T", paths.linkerScript.absolutePath,
-    ) + if (debug) emptyList() else listOf("--strip-all")
+    )
     val linker = tools.linker
 }
 
@@ -355,7 +357,7 @@ private class BuildConfig(private val project: Project) {
         flags = listOf(
             "-m", setting("qemuMemory", "QEMU_MEMORY", "2g"),
             "-M", "q35", "-cpu", "host", "-enable-kvm",
-            "-no-reboot", "-smp", "4",
+            "-no-reboot", "-smp", setting("qemuSmp", "QEMU_SMP", "4"),
             "-device", "qemu-xhci,id=xhci",
             "-device", "usb-kbd,bus=xhci.0", "-device", "usb-mouse,bus=xhci.0",
             "-netdev", "user,id=usbnet",

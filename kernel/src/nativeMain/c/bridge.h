@@ -47,6 +47,8 @@ uint64_t get_sys_clone_stack_at(uint64_t index);
 uint64_t get_sys_clone_tls_at(uint64_t index);
 uint64_t get_kernel_clone_thread_entry_address(void);
 uint64_t create_kernel_runtime_tcb(void);
+bool can_use_runtime(void);
+void set_runtime_use_mask(bool enabled);
 uint64_t get_asm_syscall_handle_address(void);
 void setup_syscall_cpu(uint64_t lapic_id, uint8_t is_bsp);
 void wait_for_interrupt(void);
@@ -136,6 +138,9 @@ typedef struct {
 void x86_cpuid(uint32_t leaf,uint32_t subleaf,cpuid_result_t *result);
 bool rdrand64_step(uint64_t *out);
 bool rdseed64_step(uint64_t *out);
+
+bool can_use_runtime(void);
+void set_runtime_use_mask(bool enabled);
 
 #ifdef __cplusplus
 }

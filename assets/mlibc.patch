@@ -1568,10 +1568,23 @@ index 00000000..b397c33b
 +)
 +libc_include_dirs += include_directories('include')
 diff --git a/options/internal/generic/threads.cpp b/options/internal/generic/threads.cpp
-index 898bf82a..2262408a 100644
+index 898bf82a..885df9ae 100644
 --- a/options/internal/generic/threads.cpp
 +++ b/options/internal/generic/threads.cpp
-@@ -224,6 +224,18 @@ static constexpr unsigned int mutexShared = 4;
+@@ -20,6 +20,12 @@
+ 
+ 	void (*dtor)(void *);
+ 	uint64_t generation;
++
++	void *get(Tcb::LocalKey &local) const {
++		if (generation > local.generation)
++			local = {nullptr, generation};
++		return local.value;
++	}
+ };
+ 
+ constinit frg::array<
+@@ -224,6 +230,18 @@ static constexpr unsigned int mutexShared = 4;
  static constexpr unsigned int mutex_owner_mask = (static_cast<uint32_t>(1) << 30) - 1;
  static constexpr unsigned int mutex_waiters_bit = static_cast<uint32_t>(1) << 31;
  
@@ -1590,7 +1603,7 @@ index 898bf82a..2262408a 100644
  int thread_mutex_init(struct __mlibc_mutex *__restrict mutex,
  		const struct __mlibc_mutexattr *__restrict attr) {
  	auto type = attr ? attr->__mlibc_type : __MLIBC_THREAD_MUTEX_DEFAULT;
-@@ -275,6 +287,10 @@ int thread_mutex_timedlock(struct __mlibc_mutex *mutex, const struct timespec *_
+@@ -275,6 +293,10 @@ int thread_mutex_timedlock(struct __mlibc_mutex *mutex, const struct timespec *_
  			// If this (recursive) mutex is already owned by us, increment the recursion level.
  			if((expected & mutex_owner_mask) == this_tid) {
  				if(!(mutex->__mlibc_flags & mutexRecursive)) {
@@ -1601,7 +1614,7 @@ index 898bf82a..2262408a 100644
  					if (!abstime)
  						return EDEADLK;
  				} else {
-@@ -342,6 +358,10 @@ int thread_mutex_trylock(struct __mlibc_mutex *mutex) {
+@@ -342,6 +364,10 @@ int thread_mutex_trylock(struct __mlibc_mutex *mutex) {
  		// If this (recursive) mutex is already owned by us, increment the recursion level.
  		if((expected & mutex_owner_mask) == this_tid) {
  			if(!(mutex->__mlibc_flags & mutexRecursive)) {
@@ -1612,8 +1625,42 @@ index 898bf82a..2262408a 100644
  				return EBUSY;
  			}
  			++mutex->__mlibc_recursion;
+@@ -549,12 +575,27 @@
+ 	if (key >= PTHREAD_KEYS_MAX || !key_globals_[key].in_use)
+ 		return nullptr;
+ 
+-	if (key_globals_[key].generation > (*self->localKeys)[key].generation) {
+-		(*self->localKeys)[key].value = nullptr;
+-		(*self->localKeys)[key].generation = key_globals_[key].generation;
+-	}
+-
+-	return (*self->localKeys)[key].value;
++	return key_globals_[key].get((*self->localKeys)[key]);
++}
++
++int thread_key_try_get(__mlibc_uintptr key, void **value) {
++	if (!value || key >= PTHREAD_KEYS_MAX)
++		return EINVAL;
++	if (!mlibc::tcb_available_flag)
++		return EAGAIN;
++
++	auto self = mlibc::get_current_tcb();
++	if (!self || !self->localKeys || self->tid <= 0)
++		return EAGAIN;
++	if (!key_mutex_.try_lock())
++		return EBUSY;
++
++	auto g = frg::unique_lock{frg::adopt_lock, key_mutex_};
++	if (!key_globals_[key].in_use)
++		return EINVAL;
++
++	*value = key_globals_[key].get((*self->localKeys)[key]);
++	return 0;
+ }
+ 
+ int thread_key_set(__mlibc_uintptr key, const void *value) {
 diff --git a/options/posix/generic/pthread.cpp b/options/posix/generic/pthread.cpp
-index 0d133859..6f685597 100644
+index 0d133859..63715092 100644
 --- a/options/posix/generic/pthread.cpp
 +++ b/options/posix/generic/pthread.cpp
 @@ -685,5 +685,9 @@ int pthread_atfork(void (*prepare) (void), void (*parent) (void), void (*child)
@@ -1629,6 +1676,17 @@ index 0d133859..6f685597 100644
 +		*out = static_cast<pthread_key_t>(key);
 +	return error;
  }
+@@ -699,6 +703,10 @@
+ 	SCOPE_TRACE();
+ 
+ 	return mlibc::thread_key_get(key);
++}
++
++int mlibc_try_getspecific(pthread_key_t key, void **value) {
++	return mlibc::thread_key_try_get(key, value);
+ }
+ 
+ int pthread_setspecific(pthread_key_t key, const void *value) {
 diff --git a/options/posix/include/bits/posix/pthread_types.h b/options/posix/include/bits/posix/pthread_types.h
 index 34a63654..5067300f 100644
 --- a/options/posix/include/bits/posix/pthread_types.h
@@ -1640,3 +1698,27 @@ index 34a63654..5067300f 100644
 +// unsigned 32-bit key, not a pointer-sized value on x86_64.
 +typedef __mlibc_uint32 pthread_key_t;
  typedef struct __mlibc_mutex pthread_mutex_t;
+diff --git a/options/internal/include/mlibc/threads.hpp b/options/internal/include/mlibc/threads.hpp
+index c2766a47..e75eb000 100644
+--- a/options/internal/include/mlibc/threads.hpp
++++ b/options/internal/include/mlibc/threads.hpp
+@@ -40,6 +40,7 @@
+ int thread_key_create(__mlibc_uintptr *out, void (*destructor)(void *));
+ int thread_key_delete(__mlibc_uintptr key);
+ void *thread_key_get(__mlibc_uintptr key);
++int thread_key_try_get(__mlibc_uintptr key, void **value);
+ int thread_key_set(__mlibc_uintptr key, const void *value);
+ 
+ } // namespace mlibc
+diff --git a/options/posix/include/pthread.h b/options/posix/include/pthread.h
+index 8d1fee57..88624fd5 100644
+--- a/options/posix/include/pthread.h
++++ b/options/posix/include/pthread.h
+@@ -181,6 +181,7 @@
+ int pthread_key_delete(pthread_key_t __key);
+ 
+ void *pthread_getspecific(pthread_key_t __key);
++int mlibc_try_getspecific(pthread_key_t __key, void **__value);
+ int pthread_setspecific(pthread_key_t __key, const void *__data);
+ 
+ /* ---------------------------------------------------------------------------- */
