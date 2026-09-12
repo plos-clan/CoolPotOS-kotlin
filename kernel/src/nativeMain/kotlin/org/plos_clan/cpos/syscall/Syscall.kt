@@ -153,6 +153,7 @@ private enum class LinuxSyscall(
     DUP2(33, ::dup2),
     PAUSE(34, SignalSyscalls::pause),
     NANO_SLEEP(35, ::nanoSleep),
+    ALARM(37, { regs, process -> process.alarm.replace(regs[PtraceRegisters.IDX_RDI].toUInt()).toLong() }),
     GETPID(39, ::getPid),
     SOCKET(41, SocketSyscalls::socket),
     CONNECT(42, SocketSyscalls::connect, restartable = true),
@@ -325,7 +326,6 @@ private enum class LinuxSyscall(
 }
 
 @ExperimentalNativeApi
-@ExperimentalForeignApi
 @Suppress("unused")
 @CName("syscall_handler")
 fun syscallHandler(frame: COpaquePointer?) {

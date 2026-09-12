@@ -1,7 +1,8 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class, ExperimentalAtomicApi::class)
+@file:OptIn(ExperimentalForeignApi::class, ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.coroutines
 
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope

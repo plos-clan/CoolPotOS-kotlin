@@ -69,6 +69,7 @@ internal object ProcessExit {
         }
         val lastThread = process.completeThreadExit(waitStatus)
         if (lastThread) {
+            process.alarm.replace(0u)
             process.signals.pending.discard(ULong.MAX_VALUE)
             TaskReaper.enqueue(process)
         }

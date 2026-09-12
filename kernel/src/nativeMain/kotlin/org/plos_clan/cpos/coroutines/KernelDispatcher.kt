@@ -95,6 +95,15 @@ class KernelDispatcher internal constructor(
         val task = lock.withLock {
             queue.schedule(nowNanos, delayMillis, block)
         }
+        return cancellationHandle(task)
+    }
+
+    internal fun scheduleAt(deadlineNanos: ULong, block: Runnable): DisposableHandle {
+        val task = lock.withLock { queue.scheduleAt(deadlineNanos, block) }
+        return cancellationHandle(task)
+    }
+
+    private fun cancellationHandle(task: DelayedCoroutineTask): DisposableHandle {
         wake()
         return QueueDisposableHandle {
             if (lock.withLock { queue.dispose(task) }) wake()

@@ -39,6 +39,7 @@ internal value class Signal private constructor(val number: Int) {
         val KILL = Signal(9)
         val SEGV = Signal(11)
         val PIPE = Signal(13)
+        val ALARM = Signal(14)
         val CHILD = Signal(17)
         val CONTINUE = Signal(18)
         val STOP = Signal(19)

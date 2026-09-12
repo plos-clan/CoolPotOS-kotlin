@@ -456,6 +456,7 @@ class Process internal constructor(
         uid = { credentials.userIds.real },
         limit = { resourceLimits.get(ProcessResource.PENDING_SIGNALS).soft },
     )
+    internal val alarm = ProcessAlarm(this)
     internal val childEvents = ChildWaitQueue()
 
     val fdTable = FileDescriptorTable()
