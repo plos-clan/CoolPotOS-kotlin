@@ -6,6 +6,7 @@ import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.sock.AbstractSocket
 import org.plos_clan.cpos.fs.sock.AcceptedSocket
 import org.plos_clan.cpos.fs.sock.SocketAddress
+import org.plos_clan.cpos.fs.sock.SocketDeadline
 import org.plos_clan.cpos.fs.sock.SocketDomain
 import org.plos_clan.cpos.fs.sock.SocketOptions
 import org.plos_clan.cpos.fs.sock.SocketReceiveRequest
@@ -545,6 +546,7 @@ internal class TcpSocket internal constructor(
     }
 
     override fun acceptSocket(process: Process, nonBlocking: Boolean): VfsResult<AcceptedSocket> {
+        val deadline = if (nonBlocking) null else SocketDeadline.after(socketOptions().receiveTimeoutNanos)
         while (true) {
             var waiter: IoWaitQueue.Waiter? = null
             val result = lock.withLock {
@@ -557,14 +559,16 @@ internal class TcpSocket internal constructor(
                         AcceptedSocket(child, checkNotNull(child.remote)),
                     )
                 }
-                if (nonBlocking) return@withLock VfsResult.Err(VfsError.WOULD_BLOCK)
+                if (nonBlocking || deadline?.expired() == true) {
+                    return@withLock VfsResult.Err(VfsError.WOULD_BLOCK)
+                }
                 val thread = ProcessManager.currentThread()
                     ?: return@withLock VfsResult.Err(VfsError.NOT_FOUND)
                 waiter = acceptWaiters.add(thread)
                 null
             }
             if (result != null) return result
-            if (!acceptWaiters.await(lock, checkNotNull(waiter))) {
+            if (!acceptWaiters.await(lock, checkNotNull(waiter), deadline?.expirationNanos)) {
                 return VfsResult.Err(VfsError.INTERRUPTED)
             }
         }

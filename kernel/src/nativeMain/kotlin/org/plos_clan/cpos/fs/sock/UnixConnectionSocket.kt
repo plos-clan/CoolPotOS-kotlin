@@ -602,17 +602,14 @@ internal class UnixConnectionSocket(
                         return@withLock VfsResult.Ok<UnixSocket>(socket)
                     }
                     if (closed) return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
-                    if (nonBlocking) return@withLock VfsResult.Err(VfsError.WOULD_BLOCK)
-                    if (deadline == null) waiter = acceptWaiters.add(checkNotNull(thread))
+                    if (nonBlocking || deadline?.expired() == true) {
+                        return@withLock VfsResult.Err(VfsError.WOULD_BLOCK)
+                    }
+                    waiter = acceptWaiters.add(checkNotNull(thread))
                     null
                 }
                 if (accepted != null) return accepted
-                if (deadline != null) {
-                    val waitError = deadline.await(::canAccept)
-                    if (waitError != null) return VfsResult.Err(waitError)
-                    continue
-                }
-                if (!acceptWaiters.await(lock, checkNotNull(waiter))) {
+                if (!acceptWaiters.await(lock, checkNotNull(waiter), deadline?.expirationNanos)) {
                     return VfsResult.Err(VfsError.INTERRUPTED)
                 }
             }
@@ -634,8 +631,6 @@ internal class UnixConnectionSocket(
         private fun canConnect(): Boolean = lock.withLock {
             closed || pending.size + reservations < capacity
         }
-
-        private fun canAccept(): Boolean = lock.withLock { closed || pending.isNotEmpty() }
 
         fun poll(events: Int): Int = lock.withLock {
             val available = when {

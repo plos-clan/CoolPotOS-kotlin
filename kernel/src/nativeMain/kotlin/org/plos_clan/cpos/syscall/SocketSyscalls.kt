@@ -639,9 +639,8 @@ internal object SocketSyscalls {
                 is VfsResult.Ok -> result.value
                 is VfsResult.Err -> return@withSocket errno(result.error.errno)
             }
-            val operationNonBlocking = flags and SOCK_NONBLOCK != 0 ||
-                file.getStatusFlags() and OpenFlags.O_NONBLOCK != 0
-            val accepted = when (val result = socket.acceptSocket(process, operationNonBlocking)) {
+            val listenerNonBlocking = file.getStatusFlags() and OpenFlags.O_NONBLOCK != 0
+            val accepted = when (val result = socket.acceptSocket(process, listenerNonBlocking)) {
                 is VfsResult.Ok -> result.value
                 is VfsResult.Err -> return@withSocket errno(result.error.errno)
             }

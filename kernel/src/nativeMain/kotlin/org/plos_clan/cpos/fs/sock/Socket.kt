@@ -188,7 +188,7 @@ internal data class AcceptedSocket(
 )
 
 internal class SocketDeadline private constructor(
-    private val expirationNanos: ULong,
+    val expirationNanos: ULong,
 ) {
     fun expired(): Boolean = !TscClock.isReady || TscClock.nanoTime() >= expirationNanos
 
