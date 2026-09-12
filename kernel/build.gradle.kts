@@ -107,6 +107,7 @@ private class BuildPaths(project: Project) {
     val iso = root.resolve("iso")
     val downloads = root.resolve("downloads")
     val kernelC = project.file("src/nativeMain/c")
+    val kernelAsm = project.file("src/nativeMain/asm")
     val assets = project.rootProject.file("assets")
     val libraries = project.rootProject.file("prebuilt/x86_64")
     val mlibc = project.rootProject.file("vendor/mlibc")
@@ -150,8 +151,7 @@ private class VdsoConfig(
     tools: ToolSettings,
     arch: String,
 ) {
-    val source = paths.kernelC.resolve("vdso.c")
-    val header = paths.kernelC.resolve("vdso.h")
+    val source = paths.kernelAsm.resolve("vdso.S")
     val linkerScript = paths.kernelC.resolve("vdso.ld")
     val objectFile = paths.vdso.resolve("vdso.o")
     val linkedImage = paths.vdso.resolve("vdso.unstripped.so")
@@ -160,13 +160,6 @@ private class VdsoConfig(
     val compileCommand = listOf(
         tools.cc,
         "-target", "$arch-freestanding",
-        "-std=c23", "-O3",
-    ) + FullLto.compilerArgs + listOf(
-        "-fPIC", "-fvisibility=hidden",
-        "-ffreestanding", "-nostdinc", "-fno-stack-protector", "-fomit-frame-pointer",
-        "-fno-asynchronous-unwind-tables", "-fno-unwind-tables",
-        "-Wall", "-Wextra", "-Wpedantic", "-Werror",
-        "-I${paths.freestandingInclude.absolutePath}",
         "-c", source.absolutePath,
         "-o", objectFile.absolutePath,
     )
@@ -256,7 +249,7 @@ private class KernelConfig(
     val sources = listOf(
         "boot.c", "shim.c", "clock.c", "syscall.c", "gdt.c",
         "idt.c", "handoff.c", "smp.c", "tls.c", "zstd_bridge.c",
-    ).map(paths.kernelC::resolve)
+    ).map(paths.kernelC::resolve) + paths.kernelAsm.resolve("task.S")
     val objects = sources.map { paths.cObjects.resolve("${it.nameWithoutExtension}.o") }
     val kotlinLinkTask = if (debug) "linkDebugStaticNative" else "linkReleaseStaticNative"
     val kotlinLibrary = paths.root.resolve(
@@ -295,6 +288,7 @@ private class KernelConfig(
         "-T", paths.linkerScript.absolutePath,
     )
     val linker = tools.linker
+    val assemblyArgs = listOf("-target", "$arch-freestanding")
 }
 
 private data class QemuConfig(
@@ -657,10 +651,7 @@ val compileVdso = tasks.register<Exec>("compileVdso") {
     group = "build"
     description = "Compiles the userspace vDSO."
     notCompatibleWithConfigurationCache("Creates a generated native image.")
-    dependsOn(prepareFreestndHeaders)
     inputs.file(config.vdso.source)
-    inputs.file(config.vdso.header)
-    inputs.dir(config.paths.freestandingInclude)
     outputs.file(config.vdso.objectFile)
     doFirst { config.paths.vdso.mkdirs() }
     commandLine(config.vdso.compileCommand)
@@ -766,18 +757,19 @@ val buildMlibc = tasks.register("buildMlibc") {
 
 val compileC = tasks.register("compileC") {
     group = "build"
-    description = "Compiles C sources into object files."
+    description = "Compiles native sources into object files."
     dependsOn(prepareLimine, prepareFreestndHeaders, buildMlibc)
     notCompatibleWithConfigurationCache("Runs an external compiler.")
 
     inputs.property("compiler", config.tools.cc)
     inputs.property("compileArgs", config.kernel.compileArgs)
+    inputs.property("assemblyArgs", config.kernel.assemblyArgs)
     inputs.files(config.kernel.sources)
         .withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.files(
         config.paths.kernelC.resolve("bridge.h"),
         config.paths.kernelC.resolve("os_terminal.h"),
-        config.vdso.header,
+        config.paths.kernelC.resolve("vdso.h"),
         config.paths.limineHeader,
         config.paths.mlibcSyscallHeader,
     ).withPathSensitivity(PathSensitivity.RELATIVE)
@@ -789,7 +781,9 @@ val compileC = tasks.register("compileC") {
         config.paths.cObjects.mkdirs()
         config.kernel.sources.forEach { source ->
             val objectFile = config.paths.cObjects.resolve("${source.nameWithoutExtension}.o")
-            val command = listOf(config.tools.cc) + config.kernel.compileArgs + listOf(
+            val arguments = if (source.extension == "S") config.kernel.assemblyArgs
+                else config.kernel.compileArgs
+            val command = listOf(config.tools.cc) + arguments + listOf(
                 "-c", source.absolutePath,
                 "-o", objectFile.absolutePath,
             )

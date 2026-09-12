@@ -120,26 +120,7 @@ static enum fast_schedule_result fast_handoff_schedule(
     fast_sleep_t *sleep
 );
 
-__attribute__((naked, noinline))
-static void fast_switch_to(uint64_t *, uint64_t) {
-    __asm__ volatile(
-        "pushq %rbp\n"
-        "pushq %rbx\n"
-        "pushq %r12\n"
-        "pushq %r13\n"
-        "pushq %r14\n"
-        "pushq %r15\n"
-        "movq %rsp, (%rdi)\n"
-        "movq %rsi, %rsp\n"
-        "popq %r15\n"
-        "popq %r14\n"
-        "popq %r13\n"
-        "popq %r12\n"
-        "popq %rbx\n"
-        "popq %rbp\n"
-        "retq\n"
-    );
-}
+void fast_switch_to(uint64_t *, uint64_t);
 
 __attribute__((naked, noreturn))
 static void fast_kernel_task_entry(void) {
@@ -658,23 +639,6 @@ _Noreturn void fast_handoff_idle(void) {
         const uint64_t sequence = fast_handoff_service();
         fast_handoff_park_kotlin(0, sequence);
     }
-}
-
-uint64_t fast_handoff_create_task(
-    uint64_t id,
-    uint64_t cr3,
-    uint64_t kernel_rsp,
-    uint64_t kernel_fs_base
-) {
-    fast_task_t *task = malloc(sizeof(*task));
-    if (!task) return 0;
-    __builtin_memset(task, 0, sizeof(*task));
-    task->id = id;
-    task->cr3 = cr3;
-    task->kernel_rsp = kernel_rsp;
-    task->kernel_fs_base = kernel_fs_base;
-    task_state_store(task, task_ready);
-    return (uintptr_t)task;
 }
 
 void fast_handoff_init_kernel(

@@ -14,6 +14,8 @@ import org.plos_clan.cpos.syscall.Syscall.userMemory
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
+import org.plos_clan.cpos.tasks.TaskState
+import org.plos_clan.cpos.tasks.Thread
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.KernelRandom
 import org.plos_clan.cpos.utils.LittleEndianBuffer
@@ -42,28 +44,48 @@ private const val RANDOM_CHUNK_SIZE = 4096
 private const val NANOSECONDS_PER_SECOND = 1_000_000_000uL
 private const val NANOSECONDS_PER_MICROSECOND = 1_000uL
 
-private enum class ClockId(val value: ULong, private val realtime: Boolean = false) {
-    REALTIME(0uL, realtime = true),
-    MONOTONIC(1uL),
-    MONOTONIC_RAW(4uL),
-    REALTIME_COARSE(5uL, realtime = true),
-    MONOTONIC_COARSE(6uL),
-    BOOTTIME(7uL),
-    ;
+private sealed interface Clock {
+    fun read(): TimeSpec
 
-    fun read(): TimeSpec = if (realtime) {
-        RealtimeClock.now().let { TimeSpec(it.seconds, it.nanoseconds.toLong()) }
-    } else {
-        TscClock.nanoTime().let {
-            TimeSpec(
-                sec = (it / NANOSECONDS_PER_SECOND).toLong(),
-                nsec = (it % NANOSECONDS_PER_SECOND).toLong(),
-            )
+    enum class System(val value: Int, private val realtime: Boolean = false) : Clock {
+        REALTIME(0, realtime = true),
+        MONOTONIC(1),
+        MONOTONIC_RAW(4),
+        REALTIME_COARSE(5, realtime = true),
+        MONOTONIC_COARSE(6),
+        BOOTTIME(7),
+        ;
+
+        override fun read(): TimeSpec = if (realtime) {
+            RealtimeClock.now().let { TimeSpec(it.seconds, it.nanoseconds.toLong()) }
+        } else {
+            TimeSpec.fromDurationNanos(TscClock.nanoTime())
         }
     }
 
+    class Cpu(private val thread: Thread, private val perThread: Boolean) : Clock {
+        override fun read(): TimeSpec = TimeSpec.fromDurationNanos(
+            if (perThread) thread.cpuTimeNanos else thread.process.cpuTimeNanos,
+        )
+    }
+
     companion object {
-        fun from(value: ULong): ClockId? = entries.firstOrNull { it.value == value }
+        fun from(value: Int, process: Process): Clock? {
+            if (value >= 0 && value != 2 && value != 3) {
+                return System.entries.firstOrNull { it.value == value }
+            }
+            if (value < 0 && value and 3 != 2) return null
+            val perThread = if (value >= 0) value == 3 else value and 4 != 0
+            val id = if (value >= 0) 0 else (value shr 3).inv()
+            val thread = when {
+                id == 0 -> ProcessManager.currentThread()
+                perThread -> ProcessManager.findThread(id)?.takeIf {
+                    it.process === process && it.state != TaskState.ZOMBIE
+                }
+                else -> ProcessManager.findProcess(id)?.threads?.firstOrNull()
+            } ?: return null
+            return Cpu(thread, perThread)
+        }
     }
 }
 
@@ -168,7 +190,7 @@ internal fun time(regs: PtraceRegisters, process: Process): Long {
 }
 
 internal fun clockGetTime(regs: PtraceRegisters, process: Process): Long {
-    val clock = ClockId.from(regs[PtraceRegisters.IDX_RDI]) ?: return errno(Errno.EINVAL)
+    val clock = Clock.from(regs[PtraceRegisters.IDX_RDI].toInt(), process) ?: return errno(Errno.EINVAL)
     if (!TscClock.isReady) return errno(Errno.EIO)
     return if (UserMemory(
             process.addressSpace,
@@ -280,7 +302,7 @@ internal fun sysInfo(regs: PtraceRegisters, process: Process): Long {
 }
 
 internal fun clockGetRes(regs: PtraceRegisters, process: Process): Long {
-    ClockId.from(regs[PtraceRegisters.IDX_RDI]) ?: return errno(Errno.EINVAL)
+    Clock.from(regs[PtraceRegisters.IDX_RDI].toInt(), process) ?: return errno(Errno.EINVAL)
     val address = regs[PtraceRegisters.IDX_RSI]
     if (address == 0uL) return 0L
     val resolution = TimeSpec(sec = 0, nsec = 1).toNativeBytes()

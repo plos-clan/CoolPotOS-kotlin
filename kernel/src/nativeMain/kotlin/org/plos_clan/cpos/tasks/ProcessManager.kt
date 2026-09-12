@@ -1,4 +1,5 @@
-@file:OptIn(ExperimentalForeignApi::class, ExperimentalAtomicApi::class)
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+@file:OptIn(ExperimentalForeignApi::class, ExperimentalAtomicApi::class, InternalForKotlinNative::class)
 
 package org.plos_clan.cpos.tasks
 
@@ -29,8 +30,13 @@ import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import kotlin.native.internal.GCUnsafeCall
+import kotlin.native.internal.InternalForKotlinNative
 
 private const val DEFAULT_THREAD_STACK_PAGES = 64uL
+
+@GCUnsafeCall("fast_handoff_task_cpu_time")
+private external fun taskCpuTime(task: ULong): ULong
 
 enum class TaskState {
     READY,
@@ -291,6 +297,9 @@ class Thread internal constructor(
             value.ordinal.toUByte(),
         )
 
+    internal val cpuTimeNanos: ULong
+        get() = taskCpuTime(nativeContext)
+
     fun initializeContext(
         entryPoint: ULong,
         stackTop: ULong,
@@ -446,6 +455,8 @@ class Process internal constructor(
     private val lifecycle = AtomicReference(Lifecycle())
     val threads: List<Thread>
         get() = lifecycle.load().threads
+    internal val cpuTimeNanos: ULong
+        get() = threads.sumOf { it.cpuTimeNanos }
     var commandLine: ByteArray = name.encodeToByteArray() + byteArrayOf(0)
         internal set
     internal val state: ProcessState
