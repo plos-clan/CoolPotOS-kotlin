@@ -7,6 +7,7 @@ import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.SuperBlock
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.tasks.UtsNamespace
 import org.plos_clan.cpos.utils.BootIdentity
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -53,32 +54,63 @@ internal object ProcSysTree {
 
     private enum class KernelSetting(
         override val fileName: String,
+        private val value: Setting,
     ) : ProcStaticEntry {
-        OVERFLOW_UID("overflowuid"),
-        OVERFLOW_GID("overflowgid"),
+        OVERFLOW_UID("overflowuid", OverflowId()),
+        OVERFLOW_GID("overflowgid", OverflowId()),
+        HOSTNAME("hostname", UtsName(UtsNamespace.MutableField.NODE_NAME)),
         ;
 
         override val inodeId: ULong
             get() = KERNEL_INODE + ordinal.toULong() + 1uL
         override val type: InodeType
             get() = InodeType.REGULAR
-        private val value = AtomicInt(DEFAULT_OVERFLOW_ID)
 
         override fun create(fileSystem: ProcfsInstance, superBlock: SuperBlock): Inode =
             fileSystem.text(
                 superBlock = superBlock,
                 id = inodeId,
-                write = { _, input -> update(input) },
-            ) {
-                "${value.load()}\n".encodeToByteArray()
-            }
+                write = { _, input -> value.update(input) },
+                pollVersion = { value.version },
+                render = value::render,
+            )
+    }
 
-        private fun update(input: ByteArray): VfsResult<Unit> {
+    private abstract class Setting : ProcFSRender {
+        open val version: Int
+            get() = 0
+
+        abstract fun update(input: ByteArray): VfsResult<Unit>
+    }
+
+    private class OverflowId : Setting() {
+        private val value = AtomicInt(DEFAULT_OVERFLOW_ID)
+
+        override fun render(): ByteArray = "${value.load()}\n".encodeToByteArray()
+
+        override fun update(input: ByteArray): VfsResult<Unit> {
             val replacement = input.decodeToString().trim().toIntOrNull()
             if (replacement == null || replacement !in 0..MAX_OLD_ID) {
                 return VfsResult.Err(VfsError.INVALID_ARGUMENT)
             }
             value.store(replacement)
+            return VfsResult.Ok(Unit)
+        }
+    }
+
+    private class UtsName(private val field: UtsNamespace.MutableField) : Setting() {
+        override val version: Int
+            get() = UtsNamespace.initial.version(this.field)
+
+        override fun render(): ByteArray = UtsNamespace.initial.name(field) + '\n'.code.toByte()
+
+        override fun update(input: ByteArray): VfsResult<Unit> {
+            var length = 0
+            val maximum = minOf(input.size, UtsNamespace.MAX_NAME_LENGTH)
+            while (length < maximum && input[length] != 0.toByte() && input[length] != '\n'.code.toByte()) {
+                length++
+            }
+            UtsNamespace.initial.setName(field, input.copyOf(length))
             return VfsResult.Ok(Unit)
         }
     }

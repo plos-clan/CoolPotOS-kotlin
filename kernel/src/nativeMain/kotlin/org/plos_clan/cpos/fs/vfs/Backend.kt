@@ -612,6 +612,9 @@ interface OpenFileBackend {
             -VfsError.NOT_SUPPORTED.errno.toLong()
         }
 
+    fun pollReadiness(caller: VfsOperationContext, inode: Inode, events: Int): Long =
+        poll(caller, inode, events)
+
     fun flush(caller: VfsOperationContext, inode: Inode): VfsResult<Unit> = VfsResult.Ok(Unit)
 
     fun syncHandle(

@@ -531,9 +531,10 @@ class OpenFileDescription private constructor(
         }
     }
 
-    fun poll(caller: VfsOperationContext, events: Int): Long =
+    fun poll(caller: VfsOperationContext, events: Int, consume: Boolean = true): Long =
         if (references.load() == 0) -VfsError.BAD_DESCRIPTOR.errno.toLong()
-        else backend.poll(caller, inode, events)
+        else if (consume) backend.poll(caller, inode, events)
+        else backend.pollReadiness(caller, inode, events)
 
     fun seek(caller: VfsOperationContext, offset: Long, origin: SeekOrigin): VfsResult<Long> {
         if (references.load() == 0) {

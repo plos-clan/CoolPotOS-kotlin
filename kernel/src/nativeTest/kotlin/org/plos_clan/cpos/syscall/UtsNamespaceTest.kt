@@ -1,6 +1,7 @@
 package org.plos_clan.cpos.syscall
 
 import org.plos_clan.cpos.mem.ByteArrayBuffer
+import org.plos_clan.cpos.tasks.UtsNamespace
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -8,6 +9,42 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class UtsNamespaceTest {
+    @Test
+    fun exposesNamesAsNullTerminatedBytesWithoutChangingTheAbi() {
+        val namespace = namespace()
+        val field = UtsNamespace.MutableField.NODE_NAME
+        val input = byteArrayOf('h'.code.toByte(), 0xFF.toByte(), 0, 'x'.code.toByte())
+
+        namespace.setName(field, input)
+
+        assertContentEquals(input.copyOf(2), namespace.name(field))
+        assertContentEquals(input, snapshot(namespace).copyOfRange(field.offset, field.offset + input.size))
+        namespace.name(field).fill(0)
+        assertContentEquals(input.copyOf(2), namespace.name(field))
+        assertContentEquals("domain".encodeToByteArray(), namespace.name(UtsNamespace.MutableField.DOMAIN_NAME))
+    }
+
+    @Test
+    fun versionsSuccessfulUpdatesIndependentlyIncludingRepeatedValues() {
+        val namespace = namespace()
+        val hostname = UtsNamespace.MutableField.NODE_NAME
+        val domainName = UtsNamespace.MutableField.DOMAIN_NAME
+
+        repeat(2) { namespace.setName(hostname, "host".encodeToByteArray()) }
+        assertEquals(2, namespace.version(hostname))
+        assertEquals(0, namespace.version(domainName))
+
+        namespace.setName(domainName, ByteArray(0))
+        assertEquals(2, namespace.version(hostname))
+        assertEquals(1, namespace.version(domainName))
+        assertContentEquals(ByteArray(0), namespace.name(domainName))
+
+        assertFailsWith<IllegalArgumentException> {
+            namespace.setName(hostname, ByteArray(UtsNamespace.MAX_NAME_LENGTH + 1))
+        }
+        assertEquals(2, namespace.version(hostname))
+    }
+
     @Test
     fun serializesLinuxUtsLayout() {
         val bytes = snapshot(namespace())

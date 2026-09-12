@@ -119,6 +119,7 @@ internal class Epoll : AnonymousFileBackend(InodeType.EPOLL, "eventpoll"),
 
             registration.queued = false
             version.fetchAndAdd(1)
+            val targetVersion = registration.key.file.backend.readinessVersion
             val result = registration.key.file.poll(
                 caller,
                 ((registration.event.events and EpollEvents.IO_EVENTS) or
@@ -131,7 +132,7 @@ internal class Epoll : AnonymousFileBackend(InodeType.EPOLL, "eventpoll"),
             val current = result.toUInt() and
                 ((registration.event.events and EpollEvents.IO_EVENTS) or
                     EpollEvents.ALWAYS_REPORTED)
-            registration.observedVersion = registration.key.file.backend.readinessVersion
+            registration.observedVersion = targetVersion
             registration.observedEvents = current
             if (current == 0u) {
                 registration.readyEvents = 0u
@@ -202,10 +203,12 @@ internal class Epoll : AnonymousFileBackend(InodeType.EPOLL, "eventpoll"),
         var index = 0
         while (index < registrations.size) {
             val registration = registrations[index]
+            val targetVersion = registration.key.file.backend.readinessVersion
             val result = registration.key.file.poll(
                 caller,
                 ((registration.event.events and EpollEvents.IO_EVENTS) or
                     EpollEvents.ALWAYS_REPORTED).toInt(),
+                consume = false,
             )
             if (result < 0) {
                 removeAt(index)
@@ -215,7 +218,6 @@ internal class Epoll : AnonymousFileBackend(InodeType.EPOLL, "eventpoll"),
             val current = result.toUInt() and
                 ((registration.event.events and EpollEvents.IO_EVENTS) or
                     EpollEvents.ALWAYS_REPORTED)
-            val targetVersion = registration.key.file.backend.readinessVersion
             val edgeTriggered = registration.event.events and
                 EpollEvents.EDGE_TRIGGERED != 0u
             if (edgeTriggered &&

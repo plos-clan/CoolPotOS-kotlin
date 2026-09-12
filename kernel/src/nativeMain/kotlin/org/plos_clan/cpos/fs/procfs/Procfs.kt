@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalAtomicApi::class)
+
 package org.plos_clan.cpos.fs.procfs
 
 import KERNEL_NAME
@@ -41,7 +43,10 @@ import org.plos_clan.cpos.tasks.ProcessState
 import org.plos_clan.cpos.tasks.cgroup.Cgroups
 import org.plos_clan.cpos.utils.Cmdline
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
+import org.plos_clan.cpos.utils.PollEvents
 import org.plos_clan.cpos.utils.decimalInt
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 object Procfs : FileSystemType("proc", 0x9fa0uL) {
     override fun createBackend(options: FileSystemOptions): VfsResult<SuperBlockBackend> =
@@ -163,11 +168,12 @@ internal class ProcfsInstance : SuperBlockBackend {
         write: ((VfsOperationContext, ByteArray) -> VfsResult<Unit>)? = null,
         mode: UInt = if (write == null) FILE_MODE else WRITABLE_FILE_MODE,
         positionedWrite: Boolean = true,
+        pollVersion: (() -> Int)? = null,
         render: () -> ByteArray?,
     ): Inode = Inode(
         id = InodeId(id),
         superBlock = superBlock,
-        backend = ProcTextFile(render, write, positionedWrite),
+        backend = ProcTextFile(render, write, positionedWrite, pollVersion),
         initialAttributes = InodeAttributeSnapshot(
             InodeAttributes(
                 InodeMetadata(
@@ -345,6 +351,7 @@ private class ProcTextFile(
     private val render: () -> ByteArray?,
     private val write: ((VfsOperationContext, ByteArray) -> VfsResult<Unit>)?,
     private val positionedWrite: Boolean,
+    private val pollVersion: (() -> Int)?,
 ) : RegularFileBackend() {
 
     override fun resize(
@@ -367,10 +374,37 @@ private class ProcTextFile(
         if (options.access.canWrite && write == null) {
             return VfsResult.Err(VfsError.PERMISSION_DENIED)
         }
-        return render()?.let {
-            VfsResult.Ok(ProcTextHandle(it, render, write, positionedWrite))
-        }
-            ?: VfsResult.Err(VfsError.NOT_FOUND)
+        val content = render() ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val handle = ProcTextHandle(content, render, write, positionedWrite)
+        return VfsResult.Ok(pollVersion?.let { ProcPollHandle(it, handle) } ?: handle)
+    }
+}
+
+private class ProcPollHandle(
+    private val version: () -> Int,
+    backend: OpenFileBackend,
+) : OpenFileBackend by backend {
+    private val observed = AtomicInt(readinessVersion)
+
+    override val supportsEpoll: Boolean
+        get() = true
+
+    override val readinessVersion: Int
+        get() = version()
+
+    override fun poll(caller: VfsOperationContext, inode: Inode, events: Int): Long =
+        poll(events, consume = true)
+
+    override fun pollReadiness(caller: VfsOperationContext, inode: Inode, events: Int): Long =
+        poll(events, consume = false)
+
+    private fun poll(events: Int, consume: Boolean): Long {
+        val previous = observed.load()
+        val current = readinessVersion
+        val changed = current != previous && (!consume || observed.compareAndSet(previous, current))
+        val ready = if (changed) PollEvents.NORMAL_INPUT or PollEvents.POLLPRI or PollEvents.POLLERR
+        else PollEvents.DEFAULT_FILE_EVENTS
+        return (ready and (events or PollEvents.UNCONDITIONALLY_REPORTED)).toLong()
     }
 }
 
