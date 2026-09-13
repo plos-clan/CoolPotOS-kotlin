@@ -2,6 +2,8 @@
 
 package org.plos_clan.cpos.fs.vfs
 
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import org.plos_clan.cpos.mem.PageCache
 import org.plos_clan.cpos.mem.PageCacheFailure
 import org.plos_clan.cpos.mem.PageCacheSource
@@ -10,8 +12,6 @@ import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PollEvents
-import kotlin.concurrent.atomics.AtomicInt
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 abstract class FileSystemType(
     val name: String,
@@ -550,6 +550,9 @@ interface FileContent {
 }
 
 interface OpenFileBackend {
+    val peerDentry: Dentry?
+        get() = null
+
     val supportsEpoll: Boolean
         get() = false
 

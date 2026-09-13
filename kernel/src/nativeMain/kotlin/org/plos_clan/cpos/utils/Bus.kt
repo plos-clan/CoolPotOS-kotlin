@@ -77,6 +77,7 @@ object TermiosConstants {
     const val OFILL = 0x000040
     const val OFDEL = 0x000080
 
+    const val B38400 = 0x00000F
     const val CSIZE = 0x000030
     const val CS5 = 0x000000
     const val CS6 = 0x000010
@@ -96,6 +97,8 @@ object TermiosConstants {
     const val ECHOK = 0x000020
     const val ECHONL = 0x000040
     const val NOFLSH = 0x000080
+    const val ECHOCTL = 0x000200
+    const val ECHOKE = 0x000800
     const val TOSTOP = 0x000100
     const val IEXTEN = 0x008000
 }

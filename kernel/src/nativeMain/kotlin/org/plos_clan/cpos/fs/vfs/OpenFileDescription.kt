@@ -2,6 +2,9 @@
 
 package org.plos_clan.cpos.fs.vfs
 
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.OpenFlags
 import org.plos_clan.cpos.mem.BufferDestination
 import org.plos_clan.cpos.mem.BufferSource
@@ -12,9 +15,9 @@ import org.plos_clan.cpos.mem.PageCacheSource
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.utils.KernelMutex
-import kotlin.concurrent.atomics.AtomicInt
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 enum class SeekOrigin {
     START,
@@ -24,6 +27,7 @@ enum class SeekOrigin {
 
 private data object PathOnlyHandle : OpenFileBackend
 private const val FIONBIO = 0x5421
+private const val TIOCGPTPEER = 0x5441
 
 class OpenFileDescription private constructor(
     val path: VfsPath,
@@ -514,6 +518,8 @@ class OpenFileDescription private constructor(
     fun ioctl(caller: VfsOperationContext, command: Int, args: UserMemory): Long {
         if (references.load() == 0) {
             return -VfsError.BAD_DESCRIPTOR.errno.toLong()
+        } else if (command == TIOCGPTPEER) {
+            return openPeer(caller, args.address)
         } else if (command == FIONBIO) {
             val enabled = args.readUIntLE() ?: return -VfsError.FAULT.errno.toLong()
             while (true) {
@@ -528,6 +534,32 @@ class OpenFileDescription private constructor(
             return 0L
         } else {
             return backend.ioctl(caller, inode, command, args)
+        }
+    }
+
+    private fun openPeer(caller: VfsOperationContext, flags: ULong): Long {
+        val entry = backend.peerDentry ?: return -VfsError.NOT_TTY.errno.toLong()
+        val peerInode = entry.inode() ?: return -VfsError.IO.errno.toLong()
+        val allowed = OpenFlags.O_ACCMODE or OpenFlags.O_NOCTTY or OpenFlags.O_NONBLOCK or OpenFlags.O_CLOEXEC
+        if (flags and allowed.toULong().inv() != 0uL) return -VfsError.INVALID_ARGUMENT.errno.toLong()
+        val access = when (flags.toInt() and OpenFlags.O_ACCMODE) {
+            OpenFlags.O_RDONLY -> AccessMode.READ
+            OpenFlags.O_WRONLY -> AccessMode.WRITE
+            OpenFlags.O_RDWR -> AccessMode.READ_WRITE
+            else -> return -VfsError.INVALID_ARGUMENT.errno.toLong()
+        }
+        val options = OpenOptions(access = access,
+            nonBlocking = flags.toInt() and OpenFlags.O_NONBLOCK != 0,
+            noControllingTerminal = flags.toInt() and OpenFlags.O_NOCTTY != 0)
+        val process = ProcessManager.currentProcess() ?: return -VfsError.NO_SUCH_PROCESS.errno.toLong()
+        val descriptorFlags = if (flags.toInt() and OpenFlags.O_CLOEXEC != 0) FileDescriptorFlags.FD_CLOEXEC else 0uL
+        val reservation = process.fdTable.reserve(descriptorFlags, process.resourceLimits.get(ProcessResource.OPEN_FILES).soft)
+            ?: return -VfsError.TOO_MANY_OPEN_FILES.errno.toLong()
+        return reservation.use {
+            when (val opened = open(caller, VfsPath(path.mount, entry), peerInode, options)) {
+                is VfsResult.Err -> -opened.error.errno.toLong()
+                is VfsResult.Ok -> reservation.install(opened.value).toLong()
+            }
         }
     }
 

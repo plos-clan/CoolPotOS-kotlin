@@ -1,6 +1,7 @@
 package org.plos_clan.cpos.fs
 
 import org.plos_clan.cpos.fs.cgroupfs.Cgroupfs
+import org.plos_clan.cpos.fs.devpts.Devpts
 import org.plos_clan.cpos.fs.erofs.Erofs
 import org.plos_clan.cpos.fs.erofs.ErofsOptions
 import org.plos_clan.cpos.fs.fuse.Fuse
@@ -28,6 +29,7 @@ object FileSystemManager {
     private val builtInFileSystems = listOf(
         Tmpfs,
         Devtmpfs,
+        Devpts,
         Procfs,
         Erofs,
         Fuse,

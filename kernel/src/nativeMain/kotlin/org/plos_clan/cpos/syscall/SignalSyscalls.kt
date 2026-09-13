@@ -648,13 +648,26 @@ internal object SignalDelivery {
         thread: Thread,
         returnMask: ULong? = null,
     ): Boolean {
+        var stopped = false
         while (true) {
             Cgroups.awaitThaw(thread)
             if (thread.process.state == ProcessState.STOPPED) {
+                stopped = true
                 thread.process.signals.stop(thread.process, thread, Signal.STOP)
             }
             val accepted = thread.signals.mask.inv()
-            val info = thread.takePendingSignal(accepted) ?: return false
+            val info = thread.takePendingSignal(accepted)
+            if (info == null) {
+                val syscall = registers[PtraceRegisters.IDX_FUNC]
+                val instruction = registers[PtraceRegisters.IDX_RIP]
+                if (stopped && registers[PtraceRegisters.IDX_RAX].toLong() == -Errno.EINTR.toLong() &&
+                    Syscall.isRestartable(syscall) && instruction >= 2uL
+                ) {
+                    registers[PtraceRegisters.IDX_RAX] = syscall
+                    registers[PtraceRegisters.IDX_RIP] = instruction - 2uL
+                }
+                return false
+            }
             val action = thread.process.signals.actionForDelivery(info.signal)
             when {
                 action.isIgnored -> continue
@@ -665,6 +678,7 @@ internal object SignalDelivery {
                         continue
                     }
                     DefaultSignalAction.STOP -> {
+                        stopped = true
                         thread.process.signals.stop(thread.process, thread, info.signal)
                         continue
                     }

@@ -3,35 +3,36 @@
 
 package org.plos_clan.cpos.tasks
 
-import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.addressOf
-import kotlinx.cinterop.usePinned
-import org.plos_clan.cpos.drivers.TscClock
-import org.plos_clan.cpos.fs.FileDescriptorTable
-import org.plos_clan.cpos.fs.FileSystemManager
-import org.plos_clan.cpos.fs.vfs.AnonymousFileIdentity
-import org.plos_clan.cpos.fs.vfs.FileSystemContext
-import org.plos_clan.cpos.fs.vfs.VfsOperationContext
-import org.plos_clan.cpos.fs.vfs.VfsError
-import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.tasks.cgroup.CgroupHierarchy
-import org.plos_clan.cpos.tasks.cgroup.CgroupPlacement
-import org.plos_clan.cpos.tasks.cgroup.Cgroups
-import org.plos_clan.cpos.mem.BuddyFrameAllocator
-import org.plos_clan.cpos.mem.Hhdm
-import org.plos_clan.cpos.mem.INVALID_FRAME
-import org.plos_clan.cpos.mem.addressspace.AddressSpace
-import org.plos_clan.cpos.mem.page.KernelPageDirectory
-import org.plos_clan.cpos.utils.IrqSpinLock
-import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
-import org.plos_clan.cpos.utils.PtraceRegisters
-import org.plos_clan.cpos.utils.alignDown
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.native.internal.GCUnsafeCall
 import kotlin.native.internal.InternalForKotlinNative
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.addressOf
+import kotlinx.cinterop.usePinned
+import org.plos_clan.cpos.drivers.TscClock
+import org.plos_clan.cpos.drivers.char.tty.TtySession
+import org.plos_clan.cpos.fs.FileDescriptorTable
+import org.plos_clan.cpos.fs.FileSystemManager
+import org.plos_clan.cpos.fs.vfs.AnonymousFileIdentity
+import org.plos_clan.cpos.fs.vfs.FileSystemContext
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
+import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.mem.BuddyFrameAllocator
+import org.plos_clan.cpos.mem.Hhdm
+import org.plos_clan.cpos.mem.INVALID_FRAME
+import org.plos_clan.cpos.mem.addressspace.AddressSpace
+import org.plos_clan.cpos.mem.page.KernelPageDirectory
+import org.plos_clan.cpos.tasks.cgroup.CgroupHierarchy
+import org.plos_clan.cpos.tasks.cgroup.CgroupPlacement
+import org.plos_clan.cpos.tasks.cgroup.Cgroups
+import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
+import org.plos_clan.cpos.utils.PtraceRegisters
+import org.plos_clan.cpos.utils.alignDown
 
 private const val DEFAULT_THREAD_STACK_PAGES = 64uL
 
@@ -455,6 +456,11 @@ class Process internal constructor(
         internal set
     var addressSpace = addressSpace
         internal set
+    private val terminalState = AtomicReference<TtySession?>(null)
+    internal var controllingTerminal: TtySession?
+        get() = terminalState.load()
+        set(value) = terminalState.store(value)
+
     private val membershipState = AtomicReference(ProcessMembership(id, id))
 
     internal val membership: ProcessMembership
@@ -573,6 +579,7 @@ class Process internal constructor(
     }
 
     internal fun establishSession() {
+        controllingTerminal = null
         membershipState.store(ProcessMembership(id, id))
     }
 
@@ -584,6 +591,7 @@ class Process internal constructor(
         credentials.inherit(parent.credentials)
         fileCreationMask = parent.fileCreationMask
         dumpable = parent.dumpable
+        controllingTerminal = parent.controllingTerminal
         membershipState.store(parent.membership)
         signals.inherit(parent.signals)
         resourceLimits.inherit(parent.resourceLimits)
@@ -768,6 +776,7 @@ object ProcessManager {
         val removed = processLock.withLock { processes.remove(process) }
         if (!removed) return false
 
+        if (process.id == process.sessionId) process.controllingTerminal?.hangup()
         process.releaseOwnedResources()
         return true
     }
@@ -896,6 +905,7 @@ object ProcessManager {
 
     internal fun finishExited(process: Process) {
         val waitStatus = process.requestedExitStatus
+        if (process.id == process.sessionId) process.controllingTerminal?.hangup()
         process.releaseOwnedResources()
         val parent = processLock.withLock {
             check(process.transitionState(ProcessState.EXITING, ProcessState.ZOMBIE))

@@ -124,6 +124,7 @@ internal class LinuxOpenHow private constructor(
             directoryOnly = flags and OpenFlags.O_DIRECTORY != 0,
             followFinalSymlink = flags and OpenFlags.O_NOFOLLOW == 0,
             nonBlocking = flags and OpenFlags.O_NONBLOCK != 0,
+            noControllingTerminal = flags and OpenFlags.O_NOCTTY != 0,
             noAtime = !pathOnly && flags and OpenFlags.O_NOATIME != 0,
             resolution = resolution,
         )

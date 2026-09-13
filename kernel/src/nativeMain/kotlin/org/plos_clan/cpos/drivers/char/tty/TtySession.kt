@@ -2,10 +2,17 @@
 
 package org.plos_clan.cpos.drivers.char.tty
 
+import kotlin.concurrent.atomics.AtomicLong
+import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceBackend
+import org.plos_clan.cpos.drivers.ModeAwareDeviceBackend
 import org.plos_clan.cpos.drivers.PositionlessDeviceBackend
+import org.plos_clan.cpos.fs.vfs.IoMode
+import org.plos_clan.cpos.fs.vfs.OpenOptions
 import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
@@ -20,23 +27,25 @@ import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.KernelMutex
 import org.plos_clan.cpos.utils.PollEvents
-import kotlin.concurrent.atomics.AtomicLong
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import org.plos_clan.cpos.utils.TermiosConstants
 
 class TtySession(
     private val createBackend: () -> TtySessionBackend?,
+    val deviceNumber: ULong = 0uL,
     inputSpeed: Int = 0,
     outputSpeed: Int = inputSpeed,
 ) : TtyDevice() {
-    var termios = Termios.defaults()
-        private set
-    var termios2 = Termios2(termios, inputSpeed, outputSpeed)
-        private set
+    private val attributes = AtomicReference(Termios2(Termios.defaults(), inputSpeed, outputSpeed))
+    val termios: Termios
+        get() = attributes.load()
+    val termios2: Termios2
+        get() = attributes.load()
 
     private val lifecycleLock = KernelMutex()
     private val generation = AtomicLong(0)
     private var backend: TtySessionBackend? = null
     private var openCount = 0
+    internal var exclusive = false
     private val stateLock = IrqSpinLock()
     private var controllingSessionId = 0
     private var foregroundProcessGroupId = 0
@@ -51,6 +60,11 @@ class TtySession(
         when (val result = allocate()) {
             is VfsResult.Err -> result
             is VfsResult.Ok -> {
+                if (exclusive && ProcessManager.currentThread()?.capabilities?.hasEffective(CapEnum.SYS_ADMIN) != true) {
+                    return@withLock VfsResult.Err(VfsError.BUSY)
+                }
+                val error = result.value.open(this)
+                if (error != 0) return@withLock VfsResult.Err(VfsError.fromErrno(-error))
                 openCount++
                 VfsResult.Ok(OpenFile(this, result.value, generation.load()))
             }
@@ -98,50 +112,68 @@ class TtySession(
     }
 
     internal fun resetTermios() {
-        termios = Termios.defaults()
-        termios2 = Termios2(termios)
+        attributes.store(Termios2(Termios.defaults()))
     }
 
-    private fun hangup(file: OpenFile): Int {
-        if (file.isHungUp) return -Errno.EIO
-        if (ProcessManager.currentThread()?.capabilities?.hasEffective(CapEnum.SYS_ADMIN) != true) {
-            return -Errno.EPERM
+    internal fun updateTermios(value: Termios2) = attributes.store(value)
+
+    fun hangup() {
+        lifecycleLock.withLock {
+            val group = stateLock.withLock {
+                val previous = foregroundProcessGroupId
+                controllingSessionId = 0
+                foregroundProcessGroupId = 0
+                generation.fetchAndAdd(1)
+                previous
+            }
+            for (process in ProcessManager.snapshotProcesses()) {
+                if (process.controllingTerminal === this) process.controllingTerminal = null
+                if (group != 0 && process.processGroupId == group) {
+                    SignalRouter.sendProcess(null, process, SignalInfo(Signal.HANGUP, SignalInfo.KERNEL))
+                    SignalRouter.sendProcess(null, process, SignalInfo(Signal.CONTINUE, SignalInfo.KERNEL))
+                }
+            }
+            backend?.hangup(this)
         }
-        val detached = stateLock.withLock {
-            val previous = controllingSessionId
-            controllingSessionId = 0
-            foregroundProcessGroupId = 0
-            generation.fetchAndAdd(1)
-            previous
-        }
-        file.backend.hangup(this)
-        val leader = if (detached == 0) null else ProcessManager.findProcess(detached)
-        if (leader != null) {
-            SignalRouter.sendProcess(null, leader, SignalInfo(Signal.HANGUP, SignalInfo.KERNEL))
-            SignalRouter.sendProcess(null, leader, SignalInfo(Signal.CONTINUE, SignalInfo.KERNEL))
-        }
-        return Errno.EOK
+    }
+
+    override fun open(device: Device, caller: VfsOperationContext, options: OpenOptions): VfsResult<DeviceBackend> {
+        val result = open(device)
+        if (result is VfsResult.Ok && !options.noControllingTerminal && sessionId == 0) attachCurrentProcess()
+        return result
+    }
+
+    internal fun masterFile(): OpenFile = lifecycleLock.withLock {
+        OpenFile(this, checkNotNull(backend), generation.load(), true)
     }
 
     class OpenFile internal constructor(
         val session: TtySession,
         internal val backend: TtySessionBackend,
         private val generation: Long,
-    ) : PositionlessDeviceBackend {
+        internal val isMaster: Boolean = false,
+    ) : ModeAwareDeviceBackend {
+        override val readinessVersion: Int
+            get() = backend.readinessVersion + session.generation.load().toInt()
+
         val isHungUp: Boolean
             get() = generation != session.generation.load()
 
         override fun close(device: Device) = session.lifecycleLock.withLock {
             check(session.openCount > 0)
             session.openCount -= 1
+            backend.close(session)
         }
 
-        override fun ioctl(device: Device, command: Int, args: UserMemory): Long =
-            if (command == IoctlConstants.TIOCVHANGUP) {
-                control(command) { session.hangup(this) }.toLong()
-            } else {
-                backend.ioctl(this, command, args).toLong()
+        override fun ioctl(device: Device, command: Int, args: UserMemory): Long {
+            if (command != IoctlConstants.TIOCVHANGUP) return backend.ioctl(this, command, args).toLong()
+            if (isHungUp) return -Errno.EIO.toLong()
+            if (ProcessManager.currentThread()?.capabilities?.hasEffective(CapEnum.SYS_ADMIN) != true) {
+                return -Errno.EPERM.toLong()
             }
+            session.hangup()
+            return 0
+        }
 
         internal fun control(command: Int, action: () -> Int): Int = session.lifecycleLock.withLock {
             if (!isHungUp) action()
@@ -149,7 +181,7 @@ class TtySession(
         }
 
         override fun poll(device: Device, events: Int): Long = if (isHungUp) {
-            (PollEvents.DEFAULT_FILE_EVENTS or PollEvents.POLLERR or PollEvents.POLLHUP).toLong()
+            ((events and PollEvents.DEFAULT_FILE_EVENTS) or PollEvents.POLLERR or PollEvents.POLLHUP).toLong()
         } else {
             backend.poll(session, events).toLong()
         }
@@ -159,16 +191,41 @@ class TtySession(
             buffer: PreparedBufferDestination,
             bufferOffset: Int,
             size: ULong,
-        ): Long = if (isHungUp) 0 else backend.read(this, buffer, bufferOffset, size)
+            mode: IoMode,
+        ): Long {
+            if (isHungUp || size == 0uL) return 0
+            val error = checkBackground(Signal.TERMINAL_INPUT_STOP)
+            return if (error != 0) error.toLong() else backend.read(this, buffer, bufferOffset, size, mode)
+        }
 
         override fun write(
             device: Device,
             buffer: PreparedBufferSource,
             bufferOffset: Int,
             size: ULong,
-        ): Long = session.lifecycleLock.withLock {
-            if (isHungUp) -Errno.EIO.toLong()
-            else backend.write(session, buffer, bufferOffset, size)
+            mode: IoMode,
+        ): Long {
+            if (isHungUp) return -Errno.EIO.toLong()
+            val error = if (session.termios.cLflag and TermiosConstants.TOSTOP != 0) {
+                checkBackground(Signal.TERMINAL_OUTPUT_STOP)
+            } else 0
+            return if (error != 0) error.toLong() else backend.write(this, buffer, bufferOffset, size, mode)
+        }
+
+        internal fun checkBackground(signal: Signal): Int {
+            val thread = ProcessManager.currentThread() ?: return 0
+            val process = thread.process
+            if (isMaster || process.controllingTerminal !== session || process.processGroupId == session.foregroundProcessGroup) return 0
+            val ignored = thread.signals.mask and signal.bit != 0uL || process.signals.action(signal).isIgnored
+            if (ignored) return if (signal == Signal.TERMINAL_INPUT_STOP) -Errno.EIO else 0
+            val group = ProcessManager.processesInGroup(process.processGroupId)
+            val orphaned = group.none { member ->
+                val parent = ProcessManager.findProcess(member.parentId)
+                parent != null && parent.sessionId == process.sessionId && parent.processGroupId != process.processGroupId
+            }
+            if (orphaned) return -Errno.EIO
+            for (member in group) SignalRouter.sendProcess(null, member, SignalInfo(signal, SignalInfo.KERNEL))
+            return -Errno.EINTR
         }
     }
 
@@ -176,30 +233,30 @@ class TtySession(
         val processGroup = foregroundProcessGroup
         if (processGroup == 0) return
         val info = SignalInfo(signal, SignalInfo.KERNEL)
-        for (process in ProcessManager.snapshotProcesses()) {
-            if (process.processGroupId == processGroup) {
-                SignalRouter.sendProcess(null, process, info)
-            }
-        }
+        for (process in ProcessManager.processesInGroup(processGroup)) SignalRouter.sendProcess(null, process, info)
     }
 
-    fun attach(process: Process): Boolean = stateLock.withLock {
-        if (process.sessionId != process.id ||
-            controllingSessionId != 0 && controllingSessionId != process.sessionId
-        ) {
+    fun attach(process: Process, force: Boolean = false): Boolean = stateLock.withLock {
+        if (process.sessionId != process.id || process.controllingTerminal != null && process.controllingTerminal !== this) {
             return@withLock false
         }
+        if (controllingSessionId != 0 && controllingSessionId != process.sessionId) {
+            if (!force || ProcessManager.currentThread()?.capabilities?.hasEffective(CapEnum.SYS_ADMIN) != true) return@withLock false
+            for (member in ProcessManager.snapshotProcesses()) {
+                if (member.controllingTerminal === this) member.controllingTerminal = null
+            }
+            foregroundProcessGroupId = 0
+        }
         controllingSessionId = process.sessionId
-        if (foregroundProcessGroupId == 0) {
-            foregroundProcessGroupId = process.processGroupId
+        if (foregroundProcessGroupId == 0) foregroundProcessGroupId = process.processGroupId
+        for (member in ProcessManager.snapshotProcesses()) {
+            if (member.sessionId == process.sessionId) member.controllingTerminal = this
         }
         true
     }
 
-    fun attachCurrentProcess(): Boolean {
-        val process = ProcessManager.currentProcess() ?: return false
-        return attach(process)
-    }
+    fun attachCurrentProcess(force: Boolean = false): Boolean =
+        ProcessManager.currentProcess()?.let { attach(it, force) } == true
 
     fun setForegroundProcessGroup(process: Process, processGroup: Int): Boolean {
         if (processGroup <= 0) {
@@ -222,15 +279,23 @@ class TtySession(
 
     fun detachCurrentProcess(): Boolean {
         val process = ProcessManager.currentProcess() ?: return false
-        return stateLock.withLock {
-            if (controllingSessionId != process.sessionId) {
-                return@withLock false
+        if (process.controllingTerminal !== this) return false
+        if (process.id != process.sessionId) {
+            process.controllingTerminal = null
+            return true
+        }
+        signalForeground(Signal.HANGUP)
+        signalForeground(Signal.CONTINUE)
+        stateLock.withLock {
+            for (member in ProcessManager.snapshotProcesses()) {
+                if (member.controllingTerminal === this) member.controllingTerminal = null
             }
             controllingSessionId = 0
             foregroundProcessGroupId = 0
-            true
         }
+        return true
     }
+
 }
 
 abstract class TtyDevice : PositionlessDeviceBackend {
@@ -255,8 +320,7 @@ abstract class TtyDevice : PositionlessDeviceBackend {
 
 internal object ControllingTty : TtyDevice() {
     override fun open(device: Device): VfsResult<DeviceBackend> {
-        val sessionId = ProcessManager.currentProcess()?.sessionId
-        val session = TtyManager.sessions.firstOrNull { sessionId != 0 && it.sessionId == sessionId }
+        val session = ProcessManager.currentProcess()?.controllingTerminal
         return session?.open(device) ?: VfsResult.Err(VfsError.NO_SUCH_DEVICE_OR_ADDRESS)
     }
 }

@@ -11,6 +11,7 @@ import org.plos_clan.cpos.drivers.DeviceType
 import org.plos_clan.cpos.drivers.LinuxDeviceMajor
 import org.plos_clan.cpos.fs.sysfs.SysfsDevicePublication
 import org.plos_clan.cpos.fs.sysfs.SysfsTextAttribute
+import org.plos_clan.cpos.fs.vfs.DeviceNumber
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.tasks.Process
@@ -75,9 +76,8 @@ object TtyManager {
         systemConsole?.attach(process) == true
 
     fun processTerminal(process: Process): ProcessTerminal? {
-        val session = sessions.firstOrNull { it.sessionId == process.sessionId } ?: return null
-        val device = DeviceManager.findByBackend(session) ?: return null
-        return ProcessTerminal(device.number.value, session.foregroundProcessGroup)
+        val session = process.controllingTerminal ?: return null
+        return ProcessTerminal(session.deviceNumber, session.foregroundProcessGroup)
     }
 
     fun initialize(): Boolean {
@@ -105,6 +105,7 @@ object TtyManager {
         val endpointSessions = endpoints.map { endpoint ->
             endpoint to TtySession(
                 createBackend = endpoint.createBackend,
+                deviceNumber = checkNotNull(DeviceNumber.create(endpoint.major, endpoint.minor)).value,
                 inputSpeed = endpoint.inputSpeed,
                 outputSpeed = endpoint.outputSpeed,
             )

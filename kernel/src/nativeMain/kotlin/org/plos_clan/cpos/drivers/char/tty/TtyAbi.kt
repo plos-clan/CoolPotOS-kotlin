@@ -5,7 +5,6 @@ import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.TermiosConstants
 
 private const val NCCS = 19
-private const val TERMIOS2_NCCS = NCCS
 
 object IoctlConstants {
     const val TCGETS = 0x5401
@@ -95,6 +94,7 @@ object IoctlConstants {
     const val TIOCGPTLCK = 0x80045439
 
     const val TIOCGEXCL = 0x80045440
+    const val TIOCGPTPEER = 0x5441
 }
 
 data class WinSize(
@@ -126,7 +126,7 @@ data class WinSize(
     }
 }
 
-class Termios(
+open class Termios(
     var cIflag: Int,    /* input mode flags */
     var cOflag: Int,    /* output mode flags */
     var cCflag: Int,    /* control mode flags */
@@ -178,6 +178,10 @@ class Termios(
         return true
     }
 
+    fun character(index: Int): Int = cCc[index].toInt() and 0xFF
+
+    fun matches(index: Int, value: Int): Boolean = value != 0 && character(index) == value
+
     companion object {
         fun defaults() = Termios(
             cIflag = TermiosConstants.BRKINT or TermiosConstants.ICRNL or TermiosConstants.IXON,
@@ -211,61 +215,37 @@ class Termios(
 }
 
 class Termios2(
-    var cIflag: Int,
-    var cOflag: Int,
-    var cCflag: Int,
-    var cLflag: Int,
-    var cLine: Byte,
-    var cCc: ByteArray,
-    var cIspeed: Int,   /* input speed */
-    var cOspeed: Int    /* output speed */
-) : NativeStruct {
+    cIflag: Int,
+    cOflag: Int,
+    cCflag: Int,
+    cLflag: Int,
+    cLine: Byte,
+    cCc: ByteArray,
+    var cIspeed: Int,
+    var cOspeed: Int,
+) : Termios(cIflag, cOflag, cCflag, cLflag, cLine, cCc) {
     constructor(termios: Termios, inputSpeed: Int = 0, outputSpeed: Int = inputSpeed) : this(
         termios.cIflag, termios.cOflag, termios.cCflag, termios.cLflag,
         termios.cLine, termios.cCc.copyOf(), inputSpeed, outputSpeed,
     )
 
-    init {
-        require(cCc.size == TERMIOS2_NCCS) { "c_cc length must be $TERMIOS2_NCCS" }
-    }
-
-    override fun toNativeBytes(): ByteArray {
-        require(cCc.size == TERMIOS2_NCCS) { "c_cc length must be $TERMIOS2_NCCS" }
-
-        return ByteArray(NATIVE_SIZE).also { buffer ->
-            val output = LittleEndianBuffer(buffer)
-            output.writeU32(0, cIflag.toUInt())
-            output.writeU32(4, cOflag.toUInt())
-            output.writeU32(8, cCflag.toUInt())
-            output.writeU32(12, cLflag.toUInt())
-            buffer[LINE_OFFSET] = cLine
-            cCc.copyInto(buffer, destinationOffset = CONTROL_CHARACTERS_OFFSET)
-            output.writeU32(INPUT_SPEED_OFFSET, cIspeed.toUInt())
-            output.writeU32(OUTPUT_SPEED_OFFSET, cOspeed.toUInt())
+    override fun toNativeBytes(): ByteArray = super.toNativeBytes().copyOf(NATIVE_SIZE).also {
+        LittleEndianBuffer(it).apply {
+            writeU32(Termios.NATIVE_SIZE, cIspeed.toUInt())
+            writeU32(Termios.NATIVE_SIZE + Int.SIZE_BYTES, cOspeed.toUInt())
         }
     }
 
     override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
-        if (buffer.size != NATIVE_SIZE) {
-            return false
-        }
+        if (buffer.size != NATIVE_SIZE) return false
+        super.updateFromNativeBytes(buffer.copyOf(Termios.NATIVE_SIZE))
         val input = LittleEndianBuffer(buffer)
-        cIflag = input.readU32(0).toInt()
-        cOflag = input.readU32(4).toInt()
-        cCflag = input.readU32(8).toInt()
-        cLflag = input.readU32(12).toInt()
-        cLine = buffer[LINE_OFFSET]
-        cCc = buffer.copyOfRange(CONTROL_CHARACTERS_OFFSET, INPUT_SPEED_OFFSET)
-        cIspeed = input.readU32(INPUT_SPEED_OFFSET).toInt()
-        cOspeed = input.readU32(OUTPUT_SPEED_OFFSET).toInt()
+        cIspeed = input.readU32(Termios.NATIVE_SIZE).toInt()
+        cOspeed = input.readU32(Termios.NATIVE_SIZE + Int.SIZE_BYTES).toInt()
         return true
     }
 
     companion object {
-        private const val LINE_OFFSET = 16
-        private const val CONTROL_CHARACTERS_OFFSET = 17
-        private const val INPUT_SPEED_OFFSET = CONTROL_CHARACTERS_OFFSET + TERMIOS2_NCCS
-        private const val OUTPUT_SPEED_OFFSET = INPUT_SPEED_OFFSET + Int.SIZE_BYTES
-        const val NATIVE_SIZE = OUTPUT_SPEED_OFFSET + Int.SIZE_BYTES
+        const val NATIVE_SIZE = Termios.NATIVE_SIZE + 2 * Int.SIZE_BYTES
     }
 }

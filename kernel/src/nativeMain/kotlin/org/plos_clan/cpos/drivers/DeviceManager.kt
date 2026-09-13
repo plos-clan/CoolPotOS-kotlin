@@ -5,17 +5,20 @@
 
 package org.plos_clan.cpos.drivers
 
+import kotlin.concurrent.atomics.AtomicBoolean
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.sysfs.Sysfs
 import org.plos_clan.cpos.fs.sysfs.SysfsDevicePublication
 import org.plos_clan.cpos.fs.vfs.DeviceNumber
+import org.plos_clan.cpos.fs.vfs.IoMode
+import org.plos_clan.cpos.fs.vfs.OpenOptions
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.IrqSpinLock
-import kotlin.concurrent.atomics.AtomicBoolean
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 enum class DeviceType {
     CHARACTER,
@@ -32,6 +35,9 @@ enum class LinuxDeviceMajor(val number: UInt) {
 
 interface DeviceBackend {
     fun open(device: Device): VfsResult<DeviceBackend> = VfsResult.Ok(this)
+
+    fun open(device: Device, caller: VfsOperationContext, options: OpenOptions): VfsResult<DeviceBackend> =
+        open(device)
 
     fun close(device: Device) {}
 
@@ -93,6 +99,20 @@ interface PositionlessDeviceBackend : DeviceBackend {
 
 interface WaitablePositionlessDeviceBackend : PositionlessDeviceBackend {
     fun await(device: Device, event: DeviceIoEvent, count: Int): Boolean
+}
+
+interface ModeAwareDeviceBackend : PositionlessDeviceBackend {
+    val readinessVersion: Int
+        get() = 0
+
+    fun read(device: Device, buffer: PreparedBufferDestination, bufferOffset: Int, size: ULong, mode: IoMode): Long
+    fun write(device: Device, buffer: PreparedBufferSource, bufferOffset: Int, size: ULong, mode: IoMode): Long
+
+    override fun read(device: Device, buffer: PreparedBufferDestination, bufferOffset: Int, size: ULong): Long =
+        read(device, buffer, bufferOffset, size, IoMode.BLOCKING)
+
+    override fun write(device: Device, buffer: PreparedBufferSource, bufferOffset: Int, size: ULong): Long =
+        write(device, buffer, bufferOffset, size, IoMode.BLOCKING)
 }
 
 interface DiscardingDeviceBackend : PositionlessDeviceBackend {

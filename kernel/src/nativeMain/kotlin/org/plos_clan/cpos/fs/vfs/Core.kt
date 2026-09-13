@@ -350,6 +350,7 @@ data class OpenOptions(
     val directoryOnly: Boolean = false,
     val followFinalSymlink: Boolean = true,
     val nonBlocking: Boolean = false,
+    val noControllingTerminal: Boolean = false,
     val noAtime: Boolean = false,
     val resolution: PathResolution = PathResolution.DEFAULT,
 )

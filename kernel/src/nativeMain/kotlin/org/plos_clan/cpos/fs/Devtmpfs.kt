@@ -7,13 +7,16 @@ import org.plos_clan.cpos.drivers.DeviceManager
 import org.plos_clan.cpos.drivers.DeviceRegistryObserver
 import org.plos_clan.cpos.drivers.DeviceType
 import org.plos_clan.cpos.drivers.DiscardingDeviceBackend
+import org.plos_clan.cpos.drivers.ModeAwareDeviceBackend
 import org.plos_clan.cpos.drivers.PositionlessDeviceBackend
 import org.plos_clan.cpos.drivers.WaitablePositionlessDeviceBackend
 import org.plos_clan.cpos.fs.tmpfs.TmpfsFileSystemType
 import org.plos_clan.cpos.fs.tmpfs.TmpfsInstance
 import org.plos_clan.cpos.fs.tmpfs.TmpfsOptions
-import org.plos_clan.cpos.fs.vfs.DiscardingOpenFileBackend
+import org.plos_clan.cpos.fs.tmpfs.TmpfsSymlink
+import org.plos_clan.cpos.fs.vfs.Dentry
 import org.plos_clan.cpos.fs.vfs.DeviceNumber
+import org.plos_clan.cpos.fs.vfs.DiscardingOpenFileBackend
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FilePosition
 import org.plos_clan.cpos.fs.vfs.Inode
@@ -22,6 +25,7 @@ import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.IoEvent
 import org.plos_clan.cpos.fs.vfs.IoMode
 import org.plos_clan.cpos.fs.vfs.IoResult
+import org.plos_clan.cpos.fs.vfs.ModeAwareOpenFileBackend
 import org.plos_clan.cpos.fs.vfs.MountResource
 import org.plos_clan.cpos.fs.vfs.MountResourceProvider
 import org.plos_clan.cpos.fs.vfs.MutableInodeBackend
@@ -32,6 +36,7 @@ import org.plos_clan.cpos.fs.vfs.SuperBlock
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
+import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.fs.vfs.WaitableOpenFileBackend
 import org.plos_clan.cpos.mem.PreparedBufferDestination
@@ -47,6 +52,11 @@ private class DevtmpfsInstance(options: TmpfsOptions) :
     override fun createRoot(superBlock: SuperBlock): Inode {
         val inode = super.createRoot(superBlock)
         root = inode
+        installSpecialNode(inode,
+            listOf((VfsName.fromBytes("ptmx".encodeToByteArray()) as VfsResult.Ok).value),
+            TmpfsSymlink(VfsPathname.fromString("pts/ptmx")),
+            InodeMetadata(mode = FileMode(0x1FFu), size = 8uL),
+        )
         DeviceManager.observe(this)
         return inode
     }
@@ -106,7 +116,7 @@ internal class DeviceNode(
         val deviceType = if (type == InodeType.BLOCK_DEVICE) DeviceType.BLOCK else DeviceType.CHARACTER
         val device = DeviceManager.find(deviceType, number)
             ?: return VfsResult.Err(VfsError.NO_SUCH_DEVICE_OR_ADDRESS)
-        return when (val result = device.backend.open(device)) {
+        return when (val result = device.backend.open(device, caller, options)) {
             is VfsResult.Ok -> VfsResult.Ok(DeviceOpenFile.open(device, result.value))
             is VfsResult.Err -> result
         }
@@ -122,12 +132,43 @@ internal sealed class DeviceOpenFile(
     protected val backend: DeviceBackend,
 ) : OpenFileBackend, MountResourceProvider {
     companion object {
-        fun open(device: Device, backend: DeviceBackend): DeviceOpenFile = when (backend) {
+        fun open(device: Device, backend: DeviceBackend, peer: Dentry? = null): DeviceOpenFile = when (backend) {
+            is ModeAwareDeviceBackend -> ModeAware(device, backend, peer)
             is DiscardingDeviceBackend -> Discarding(device, backend)
             is WaitablePositionlessDeviceBackend -> Waitable(device, backend)
             is PositionlessDeviceBackend -> Positionless(device, backend)
             else -> Positioned(device, backend)
         }
+    }
+
+    private class ModeAware(
+        device: Device,
+        private val terminal: ModeAwareDeviceBackend,
+        override val peerDentry: Dentry?,
+    ) : DeviceOpenFile(device, terminal), ModeAwareOpenFileBackend {
+        override val readinessVersion: Int
+            get() = terminal.readinessVersion
+
+        override val supportsEpoll = true
+        override val seekable = false
+
+        override fun read(
+            caller: VfsOperationContext,
+            inode: Inode,
+            destination: PreparedBufferDestination,
+            destinationOffset: Int,
+            count: Int,
+            mode: IoMode,
+        ): IoResult = terminal.read(device, destination, destinationOffset, count.toULong(), mode).toIoResult(count)
+
+        override fun write(
+            caller: VfsOperationContext,
+            inode: Inode,
+            source: PreparedBufferSource,
+            sourceOffset: Int,
+            count: Int,
+            mode: IoMode,
+        ): IoResult = terminal.write(device, source, sourceOffset, count.toULong(), mode).toIoResult(count)
     }
 
     override fun ioctl(

@@ -22,6 +22,15 @@ class KernelMutex {
         }
     }
 
+    fun <T> tryWithLock(block: () -> T): T? {
+        val current = checkNotNull(ProcessManager.currentThread())
+        val acquired = stateLock.withLock {
+            if (owner != null) false else { owner = current; true }
+        }
+        if (!acquired) return null
+        return try { block() } finally { unlock() }
+    }
+
     private fun lock() {
         val current = checkNotNull(ProcessManager.currentThread()) {
             "A sleeping mutex requires a scheduled kernel thread"
