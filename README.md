@@ -74,7 +74,20 @@ CONSOLE=ttyS0,115200n8 QEMU_DISPLAY=none ./gradlew run
 QEMU's serial port is always connected to the current terminal. Its stdio
 multiplexer uses `Ctrl-A X` to exit and `Ctrl-A H` to show shortcut help.
 The default QEMU machine also exposes an RNDIS USB Ethernet adapter backed by
-QEMU user networking.
+QEMU user networking, which requires no host network setup. To attach the adapter
+to an existing host bridge instead, specify its interface name:
+
+```shell
+./gradlew run -PqemuBridge=virbr0
+QEMU_BRIDGE=virbr0 ./gradlew run
+```
+
+`-PqemuBridge` takes precedence over `QEMU_BRIDGE`. If neither has a nonblank
+value, QEMU uses the default user network. Bridge mode requires the bridge to
+exist and QEMU's bridge helper to be permitted to attach to it. Gradle does not
+create or configure the bridge. The guest obtains its address from that network's
+DHCP server, or can use a static address. On a host bridge with an IP address,
+the host can access the guest's address directly without port forwarding.
 
 You need to install:
 - Kotlin/Native (`konanc`, `cinterop`)
@@ -120,20 +133,16 @@ value for a build.
 | `XORRISO=xorriso`                                 | ISO creation executable.               |
 | `QEMU=qemu-system-x86_64`                         | QEMU executable.                       |
 | `QEMU_DISPLAY=gtk`                                | QEMU display frontend.                 |
+| `QEMU_BRIDGE`                                     | Existing host bridge interface (`-PqemuBridge`). Unset uses user networking. |
 | `KONAN_TOOLROOT=~/.konan/dependencies/xxx`        | Kotlin/Native GNU toolchain root.      |
 | `MLIBC_PREFIX=kernel/build/mlibc-x86_64/prefix`   | mlibc installation prefix.             |
 | `USERLAND_IMAGE=docker.io/cachyos/cachyos:latest` | OCI image used to build the rootfs.    |
 | `QEMU_CPU_SET=0-7`                                | Host CPU set passed to `taskset`.      |
 | `QEMU_MEMORY=2g`                                  | Guest memory passed to QEMU.           |
-| `QEMU_ACPI_TABLE_DIR`                             | Directory of SSDTs injected into QEMU. |
-| `QEMU_ACPI_TABLES`                                | Comma-separated SSDTs to inject.       |
 | `ACPI_AML_TABLE_DIR`                              | Firmware tables used by AML tests.     |
 
-`QEMU_ACPI_TABLE_DIR` must contain files named `ssdtN.dat`. By default, all
-matching files are injected in numeric order; `QEMU_ACPI_TABLES` restricts the
-selection to names such as `ssdt3.dat,ssdt5.dat`. `ACPI_AML_TABLE_DIR` enables
-the full firmware regression in `nativeTest` and must contain `dsdt.dat` plus
-`ssdt1.dat` through `ssdt17.dat`.
+`ACPI_AML_TABLE_DIR` enables the full firmware regression in `nativeTest` and
+must contain `dsdt.dat` plus `ssdt1.dat` through `ssdt17.dat`.
 
 ## Kernel coroutines
 

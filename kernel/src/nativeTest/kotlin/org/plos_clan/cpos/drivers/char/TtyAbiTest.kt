@@ -4,6 +4,7 @@ import org.plos_clan.cpos.drivers.char.tty.Termios
 import org.plos_clan.cpos.drivers.char.tty.Termios2
 import org.plos_clan.cpos.drivers.char.tty.WinSize
 import org.plos_clan.cpos.utils.LittleEndianBuffer
+import org.plos_clan.cpos.utils.TermiosConstants
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -12,6 +13,36 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class TtyAbiTest {
+    @Test
+    fun inputFlagsMatchLinuxAbi() {
+        val flags = with(TermiosConstants) {
+            intArrayOf(
+                IGNBRK, BRKINT, IGNPAR, PARMRK, INPCK, ISTRIP, INLCR, IGNCR,
+                ICRNL, IUCLC, IXON, IXANY, IXOFF, IMAXBEL, IUTF8,
+            )
+        }
+        assertContentEquals(IntArray(15) { 1 shl it }, flags)
+        assertEquals(0x8000, TermiosConstants.IEXTEN)
+        assertEquals(0x0502, Termios.defaults().cIflag)
+        assertEquals(0x803B, Termios.defaults().cLflag)
+    }
+
+    @Test
+    fun linuxPasswordModePreservesNewlineInput() {
+        val bytes = ByteArray(Termios2.NATIVE_SIZE)
+        LittleEndianBuffer(bytes).apply {
+            writeU32(0, 0x6502u)
+            writeU32(12, 0x8A33u)
+        }
+        val termios = Termios2(Termios.defaults())
+        assertTrue(termios.updateFromNativeBytes(bytes))
+        assertTrue(termios.cIflag and TermiosConstants.ICRNL != 0)
+        assertEquals(0, termios.cIflag and TermiosConstants.INLCR)
+        assertEquals(0, termios.cIflag and TermiosConstants.IGNCR)
+        assertTrue(termios.cLflag and TermiosConstants.ICANON != 0)
+        assertEquals(0, termios.cLflag and TermiosConstants.ECHO)
+    }
+
     @Test
     fun roundTripsWindowSize() {
         val original = WinSize(24, 80, 640, 480)

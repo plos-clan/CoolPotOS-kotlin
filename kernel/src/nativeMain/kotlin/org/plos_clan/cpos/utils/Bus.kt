@@ -52,21 +52,21 @@ object TermiosConstants {
     const val VLNEXT = 15
     const val VEOL2 = 16
 
-    const val IGNBRK = 0x0000001
-    const val BRKINT = 0x0000002
-    const val IGNPAR = 0x0000004
-    const val PARMRK = 0x0000010
-    const val INPCK = 0x0000020
-    const val ISTRIP = 0x0000040
-    const val INLCR = 0x0000100
-    const val IGNCR = 0x0000200
-    const val ICRNL = 0x0000400
-    const val IUCLC = 0x0001000
-    const val IXON = 0x0002000
-    const val IXANY = 0x0004000
-    const val IXOFF = 0x0010000
-    const val IMAXBEL = 0x0020000
-    const val IUTF8 = 0x0040000
+    const val IGNBRK = 0x0001
+    const val BRKINT = 0x0002
+    const val IGNPAR = 0x0004
+    const val PARMRK = 0x0008
+    const val INPCK = 0x0010
+    const val ISTRIP = 0x0020
+    const val INLCR = 0x0040
+    const val IGNCR = 0x0080
+    const val ICRNL = 0x0100
+    const val IUCLC = 0x0200
+    const val IXON = 0x0400
+    const val IXANY = 0x0800
+    const val IXOFF = 0x1000
+    const val IMAXBEL = 0x2000
+    const val IUTF8 = 0x4000
 
     const val OPOST = 0x000001
     const val OLCUC = 0x000002
@@ -97,7 +97,7 @@ object TermiosConstants {
     const val ECHONL = 0x000040
     const val NOFLSH = 0x000080
     const val TOSTOP = 0x000100
-    const val IEXTEN = 0x010000
+    const val IEXTEN = 0x008000
 }
 
 object PollEvents {

@@ -241,7 +241,6 @@ private class KernelConfig(
     paths: BuildPaths,
     mlibc: MlibcConfig,
     vdso: VdsoConfig,
-    tools: ToolSettings,
     arch: String,
     debug: Boolean,
     toolRoot: File,
@@ -287,7 +286,6 @@ private class KernelConfig(
         "-u", "sched_yield", "-u", "frg_panic",
         "-T", paths.linkerScript.absolutePath,
     )
-    val linker = tools.linker
     val assemblyArgs = listOf("-target", "$arch-freestanding")
 }
 
@@ -296,8 +294,6 @@ private data class QemuConfig(
     val cpuSet: String,
     val flags: List<String>,
 )
-
-private val SSDT_FILE_PATTERN = Regex("ssdt\\d+\\.dat", RegexOption.IGNORE_CASE)
 
 private class BuildConfig(private val project: Project) {
     val arch = "x86_64"
@@ -333,7 +329,7 @@ private class BuildConfig(private val project: Project) {
     )
     val vdso = VdsoConfig(paths, tools, arch)
     private val rootfsName = "rootfs-$arch.erofs"
-    val kernel = KernelConfig(paths, mlibc, vdso, tools, arch, debug, toolRoot)
+    val kernel = KernelConfig(paths, mlibc, vdso, arch, debug, toolRoot)
     val userland = UserlandConfig(
         image = setting(
             "userlandImage",
@@ -345,6 +341,7 @@ private class BuildConfig(private val project: Project) {
         script = paths.userlandScript,
         archive = paths.root.resolve("generated/userland/$rootfsName"),
     )
+    private val qemuBridge = optionalSetting("qemuBridge", "QEMU_BRIDGE")
     val qemu = QemuConfig(
         executable = tools.qemu,
         cpuSet = setting("qemuCpuSet", "QEMU_CPU_SET", "0-7"),
@@ -354,80 +351,25 @@ private class BuildConfig(private val project: Project) {
             "-no-reboot", "-smp", setting("qemuSmp", "QEMU_SMP", "4"),
             "-device", "qemu-xhci,id=xhci",
             "-device", "usb-kbd,bus=xhci.0", "-device", "usb-mouse,bus=xhci.0",
-            "-netdev", "user,id=usbnet",
+            "-netdev", qemuBridge?.let { "bridge,id=usbnet,br=$it" } ?: "user,id=usbnet",
             "-device", "usb-net,id=rndis,bus=xhci.0,netdev=usbnet",
             "-display", setting("qemuDisplay", "QEMU_DISPLAY", "gtk"),
             "-chardev", "stdio,id=console,mux=on,signal=off",
             "-serial", "chardev:console",
             "-drive",
             "if=pflash,format=raw,readonly=on,file=${paths.assets.resolve("ovmf-code.fd")}",
-        ) + qemuAcpiTableFlags(optionalSetting("qemuAcpiTableDir", "QEMU_ACPI_TABLE_DIR")) +
-            (if (debug) listOf("-s", "-S") else emptyList()) + listOf(
-                "-drive",
-                "file=${paths.isoImage.absolutePath},format=raw,snapshot=on",
-            ),
+        ) + (if (debug) listOf("-s", "-S") else emptyList()) + listOf(
+            "-drive",
+            "file=${paths.isoImage.absolutePath},format=raw,snapshot=on",
+        ),
     )
 
-    private fun setting(prop: String, env: String, default: String): String = listOfNotNull(
-        (project.findProperty(prop) as String?)?.takeIf(String::isNotBlank),
-        System.getenv(env)?.takeIf(String::isNotBlank),
-    ).firstOrNull() ?: default
+    private fun setting(prop: String, env: String, default: String): String =
+        optionalSetting(prop, env) ?: default
 
-    private fun optionalSetting(prop: String, env: String): String? = listOfNotNull(
-        (project.findProperty(prop) as String?)?.takeIf(String::isNotBlank),
-        System.getenv(env)?.takeIf(String::isNotBlank),
-    ).firstOrNull()
-
-    private fun qemuAcpiTableFlags(directoryPath: String?): List<String> {
-        if (directoryPath == null) {
-            return emptyList()
-        }
-
-        val directory = File(directoryPath)
-        if (!directory.isDirectory) {
-            throw GradleException("QEMU ACPI table directory does not exist: ${directory.absolutePath}")
-        }
-
-        val requestedNames = optionalSetting("qemuAcpiTables", "QEMU_ACPI_TABLES")
-            ?.split(',')
-            ?.map(String::trim)
-            ?.filter(String::isNotEmpty)
-
-        val files = if (requestedNames == null) {
-            directory.listFiles { file -> file.isFile && SSDT_FILE_PATTERN.matches(file.name) }
-                ?.sortedWith(compareBy<File> {
-                    it.nameWithoutExtension.lowercase().removePrefix("ssdt").toInt()
-                }
-                    .thenBy { it.name })
-                .orEmpty()
-        } else {
-            requestedNames.map { name ->
-                if (!SSDT_FILE_PATTERN.matches(name)) {
-                    throw GradleException(
-                        "QEMU_ACPI_TABLES only accepts ssdtN.dat names; got '$name'",
-                    )
-                }
-                val file = directory.resolve(name)
-                if (!file.isFile) {
-                    throw GradleException("Requested QEMU ACPI table does not exist: ${file.absolutePath}")
-                }
-                file
-            }
-        }
-
-        if (files.isEmpty()) {
-            throw GradleException("No ssdtN.dat files found in ${directory.absolutePath}")
-        }
-
-        return files.flatMap { file ->
-            if (file.length() > 0xFFFF) {
-                throw GradleException(
-                    "QEMU -acpitable cannot load ${file.name}: ${file.length()} bytes exceeds 65535",
-                )
-            }
-            listOf("-acpitable", "file=${file.absolutePath}")
-        }
-    }
+    private fun optionalSetting(prop: String, env: String): String? =
+        (project.findProperty(prop) as String?)?.takeIf(String::isNotBlank)
+            ?: System.getenv(env)?.takeIf(String::isNotBlank)
 
     private fun settingBoolean(prop: String, env: String, default: Boolean): Boolean =
         when (val value = setting(prop, env, default.toString()).lowercase()) {
@@ -466,7 +408,6 @@ kotlin {
         main.cinterops {
             create("bridge") {
                 defFile(config.paths.bridgeDef)
-                packageName("bridge")
                 includeDirs(
                     config.paths.kernelC,
                     config.paths.limineInclude,
@@ -650,17 +591,14 @@ tasks.matching { it.name == "cinteropBridgeNative" }.configureEach {
 val compileVdso = tasks.register<Exec>("compileVdso") {
     group = "build"
     description = "Compiles the userspace vDSO."
-    notCompatibleWithConfigurationCache("Creates a generated native image.")
     inputs.file(config.vdso.source)
     outputs.file(config.vdso.objectFile)
-    doFirst { config.paths.vdso.mkdirs() }
     commandLine(config.vdso.compileCommand)
 }
 
 val linkVdso = tasks.register<Exec>("linkVdso") {
     group = "build"
     description = "Links the userspace vDSO ELF image."
-    notCompatibleWithConfigurationCache("Creates a generated native image.")
     dependsOn(compileVdso)
     inputs.file(config.vdso.objectFile)
     inputs.file(config.vdso.linkerScript)
@@ -671,7 +609,6 @@ val linkVdso = tasks.register<Exec>("linkVdso") {
 val stripVdso = tasks.register<Exec>("stripVdso") {
     group = "build"
     description = "Removes link-time metadata from the vDSO image."
-    notCompatibleWithConfigurationCache("Creates a generated native image.")
     dependsOn(linkVdso)
     inputs.file(config.vdso.linkedImage)
     outputs.file(config.vdso.image)
@@ -681,7 +618,6 @@ val stripVdso = tasks.register<Exec>("stripVdso") {
 val embedVdso = tasks.register<Exec>("embedVdso") {
     group = "build"
     description = "Embeds the vDSO image into the kernel link."
-    notCompatibleWithConfigurationCache("Creates a generated native image.")
     dependsOn(stripVdso)
     inputs.file(config.vdso.image)
     outputs.file(config.vdso.blob)
@@ -804,7 +740,7 @@ val linkKernel = tasks.register<Exec>("linkKernel") {
     outputs.file(config.paths.kernelElf)
 
     val linkCommand = buildList {
-        add(config.kernel.linker)
+        add(config.tools.linker)
         addAll(config.kernel.linkArgs)
         add("-o")
         add(config.paths.kernelElf.absolutePath)
@@ -857,18 +793,14 @@ val buildIso = tasks.register<Exec>("buildIso") {
     inputs.dir(config.paths.iso)
     outputs.file(config.paths.isoImage)
 
-    val isoCommand = buildList {
-        add(config.tools.xorriso)
-        addAll(listOf(
-            "-as", "mkisofs",
-            "--efi-boot", "limine/limine-uefi-cd.bin",
-            "-efi-boot-part", "--efi-boot-image",
-        ))
-        add(config.paths.iso.absolutePath)
-        add("-o")
-        add(config.paths.isoImage.absolutePath)
-    }
-    commandLine(isoCommand)
+    commandLine(
+        config.tools.xorriso,
+        "-as", "mkisofs",
+        "--efi-boot", "limine/limine-uefi-cd.bin",
+        "-efi-boot-part", "--efi-boot-image",
+        config.paths.iso.absolutePath,
+        "-o", config.paths.isoImage.absolutePath,
+    )
 }
 
 tasks.register<Exec>("run") {

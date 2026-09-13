@@ -12,24 +12,18 @@ packages=(
     fuse2fs
     fuse-overlayfs
     python
-    dbus
-    dbus-broker
     dbus-broker-units
     networkmanager
     less
-    ethtool
+    dropbear
 )
 
 rootfs=$(mktemp -d)
-chmod 0755 "$rootfs"
 partial="$archive.part"
+trap 'rm -rf -- "$rootfs" "$partial"' EXIT
+
 keyring="$rootfs/etc/pacman.d/gnupg"
-
-cleanup() {
-    rm -rf "$rootfs" "$partial"
-}
-
-trap cleanup EXIT
+chmod 0755 "$rootfs"
 
 sed -i '/^\[cachyos\]$/i\
 [cachyos-v3]\
@@ -55,15 +49,15 @@ pacman -Sy \
     --disable-sandbox-network \
     "${packages[@]}"
 
-sed -i 's/^root:[^:]*:/root::/' "$rootfs/etc/shadow"
-grep -q '^root::' "$rootfs/etc/shadow"
-
+printf 'root:%s\n' '123456' | chroot "$rootfs" /usr/bin/chpasswd
 sed -i '/^hosts:/c\hosts: files dns' "$rootfs/etc/nsswitch.conf"
 grep -qx 'hosts: files dns' "$rootfs/etc/nsswitch.conf"
 
 install -d -m 0700 "$keyring"
 pacman-key --gpgdir "$keyring" --init
-pacman-key --gpgdir "$keyring" --populate archlinux cachyos
+pacman-key --gpgdir "$keyring" \
+    --populate-from "$rootfs/usr/share/pacman/keyrings" \
+    --populate archlinux cachyos
 gpgconf --homedir "$keyring" --kill all
 find "$keyring" -type s -delete
 
@@ -74,19 +68,16 @@ install -Dm644 /etc/pacman.d/cachyos-v3-mirrorlist "$rootfs/etc/pacman.d/cachyos
 
 rm -rf \
     "$rootfs/var/cache"/* \
-    "$rootfs/var/db" \
-    "$rootfs/var/log/pacman.log" \
+    "$rootfs/var/log"/* \
+    "$rootfs/var/tmp"/* \
     "$rootfs/usr/include" \
     "$rootfs/usr/lib/"{cmake,pkgconfig} \
-    "$rootfs/usr/share/"{aclocal,doc,factory,i18n,info} \
+    "$rootfs/usr/share/"{aclocal,doc,i18n,info} \
     "$rootfs/usr/share/"{licenses,locale,man,pixmaps,readline}
 
-find "$rootfs" -type f \( -name '*.a' -o -name '*.o' -o -name '*.debug' \) -delete
-rm -rf "$rootfs/var/log"/* "$rootfs/var/tmp"/*
-
+find "$rootfs/usr" -type f \( -name '*.a' -o -name '*.o' -o -name '*.debug' \) -delete
 cp -a --no-preserve=ownership /usr/local/share/cpos/rootfs/. "$rootfs/"
-
-systemctl --root="$rootfs" enable NetworkManager.service
+systemctl --root="$rootfs" enable NetworkManager.service dropbear.service
 
 mkfs.erofs \
     -x-1 \

@@ -2,20 +2,10 @@ plugins {
     base
 }
 
-tasks.named("assemble") {
-    dependsOn(":kernel:assemble")
-}
-
-tasks.named("check") {
-    dependsOn(":kernel:check")
-}
-
-tasks.named("build") {
-    dependsOn(":kernel:build")
-}
-
-tasks.named("clean") {
-    dependsOn(":kernel:clean")
+listOf("assemble", "check", "build", "clean").forEach { taskName ->
+    tasks.named(taskName) {
+        dependsOn(":kernel:$taskName")
+    }
 }
 
 tasks.register<Delete>("cleanAll") {
