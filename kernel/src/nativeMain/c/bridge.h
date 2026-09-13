@@ -3,6 +3,7 @@
 #include <limine.h>
 #include "os_terminal.h"
 #include "vdso.h"
+#include "context.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,6 +56,8 @@ void fast_handoff_request_user_interrupt(uint64_t task);
 bool fast_handoff_yield(void);
 bool fast_handoff_park_current(uint64_t deadline_ns);
 bool fast_handoff_unpark(uint64_t task);
+void fast_handoff_set_quantum(uint64_t task, uint64_t cycles);
+uint64_t fast_handoff_queue_size(uint64_t lapic_id);
 uint64_t fast_handoff_service(void);
 void fast_handoff_wake_bsp(void);
 void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence);
@@ -67,18 +70,6 @@ uint64_t fast_handoff_create_task(
     uint64_t kernel_fs_base,
     uint64_t quantum_cycles
 );
-void fast_handoff_init_user(
-    uint64_t task,
-    uint64_t entry,
-    uint64_t rsp,
-    uint64_t fs_base
-);
-void fast_handoff_init_user_registers(
-    uint64_t task,
-    const uint64_t *registers,
-    uint64_t rsp,
-    uint64_t fs_base
-);
 bool fast_handoff_bind_current(
     uint64_t task,
     uint64_t lapic_id,
@@ -86,12 +77,10 @@ bool fast_handoff_bind_current(
 );
 bool fast_handoff_finish_bootstrap(uint64_t task);
 bool fast_handoff_enqueue(uint64_t task, uint64_t lapic_id);
-void fast_handoff_set_enabled(uint8_t enabled);
 uint8_t fast_handoff_task_state(uint64_t task);
 void fast_handoff_set_task_state(uint64_t task, uint8_t state);
-uint64_t fast_handoff_current_task_id(void);
+uint64_t fast_handoff_current_task_handle(void);
 bool fast_handoff_replace_address_space(uint64_t task, uint64_t cr3);
-void fast_handoff_reset_user_xstate(void);
 bool runtime_vm_install(void *(*allocate)(size_t));
 extern void *(*const runtime_allocate_callback)(size_t);
 void *runtime_vm_take_released(void);
@@ -101,6 +90,19 @@ uint64_t runtime_clock_nanos(void);
 bool runtime_vdso_initialize(vdso_image_t *image);
 extern void (*ap_start_ptr)(struct limine_mp_info *);
 void *__rtld_allocateTcb(void);
+typedef struct {
+    uintptr_t allocation;
+    uint64_t task;
+    uint8_t created;
+    uint8_t owns_stack;
+} runtime_tls_t;
+runtime_tls_t *runtime_tls_owner(uintptr_t tcb);
+bool fast_handoff_task_has_exited(uint64_t task);
+bool runtime_tls_reclaimable(uintptr_t tcb);
+void runtime_tls_destroy(uintptr_t tcb);
+uint64_t fast_handoff_take_exited_runtime(void);
+_Noreturn void fast_handoff_exit_current(void);
+int munmap(void *pointer, size_t size);
 void asm_syscall_handle(void);
 
 void *malloc(size_t size);

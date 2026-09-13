@@ -464,6 +464,8 @@ long syscall(long number, ...) {
         break;
     }
     case SYS_exit:
+        set_runtime_use_mask(false);
+        fast_handoff_exit_current();
     case SYS_exit_group:
         for (;;)
             __asm__ volatile("hlt");

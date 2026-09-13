@@ -16,6 +16,7 @@ import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.acpi.aml.Aml
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.tasks.TaskReaper
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
@@ -94,8 +95,9 @@ object KernelCoroutines {
         val dispatcher = dispatcher
         while (true) {
             val wakeSequence = bridge.fast_handoff_service()
+            val pendingSwitch = TaskReaper.reapRuntime()
             dispatcher.runReadyBatch()
-            if (dispatcher.hasReadyWork()) {
+            if (pendingSwitch || dispatcher.hasReadyWork()) {
                 continue
             }
             bridge.fast_handoff_park_kotlin(

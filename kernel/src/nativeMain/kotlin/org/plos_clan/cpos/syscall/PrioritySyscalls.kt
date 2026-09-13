@@ -40,7 +40,7 @@ internal object PrioritySyscalls {
             val owner = target.process.credentials.userIds
             val error = when {
                 !privileged && uid != owner.real && uid != owner.effective -> Errno.EPERM
-                !target.priority.set(
+                !target.setPriority(
                     requested,
                     if (privileged) 0uL else target.process.resourceLimits.get(ProcessResource.NICE).soft,
                     privileged,

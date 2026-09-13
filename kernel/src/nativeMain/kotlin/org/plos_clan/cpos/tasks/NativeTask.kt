@@ -4,10 +4,16 @@
 package org.plos_clan.cpos.tasks
 
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.addressOf
+import kotlinx.cinterop.alignOf
+import kotlinx.cinterop.pointed
+import kotlinx.cinterop.ptr
+import kotlinx.cinterop.sizeOf
+import kotlinx.cinterop.toLong
+import kotlinx.cinterop.usePinned
+import kotlinx.cinterop.value
 import kotlinx.cinterop.IntVar
 import kotlinx.cinterop.ULongVar
-import kotlinx.cinterop.get
-import kotlinx.cinterop.set
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.INVALID_FRAME
@@ -17,14 +23,11 @@ import org.plos_clan.cpos.utils.toPointer
 import kotlin.native.internal.GCUnsafeCall
 import kotlin.native.internal.InternalForKotlinNative
 
-@GCUnsafeCall("calloc")
-private external fun allocateZeroed(count: ULong, size: ULong): ULong
-
 @GCUnsafeCall("memcpy")
 private external fun copyMemory(destination: ULong, source: ULong, size: ULong): ULong
 
-@GCUnsafeCall("kernel_tls_template")
-private external fun kernelTlsTemplate(): ULong
+@GCUnsafeCall("memset")
+private external fun clearMemory(destination: ULong, value: Int, size: ULong): ULong
 
 @GCUnsafeCall("allocate_runtime_tid")
 private external fun allocateRuntimeTid(): ULong
@@ -35,27 +38,18 @@ private external fun taskCpuTime(task: ULong): ULong
 @GCUnsafeCall("fast_handoff_task_has_exited")
 private external fun taskHasExited(task: ULong): Boolean
 
-@GCUnsafeCall("fast_handoff_destroy_task")
-private external fun destroyTask(task: ULong): Boolean
-
 @GCUnsafeCall("_ZN5mlibc28run_thread_local_destructorsEv")
 private external fun runThreadLocalDestructors()
 
 @GCUnsafeCall("deinitRuntimeIfNeeded")
 private external fun deinitializeRuntime()
 
-@GCUnsafeCall("fast_handoff_set_task_state")
-private external fun markNativeTaskExited(task: ULong, state: UByte)
-
-@GCUnsafeCall("fast_handoff_yield")
-private external fun yieldFromExitedTask(): Boolean
-
-@GCUnsafeCall("fast_handoff_idle")
-private external fun continueScheduling(): Nothing
+@GCUnsafeCall("fast_handoff_exit_current")
+private external fun exitCurrent(): Nothing
 
 internal class NativeTask private constructor(
     private var handle: ULong,
-    private val stack: KernelStack?,
+    private val stack: AutoCloseable?,
     private val runtime: Runtime?,
 ) : AutoCloseable {
     private val lock = IrqSpinLock()
@@ -69,28 +63,88 @@ internal class NativeTask private constructor(
     val cpuTimeNanos: ULong
         get() = access { if (it == 0uL) exitedCpuTime else taskCpuTime(it) }
 
+    fun resetUserXstate() = access { handle ->
+        val task = handle.toPointer<bridge.fast_task_t>()!!.pointed
+        val frame = (task.kernel_rsp - sizeOf<bridge.kernel_entry_frame_t>().toULong())
+            .toPointer<bridge.kernel_entry_frame_t>()!!.pointed
+        copyMemory(frame.xstate.ptr.toLong().toULong(), bridge.initial_xstate.ptr.toLong().toULong(), sizeOf<bridge.xstate_t>().toULong())
+    }
+
+    fun initializeUser(entry: ULong, rsp: ULong, fsBase: ULong, registers: ULongArray? = null) {
+        access { handle ->
+            val task = handle.toPointer<bridge.fast_task_t>()!!.pointed
+            val frameAddress = (task.kernel_rsp - sizeOf<bridge.kernel_entry_frame_t>().toULong()) and
+                (alignOf<bridge.kernel_entry_frame_t>().toULong() - 1uL).inv()
+            val frame = frameAddress.toPointer<bridge.kernel_entry_frame_t>()!!.pointed
+            val context = (frameAddress - sizeOf<bridge.switch_frame_t>().toULong())
+                .toPointer<bridge.switch_frame_t>()!!.pointed
+            clearMemory(context.ptr.toLong().toULong(), 0,
+                sizeOf<bridge.switch_frame_t>().toULong() + sizeOf<bridge.kernel_entry_frame_t>().toULong())
+            val regs = frame.regs
+            if (registers == null) {
+                regs.rip = entry
+                regs.ds = 0x1buL
+                regs.es = 0x1buL
+                regs.cs = 0x23uL
+                regs.ss = 0x1buL
+                regs.rflags = 0x202uL
+                copyMemory(frame.xstate.ptr.toLong().toULong(), bridge.initial_xstate.ptr.toLong().toULong(), sizeOf<bridge.xstate_t>().toULong())
+            } else {
+                registers.usePinned {
+                    copyMemory(regs.ptr.toLong().toULong(), it.addressOf(0).toLong().toULong(), sizeOf<bridge.pt_regs_t>().toULong())
+                }
+                val parent = bridge.fast_handoff_current_task_handle().toPointer<bridge.fast_task_t>()!!.pointed
+                val parentFrame = (parent.kernel_rsp - sizeOf<bridge.kernel_entry_frame_t>().toULong())
+                    .toPointer<bridge.kernel_entry_frame_t>()!!.pointed
+                copyMemory(frame.xstate.ptr.toLong().toULong(), parentFrame.xstate.ptr.toLong().toULong(), sizeOf<bridge.xstate_t>().toULong())
+            }
+            regs.rax = 0uL
+            regs.func = 0uL
+            regs.errcode = 0uL
+            regs.rsp = rsp
+            regs.fs_base = fsBase
+            context.rip = bridge.user_task_entry.toLong().toULong()
+            task.rsp = context.ptr.toLong().toULong()
+        }
+    }
+
     fun exit(): Nothing {
-        val task = access { it }
-        val zombie = TaskState.ZOMBIE.ordinal.toUByte()
         runThreadLocalDestructors()
         bridge.set_runtime_use_mask(false)
         bridge.irq_save()
         deinitializeRuntime()
-        markNativeTaskExited(task, zombie)
-        yieldFromExitedTask()
-        continueScheduling()
+        exitCurrent()
     }
 
     override fun close() {
-        lock.withLock {
+        val context = lock.withLock {
             val task = handle
             if (task == 0uL) return
             exitedCpuTime = taskCpuTime(task)
-            check(destroyTask(task)) { "Cannot release a scheduled task" }
+            val context = task.toPointer<bridge.fast_task_t>()!!
+            check(context.pointed.cpu == null || taskHasExited(task)) { "Cannot release a scheduled task" }
             handle = 0uL
+            context
         }
-        runtime?.close()
+        bridge.free(context)
         stack?.close()
+        runtime?.close()
+    }
+
+    internal fun reapRuntime(): Boolean {
+        if (!bridge.runtime_tls_reclaimable(checkNotNull(runtime).fsBase)) return false
+        close()
+        return true
+    }
+
+    private class RuntimeStack(private val tcb: ULong) : AutoCloseable {
+        override fun close() {
+            val owner = (tcb + TcbLayout.SIZE).toPointer<bridge.runtime_tls_t>()!!.pointed
+            if (owner.owns_stack == 0.toUByte()) return
+            val address = (tcb + TcbLayout.stackAddr).toPointer<ULongVar>()!!.pointed.value
+            val size = (tcb + TcbLayout.stackSize).toPointer<ULongVar>()!!.pointed.value
+            check(bridge.munmap(address.toPointer<ULongVar>(), size) == 0)
+        }
     }
 
     private class KernelStack private constructor(
@@ -112,45 +166,33 @@ internal class NativeTask private constructor(
         }
     }
 
-    private class Runtime(private val allocation: ULong, val fsBase: ULong) : AutoCloseable {
-        override fun close() = bridge.free(allocation.toPointer<ULongVar>())
+    private class Runtime(val fsBase: ULong) : AutoCloseable {
+        override fun close() = bridge.runtime_tls_destroy(fsBase)
 
         companion object {
             fun allocate(): Runtime? {
-                val template = kernelTlsTemplate().toPointer<ULongVar>()!!
-                val tlsAlign = template[3].coerceAtLeast(1uL)
-                val tlsSize = (template[2] + tlsAlign - 1uL) and (tlsAlign - 1uL).inv()
-                val alignment = maxOf(tlsAlign, TcbLayout.ALIGN, LocalKeysLayout.ALIGN)
-                val keysOffset = (TcbLayout.SIZE + LocalKeysLayout.ALIGN - 1uL) and
-                    (LocalKeysLayout.ALIGN - 1uL).inv()
-                val dtvOffset = keysOffset + LocalKeysLayout.SIZE
-                val allocation = allocateZeroed(1uL, tlsSize + alignment - 1uL + dtvOffset + ULong.SIZE_BYTES.toULong())
-                if (allocation == 0uL) return null
-                val tcb = (allocation + tlsSize + alignment - 1uL) and (alignment - 1uL).inv()
-                copyMemory(tcb - tlsSize, template[0], template[1])
-                (tcb + TcbLayout.selfPointer).toPointer<ULongVar>()!![0] = tcb
-                (tcb + TcbLayout.dtvSize).toPointer<ULongVar>()!![0] = if (tlsSize == 0uL) 0uL else 1uL
-                (tcb + TcbLayout.dtvPointers).toPointer<ULongVar>()!![0] = tcb + dtvOffset
-                (tcb + dtvOffset).toPointer<ULongVar>()!![0] = tcb - tlsSize
-                (tcb + TcbLayout.localKeys).toPointer<ULongVar>()!![0] = tcb + keysOffset
-                (tcb + TcbLayout.tid).toPointer<IntVar>()!![0] = allocateRuntimeTid().toInt()
-                val currentTcb = bridge.rdmsr(0xc0000100u)
-                (tcb + TcbLayout.stackCanary).toPointer<ULongVar>()!![0] =
-                    (currentTcb + TcbLayout.stackCanary).toPointer<ULongVar>()!![0]
-                return Runtime(allocation, tcb)
+                val pointer = bridge.__rtld_allocateTcb() ?: return null
+                val tcb = pointer.toLong().toULong()
+                (tcb + TcbLayout.tid).toPointer<IntVar>()!!.pointed.value = allocateRuntimeTid().toInt()
+                return Runtime(tcb)
             }
         }
     }
 
     companion object {
-        fun allocate(id: Int, cr3: ULong, stackPages: ULong = 0uL): NativeTask? {
+        internal fun adoptRuntime(handle: ULong): NativeTask {
+            val tcb = handle.toPointer<bridge.fast_task_t>()!!.pointed.kernel_fs_base
+            return NativeTask(handle, RuntimeStack(tcb), Runtime(tcb))
+        }
+
+        fun allocate(id: Int, cr3: ULong, stackPages: ULong = 0uL, nice: Int = 0): NativeTask? {
             val stack = if (stackPages == 0uL) null else KernelStack.allocate(stackPages) ?: return null
             var runtime: Runtime? = null
             var handle = 0uL
             try {
                 if (stack != null) runtime = Runtime.allocate() ?: return null
                 handle = bridge.fast_handoff_create_task(
-                    id.toUInt(), cr3, stack?.top ?: 0uL, runtime?.fsBase ?: 0uL, Scheduler.policy.quantumCycles,
+                    id.toUInt(), cr3, stack?.top ?: 0uL, runtime?.fsBase ?: 0uL, Scheduler.policy.quantumCycles(nice),
                 )
                 if (handle == 0uL) return null
                 return NativeTask(handle, stack, runtime)

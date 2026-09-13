@@ -15,7 +15,7 @@ internal class NicePriority(initial: Int = 0) {
         get() = 20 - value
 
     fun set(requested: Int, limit: ULong, privileged: Boolean): Boolean {
-        val replacement = requested.coerceIn(-20, 19)
+        val replacement = requested.coerceIn(MIN, MAX)
         val mayRaise = privileged || (20 - replacement).toULong() <= limit
         var observed = state.load()
         while (true) {
@@ -23,5 +23,10 @@ internal class NicePriority(initial: Int = 0) {
             if (replacement == observed || state.compareAndSet(observed, replacement)) return true
             observed = state.load()
         }
+    }
+
+    companion object {
+        const val MIN = -20
+        const val MAX = 19
     }
 }

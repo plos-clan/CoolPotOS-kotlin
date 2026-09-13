@@ -126,6 +126,7 @@ int pthread_key_create(uint32_t *key, void (*destructor)(void *));
 
 __attribute__((naked, noreturn)) void kernel_clone_thread_entry(void) {
     __asm__ volatile(
+        "sti\n"
         "popq %rax\n"
         "popq %rdi\n"
         "addq $8, %rsp\n"

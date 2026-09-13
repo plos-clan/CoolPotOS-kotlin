@@ -61,7 +61,7 @@ class PerCpuScheduler {
 
 object Scheduler {
     internal val policy by lazy(LazyThreadSafetyMode.NONE) {
-        RoundRobinPolicy(
+        WeightedRoundRobinPolicy(
             SMProcessor.locals.values.sortedWith(
                 compareBy<CpuLocal> { if (it.isBsp) 0 else 1 }.thenBy(CpuLocal::lapicId),
             ),
@@ -72,7 +72,6 @@ object Scheduler {
 
     fun initialize(): Boolean {
         if (!initializeCurrentCpu(ProcessManager.getBootstrapThread(), true)) return false
-        bridge.fast_handoff_set_enabled(1u.toUByte())
         bridge.fast_handoff_yield()
 
         val applicationProcessors = policy.processors.filterNot(CpuLocal::isBsp)
@@ -89,7 +88,7 @@ object Scheduler {
     }
 
     fun enqueueThread(thread: Thread) {
-        val target = policy.nextProcessor()
+        val target = policy.nextProcessor { bridge.fast_handoff_queue_size(it.lapicId.toULong()) }
         enqueueThreadOn(thread, target.lapicId.toUInt())
     }
 

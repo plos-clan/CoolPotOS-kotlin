@@ -285,6 +285,7 @@ private class KernelConfig(
         "-m", "elf_$arch", "-nostdlib", "--eh-frame-hdr",
         "-z", "max-page-size=0x1000", "--gc-sections",
         "-u", "sched_yield", "-u", "frg_panic", "-u", "pthread_exit",
+        "--wrap=__rtld_allocateTcb", "--wrap=pthread_create", "--wrap=pthread_join", "--wrap=pthread_detach",
         "-T", paths.linkerScript.absolutePath,
     )
 }
@@ -442,6 +443,17 @@ val generateRuntimeLayout = tasks.register("generateRuntimeLayout") {
             parentFile.mkdirs()
             writeText(source)
         }
+        runtimeLayout.get().file("runtime_layout.h").asFile.writeText(buildString {
+            appendLine("#pragma once")
+            var type = ""
+            source.lineSequence().forEach { line ->
+                if (line.startsWith("internal object ")) type = line.substringAfter("object ").substringBefore("Layout")
+                if (line.trimStart().startsWith("const val ")) {
+                    val declaration = line.substringAfter("const val ").replace(" = ", " ").removeSuffix("uL")
+                    appendLine("#define ${type}_$declaration")
+                }
+            }
+        })
     }
 }
 
@@ -480,6 +492,8 @@ kotlin {
                 includeDirs(
                     config.paths.kernelC,
                     config.paths.limineInclude,
+                    config.mlibc.prefix.resolve("include"),
+                    config.paths.mlibc.resolve("sysdeps/template/include"),
                     config.paths.freestandingInclude,
                 )
             }
@@ -654,10 +668,6 @@ val prepareLimine = tasks.register<Sync>("prepareLimine") {
     }
 }
 
-tasks.matching { it.name == "cinteropBridgeNative" }.configureEach {
-    dependsOn(prepareLimine, prepareFreestndHeaders)
-}
-
 compileRuntimeCallbacks.configure { dependsOn(prepareFreestndHeaders) }
 
 val compileVdso = tasks.register<Exec>("compileVdso") {
@@ -771,10 +781,14 @@ val buildMlibc = tasks.register("buildMlibc") {
 
 generateRuntimeLayout.configure { dependsOn(buildMlibc) }
 
+tasks.matching { it.name == "cinteropBridgeNative" }.configureEach {
+    dependsOn(prepareLimine, prepareFreestndHeaders, buildMlibc)
+}
+
 val compileC = tasks.register("compileC") {
     group = "build"
     description = "Compiles native sources into object files."
-    dependsOn(prepareLimine, prepareFreestndHeaders, buildMlibc)
+    dependsOn(prepareLimine, prepareFreestndHeaders, buildMlibc, generateRuntimeLayout)
     notCompatibleWithConfigurationCache("Runs an external compiler.")
 
     inputs.property("compiler", config.tools.cc)
@@ -784,6 +798,7 @@ val compileC = tasks.register("compileC") {
     inputs.files(
         config.paths.kernelC.resolve("bridge.h"),
         config.paths.kernelC.resolve("native.h"),
+        config.paths.kernelC.resolve("context.h"),
         config.paths.kernelC.resolve("os_terminal.h"),
         config.paths.kernelC.resolve("vdso.h"),
         config.paths.limineHeader,
@@ -791,6 +806,7 @@ val compileC = tasks.register("compileC") {
     ).withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.dir(config.paths.freestandingInclude)
         .withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.dir(runtimeLayout)
     outputs.dir(config.paths.cObjects)
 
     doLast {

@@ -9,8 +9,8 @@ import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.experimental.ExperimentalNativeApi
 import kotlin.native.ref.WeakReference
 import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.addressOf
-import kotlinx.cinterop.usePinned
+import kotlinx.cinterop.pointed
+import org.plos_clan.cpos.utils.toPointer
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.char.tty.TtySession
 import org.plos_clan.cpos.fs.FileDescriptorTable
@@ -263,6 +263,7 @@ class Thread internal constructor(
     private val scheduledCpu = AtomicLong(-1)
     private val parentDeathSignalNumber = AtomicInt(0)
     internal val priority = NicePriority(nice)
+
     internal var keys: KeyStore.Context? = null
 
     internal val hasTaskId: Boolean
@@ -272,6 +273,12 @@ class Thread internal constructor(
     internal var parentDeathSignal: Signal?
         get() = Signal.from(parentDeathSignalNumber.load())
         set(value) = parentDeathSignalNumber.store(value?.number ?: 0)
+
+    internal fun setPriority(requested: Int, limit: ULong, privileged: Boolean): Boolean = nativeTask.access { handle ->
+        if (!priority.set(requested, limit, privileged)) return@access false
+        if (handle != 0uL) bridge.fast_handoff_set_quantum(handle, Scheduler.policy.quantumCycles(priority.value))
+        true
+    }
 
     internal fun bindToCpu(lapicId: UInt) {
         val requested = lapicId.toLong()
@@ -303,7 +310,7 @@ class Thread internal constructor(
         fsBase: ULong = 0uL,
     ) {
         require(!process.isKernelProcess) { "Kernel process cannot own a user context" }
-        nativeTask.access { bridge.fast_handoff_init_user(it, entryPoint, stackPointer, fsBase) }
+        nativeTask.initializeUser(entryPoint, stackPointer, fsBase)
     }
 
     fun initializeUserContext(
@@ -313,11 +320,7 @@ class Thread internal constructor(
     ) {
         require(!process.isKernelProcess) { "Kernel process cannot own a user context" }
         require(registers.size == PtraceRegisters.REGISTER_COUNT)
-        registers.usePinned { snapshot ->
-            nativeTask.access {
-                bridge.fast_handoff_init_user_registers(it, snapshot.addressOf(0), stackPointer, fsBase)
-            }
-        }
+        nativeTask.initializeUser(0uL, stackPointer, fsBase, registers)
     }
 
     internal fun replaceAddressSpace(addressSpace: AddressSpace): Boolean =
@@ -617,7 +620,8 @@ object ProcessManager {
     fun getKernelProcess(): Process? = bootstrapThread?.process
 
     fun currentThread(): Thread? {
-        val id = bridge.fast_handoff_current_task_id()
+        val task = bridge.fast_handoff_current_task_handle().toPointer<bridge.fast_task_t>() ?: return null
+        val id = task.pointed.id.toULong()
         if (id > Int.MAX_VALUE.toULong()) {
             return null
         }
@@ -693,11 +697,12 @@ object ProcessManager {
         }
         var published = false
         var nativeTask: NativeTask? = null
+        val nice = creator?.priority?.value ?: 0
         try {
             val preparation = prepare(cgroup.id)
             if (preparation is VfsResult.Err) return preparation
             nativeTask = NativeTask.allocate(
-                cgroup.id, process.addressSpace.pageDirectory.pml4PhysicalAddress, kernelStackPages,
+                cgroup.id, process.addressSpace.pageDirectory.pml4PhysicalAddress, kernelStackPages, nice,
             ) ?: return VfsResult.Err(VfsError.NO_MEMORY)
             val thread = newThread(
                 process = process,
@@ -706,7 +711,7 @@ object ProcessManager {
                 signals = signals,
                 cgroup = cgroup,
                 pidHandle = pidHandle,
-                nice = creator?.priority?.value ?: 0,
+                nice = nice,
             ) {
                 if (registers == null) it.initializeUserContext(entryPoint, stackPointer, fsBase)
                 else it.initializeUserContext(registers, stackPointer, fsBase)
@@ -984,7 +989,7 @@ object ProcessManager {
     ): Thread {
         val id = cgroup?.id ?: if (process.threads.isEmpty()) process.id else nextTaskId.fetchAndAdd(1)
         val task = nativeTask ?: checkNotNull(NativeTask.allocate(
-            id, process.addressSpace.pageDirectory.pml4PhysicalAddress,
+            id, process.addressSpace.pageDirectory.pml4PhysicalAddress, nice = nice,
         ))
         try {
             val thread = Thread(

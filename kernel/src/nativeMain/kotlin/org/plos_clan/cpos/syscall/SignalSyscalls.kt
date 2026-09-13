@@ -969,7 +969,7 @@ private object SignalFrame {
         registers[PtraceRegisters.IDX_ERRCODE] = general(input, GENERAL_ERROR)
         registers[PtraceRegisters.IDX_FUNC] = PtraceRegisters.SIGNAL_RETURN
         if (xstate == null) {
-            bridge.fast_handoff_reset_user_xstate()
+            thread.nativeTask.resetUserXstate()
         } else if (!registers.restoreExtendedState(xstate)) {
             return null
         }
