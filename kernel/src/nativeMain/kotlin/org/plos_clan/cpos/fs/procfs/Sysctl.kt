@@ -9,6 +9,7 @@ import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.tasks.UtsNamespace
 import org.plos_clan.cpos.utils.BootIdentity
+import org.plos_clan.cpos.utils.KernelRandom
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
@@ -117,18 +118,26 @@ internal object ProcSysTree {
 
     private enum class RandomFile(
         override val fileName: String,
-    ) : ProcStaticEntry {
+    ) : ProcStaticEntry, ProcFSRender {
         BOOT_ID("boot_id"),
+        UUID("uuid"),
         ;
 
         override val inodeId: ULong
             get() = RandomDirectory.inodeId + ordinal.toULong() + 1uL
         override val type: InodeType
             get() = InodeType.REGULAR
-        private val content = "${BootIdentity.id}\n".encodeToByteArray()
 
         override fun create(fileSystem: ProcfsInstance, superBlock: SuperBlock): Inode =
-            fileSystem.text(superBlock, inodeId) { content }
+            fileSystem.text(superBlock, inodeId, render = ::render)
+
+        override fun render(): ByteArray {
+            val id = when (this) {
+                BOOT_ID -> BootIdentity.id
+                UUID -> KernelRandom.uuidV4()
+            }
+            return "$id\n".encodeToByteArray()
+        }
     }
 }
 
