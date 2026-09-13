@@ -2,6 +2,8 @@
 .equ task_kernel_rsp, 16
 .equ task_kernel_fs_base, 24
 .equ task_id, 32
+.equ task_state, 56
+.equ task_zombie, 3
 .equ task_elapsed, 64
 .equ task_started, 72
 .equ task_sequence, 80
@@ -66,6 +68,10 @@ fast_switch_to:
     incq task_sequence(%rdx)
     movq %rsp, (%r12)
     movq %r13, %rsp
+    cmpb $task_zombie, task_state(%r12)
+    jne .Lswitched
+    movq $0, (%r12)
+.Lswitched:
     popq %r15
     popq %r14
     popq %r13
@@ -74,6 +80,18 @@ fast_switch_to:
     popq %rbp
     ret
 .size fast_switch_to, .-fast_switch_to
+
+.global fast_handoff_task_has_exited
+.type fast_handoff_task_has_exited, @function
+fast_handoff_task_has_exited:
+    xorl %eax, %eax
+    cmpb $task_zombie, task_state(%rdi)
+    jne .Lexited
+    cmpq $0, (%rdi)
+    sete %al
+.Lexited:
+    ret
+.size fast_handoff_task_has_exited, .-fast_handoff_task_has_exited
 
 .global fast_handoff_task_cpu_time
 .type fast_handoff_task_cpu_time, @function

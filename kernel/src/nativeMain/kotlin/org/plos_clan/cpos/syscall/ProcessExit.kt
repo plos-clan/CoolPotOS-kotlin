@@ -71,8 +71,8 @@ internal object ProcessExit {
         if (lastThread) {
             process.alarm.replace(0u)
             process.signals.pending.discard(ULong.MAX_VALUE)
-            TaskReaper.enqueue(process)
         }
+        TaskReaper.enqueue(current, lastThread)
 
         val nativeContext = current.nativeContext
         val zombieState = TaskState.ZOMBIE.ordinal.toUByte()

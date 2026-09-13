@@ -34,7 +34,6 @@ import org.plos_clan.cpos.tasks.keys.Keys
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PtraceRegisters
-import org.plos_clan.cpos.utils.alignDown
 
 private const val DEFAULT_THREAD_STACK_PAGES = 64uL
 
@@ -256,10 +255,8 @@ class Thread internal constructor(
     val id: Int,
     val process: Process,
     internal val parentThread: Thread? = null,
-    val kernelStackTop: ULong = 0uL,
-    val kernelStackPhysicalBase: ULong = 0uL,
-    val kernelStackPages: ULong = 0uL,
-    val kernelFsBase: ULong = 0uL,
+    internal val kernelStack: KernelStack? = null,
+    kernelFsBase: ULong = 0uL,
     internal val signals: ThreadSignalState = process.signals.newThread(),
     var name: String = "",
     val affinityMask: ULong = 0UL,
@@ -299,7 +296,7 @@ class Thread internal constructor(
     val nativeContext: ULong = bridge.fast_handoff_create_task(
         id.toULong(),
         process.addressSpace.pageDirectory.pml4PhysicalAddress,
-        kernelStackTop,
+        kernelStack?.top ?: 0uL,
         kernelFsBase,
     ).also { handle ->
         require(handle != 0uL) { "Cannot allocate native context for thread $id" }
@@ -747,21 +744,16 @@ object ProcessManager {
         try {
             val preparation = prepare(cgroup.id)
             if (preparation is VfsResult.Err) return preparation
-            val stack = allocateKernelStack(
-                name = "process ${process.id} thread",
-                stackPages = kernelStackPages,
-            ) ?: return VfsResult.Err(VfsError.NO_MEMORY)
+            val stack = KernelStack.allocate(kernelStackPages) ?: return VfsResult.Err(VfsError.NO_MEMORY)
             val kernelFsBase = bridge.create_kernel_runtime_tcb()
             if (kernelFsBase == 0uL) {
-                BuddyFrameAllocator.free(stack.physicalBase, stack.pages)
+                stack.close()
                 return VfsResult.Err(VfsError.NO_MEMORY)
             }
             val thread = newThread(
                 process = process,
                 parentThread = parentThread,
-                kernelStackTop = stack.top,
-                kernelStackPhysicalBase = stack.physicalBase,
-                kernelStackPages = stack.pages,
+                kernelStack = stack,
                 kernelFsBase = kernelFsBase,
                 signals = signals,
                 cgroup = cgroup,
@@ -996,26 +988,6 @@ object ProcessManager {
         )
     }
 
-    private fun allocateKernelStack(name: String, stackPages: ULong): KernelStack? {
-        if (!BuddyFrameAllocator.isReady && !BuddyFrameAllocator.initialize()) {
-            println("ProcessManager: frame allocator unavailable for thread '$name'")
-            return null
-        }
-        if (!Hhdm.isReady && Hhdm.initialize() == null) {
-            println("ProcessManager: HHDM unavailable for thread '$name'")
-            return null
-        }
-
-        val pages = stackPages.takeIf { it != 0uL } ?: DEFAULT_THREAD_STACK_PAGES
-        val physicalBase = BuddyFrameAllocator.allocate(pages)
-        if (physicalBase == INVALID_FRAME) {
-            println("ProcessManager: failed to allocate stack for thread '$name'")
-            return null
-        }
-        val top = Hhdm.toVirtual(physicalBase + pages * PAGE_SIZE_BYTES).alignDown(16uL)
-        return KernelStack(physicalBase, pages, top)
-    }
-
     private fun newProcess(
         name: String,
         addressSpace: AddressSpace,
@@ -1044,9 +1016,7 @@ object ProcessManager {
     private fun newThread(
         process: Process,
         parentThread: Thread? = null,
-        kernelStackTop: ULong = 0uL,
-        kernelStackPhysicalBase: ULong = 0uL,
-        kernelStackPages: ULong = 0uL,
+        kernelStack: KernelStack? = null,
         kernelFsBase: ULong = 0uL,
         signals: ThreadSignalState? = null,
         cgroup: CgroupHierarchy.Task? = null,
@@ -1057,9 +1027,7 @@ object ProcessManager {
             id = cgroup?.id ?: if (process.threads.isEmpty()) process.id else nextTaskId.fetchAndAdd(1),
             process = process,
             parentThread = parentThread,
-            kernelStackTop = kernelStackTop,
-            kernelStackPhysicalBase = kernelStackPhysicalBase,
-            kernelStackPages = kernelStackPages,
+            kernelStack = kernelStack,
             kernelFsBase = kernelFsBase,
             signals = signals ?: process.signals.newThread(),
             cgroup = cgroup,
@@ -1073,10 +1041,23 @@ object ProcessManager {
     }
 }
 
-private data class KernelStack(
-    val physicalBase: ULong,
-    val pages: ULong,
-    val top: ULong,
-)
+internal class KernelStack private constructor(
+    private val physicalBase: ULong,
+    private val pages: ULong,
+) : AutoCloseable {
+    val top: ULong
+        get() = Hhdm.toVirtual(physicalBase + pages * PAGE_SIZE_BYTES)
+
+    override fun close() {
+        check(BuddyFrameAllocator.free(physicalBase, pages))
+    }
+
+    companion object {
+        fun allocate(pages: ULong): KernelStack? {
+            val physicalBase = BuddyFrameAllocator.allocate(pages)
+            return if (physicalBase == INVALID_FRAME) null else KernelStack(physicalBase, pages)
+        }
+    }
+}
 
 private const val NANOSECONDS_PER_USER_TICK = 10_000_000uL
