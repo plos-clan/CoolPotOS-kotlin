@@ -230,6 +230,8 @@ private enum class LinuxSyscall(
     MKNOD(133, ::mknod),
     STATFS(137, ::statfs),
     FSTATFS(138, ::fstatfs),
+    GETPRIORITY(140, PrioritySyscalls::get),
+    SETPRIORITY(141, PrioritySyscalls::set),
     PRCTL(157, ::prctl),
     ARCH_PRCTL(158, ::archPrctl),
     CHROOT(161, ::chroot),

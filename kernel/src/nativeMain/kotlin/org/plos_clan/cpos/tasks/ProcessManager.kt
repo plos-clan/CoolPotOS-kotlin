@@ -64,6 +64,13 @@ internal enum class ProcessGroupResult {
     NOT_PERMITTED,
 }
 
+// Linux getpriority/setpriority selectors, in ABI order.
+internal enum class TaskScope {
+    PROCESS,
+    PROCESS_GROUP,
+    USER,
+}
+
 internal class PidHandle private constructor(
     val scope: Scope,
     internal val fileIdentity: AnonymousFileIdentity,
@@ -256,9 +263,15 @@ class Thread internal constructor(
     val capabilities: CapabilityState = CapabilityState(),
     internal val cgroup: CgroupHierarchy.Task? = null,
     internal val pidFileIdentity: AnonymousFileIdentity,
+    nice: Int = 0,
 ) {
     private val scheduledCpu = AtomicLong(-1)
     private val parentDeathSignalNumber = AtomicInt(0)
+    internal val priority = NicePriority(nice)
+
+    internal val hasTaskId: Boolean
+        get() = !process.isKernelProcess && process.state != ProcessState.DEAD &&
+            (id == process.id || state != TaskState.ZOMBIE)
 
     internal var parentDeathSignal: Signal?
         get() = Signal.from(parentDeathSignalNumber.load())
@@ -705,7 +718,8 @@ object ProcessManager {
         if (process.isKernelProcess || entryPoint == 0uL || stackPointer == 0uL) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
-        val parent = currentThread()?.cgroup
+        val creator = currentThread()
+        val parent = creator?.cgroup
         val membership = Cgroups.lock.withLock {
             val id = if (process.threads.isEmpty()) process.id else nextTaskId.fetchAndAdd(1)
             placement?.fork(id, process.id, parent) ?: Cgroups.hierarchy.fork(id, process.id, parent)
@@ -737,6 +751,7 @@ object ProcessManager {
                 signals = signals,
                 cgroup = cgroup,
                 pidHandle = pidHandle,
+                nice = creator?.priority?.value ?: 0,
             )
             if (registers == null) thread.initializeUserContext(entryPoint, stackPointer, fsBase)
             else thread.initializeUserContext(registers, stackPointer, fsBase)
@@ -781,6 +796,23 @@ object ProcessManager {
     }
 
     fun findThread(tid: Int): Thread? = threadTableLock.withLock { threadTable[tid] }
+
+    internal fun forEachThread(scope: TaskScope, id: Int, action: (Thread) -> Unit) {
+        threadTableLock.withLock {
+            if (scope == TaskScope.PROCESS) {
+                threadTable[id]?.takeIf { it.hasTaskId }?.let(action)
+                return@withLock
+            }
+            for (thread in threadTable.values) {
+                val matches = when (scope) {
+                    TaskScope.PROCESS_GROUP -> thread.process.processGroupId == id
+                    TaskScope.USER -> thread.process.credentials.userIds.real == id
+                    TaskScope.PROCESS -> false
+                }
+                if (matches && thread.hasTaskId) action(thread)
+            }
+        }
+    }
 
     internal fun setParentDeathSignal(thread: Thread, signal: Signal?) {
         threadTableLock.withLock {
@@ -1001,6 +1033,7 @@ object ProcessManager {
         signals: ThreadSignalState? = null,
         cgroup: CgroupHierarchy.Task? = null,
         pidHandle: PidHandle? = null,
+        nice: Int = 0,
     ): Thread {
         val thread = Thread(
             id = cgroup?.id ?: if (process.threads.isEmpty()) process.id else nextTaskId.fetchAndAdd(1),
@@ -1013,6 +1046,7 @@ object ProcessManager {
             signals = signals ?: process.signals.newThread(),
             cgroup = cgroup,
             pidFileIdentity = pidHandle?.fileIdentity ?: AnonymousFileIdentity.create(),
+            nice = nice,
         )
         pidHandle?.attach(thread)
         process.addThread(thread)

@@ -103,6 +103,7 @@ internal enum class ProcessFile(val fileName: String) {
 fun Process.stat(): String {
     val terminal = TtyManager.processTerminal(this)
     val membership = this.membership
+    val nice = threads.firstOrNull()?.priority?.value ?: 0
     val fields = buildList {
         add(stateCode().toString())
         add(parentId.toString())
@@ -111,8 +112,8 @@ fun Process.stat(): String {
         add((terminal?.deviceNumber ?: 0uL).toString())
         add((terminal?.foregroundProcessGroup ?: -1).toString())
         repeat(9) { add("0") }
-        add("20") // priority
-        add("0") // nice
+        add((20 + nice).toString()) // priority
+        add(nice.toString())
         add(threads.count { it.state != TaskState.ZOMBIE }.toString())
         add("0") // itrealvalue
         add(startTimeTicks.toString())
