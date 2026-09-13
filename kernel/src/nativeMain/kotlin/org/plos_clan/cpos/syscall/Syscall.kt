@@ -102,6 +102,7 @@ import org.plos_clan.cpos.syscall.fs.writev
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.TaskState
+import org.plos_clan.cpos.tasks.keys.Keys
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
 import kotlin.experimental.ExperimentalNativeApi
@@ -268,6 +269,9 @@ private enum class LinuxSyscall(
     EPOLL_CTL(233, EpollSyscalls::control),
     TGKILL(234, SignalSyscalls::tgkill),
     WAITID(247, ::waitid, restartable = true),
+    ADD_KEY(248, KeySyscalls::add),
+    REQUEST_KEY(249, KeySyscalls::request, restartable = true),
+    KEYCTL(250, KeySyscalls::control),
     INOTIFY_INIT(253, InotifySyscalls::init),
     INOTIFY_ADD_WATCH(254, InotifySyscalls::addWatch),
     INOTIFY_RM_WATCH(255, InotifySyscalls::removeWatch),
@@ -348,6 +352,7 @@ object Syscall {
     fun syscallHandle(regs: PtraceRegisters) {
         val number = regs[PtraceRegisters.IDX_RAX]
         val thread = ProcessManager.currentThread()
+        if (thread != null) Keys.applyPendingSession(thread)
         if (number == Vdso.SIGNAL_GATEWAY_SYSCALL) {
             if (thread != null && SignalDelivery.deliverGateway(regs, thread)) return
             regs[PtraceRegisters.IDX_RAX] = errno(Errno.ENOSYS).toULong()
@@ -365,6 +370,7 @@ object Syscall {
             val process = thread?.process
             if (process == null) errno(Errno.ESRCH) else definition.handler(regs, process)
         }
+        if (thread != null) Keys.applyPendingSession(thread)
         val frameInstalled = regs.signalFrameInstalled
         if (!frameInstalled) regs[PtraceRegisters.IDX_RAX] = result.toULong()
         if (thread != null && thread.state != TaskState.ZOMBIE &&

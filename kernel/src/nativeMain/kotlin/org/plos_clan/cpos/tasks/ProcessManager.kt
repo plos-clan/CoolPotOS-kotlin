@@ -29,6 +29,8 @@ import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.tasks.cgroup.CgroupHierarchy
 import org.plos_clan.cpos.tasks.cgroup.CgroupPlacement
 import org.plos_clan.cpos.tasks.cgroup.Cgroups
+import org.plos_clan.cpos.tasks.keys.KeyStore
+import org.plos_clan.cpos.tasks.keys.Keys
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PtraceRegisters
@@ -269,6 +271,7 @@ class Thread internal constructor(
     private val scheduledCpu = AtomicLong(-1)
     private val parentDeathSignalNumber = AtomicInt(0)
     internal val priority = NicePriority(nice)
+    internal var keys: KeyStore.Context? = null
 
     internal val hasTaskId: Boolean
         get() = !process.isKernelProcess && process.state != ProcessState.DEAD &&
@@ -391,6 +394,9 @@ class Thread internal constructor(
             previousUserIds.filesystem != userIds.filesystem ||
             previousGroupIds.effective != groupIds.effective ||
             previousGroupIds.filesystem != groupIds.filesystem
+        if (previousUserIds.filesystem != userIds.filesystem || previousGroupIds.filesystem != groupIds.filesystem) {
+            Keys.updateIdentity(this)
+        }
         if (identityChanged && parentDeathSignal != null) {
             ProcessManager.setParentDeathSignal(this, null)
         }
@@ -398,6 +404,7 @@ class Thread internal constructor(
     }
 
     internal fun commitExecution(execution: Credentials.Execution) {
+        Keys.exec(this)
         updateCredentials { commitExec(execution) }
         capabilities.applyExec(execution)
         if (execution.privileged && parentDeathSignal != null) {
@@ -839,6 +846,7 @@ object ProcessManager {
     }
 
     internal fun notifyThreadExited(thread: Thread) {
+        Keys.exit(thread)
         Cgroups.exit(thread)
         val deliveries = threadTableLock.withLock {
             thread.parentThread?.let { parent ->

@@ -16,6 +16,7 @@ import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.Signal
 import org.plos_clan.cpos.tasks.SignalStack
+import org.plos_clan.cpos.tasks.keys.Keys
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -154,6 +155,7 @@ internal data class CloneRequest(
                 if (!threadClone) ProcessManager.discardUserProcess(child)
             }
             childThread.capabilities.inherit(current.capabilities)
+            Keys.fork(current, childThread)
             if (has(Flag.CHILD_CLEARTID)) childThread.clearChildTid = childTid
             descriptor?.install()
 

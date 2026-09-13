@@ -25,7 +25,7 @@ internal object SignalInterrupt : SignalPreemption {
 
     fun handle(frame: InterruptFrame) {
         val thread = ProcessManager.currentThread() ?: return
-        if (thread.hasPendingSignal() || thread.cgroup?.freezing == true) {
+        if (thread.hasPendingSignal() || thread.cgroup?.freezing == true || thread.keys?.hasPendingSession == true) {
             SignalGateway.redirectPending(frame, thread)
         }
     }
