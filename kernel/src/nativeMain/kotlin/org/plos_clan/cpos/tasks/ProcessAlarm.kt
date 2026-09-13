@@ -25,8 +25,6 @@ internal class ProcessAlarm(private val process: Process) {
             expiration.handle = KernelCoroutines.dispatcher.scheduleAt(deadline, expiration)
         }
 
-        // Linux rounds to the nearest second; an armed timer returns at least one,
-        // including an overdue timer whose callback has not run yet.
         if (previous == null) 0u
         else maxOf(1uL, (remaining + NANOS_PER_SECOND / 2u) / NANOS_PER_SECOND).toUInt()
     }
@@ -36,7 +34,6 @@ internal class ProcessAlarm(private val process: Process) {
 
         override fun run() {
             lock.withLock {
-                // Disposal cannot retract a callback already claimed by the dispatcher.
                 if (pending !== this) return
                 pending = null
                 SignalRouter.sendProcess(

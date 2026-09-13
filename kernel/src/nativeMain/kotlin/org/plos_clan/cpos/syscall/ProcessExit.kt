@@ -63,16 +63,10 @@ internal object ProcessExit {
 
         current.signals.pending.discard(ULong.MAX_VALUE)
         clearChildTid(current)
-        ProcessManager.notifyThreadExited(current)
         check(current.replaceAddressSpace(KernelPageDirectory.addressSpace)) {
             "exiting thread is not current"
         }
-        val lastThread = process.completeThreadExit(waitStatus)
-        if (lastThread) {
-            process.alarm.replace(0u)
-            process.signals.pending.discard(ULong.MAX_VALUE)
-        }
-        TaskReaper.enqueue(current, lastThread)
+        TaskReaper.enqueue(current, waitStatus)
 
         val nativeContext = current.nativeContext
         val zombieState = TaskState.ZOMBIE.ordinal.toUByte()

@@ -7,8 +7,10 @@ import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import kotlin.experimental.ExperimentalNativeApi
 import kotlin.native.internal.GCUnsafeCall
 import kotlin.native.internal.InternalForKotlinNative
+import kotlin.native.ref.WeakReference
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
@@ -66,7 +68,6 @@ internal enum class ProcessGroupResult {
     NOT_PERMITTED,
 }
 
-// Linux getpriority/setpriority selectors, in ABI order.
 internal enum class TaskScope {
     PROCESS,
     PROCESS_GROUP,
@@ -251,10 +252,11 @@ internal class ChildWaitQueue {
     }
 }
 
+@OptIn(ExperimentalNativeApi::class)
 class Thread internal constructor(
     val id: Int,
     val process: Process,
-    internal val parentThread: Thread? = null,
+    parentThread: Thread? = null,
     internal val kernelStack: KernelStack? = null,
     kernelFsBase: ULong = 0uL,
     internal val signals: ThreadSignalState = process.signals.newThread(),
@@ -265,6 +267,10 @@ class Thread internal constructor(
     internal val pidFileIdentity: AnonymousFileIdentity,
     nice: Int = 0,
 ) {
+    private val parent = parentThread?.let(::WeakReference)
+    internal val parentThread: Thread?
+        get() = parent?.get()
+
     private val scheduledCpu = AtomicLong(-1)
     private val parentDeathSignalNumber = AtomicInt(0)
     internal val priority = NicePriority(nice)
@@ -442,6 +448,7 @@ class Process internal constructor(
         val state: ProcessState = ProcessState.READY,
         val threads: List<Thread> = emptyList(),
         val liveThreads: Int = 0,
+        val exitedCpuTimeNanos: ULong = 0uL,
         val waitStatus: Int = 0,
     )
 
@@ -479,7 +486,7 @@ class Process internal constructor(
     val threads: List<Thread>
         get() = lifecycle.load().threads
     internal val cpuTimeNanos: ULong
-        get() = threads.sumOf { it.cpuTimeNanos }
+        get() = lifecycle.load().let { it.exitedCpuTimeNanos + it.threads.sumOf(Thread::cpuTimeNanos) }
     var commandLine: ByteArray = name.encodeToByteArray() + byteArrayOf(0)
         internal set
     internal val state: ProcessState
@@ -544,7 +551,9 @@ class Process internal constructor(
         return null
     }
 
-    internal fun completeThreadExit(waitStatus: Int): Boolean {
+    internal fun completeThreadExit(thread: Thread, waitStatus: Int): Boolean {
+        val retainLeader = thread.id == id
+        val cpuTime = if (retainLeader) 0uL else thread.cpuTimeNanos
         while (true) {
             val observed = lifecycle.load()
             check(observed.liveThreads > 0) { "process $id has no live thread to exit" }
@@ -555,7 +564,9 @@ class Process internal constructor(
             val beginExit = remaining == 0 && observed.state.canReceiveSignals
             val replacement = observed.copy(
                 state = if (beginExit) ProcessState.EXITING else observed.state,
+                threads = if (retainLeader) observed.threads else observed.threads - thread,
                 liveThreads = remaining,
+                exitedCpuTimeNanos = observed.exitedCpuTimeNanos + cpuTime,
                 waitStatus = if (beginExit) waitStatus else observed.waitStatus,
             )
             if (lifecycle.compareAndSet(observed, replacement)) return remaining == 0
@@ -837,10 +848,12 @@ object ProcessManager {
         }
     }
 
-    internal fun notifyThreadExited(thread: Thread) {
+    internal fun finishThreadExit(thread: Thread, waitStatus: Int) {
+        thread.kernelStack?.close()
         Keys.exit(thread)
         Cgroups.exit(thread)
         val deliveries = threadTableLock.withLock {
+            if (thread.id != thread.process.id) threadTable.remove(thread.id)
             thread.parentThread?.let { parent ->
                 parentDeathSubscribers[parent]?.let { subscribers ->
                     subscribers.remove(thread)
@@ -858,6 +871,8 @@ object ProcessManager {
                 info = SignalInfo.fromSender(signal, thread.process, SignalInfo.KERNEL),
             )
         }
+        val process = thread.process
+        if (process.completeThreadExit(thread, waitStatus)) finishExited(process)
     }
 
     fun snapshotProcesses(): List<Process> = processLock.withLock {
@@ -903,8 +918,10 @@ object ProcessManager {
         ProcessGroupResult.SUCCESS
     }
 
-    internal fun finishExited(process: Process) {
+    private fun finishExited(process: Process) {
         val waitStatus = process.requestedExitStatus
+        process.alarm.replace(0u)
+        process.signals.pending.discard(ULong.MAX_VALUE)
         if (process.id == process.sessionId) process.controllingTerminal?.hangup()
         process.releaseOwnedResources()
         val parent = processLock.withLock {
@@ -961,6 +978,7 @@ object ProcessManager {
             true
         }
         if (reaped) {
+            threadTableLock.withLock { threadTable.remove(child.id) }
             parent?.childEvents?.apply {
                 discard(child)
                 notifyChange()

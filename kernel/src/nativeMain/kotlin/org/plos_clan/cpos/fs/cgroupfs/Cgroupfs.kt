@@ -82,7 +82,7 @@ object Cgroupfs : FileSystemType("cgroup2", 0x63677270uL) {
         when (val result = super.createSuperBlock(source, options)) {
             is VfsResult.Ok -> {
                 shared = result.value
-                check(result.value.retain()) // The unified hierarchy outlives its mounts.
+                check(result.value.retain())
                 result
             }
             is VfsResult.Err -> result

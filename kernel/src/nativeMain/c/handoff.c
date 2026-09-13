@@ -915,8 +915,6 @@ __attribute__((used)) bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
     const bool deliver = (regs->cs & 3u) && cpu->current && handler &&
         __atomic_exchange_n(&cpu->current->user_interrupt_pending, false, __ATOMIC_ACQ_REL);
     if (deliver) {
-        // IRQ entry already installed kernel FS/GS. Never enter Kotlin from
-        // an interrupted kernel/GC frame; retain its request until user mode.
         initialize_xstate_header(xstate);
         save_xstate(xstate);
         restore_xstate(&initial_xstate);

@@ -15,14 +15,14 @@ import kotlin.native.internal.InternalForKotlinNative
 private external fun taskHasExited(task: ULong): Boolean
 
 object TaskReaper {
-    private class Exit(val thread: Thread, val lastThread: Boolean)
+    private class Exit(val thread: Thread, val waitStatus: Int)
 
     private val lock = IrqSpinLock()
     private val queued = ArrayDeque<Exit>()
     private lateinit var wakeup: KernelEvent
 
-    internal fun enqueue(thread: Thread, lastThread: Boolean) {
-        lock.withLock { queued.addLast(Exit(thread, lastThread)) }
+    internal fun enqueue(thread: Thread, waitStatus: Int) {
+        lock.withLock { queued.addLast(Exit(thread, waitStatus)) }
         wakeup.signal()
     }
 
@@ -39,8 +39,7 @@ object TaskReaper {
                 }
                 val thread = exit.thread
                 while (!taskHasExited(thread.nativeContext)) yield()
-                thread.kernelStack?.close()
-                if (exit.lastThread) ProcessManager.finishExited(thread.process)
+                ProcessManager.finishThreadExit(thread, exit.waitStatus)
                 yield()
             }
         }
