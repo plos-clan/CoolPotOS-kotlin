@@ -1,17 +1,18 @@
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+
 package org.plos_clan.cpos.fault
 
 import org.plos_clan.cpos.drivers.acpi.apic.IoApic
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.utils.IrqSpinLock
-import kotlin.experimental.ExperimentalNativeApi
+import kotlin.native.internal.ExportForCppRuntime
 
 internal const val IRQ_BASE_VECTOR = 0x20u
 internal const val IRQ_LAST_DEVICE_VECTOR = 0xEFu
 
-@ExperimentalNativeApi
 @Suppress("unused")
-@CName("do_irq")
+@ExportForCppRuntime("kotlin_do_irq")
 fun doIrqHandler(irqNum: ULong) = IrqController.doIrq(irqNum)
 
 typealias IrqHandler = () -> Unit

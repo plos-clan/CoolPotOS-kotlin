@@ -106,6 +106,7 @@ uint64_t fast_handoff_current_task_id(void);
 bool fast_handoff_replace_address_space(uint64_t task, uint64_t cr3);
 void fast_handoff_reset_user_xstate(void);
 bool runtime_vm_install(void *(*allocate)(size_t));
+extern void *(*const runtime_allocate_callback)(size_t);
 void *runtime_vm_take_released(void);
 uint64_t runtime_clock_initialize(uint64_t frequency);
 uint64_t runtime_clock_frequency(void);
@@ -127,6 +128,7 @@ void register_interrupt_handler(
     uint8_t ist,
     uint8_t flags
 );
+extern void (*const kotlin_exception_callbacks[])(void *, uint64_t, uint64_t, uint64_t);
 
 typedef struct {
     uint32_t eax;

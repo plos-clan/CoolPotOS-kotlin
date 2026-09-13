@@ -1,3 +1,4 @@
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
 @file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.drivers.char
@@ -23,11 +24,10 @@ import org.plos_clan.cpos.fault.IrqController
 import org.plos_clan.cpos.utils.ByteRingBuffer
 import org.plos_clan.cpos.utils.Cmdline
 import org.plos_clan.cpos.utils.IrqSpinLock
-import kotlin.experimental.ExperimentalNativeApi
+import kotlin.native.internal.ExportForCppRuntime
 
-@ExperimentalNativeApi
 @Suppress("unused")
-@CName("serial_print")
+@ExportForCppRuntime("kotlin_serial_print")
 fun serialPrint(buffer: CPointer<ByteVar>?, size: ULong) =
     KernelSerialConsole.write(buffer, size)
 

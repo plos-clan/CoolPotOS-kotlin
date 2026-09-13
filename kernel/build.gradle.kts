@@ -247,7 +247,7 @@ private class KernelConfig(
     val sources = listOf(
         "boot.c", "shim.c", "clock.c", "syscall.c", "gdt.c",
         "idt.c", "handoff.c", "smp.c", "tls.c", "zstd_bridge.c",
-    ).map(paths.kernelC::resolve) + paths.kernelAsm.resolve("task.S")
+    ).map(paths.kernelC::resolve) + listOf("task.S", "callback.S").map(paths.kernelAsm::resolve)
     val objects = sources.map { paths.cObjects.resolve("${it.nameWithoutExtension}.o") }
     val kotlinLinkTask = if (debug) "linkDebugStaticNative" else "linkReleaseStaticNative"
     val kotlinLibrary = paths.root.resolve(
@@ -380,6 +380,18 @@ private class BuildConfig(private val project: Project) {
 
 private val config = BuildConfig(project)
 
+val runtimeExports = layout.buildDirectory.file("runtime-exports.bc")
+val compileRuntimeExports = tasks.register<Exec>("compileRuntimeExports") {
+    val source = file("src/nativeMain/asm/runtime.ll")
+    inputs.file(source)
+    inputs.property("compiler", config.tools.cc)
+    outputs.file(runtimeExports)
+    commandLine(
+        config.tools.cc, "-c", "-emit-llvm", source.absolutePath,
+        "-o", runtimeExports.get().asFile.absolutePath,
+    )
+}
+
 kotlin {
     val hostOs = System.getProperty("os.name")
     val isArm64 = System.getProperty("os.arch") == "aarch64"
@@ -395,6 +407,11 @@ kotlin {
 
     nativeTarget.binaries.staticLib {
         baseName = "kernel"
+        freeCompilerArgs += listOf("-native-library", runtimeExports.get().asFile.absolutePath)
+        linkTaskProvider.configure {
+            dependsOn(compileRuntimeExports)
+            inputs.file(runtimeExports)
+        }
         if (buildType.debuggable) {
             freeCompilerArgs += listOf("-g", "-Xruntime-logs=gc=info")
         }

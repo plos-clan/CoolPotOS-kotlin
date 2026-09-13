@@ -1,3 +1,4 @@
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
 @file:OptIn(
     ExperimentalStdlibApi::class,
     NativeRuntimeApi::class,
@@ -6,6 +7,7 @@
 
 package org.plos_clan.cpos.mem
 
+import bridge.runtime_allocate_callback
 import bridge.runtime_vm_install
 import bridge.runtime_vm_take_released
 import kotlinx.cinterop.COpaquePointer
@@ -14,9 +16,9 @@ import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.reinterpret
-import kotlinx.cinterop.staticCFunction
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.toPointer
+import kotlin.native.internal.ExportForCppRuntime
 import kotlin.native.runtime.GC
 import kotlin.native.runtime.NativeRuntimeApi
 
@@ -43,7 +45,7 @@ internal object RuntimeMemory : FrameReclaimer {
             return false
         }
 
-        if (!runtime_vm_install(runtimeAllocateCallback)) {
+        if (!runtime_vm_install(runtime_allocate_callback)) {
             println("Runtime memory: failed to install the physical-memory provider")
             return false
         }
@@ -129,7 +131,6 @@ internal object RuntimeMemory : FrameReclaimer {
     }
 }
 
-private fun allocateRuntimeMemory(byteLength: ULong): COpaquePointer? =
+@ExportForCppRuntime("kotlin_runtime_allocate")
+fun allocateRuntimeMemory(byteLength: ULong): COpaquePointer? =
     RuntimeMemory.allocate(byteLength)
-
-private val runtimeAllocateCallback = staticCFunction(::allocateRuntimeMemory)

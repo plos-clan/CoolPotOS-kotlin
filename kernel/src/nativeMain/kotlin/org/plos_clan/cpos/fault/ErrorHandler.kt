@@ -1,7 +1,9 @@
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
 @file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.fault
 
+import bridge.kotlin_exception_callbacks
 import bridge.read_cr3
 import bridge.register_interrupt_handler
 import kotlinx.cinterop.COpaquePointer
@@ -9,7 +11,6 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.reinterpret
-import kotlinx.cinterop.staticCFunction
 import org.plos_clan.cpos.mem.addressspace.PageFaultResult
 import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.syscall.SignalGateway
@@ -22,6 +23,7 @@ import org.plos_clan.cpos.utils.InterruptFrame
 import org.plos_clan.cpos.utils.hex
 import org.plos_clan.cpos.utils.isCanonicalKernelAddress
 import org.plos_clan.cpos.utils.toPointer
+import kotlin.native.internal.ExportForCppRuntime
 
 private const val MAX_STACK_TRACE_DEPTH = 32
 private val MAX_STACK_WINDOW_BYTES = 1024uL * 1024uL
@@ -248,66 +250,35 @@ private fun handleUserException(
     haltOnFault(interruptFrame, errorCode, interruptedRbp, faultAddress, exception.displayName)
 }
 
-fun divideError(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
-    handleUserException(frame, ecode, rbp, faultAddress, UserException.DIVIDE)
-
-fun debugException(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
-    handleUserException(frame, ecode, rbp, faultAddress, UserException.DEBUG)
-
-fun breakpoint(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
-    handleUserException(frame, ecode, rbp, faultAddress, UserException.BREAKPOINT)
-
-fun overflow(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
-    handleUserException(frame, ecode, rbp, faultAddress, UserException.OVERFLOW)
-
-fun boundsCheck(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
-    handleUserException(frame, ecode, rbp, faultAddress, UserException.BOUNDS)
-
-fun invalidOpcode(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
-    handleUserException(frame, ecode, rbp, faultAddress, UserException.INVALID_OPCODE)
-
-fun generalProtectionFault(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
-    handleUserException(frame, ecode, rbp, faultAddress, UserException.GENERAL_PROTECTION)
-
-fun x87FloatingPoint(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
-    handleUserException(frame, ecode, rbp, faultAddress, UserException.X87_FLOATING_POINT)
-
-fun alignmentCheck(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
-    handleUserException(frame, ecode, rbp, faultAddress, UserException.ALIGNMENT)
-
-fun simdFloatingPoint(frame: COpaquePointer?, ecode: ULong, rbp: ULong, faultAddress: ULong) =
-    handleUserException(frame, ecode, rbp, faultAddress, UserException.SIMD_FLOATING_POINT)
+@ExportForCppRuntime("kotlin_handle_exception")
+fun handleException(
+    frame: COpaquePointer?,
+    errorCode: ULong,
+    rbp: ULong,
+    faultAddress: ULong,
+    vector: Int,
+) {
+    if (vector == PAGE_FAULT_VECTOR.toInt()) {
+        pageFault(frame, errorCode, rbp, faultAddress)
+        return
+    }
+    val exception = UserException.entries.first { it.vector.toInt() == vector }
+    handleUserException(frame, errorCode, rbp, faultAddress, exception)
+}
 
 object ErrorHandler {
     fun initialize() {
-        register_interrupt_handler(UserException.DIVIDE.vector, staticCFunction(::divideError), 0u, 142u)
-        register_interrupt_handler(UserException.DEBUG.vector, staticCFunction(::debugException), 0u, 142u)
-        register_interrupt_handler(UserException.BREAKPOINT.vector, staticCFunction(::breakpoint), 0u, 238u)
-        register_interrupt_handler(UserException.OVERFLOW.vector, staticCFunction(::overflow), 0u, 142u)
-        register_interrupt_handler(UserException.BOUNDS.vector, staticCFunction(::boundsCheck), 0u, 142u)
-        register_interrupt_handler(UserException.INVALID_OPCODE.vector, staticCFunction(::invalidOpcode), 0u, 142u)
+        for (exception in UserException.entries) {
+            register_interrupt_handler(
+                exception.vector,
+                kotlin_exception_callbacks[exception.vector.toInt()],
+                0u,
+                if (exception == UserException.BREAKPOINT) 238u else 142u,
+            )
+        }
         register_interrupt_handler(
-            UserException.GENERAL_PROTECTION.vector,
-            staticCFunction(::generalProtectionFault),
-            0u,
-            142u,
-        )
-        register_interrupt_handler(PAGE_FAULT_VECTOR, staticCFunction(::pageFault), 0u, 142u)
-        register_interrupt_handler(
-            UserException.X87_FLOATING_POINT.vector,
-            staticCFunction(::x87FloatingPoint),
-            0u,
-            142u,
-        )
-        register_interrupt_handler(
-            UserException.ALIGNMENT.vector,
-            staticCFunction(::alignmentCheck),
-            0u,
-            142u,
-        )
-        register_interrupt_handler(
-            UserException.SIMD_FLOATING_POINT.vector,
-            staticCFunction(::simdFloatingPoint),
+            PAGE_FAULT_VECTOR,
+            kotlin_exception_callbacks[PAGE_FAULT_VECTOR.toInt()],
             0u,
             142u,
         )
