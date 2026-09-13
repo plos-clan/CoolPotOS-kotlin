@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "bridge.h"
 #include "native.h"
 #include "syscall.h"
 
@@ -264,9 +265,7 @@ static long futex_wait(
         spin_unlock(&bucket->lock);
         irq_restore(interrupt_flags);
 
-        const bool parked = waiter.task && (time
-            ? fast_handoff_park_current_until(deadline)
-            : fast_handoff_park_current());
+        const bool parked = waiter.task && fast_handoff_park_current(deadline);
         if (!parked && !fast_handoff_yield()) cpu_relax();
     }
 }
@@ -411,12 +410,15 @@ static long write_call(int fd, const void *buffer, size_t count) {
 static long clone_call(void *stack, int *parent_tid, void *tls) {
     if (!stack || !parent_tid) return -EINVAL;
 
-    if (!capture_sys_clone_context((uintptr_t)stack, (uintptr_t)tls))
-        return -ENOMEM;
     const uint64_t tid = allocate_runtime_tid();
     if (tid > INT32_MAX) return -EAGAIN;
     *parent_tid = (int)tid;
-    return (long)tid;
+    const bool use_runtime = can_use_runtime();
+    if (use_runtime) set_runtime_use_mask(false);
+    const bool started = fast_handoff_start_runtime((uintptr_t)stack, (uintptr_t)tls);
+    if (use_runtime) set_runtime_use_mask(true);
+    if (!started) *parent_tid = 0;
+    return started ? (long)tid : -ENOMEM;
 }
 
 static long gettid_call(void) {

@@ -4,7 +4,6 @@ package org.plos_clan.cpos.tasks
 
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.tasks.cgroup.Cgroups
-import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
@@ -61,16 +60,22 @@ class PerCpuScheduler {
 }
 
 object Scheduler {
-    private val nextCpuIndex = AtomicInt(0)
-    private val schedulingCpus by lazy(LazyThreadSafetyMode.NONE) {
-        SMProcessor.locals.values.sortedWith(
-            compareBy<CpuLocal> { if (it.isBsp) 0 else 1 }
-                .thenBy(CpuLocal::lapicId),
+    internal val policy by lazy(LazyThreadSafetyMode.NONE) {
+        RoundRobinPolicy(
+            SMProcessor.locals.values.sortedWith(
+                compareBy<CpuLocal> { if (it.isBsp) 0 else 1 }.thenBy(CpuLocal::lapicId),
+            ),
+            bridge.runtime_clock_frequency(),
+            frequencyHz = 1_000u,
         )
     }
 
-    fun enableScheduler(): Boolean {
-        val applicationProcessors = schedulingCpus.filterNot(CpuLocal::isBsp)
+    fun initialize(): Boolean {
+        if (!initializeCurrentCpu(ProcessManager.getBootstrapThread(), true)) return false
+        bridge.fast_handoff_set_enabled(1u.toUByte())
+        bridge.fast_handoff_yield()
+
+        val applicationProcessors = policy.processors.filterNot(CpuLocal::isBsp)
         applicationProcessors.forEach { local ->
             if (local.scheduler.bootstrapThread == null) {
                 local.scheduler.bootstrapThread = ProcessManager.getNewApIdleThread()
@@ -79,13 +84,12 @@ object Scheduler {
         }
         if (applicationProcessors.any { !it.scheduler.waitUntilBound() }) return false
 
-        bridge.fast_handoff_set_enabled(1u.toUByte())
         applicationProcessors.forEach { it.scheduler.enable() }
         return true
     }
 
     fun enqueueThread(thread: Thread) {
-        val target = selectTargetCpu()
+        val target = policy.nextProcessor()
         enqueueThreadOn(thread, target.lapicId.toUInt())
     }
 
@@ -106,12 +110,12 @@ object Scheduler {
 
     fun parkCurrent(): Boolean {
         if (Cgroups.awaitThaw(ProcessManager.currentThread())) return true
-        return bridge.fast_handoff_park_current()
+        return bridge.fast_handoff_park_current(0uL)
     }
 
     fun parkCurrentUntil(deadlineNanos: ULong): Boolean {
         if (Cgroups.awaitThaw(ProcessManager.currentThread())) return true
-        return bridge.fast_handoff_park_current_until(deadlineNanos)
+        return deadlineNanos != 0uL && bridge.fast_handoff_park_current(deadlineNanos)
     }
 
     fun yieldCurrent(): Boolean = bridge.fast_handoff_yield()
@@ -125,9 +129,6 @@ object Scheduler {
         val thread = SMProcessor.currentLocal().scheduler.bootstrapThread
         return initializeCurrentCpu(thread, false) && finishBootstrap()
     }
-
-    fun initialize(): Boolean =
-        initializeCurrentCpu(ProcessManager.getBootstrapThread(), true)
 
     fun finishBootstrap(): Boolean {
         val local = SMProcessor.currentLocal()
@@ -157,14 +158,5 @@ object Scheduler {
             println("Scheduler: initialized policy=RRS-fast-handoff core=${local.lapicId}")
         }
         return true
-    }
-
-    private fun selectTargetCpu(): CpuLocal {
-        if (schedulingCpus.isEmpty()) {
-            return SMProcessor.currentLocal()
-        }
-
-        val index = nextCpuIndex.fetchAndAdd(1).toUInt() % schedulingCpus.size.toUInt()
-        return schedulingCpus[index.toInt()]
     }
 }

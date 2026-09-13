@@ -68,12 +68,13 @@ struct fast_task {
     uint64_t cr3;
     uint64_t kernel_rsp;
     uint64_t kernel_fs_base;
-    uint64_t id;
     union {
         fast_task_t *next;
         fast_sleep_t *sleep;
     };
     fast_cpu_t *cpu;
+    uint64_t quantum_cycles;
+    uint32_t id;
     uint8_t state;
     uint8_t queued;
     uint8_t wake_pending;
@@ -101,7 +102,6 @@ struct fast_cpu {
     fast_task_t *idle;
     fast_task_t *head;
     fast_task_t *tail;
-    uint64_t queue_size;
     uint8_t is_bsp;
     enum fast_cpu_state state;
     uint8_t lock;
@@ -112,10 +112,10 @@ struct fast_cpu {
 } __attribute__((aligned(64)));
 
 static fast_cpu_t fast_cpus[cpu_slot_count];
+static fast_task_t *runtime_tasks;
 static uint8_t handoff_enabled;
 static uint8_t lapic_x2apic;
 static uint64_t lapic_mmio_base;
-static uint64_t scheduler_tick_cycles;
 static uint64_t bsp_lapic_id = UINT64_MAX;
 static void (*user_interrupt_handler)(void *frame);
 
@@ -347,8 +347,7 @@ static void sleep_remove_locked(fast_task_t *task) {
 }
 
 static void update_scheduler_timer(fast_cpu_t *cpu) {
-    const bool preemptible = scheduler_tick_cycles &&
-        cpu->state == cpu_online && cpu->current != cpu->idle;
+    const bool preemptible = cpu->state == cpu_online && cpu->current != cpu->idle;
     if (!cpu->sleepers && !preemptible) {
         set_timer_deadline(cpu, 0);
         return;
@@ -357,8 +356,9 @@ static void update_scheduler_timer(fast_cpu_t *cpu) {
     const uint64_t now = read_tsc();
     uint64_t deadline = cpu->sleepers ? cpu->sleepers->deadline : 0;
     if (preemptible) {
-        const uint64_t tick = now > UINT64_MAX - scheduler_tick_cycles
-            ? UINT64_MAX : now + scheduler_tick_cycles;
+        const uint64_t quantum = cpu->current->quantum_cycles;
+        const uint64_t tick = now > UINT64_MAX - quantum
+            ? UINT64_MAX : now + quantum;
         if (!deadline || tick < deadline) deadline = tick;
     }
     if (deadline && cpu->timer_deadline > now &&
@@ -381,7 +381,6 @@ static bool queue_push(fast_cpu_t *cpu, fast_task_t *task) {
     if (cpu->tail) cpu->tail->next = task;
     else cpu->head = task;
     cpu->tail = task;
-    cpu->queue_size++;
     return true;
 }
 
@@ -401,7 +400,6 @@ static fast_task_t *queue_pop(fast_cpu_t *cpu) {
         fast_task_t *task = cpu->head;
         cpu->head = task->next;
         if (!cpu->head) cpu->tail = NULL;
-        cpu->queue_size--;
         task->next = NULL;
         task->queued = false;
         if (task_state_load(task) == task_ready) {
@@ -426,6 +424,17 @@ static enum fast_schedule_result fast_handoff_schedule(
     }
 
     lock_cpu(cpu);
+    if (__atomic_load_n(&runtime_tasks, __ATOMIC_ACQUIRE)) {
+        fast_task_t *task = __atomic_exchange_n(&runtime_tasks, NULL, __ATOMIC_ACQ_REL);
+        while (task) {
+            fast_task_t *next = task->next;
+            task->cr3 = cpu->idle->cr3;
+            task->quantum_cycles = cpu->idle->quantum_cycles;
+            task->cpu = cpu;
+            queue_push(cpu, task);
+            task = next;
+        }
+    }
     if (cpu->sleepers) wake_expired_locked(cpu, read_tsc());
     fast_task_t *previous = cpu->current;
     bool select_next = true;
@@ -560,12 +569,8 @@ void fast_handoff_request_user_interrupt(uint64_t handle) {
     interrupt_restore(flags);
 }
 
-bool fast_handoff_configure_timer(uint8_t vector, uint32_t frequency_hz) {
-    const uint64_t tsc_hz = runtime_clock_frequency();
-    if (vector != scheduler_vector || !frequency_hz || tsc_hz < frequency_hz)
-        return false;
-
-    scheduler_tick_cycles = (tsc_hz + frequency_hz - 1) / frequency_hz;
+bool fast_handoff_configure_timer(uint8_t vector) {
+    if (vector != scheduler_vector) return false;
     lapic_write(
         lapic_timer_register,
         vector | lapic_timer_tsc_deadline
@@ -585,28 +590,18 @@ bool fast_handoff_yield(void) {
     ) == schedule_switched;
 }
 
-bool fast_handoff_park_current(void) {
-    fast_cpu_t *cpu = current_schedulable_cpu();
-    if (!cpu) return false;
-    return fast_handoff_schedule_current(
-        cpu,
-        schedule_park,
-        NULL
-    ) != schedule_rejected;
-}
-
-bool fast_handoff_park_current_until(uint64_t deadline_ns) {
+bool fast_handoff_park_current(uint64_t deadline_ns) {
     fast_cpu_t *cpu = current_schedulable_cpu();
     if (!cpu) return false;
     fast_sleep_t sleep = {
         .task = cpu->current,
         .deadline = runtime_clock_deadline(deadline_ns),
     };
-    if (!sleep.deadline) return false;
+    if (deadline_ns && !sleep.deadline) return false;
     return fast_handoff_schedule_current(
         cpu,
         schedule_park,
-        &sleep
+        deadline_ns ? &sleep : NULL
     ) != schedule_rejected;
 }
 
@@ -688,10 +683,11 @@ _Noreturn void fast_handoff_idle(void) {
 }
 
 uint64_t fast_handoff_create_task(
-    uint64_t id,
+    uint32_t id,
     uint64_t cr3,
     uint64_t kernel_rsp,
-    uint64_t kernel_fs_base
+    uint64_t kernel_fs_base,
+    uint64_t quantum_cycles
 ) {
     fast_task_t *task = calloc(1, sizeof(*task));
     if (!task) return 0;
@@ -699,6 +695,7 @@ uint64_t fast_handoff_create_task(
     task->cr3 = cr3;
     task->kernel_rsp = kernel_rsp;
     task->kernel_fs_base = kernel_fs_base;
+    task->quantum_cycles = quantum_cycles;
     return (uintptr_t)task;
 }
 
@@ -732,26 +729,26 @@ uint64_t fast_handoff_task_cpu_time(uint64_t handle) {
     }
 }
 
-void fast_handoff_init_kernel(
-    uint64_t handle,
-    uint64_t entry,
-    uint64_t rsp,
-    uint64_t argument,
-    uint64_t fs_base
-) {
-    fast_task_t *task = task_from_handle(handle);
-    if (!task || !entry || rsp < sizeof(switch_frame_t)) return;
+bool fast_handoff_start_runtime(uint64_t rsp, uint64_t fs_base) {
+    fast_task_t *task = task_from_handle(
+        fast_handoff_create_task(UINT32_MAX, 0, rsp, fs_base, 0)
+    );
+    if (!task) return false;
     switch_frame_t *frame = (switch_frame_t *)(uintptr_t)
         (rsp - sizeof(switch_frame_t));
     *frame = (switch_frame_t){
-        .r13 = entry,
-        .r12 = argument,
+        .r13 = (uintptr_t)&kernel_clone_thread_entry,
         .rip = (uintptr_t)&fast_kernel_task_entry,
     };
-    task->kernel_rsp = rsp;
-    task->kernel_fs_base = fs_base;
-    __atomic_store_n(&task->rsp, (uintptr_t)frame, __ATOMIC_RELEASE);
-    task_state_store(task, task_ready);
+    task->rsp = (uintptr_t)frame;
+    fast_task_t *head = __atomic_load_n(&runtime_tasks, __ATOMIC_RELAXED);
+    do {
+        task->next = head;
+    } while (!__atomic_compare_exchange_n(
+        &runtime_tasks, &head, task, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED
+    ));
+    fast_handoff_wake_bsp();
+    return true;
 }
 
 static void install_user_registers(
@@ -908,19 +905,6 @@ bool fast_handoff_enqueue(uint64_t handle, uint64_t lapic_id) {
 
 void fast_handoff_set_enabled(uint8_t enabled) {
     __atomic_store_n(&handoff_enabled, enabled != 0, __ATOMIC_RELEASE);
-}
-
-uint64_t fast_handoff_cpu_load(uint64_t lapic_id) {
-    fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
-    const uint64_t flags = interrupt_save();
-    lock_cpu(cpu);
-    const uint64_t result = cpu->state != cpu_offline
-        ? cpu->queue_size +
-            (cpu->state != cpu_online || cpu->current != cpu->idle)
-        : UINT64_MAX;
-    unlock_cpu(cpu);
-    interrupt_restore(flags);
-    return result;
 }
 
 uint8_t fast_handoff_task_state(uint64_t handle) {

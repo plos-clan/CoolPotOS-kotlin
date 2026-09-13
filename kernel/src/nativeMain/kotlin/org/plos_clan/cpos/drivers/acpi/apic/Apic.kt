@@ -10,7 +10,6 @@ private const val PIC_SLAVE_DATA_PORT: UShort = 0xA1u
 private const val PIC_MASK_ALL: UByte = 0xFFu
 
 const val LAPIC_TIMER_INTERRUPT_VECTOR = 0xFEu
-const val LAPIC_TIMER_FREQUENCY_HZ = 1_000u
 
 object Apic {
     fun initialize(
@@ -22,7 +21,6 @@ object Apic {
         val lapicReady = LocalApic.initialize(
             physicalAddress = lapicPhysicalAddress.toULong(),
             timerVector = LAPIC_TIMER_INTERRUPT_VECTOR,
-            timerFrequencyHz = LAPIC_TIMER_FREQUENCY_HZ,
         )
         if (!lapicReady) {
             println("APIC: LAPIC initialization failed")

@@ -10,7 +10,6 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.get
 import kotlinx.cinterop.pointed
 import kotlinx.cinterop.toLong
-import org.plos_clan.cpos.drivers.acpi.apic.LAPIC_TIMER_FREQUENCY_HZ
 import org.plos_clan.cpos.drivers.acpi.apic.LAPIC_TIMER_INTERRUPT_VECTOR
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.syscall.Syscall
@@ -46,7 +45,6 @@ fun apStart() {
     val timerReady = LAPIC_TIMER_INTERRUPT_VECTOR <= UByte.MAX_VALUE.toUInt() &&
             LocalApic.configureDeadlineTimer(
                 vector = LAPIC_TIMER_INTERRUPT_VECTOR.toUByte(),
-                frequencyHz = LAPIC_TIMER_FREQUENCY_HZ,
             )
     SMProcessor.load_done.incrementAndFetch()
     if (!timerReady) {

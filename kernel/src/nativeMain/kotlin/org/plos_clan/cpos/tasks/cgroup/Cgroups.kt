@@ -80,7 +80,7 @@ internal object Cgroups {
             }
             if (!frozen) return waited
             waited = true
-            if (!bridge.fast_handoff_park_current()) bridge.fast_handoff_yield()
+            if (!bridge.fast_handoff_park_current(0uL)) bridge.fast_handoff_yield()
         }
     }
 }

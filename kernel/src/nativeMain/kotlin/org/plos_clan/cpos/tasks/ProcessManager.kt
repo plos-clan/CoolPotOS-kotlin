@@ -297,15 +297,6 @@ class Thread internal constructor(
     internal val cpuTimeNanos: ULong
         get() = nativeTask.cpuTimeNanos
 
-    fun initializeContext(
-        entryPoint: ULong,
-        stackTop: ULong,
-        argument: ULong = 0uL,
-        fsBase: ULong = 0uL,
-    ) {
-        nativeTask.access { bridge.fast_handoff_init_kernel(it, entryPoint, stackTop, argument, fsBase) }
-    }
-
     fun initializeUserContext(
         entryPoint: ULong,
         stackPointer: ULong,
@@ -619,21 +610,6 @@ object ProcessManager {
         }
 
         println("ProcessManager initialized.")
-    }
-
-    fun createThreadFromContext(
-        entryPoint: ULong,
-        stackPointer: ULong,
-        fsBase: ULong = 0uL,
-    ): Thread? {
-        if (entryPoint == 0uL || stackPointer == 0uL) {
-            return null
-        }
-
-        val process = kernelProcess ?: return null
-        return newThread(process).also { thread ->
-            thread.initializeContext(entryPoint, stackPointer, fsBase = fsBase)
-        }.also(Scheduler::enqueueThread)
     }
 
     fun getBootstrapThread(): Thread? = bootstrapThread

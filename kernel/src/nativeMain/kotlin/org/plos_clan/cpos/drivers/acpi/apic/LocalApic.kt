@@ -46,7 +46,6 @@ object LocalApic {
     fun initialize(
         physicalAddress: ULong,
         timerVector: UInt,
-        timerFrequencyHz: UInt,
     ): Boolean {
         bspDeadlineTimerReady = false
         x2ApicMode = detectX2ApicMode()
@@ -71,7 +70,7 @@ object LocalApic {
             println("APIC: invalid LAPIC timer vector=$timerVector")
             return false
         }
-        if (!configureDeadlineTimer(timerVector.toUByte(), timerFrequencyHz)) {
+        if (!configureDeadlineTimer(timerVector.toUByte())) {
             println("APIC: failed to configure BSP TSC-deadline timer")
             return false
         }
@@ -79,14 +78,11 @@ object LocalApic {
         return true
     }
 
-    fun configureDeadlineTimer(
-        vector: UByte,
-        frequencyHz: UInt,
-    ): Boolean {
+    fun configureDeadlineTimer(vector: UByte): Boolean {
         if (vector.toUInt() !in LAPIC_MIN_INTERRUPT_VECTOR until LAPIC_SPURIOUS_VECTOR) {
             return false
         }
-        return bridge.fast_handoff_configure_timer(vector, frequencyHz)
+        return bridge.fast_handoff_configure_timer(vector)
     }
 
     fun enableController() {

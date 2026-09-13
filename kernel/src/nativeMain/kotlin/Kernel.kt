@@ -1,7 +1,3 @@
-import bridge.get_kernel_clone_thread_entry_address
-import bridge.get_sys_clone_recorded_count
-import bridge.get_sys_clone_stack_at
-import bridge.get_sys_clone_tls_at
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.FrameBuffer
@@ -31,7 +27,6 @@ import org.plos_clan.cpos.tasks.TaskReaper
 import org.plos_clan.cpos.utils.BootIdentity
 import org.plos_clan.cpos.utils.Cmdline
 import org.plos_clan.cpos.utils.KernelRandom
-import org.plos_clan.cpos.utils.hex
 import kotlin.experimental.ExperimentalNativeApi
 
 private val KERNEL_RUNTIME = "x86_64/kotlin-${KotlinVersion.CURRENT}"
@@ -74,10 +69,6 @@ fun kernelMain() {
     if (!Scheduler.initialize()) {
         return
     }
-    startCapturedCloneThreads()
-    if (!Scheduler.enableScheduler()) {
-        return
-    }
     Cmdline.initialize()
     KernelRandom.initialize()
     BootIdentity.initialize(KernelRandom.uuidV4())
@@ -116,21 +107,4 @@ fun kernelMain() {
     }
     bridge.enable_interrupt()
     KernelCoroutines.runEventLoop()
-}
-
-@ExperimentalForeignApi
-private fun startCapturedCloneThreads() {
-    val entryPoint = get_kernel_clone_thread_entry_address()
-    val threadCount = get_sys_clone_recorded_count()
-    for (index in 0uL until threadCount) {
-        val stack = get_sys_clone_stack_at(index)
-        val tls = get_sys_clone_tls_at(index)
-        ProcessManager.createThreadFromContext(
-            entryPoint = entryPoint,
-            stackPointer = stack,
-            fsBase = tls,
-        )?.let { thread ->
-            println("runtime-thread[$index] loaded tid=${thread.id} stack=${stack.hex()} tls=${tls.hex()}")
-        }
-    }
 }

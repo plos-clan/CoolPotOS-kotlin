@@ -42,10 +42,6 @@ void enable_interrupt(void);
 void disable_interrupt(void);
 uint64_t irq_save(void);
 void irq_restore(uint64_t flags);
-uint64_t get_sys_clone_recorded_count(void);
-uint64_t get_sys_clone_stack_at(uint64_t index);
-uint64_t get_sys_clone_tls_at(uint64_t index);
-uint64_t get_kernel_clone_thread_entry_address(void);
 bool can_use_runtime(void);
 void set_runtime_use_mask(bool enabled);
 uint64_t get_asm_syscall_handle_address(void);
@@ -57,26 +53,19 @@ void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base);
 void fast_handoff_set_user_interrupt_handler(void (*handler)(void *frame));
 void fast_handoff_request_user_interrupt(uint64_t task);
 bool fast_handoff_yield(void);
-bool fast_handoff_park_current(void);
-bool fast_handoff_park_current_until(uint64_t deadline_ns);
+bool fast_handoff_park_current(uint64_t deadline_ns);
 bool fast_handoff_unpark(uint64_t task);
 uint64_t fast_handoff_service(void);
 void fast_handoff_wake_bsp(void);
 void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence);
 _Noreturn void fast_handoff_idle(void);
-bool fast_handoff_configure_timer(uint8_t vector, uint32_t frequency_hz);
+bool fast_handoff_configure_timer(uint8_t vector);
 uint64_t fast_handoff_create_task(
-    uint64_t id,
+    uint32_t id,
     uint64_t cr3,
     uint64_t kernel_rsp,
-    uint64_t kernel_fs_base
-);
-void fast_handoff_init_kernel(
-    uint64_t task,
-    uint64_t entry,
-    uint64_t rsp,
-    uint64_t argument,
-    uint64_t fs_base
+    uint64_t kernel_fs_base,
+    uint64_t quantum_cycles
 );
 void fast_handoff_init_user(
     uint64_t task,
@@ -98,7 +87,6 @@ bool fast_handoff_bind_current(
 bool fast_handoff_finish_bootstrap(uint64_t task);
 bool fast_handoff_enqueue(uint64_t task, uint64_t lapic_id);
 void fast_handoff_set_enabled(uint8_t enabled);
-uint64_t fast_handoff_cpu_load(uint64_t lapic_id);
 uint8_t fast_handoff_task_state(uint64_t task);
 void fast_handoff_set_task_state(uint64_t task, uint8_t state);
 uint64_t fast_handoff_current_task_id(void);
@@ -139,9 +127,6 @@ typedef struct {
 void x86_cpuid(uint32_t leaf,uint32_t subleaf,cpuid_result_t *result);
 bool rdrand64_step(uint64_t *out);
 bool rdseed64_step(uint64_t *out);
-
-bool can_use_runtime(void);
-void set_runtime_use_mask(bool enabled);
 
 #ifdef __cplusplus
 }

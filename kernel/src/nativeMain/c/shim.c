@@ -11,8 +11,6 @@
 #  define NO_OPTIMIZE
 #endif
 
-extern void *realloc(void *ptr, size_t size);
-
 uint64_t kernel_runtime_fs_bases[cpu_slot_count];
 
 void set_kernel_runtime_fs_base(uint64_t pointer) {
@@ -117,51 +115,16 @@ void io_out32(uint16_t port, uint32_t value) {
 void enable_interrupt(void) { __asm__ volatile("sti" : : : "memory"); }
 void disable_interrupt(void) { __asm__ volatile("cli" : : : "memory"); }
 
-struct clone_context_record {
-    uint64_t stack;
-    uint64_t tls;
-};
-
-static struct clone_context_record *clone_records;
-static uint64_t clone_count;
-static uint64_t clone_capacity;
 static uint64_t next_runtime_tid = 2;
 
 uint64_t allocate_runtime_tid(void) {
     return __atomic_fetch_add(&next_runtime_tid, 1, __ATOMIC_RELAXED);
 }
 
-static bool ensure_clone_capacity(uint64_t needed) {
-    if (needed <= clone_capacity) return true;
-
-    uint64_t new_capacity = clone_capacity ? clone_capacity : 64;
-    while (new_capacity < needed) {
-        if (new_capacity > UINT64_MAX / 2) return false;
-        new_capacity *= 2;
-    }
-    if (new_capacity > SIZE_MAX / sizeof(*clone_records)) return false;
-
-    void *new_records = realloc(clone_records, new_capacity * sizeof(*clone_records));
-    if (!new_records) return false;
-    clone_records = new_records;
-    clone_capacity = new_capacity;
-    return true;
-}
-
-bool capture_sys_clone_context(uint64_t stack, uint64_t tls) {
-    if (clone_count == UINT64_MAX || !ensure_clone_capacity(clone_count + 1)) return false;
-    clone_records[clone_count++] = (struct clone_context_record){stack, tls};
-    return true;
-}
-
-uint64_t get_sys_clone_recorded_count(void) { return clone_count; }
-uint64_t get_sys_clone_stack_at(uint64_t index) { return index < clone_count ? clone_records[index].stack : 0; }
-uint64_t get_sys_clone_tls_at(uint64_t index) { return index < clone_count ? clone_records[index].tls : 0; }
-
 void pthread_exit(void *ret_val) __attribute__((noreturn));
 int pthread_key_create(uint32_t *key, void (*destructor)(void *));
 
-static __attribute__((naked, noreturn)) void kernel_clone_thread_entry(void) {
+__attribute__((naked, noreturn)) void kernel_clone_thread_entry(void) {
     __asm__ volatile(
         "popq %rax\n"
         "popq %rdi\n"
@@ -173,7 +136,6 @@ static __attribute__((naked, noreturn)) void kernel_clone_thread_entry(void) {
     );
 }
 
-uint64_t get_kernel_clone_thread_entry_address(void) { return (uintptr_t)&kernel_clone_thread_entry; }
 int __pthread_key_create(uint32_t *key, void (*destructor)(void *)) { return pthread_key_create(key, destructor); }
 
 void asm_pause(void) { __asm__ volatile("pause" : : : "memory"); }

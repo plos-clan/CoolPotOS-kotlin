@@ -149,7 +149,9 @@ internal class NativeTask private constructor(
             var handle = 0uL
             try {
                 if (stack != null) runtime = Runtime.allocate() ?: return null
-                handle = bridge.fast_handoff_create_task(id.toULong(), cr3, stack?.top ?: 0uL, runtime?.fsBase ?: 0uL)
+                handle = bridge.fast_handoff_create_task(
+                    id.toUInt(), cr3, stack?.top ?: 0uL, runtime?.fsBase ?: 0uL, Scheduler.policy.quantumCycles,
+                )
                 if (handle == 0uL) return null
                 return NativeTask(handle, stack, runtime)
             } finally {
