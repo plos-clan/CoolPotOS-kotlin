@@ -1,5 +1,4 @@
-@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
-@file:OptIn(ExperimentalForeignApi::class, ExperimentalAtomicApi::class, InternalForKotlinNative::class)
+@file:OptIn(ExperimentalForeignApi::class, ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.tasks
 
@@ -8,8 +7,6 @@ import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.experimental.ExperimentalNativeApi
-import kotlin.native.internal.GCUnsafeCall
-import kotlin.native.internal.InternalForKotlinNative
 import kotlin.native.ref.WeakReference
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
@@ -23,9 +20,6 @@ import org.plos_clan.cpos.fs.vfs.FileSystemContext
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.mem.BuddyFrameAllocator
-import org.plos_clan.cpos.mem.Hhdm
-import org.plos_clan.cpos.mem.INVALID_FRAME
 import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.tasks.cgroup.CgroupHierarchy
@@ -34,13 +28,9 @@ import org.plos_clan.cpos.tasks.cgroup.Cgroups
 import org.plos_clan.cpos.tasks.keys.KeyStore
 import org.plos_clan.cpos.tasks.keys.Keys
 import org.plos_clan.cpos.utils.IrqSpinLock
-import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PtraceRegisters
 
 private const val DEFAULT_THREAD_STACK_PAGES = 64uL
-
-@GCUnsafeCall("fast_handoff_task_cpu_time")
-private external fun taskCpuTime(task: ULong): ULong
 
 enum class TaskState {
     READY,
@@ -257,8 +247,7 @@ class Thread internal constructor(
     val id: Int,
     val process: Process,
     parentThread: Thread? = null,
-    internal val kernelStack: KernelStack? = null,
-    kernelFsBase: ULong = 0uL,
+    internal val nativeTask: NativeTask,
     internal val signals: ThreadSignalState = process.signals.newThread(),
     var name: String = "",
     val affinityMask: ULong = 0UL,
@@ -299,26 +288,14 @@ class Thread internal constructor(
 
     var robustListHead: ULong = 0uL
 
-    val nativeContext: ULong = bridge.fast_handoff_create_task(
-        id.toULong(),
-        process.addressSpace.pageDirectory.pml4PhysicalAddress,
-        kernelStack?.top ?: 0uL,
-        kernelFsBase,
-    ).also { handle ->
-        require(handle != 0uL) { "Cannot allocate native context for thread $id" }
-    }
-
     var state: TaskState
-        get() = TaskState.entries.getOrElse(
-            bridge.fast_handoff_task_state(nativeContext).toInt(),
-        ) { TaskState.ZOMBIE }
-        set(value) = bridge.fast_handoff_set_task_state(
-            nativeContext,
-            value.ordinal.toUByte(),
-        )
+        get() = nativeTask.access { handle ->
+            TaskState.entries.getOrElse(bridge.fast_handoff_task_state(handle).toInt()) { TaskState.ZOMBIE }
+        }
+        set(value) = nativeTask.access { bridge.fast_handoff_set_task_state(it, value.ordinal.toUByte()) }
 
     internal val cpuTimeNanos: ULong
-        get() = taskCpuTime(nativeContext)
+        get() = nativeTask.cpuTimeNanos
 
     fun initializeContext(
         entryPoint: ULong,
@@ -326,13 +303,7 @@ class Thread internal constructor(
         argument: ULong = 0uL,
         fsBase: ULong = 0uL,
     ) {
-        bridge.fast_handoff_init_kernel(
-            nativeContext,
-            entryPoint,
-            stackTop,
-            argument,
-            fsBase,
-        )
+        nativeTask.access { bridge.fast_handoff_init_kernel(it, entryPoint, stackTop, argument, fsBase) }
     }
 
     fun initializeUserContext(
@@ -341,12 +312,7 @@ class Thread internal constructor(
         fsBase: ULong = 0uL,
     ) {
         require(!process.isKernelProcess) { "Kernel process cannot own a user context" }
-        bridge.fast_handoff_init_user(
-            nativeContext,
-            entryPoint,
-            stackPointer,
-            fsBase,
-        )
+        nativeTask.access { bridge.fast_handoff_init_user(it, entryPoint, stackPointer, fsBase) }
     }
 
     fun initializeUserContext(
@@ -357,20 +323,16 @@ class Thread internal constructor(
         require(!process.isKernelProcess) { "Kernel process cannot own a user context" }
         require(registers.size == PtraceRegisters.REGISTER_COUNT)
         registers.usePinned { snapshot ->
-            bridge.fast_handoff_init_user_registers(
-                nativeContext,
-                snapshot.addressOf(0),
-                stackPointer,
-                fsBase,
-            )
+            nativeTask.access {
+                bridge.fast_handoff_init_user_registers(it, snapshot.addressOf(0), stackPointer, fsBase)
+            }
         }
     }
 
     internal fun replaceAddressSpace(addressSpace: AddressSpace): Boolean =
-        bridge.fast_handoff_replace_address_space(
-            nativeContext,
-            addressSpace.pageDirectory.pml4PhysicalAddress,
-        )
+        nativeTask.access {
+            bridge.fast_handoff_replace_address_space(it, addressSpace.pageDirectory.pml4PhysicalAddress)
+        }
 
     internal val pendingSignalMask: ULong
         get() = signals.pending.mask or process.signals.pending.mask
@@ -738,7 +700,9 @@ object ProcessManager {
         pidHandle: PidHandle? = null,
         prepare: (Int) -> VfsResult<Unit> = { VfsResult.Ok(Unit) },
     ): VfsResult<Thread> {
-        if (process.isKernelProcess || entryPoint == 0uL || stackPointer == 0uL) {
+        if (process.isKernelProcess || entryPoint == 0uL || stackPointer == 0uL || kernelStackPages == 0uL ||
+            registers != null && registers.size != PtraceRegisters.REGISTER_COUNT
+        ) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
         val creator = currentThread()
@@ -752,32 +716,33 @@ object ProcessManager {
             is VfsResult.Err -> return membership
         }
         var published = false
+        var nativeTask: NativeTask? = null
         try {
             val preparation = prepare(cgroup.id)
             if (preparation is VfsResult.Err) return preparation
-            val stack = KernelStack.allocate(kernelStackPages) ?: return VfsResult.Err(VfsError.NO_MEMORY)
-            val kernelFsBase = bridge.create_kernel_runtime_tcb()
-            if (kernelFsBase == 0uL) {
-                stack.close()
-                return VfsResult.Err(VfsError.NO_MEMORY)
-            }
+            nativeTask = NativeTask.allocate(
+                cgroup.id, process.addressSpace.pageDirectory.pml4PhysicalAddress, kernelStackPages,
+            ) ?: return VfsResult.Err(VfsError.NO_MEMORY)
             val thread = newThread(
                 process = process,
                 parentThread = parentThread,
-                kernelStack = stack,
-                kernelFsBase = kernelFsBase,
+                nativeTask = nativeTask,
                 signals = signals,
                 cgroup = cgroup,
                 pidHandle = pidHandle,
                 nice = creator?.priority?.value ?: 0,
-            )
-            if (registers == null) thread.initializeUserContext(entryPoint, stackPointer, fsBase)
-            else thread.initializeUserContext(registers, stackPointer, fsBase)
+            ) {
+                if (registers == null) it.initializeUserContext(entryPoint, stackPointer, fsBase)
+                else it.initializeUserContext(registers, stackPointer, fsBase)
+            }
             published = true
             Cgroups.published(thread)
             return VfsResult.Ok(thread)
         } finally {
-            if (!published) Cgroups.lock.withLock { Cgroups.hierarchy.exit(cgroup) }
+            if (!published) {
+                nativeTask?.close()
+                Cgroups.lock.withLock { Cgroups.hierarchy.exit(cgroup) }
+            }
         }
     }
 
@@ -849,7 +814,7 @@ object ProcessManager {
     }
 
     internal fun finishThreadExit(thread: Thread, waitStatus: Int) {
-        thread.kernelStack?.close()
+        thread.nativeTask.close()
         Keys.exit(thread)
         Cgroups.exit(thread)
         val deliveries = threadTableLock.withLock {
@@ -1034,46 +999,36 @@ object ProcessManager {
     private fun newThread(
         process: Process,
         parentThread: Thread? = null,
-        kernelStack: KernelStack? = null,
-        kernelFsBase: ULong = 0uL,
+        nativeTask: NativeTask? = null,
         signals: ThreadSignalState? = null,
         cgroup: CgroupHierarchy.Task? = null,
         pidHandle: PidHandle? = null,
         nice: Int = 0,
+        initialize: (Thread) -> Unit = {},
     ): Thread {
-        val thread = Thread(
-            id = cgroup?.id ?: if (process.threads.isEmpty()) process.id else nextTaskId.fetchAndAdd(1),
-            process = process,
-            parentThread = parentThread,
-            kernelStack = kernelStack,
-            kernelFsBase = kernelFsBase,
-            signals = signals ?: process.signals.newThread(),
-            cgroup = cgroup,
-            pidFileIdentity = pidHandle?.fileIdentity ?: AnonymousFileIdentity.create(),
-            nice = nice,
-        )
-        pidHandle?.attach(thread)
-        process.addThread(thread)
-        threadTableLock.withLock { threadTable[thread.id] = thread }
-        return thread
-    }
-}
-
-internal class KernelStack private constructor(
-    private val physicalBase: ULong,
-    private val pages: ULong,
-) : AutoCloseable {
-    val top: ULong
-        get() = Hhdm.toVirtual(physicalBase + pages * PAGE_SIZE_BYTES)
-
-    override fun close() {
-        check(BuddyFrameAllocator.free(physicalBase, pages))
-    }
-
-    companion object {
-        fun allocate(pages: ULong): KernelStack? {
-            val physicalBase = BuddyFrameAllocator.allocate(pages)
-            return if (physicalBase == INVALID_FRAME) null else KernelStack(physicalBase, pages)
+        val id = cgroup?.id ?: if (process.threads.isEmpty()) process.id else nextTaskId.fetchAndAdd(1)
+        val task = nativeTask ?: checkNotNull(NativeTask.allocate(
+            id, process.addressSpace.pageDirectory.pml4PhysicalAddress,
+        ))
+        try {
+            val thread = Thread(
+                id = id,
+                process = process,
+                parentThread = parentThread,
+                nativeTask = task,
+                signals = signals ?: process.signals.newThread(),
+                cgroup = cgroup,
+                pidFileIdentity = pidHandle?.fileIdentity ?: AnonymousFileIdentity.create(),
+                nice = nice,
+            )
+            initialize(thread)
+            pidHandle?.attach(thread)
+            process.addThread(thread)
+            threadTableLock.withLock { threadTable[thread.id] = thread }
+            return thread
+        } catch (failure: Throwable) {
+            task.close()
+            throw failure
         }
     }
 }

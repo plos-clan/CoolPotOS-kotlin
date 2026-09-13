@@ -1,4 +1,5 @@
 import org.apache.tools.ant.filters.ReplaceTokens
+import groovy.json.JsonSlurper
 import java.io.OutputStream
 import java.net.URI
 import java.nio.file.Files
@@ -107,7 +108,6 @@ private class BuildPaths(project: Project) {
     val iso = root.resolve("iso")
     val downloads = root.resolve("downloads")
     val kernelC = project.file("src/nativeMain/c")
-    val kernelAsm = project.file("src/nativeMain/asm")
     val assets = project.rootProject.file("assets")
     val libraries = project.rootProject.file("prebuilt/x86_64")
     val mlibc = project.rootProject.file("vendor/mlibc")
@@ -151,7 +151,7 @@ private class VdsoConfig(
     tools: ToolSettings,
     arch: String,
 ) {
-    val source = paths.kernelAsm.resolve("vdso.S")
+    val source = paths.kernelC.resolve("vdso.c")
     val linkerScript = paths.kernelC.resolve("vdso.ld")
     val objectFile = paths.vdso.resolve("vdso.o")
     val linkedImage = paths.vdso.resolve("vdso.unstripped.so")
@@ -160,6 +160,8 @@ private class VdsoConfig(
     val compileCommand = listOf(
         tools.cc,
         "-target", "$arch-freestanding",
+        "-std=c23", "-ffreestanding", "-fPIC", "-fno-stack-protector", "-fomit-frame-pointer",
+        "-O3", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
         "-c", source.absolutePath,
         "-o", objectFile.absolutePath,
     )
@@ -247,7 +249,7 @@ private class KernelConfig(
     val sources = listOf(
         "boot.c", "shim.c", "clock.c", "syscall.c", "gdt.c",
         "idt.c", "handoff.c", "smp.c", "tls.c", "zstd_bridge.c",
-    ).map(paths.kernelC::resolve) + listOf("task.S", "callback.S").map(paths.kernelAsm::resolve)
+    ).map(paths.kernelC::resolve)
     val objects = sources.map { paths.cObjects.resolve("${it.nameWithoutExtension}.o") }
     val kotlinLinkTask = if (debug) "linkDebugStaticNative" else "linkReleaseStaticNative"
     val kotlinLibrary = paths.root.resolve(
@@ -285,7 +287,6 @@ private class KernelConfig(
         "-u", "sched_yield", "-u", "frg_panic", "-u", "pthread_exit",
         "-T", paths.linkerScript.absolutePath,
     )
-    val assemblyArgs = listOf("-target", "$arch-freestanding")
 }
 
 private data class QemuConfig(
@@ -380,16 +381,68 @@ private class BuildConfig(private val project: Project) {
 
 private val config = BuildConfig(project)
 
-val runtimeExports = layout.buildDirectory.file("runtime-exports.bc")
-val compileRuntimeExports = tasks.register<Exec>("compileRuntimeExports") {
-    val source = file("src/nativeMain/asm/runtime.ll")
+val runtimeCallbacks = layout.buildDirectory.file("runtime-callbacks.bc")
+val compileRuntimeCallbacks = tasks.register<Exec>("compileRuntimeCallbacks") {
+    val source = config.paths.kernelC.resolve("callback.c")
     inputs.file(source)
+    inputs.dir(config.paths.freestandingInclude)
     inputs.property("compiler", config.tools.cc)
-    outputs.file(runtimeExports)
+    inputs.property("compileArgs", config.kernel.compileArgs)
+    outputs.file(runtimeCallbacks)
     commandLine(
-        config.tools.cc, "-c", "-emit-llvm", source.absolutePath,
-        "-o", runtimeExports.get().asFile.absolutePath,
+        listOf(config.tools.cc) + config.kernel.compileArgs + listOf(
+            "-c", "-emit-llvm", source.absolutePath,
+            "-o", runtimeCallbacks.get().asFile.absolutePath,
+        )
     )
+}
+
+val runtimeLayout = layout.buildDirectory.dir("generated/runtime-layout")
+val generateRuntimeLayout = tasks.register("generateRuntimeLayout") {
+    inputs.file(config.mlibc.build.resolve("compile_commands.json"))
+    inputs.dir(config.mlibc.source.resolve("options"))
+    inputs.dir(config.mlibc.source.resolve("subprojects/frigg/include"))
+    outputs.dir(runtimeLayout)
+    notCompatibleWithConfigurationCache("Reads the native compiler configuration.")
+    doLast {
+        val commands = JsonSlurper().parse(config.mlibc.build.resolve("compile_commands.json")) as List<*>
+        val compilation = commands.filterIsInstance<Map<*, *>>().single {
+            (it["file"] as String).endsWith("/internal/generic/threads.cpp")
+        }
+        val command = (compilation["command"] as String).substringBefore(" -MD ") +
+            " -fsyntax-only -Xclang -fdump-record-layouts " + compilation["file"]
+        val compiler = ProcessBuilder("sh", "-c", command).apply {
+            directory(config.mlibc.build)
+            environment()["PATH"] = config.mlibc.path
+            redirectError(ProcessBuilder.Redirect.INHERIT)
+        }.start()
+        val records = compiler.inputStream.bufferedReader().readText()
+            .split("*** Dumping AST Record Layout")
+        check(compiler.waitFor() == 0) { "Cannot determine the runtime ABI" }
+        val types = mapOf("Tcb" to "struct Tcb", "LocalKeys" to "struct frg::array<struct Tcb::LocalKey,")
+        val source = buildString {
+            appendLine("package org.plos_clan.cpos.tasks")
+            types.forEach { (name, type) ->
+                val record = records.single { it.lineSequence().firstOrNull { line -> '|' in line }
+                    ?.substringAfter("| ").let { declaration ->
+                        if (type.endsWith(',')) declaration?.startsWith(type) == true else declaration == type
+                    }
+                }
+                val size = Regex("sizeof=(\\d+),.*?align=(\\d+)").find(record)!!.groupValues
+                appendLine("internal object ${name}Layout {")
+                appendLine("    const val SIZE = ${size[1]}uL")
+                appendLine("    const val ALIGN = ${size[2]}uL")
+                Regex("(?m)^\\s*(\\d+) \\|   \\S.*? (\\w+)$").findAll(record).forEach { field ->
+                    appendLine("    const val ${field.groupValues[2]} = ${field.groupValues[1]}uL")
+                }
+                appendLine("}")
+            }
+        }
+        runtimeLayout.get().file("RuntimeLayout.kt").asFile.apply {
+            parentFile.mkdirs()
+            writeText(source)
+        }
+    }
 }
 
 kotlin {
@@ -407,10 +460,10 @@ kotlin {
 
     nativeTarget.binaries.staticLib {
         baseName = "kernel"
-        freeCompilerArgs += listOf("-native-library", runtimeExports.get().asFile.absolutePath)
+        freeCompilerArgs += listOf("-native-library", runtimeCallbacks.get().asFile.absolutePath)
         linkTaskProvider.configure {
-            dependsOn(compileRuntimeExports)
-            inputs.file(runtimeExports)
+            dependsOn(compileRuntimeCallbacks)
+            inputs.file(runtimeCallbacks)
         }
         if (buildType.debuggable) {
             freeCompilerArgs += listOf("-g", "-Xruntime-logs=gc=info")
@@ -435,6 +488,7 @@ kotlin {
     }
 
     sourceSets.named("nativeMain") {
+        kotlin.srcDir(files(runtimeLayout).builtBy(generateRuntimeLayout))
         dependencies {
             implementation(libs.kotlinx.coroutines.core)
         }
@@ -604,10 +658,14 @@ tasks.matching { it.name == "cinteropBridgeNative" }.configureEach {
     dependsOn(prepareLimine, prepareFreestndHeaders)
 }
 
+compileRuntimeCallbacks.configure { dependsOn(prepareFreestndHeaders) }
+
 val compileVdso = tasks.register<Exec>("compileVdso") {
     group = "build"
     description = "Compiles the userspace vDSO."
     inputs.file(config.vdso.source)
+    inputs.file(config.paths.kernelC.resolve("vdso.h"))
+    inputs.property("compileCommand", config.vdso.compileCommand)
     outputs.file(config.vdso.objectFile)
     commandLine(config.vdso.compileCommand)
 }
@@ -711,6 +769,8 @@ val buildMlibc = tasks.register("buildMlibc") {
     }
 }
 
+generateRuntimeLayout.configure { dependsOn(buildMlibc) }
+
 val compileC = tasks.register("compileC") {
     group = "build"
     description = "Compiles native sources into object files."
@@ -719,11 +779,11 @@ val compileC = tasks.register("compileC") {
 
     inputs.property("compiler", config.tools.cc)
     inputs.property("compileArgs", config.kernel.compileArgs)
-    inputs.property("assemblyArgs", config.kernel.assemblyArgs)
     inputs.files(config.kernel.sources)
         .withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.files(
         config.paths.kernelC.resolve("bridge.h"),
+        config.paths.kernelC.resolve("native.h"),
         config.paths.kernelC.resolve("os_terminal.h"),
         config.paths.kernelC.resolve("vdso.h"),
         config.paths.limineHeader,
@@ -737,9 +797,7 @@ val compileC = tasks.register("compileC") {
         config.paths.cObjects.mkdirs()
         config.kernel.sources.forEach { source ->
             val objectFile = config.paths.cObjects.resolve("${source.nameWithoutExtension}.o")
-            val arguments = if (source.extension == "S") config.kernel.assemblyArgs
-                else config.kernel.compileArgs
-            val command = listOf(config.tools.cc) + arguments + listOf(
+            val command = listOf(config.tools.cc) + config.kernel.compileArgs + listOf(
                 "-c", source.absolutePath,
                 "-o", objectFile.absolutePath,
             )

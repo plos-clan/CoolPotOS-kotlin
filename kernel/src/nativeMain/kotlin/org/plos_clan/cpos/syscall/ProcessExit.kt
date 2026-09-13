@@ -1,12 +1,5 @@
-@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
-@file:OptIn(
-    ExperimentalForeignApi::class,
-    InternalForKotlinNative::class,
-)
-
 package org.plos_clan.cpos.syscall
 
-import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.tasks.Process
@@ -17,20 +10,6 @@ import org.plos_clan.cpos.tasks.SignalRouter
 import org.plos_clan.cpos.tasks.TaskState
 import org.plos_clan.cpos.tasks.TaskReaper
 import org.plos_clan.cpos.tasks.Thread
-import kotlin.native.internal.GCUnsafeCall
-import kotlin.native.internal.InternalForKotlinNative
-
-@GCUnsafeCall("deinitRuntimeIfNeeded")
-private external fun deinitializeRuntime()
-
-@GCUnsafeCall("fast_handoff_set_task_state")
-private external fun markNativeTaskExited(task: ULong, state: UByte)
-
-@GCUnsafeCall("fast_handoff_yield")
-private external fun yieldFromExitedTask(): Boolean
-
-@GCUnsafeCall("fast_handoff_idle")
-private external fun continueScheduling(): Nothing
 
 internal object ProcessExit {
     fun current(process: Process, status: Int, group: Boolean): Nothing {
@@ -68,14 +47,7 @@ internal object ProcessExit {
         }
         TaskReaper.enqueue(current, waitStatus)
 
-        val nativeContext = current.nativeContext
-        val zombieState = TaskState.ZOMBIE.ordinal.toUByte()
-        bridge.set_runtime_use_mask(false)
-        bridge.irq_save()
-        deinitializeRuntime()
-        markNativeTaskExited(nativeContext, zombieState)
-        yieldFromExitedTask()
-        continueScheduling()
+        current.nativeTask.exit()
     }
 
     private fun clearChildTid(thread: Thread) {

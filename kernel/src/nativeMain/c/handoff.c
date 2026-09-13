@@ -1,5 +1,6 @@
 #include "bridge.h"
 #include "native.h"
+#include <stdlib.h>
 
 extern void do_irq(uint64_t irq_num);
 
@@ -77,9 +78,14 @@ struct fast_task {
     uint8_t queued;
     uint8_t wake_pending;
     uint8_t user_interrupt_pending;
+    struct {
+        uint64_t elapsed;
+        uint64_t started;
+        uint64_t sequence;
+    } clock;
 };
 _Static_assert(
-    sizeof(fast_task_t) == 64,
+    offsetof(fast_task_t, clock) == 64,
     "scheduler metadata must fit in one cache line"
 );
 
@@ -120,7 +126,35 @@ static enum fast_schedule_result fast_handoff_schedule(
     fast_sleep_t *sleep
 );
 
-void fast_switch_to(uint64_t *, uint64_t);
+__attribute__((naked))
+static void fast_switch_to(fast_task_t *, uint64_t) {
+    __asm__ volatile(
+        "pushq %%rbp\n"
+        "pushq %%rbx\n"
+        "pushq %%r12\n"
+        "pushq %%r13\n"
+        "pushq %%r14\n"
+        "pushq %%r15\n"
+        "movq %%rsp, %c[rsp](%%rdi)\n"
+        "movq %%rsi, %%rsp\n"
+        "cmpb $%c[zombie], %c[state](%%rdi)\n"
+        "jne 1f\n"
+        "movq $0, %c[rsp](%%rdi)\n"
+        "1:\n"
+        "popq %%r15\n"
+        "popq %%r14\n"
+        "popq %%r13\n"
+        "popq %%r12\n"
+        "popq %%rbx\n"
+        "popq %%rbp\n"
+        "ret\n"
+        :
+        : [rsp] "i"(offsetof(fast_task_t, rsp)),
+          [state] "i"(offsetof(fast_task_t, state)),
+          [zombie] "i"(task_zombie)
+        : "memory"
+    );
+}
 
 __attribute__((naked, noreturn))
 static void fast_kernel_task_entry(void) {
@@ -469,7 +503,19 @@ static enum fast_schedule_result fast_handoff_schedule(
             kernel_fs_base;
         if (previous_fs_base != kernel_fs_base)
             wrmsr(ia32_fs_base_msr, kernel_fs_base);
-        fast_switch_to(&previous->rsp, next->rsp);
+        const uint64_t now = runtime_clock_nanos();
+        const uint64_t sequence = __atomic_load_n(&previous->clock.sequence, __ATOMIC_RELAXED);
+        __atomic_store_n(&previous->clock.sequence, sequence + 1, __ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        const uint64_t started = __atomic_load_n(&previous->clock.started, __ATOMIC_RELAXED);
+        if (started) {
+            const uint64_t elapsed = __atomic_load_n(&previous->clock.elapsed, __ATOMIC_RELAXED);
+            __atomic_store_n(&previous->clock.elapsed, elapsed + now - started, __ATOMIC_RELAXED);
+        }
+        __atomic_store_n(&previous->clock.started, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&previous->clock.sequence, sequence + 2, __ATOMIC_RELEASE);
+        __atomic_store_n(&next->clock.started, now, __ATOMIC_RELEASE);
+        fast_switch_to(previous, next->rsp);
     }
     interrupt_restore(flags);
     return result;
@@ -638,6 +684,51 @@ _Noreturn void fast_handoff_idle(void) {
     for (;;) {
         const uint64_t sequence = fast_handoff_service();
         fast_handoff_park_kotlin(0, sequence);
+    }
+}
+
+uint64_t fast_handoff_create_task(
+    uint64_t id,
+    uint64_t cr3,
+    uint64_t kernel_rsp,
+    uint64_t kernel_fs_base
+) {
+    fast_task_t *task = calloc(1, sizeof(*task));
+    if (!task) return 0;
+    task->id = id;
+    task->cr3 = cr3;
+    task->kernel_rsp = kernel_rsp;
+    task->kernel_fs_base = kernel_fs_base;
+    return (uintptr_t)task;
+}
+
+bool fast_handoff_task_has_exited(uint64_t handle) {
+    const fast_task_t *task = task_from_handle(handle);
+    return task_state_load(task) == task_zombie &&
+        !__atomic_load_n(&task->rsp, __ATOMIC_ACQUIRE);
+}
+
+bool fast_handoff_destroy_task(uint64_t handle) {
+    fast_task_t *task = task_from_handle(handle);
+    if (__atomic_load_n(&task->cpu, __ATOMIC_ACQUIRE) &&
+        !fast_handoff_task_has_exited(handle)) return false;
+    free(task);
+    return true;
+}
+
+uint64_t fast_handoff_task_cpu_time(uint64_t handle) {
+    const fast_task_t *task = task_from_handle(handle);
+    for (;;) {
+        const uint64_t sequence = __atomic_load_n(&task->clock.sequence, __ATOMIC_ACQUIRE);
+        if (!(sequence & 1)) {
+            uint64_t elapsed = __atomic_load_n(&task->clock.elapsed, __ATOMIC_RELAXED);
+            const uint64_t started = __atomic_load_n(&task->clock.started, __ATOMIC_ACQUIRE);
+            if (started) elapsed += runtime_clock_nanos() - started;
+            __atomic_thread_fence(__ATOMIC_ACQUIRE);
+            if (sequence == __atomic_load_n(&task->clock.sequence, __ATOMIC_RELAXED))
+                return elapsed;
+        }
+        __asm__ volatile("pause");
     }
 }
 

@@ -94,10 +94,9 @@ object Scheduler {
             println("Scheduler: target core $targetLapicId is unavailable")
             return false
         }
-        val accepted = bridge.fast_handoff_enqueue(
-            thread.nativeContext,
-            targetLapicId.toULong(),
-        )
+        val accepted = thread.nativeTask.access {
+            bridge.fast_handoff_enqueue(it, targetLapicId.toULong())
+        }
         if (accepted) {
             thread.bindToCpu(targetLapicId)
             SignalRouter.requestDelivery(thread)
@@ -119,7 +118,7 @@ object Scheduler {
 
     fun wake(thread: Thread): Boolean {
         if (thread.process.signals.deferWake(thread.process, thread)) return true
-        return bridge.fast_handoff_unpark(thread.nativeContext)
+        return thread.nativeTask.access { bridge.fast_handoff_unpark(it) }
     }
 
     fun apInitialize(): Boolean {
@@ -133,7 +132,7 @@ object Scheduler {
     fun finishBootstrap(): Boolean {
         val local = SMProcessor.currentLocal()
         val thread = local.scheduler.bootstrapThread ?: return false
-        return bridge.fast_handoff_finish_bootstrap(thread.nativeContext)
+        return thread.nativeTask.access { bridge.fast_handoff_finish_bootstrap(it) }
     }
 
     private fun initializeCurrentCpu(bootstrapThread: Thread?, isBsp: Boolean): Boolean {
@@ -143,12 +142,10 @@ object Scheduler {
             println("Scheduler: core ${local.lapicId} has no bootstrap thread")
             return false
         }
-        if (!bridge.fast_handoff_bind_current(
-                thread.nativeContext,
-                local.lapicId.toULong(),
-                if (isBsp) 1u.toUByte() else 0u.toUByte(),
-            )
-        ) {
+        val bound = thread.nativeTask.access {
+            bridge.fast_handoff_bind_current(it, local.lapicId.toULong(), if (isBsp) 1u.toUByte() else 0u.toUByte())
+        }
+        if (!bound) {
             println("Scheduler: cannot bind bootstrap thread on core ${local.lapicId}")
             return false
         }

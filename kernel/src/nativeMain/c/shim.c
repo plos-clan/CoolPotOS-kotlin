@@ -127,23 +127,8 @@ static uint64_t clone_count;
 static uint64_t clone_capacity;
 static uint64_t next_runtime_tid = 2;
 
-struct runtime_tcb_prefix {
-    struct runtime_tcb_prefix *self_pointer;
-    size_t dtv_size;
-    void **dtv_pointers;
-    int tid;
-    int did_exit;
-};
-
 uint64_t allocate_runtime_tid(void) {
     return __atomic_fetch_add(&next_runtime_tid, 1, __ATOMIC_RELAXED);
-}
-
-uint64_t create_kernel_runtime_tcb(void) {
-    struct runtime_tcb_prefix *tcb = __rtld_allocateTcb();
-    if (!tcb) return 0;
-    tcb->tid = (int)allocate_runtime_tid();
-    return (uintptr_t)tcb;
 }
 
 static bool ensure_clone_capacity(uint64_t needed) {

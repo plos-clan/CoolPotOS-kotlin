@@ -20,7 +20,7 @@ internal object SignalInterrupt : SignalPreemption {
     }
 
     override fun request(thread: Thread) {
-        bridge.fast_handoff_request_user_interrupt(thread.nativeContext)
+        thread.nativeTask.access { bridge.fast_handoff_request_user_interrupt(it) }
     }
 
     fun handle(frame: InterruptFrame) {

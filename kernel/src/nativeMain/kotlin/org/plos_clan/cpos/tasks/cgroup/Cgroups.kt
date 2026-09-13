@@ -38,7 +38,7 @@ internal object Cgroups {
         if (task.killed) {
             SignalRouter.sendProcess(null, thread.process, SignalInfo(Signal.KILL, SignalInfo.KERNEL))
         }
-        if (task.freezing) bridge.fast_handoff_request_user_interrupt(thread.nativeContext)
+        if (task.freezing) thread.nativeTask.access { bridge.fast_handoff_request_user_interrupt(it) }
     }
 
     fun kill(group: CgroupHierarchy.Group) {
@@ -58,8 +58,10 @@ internal object Cgroups {
         for (task in tasks) {
             val thread = ProcessManager.findThread(task.id) ?: continue
             if (task.freezing) {
-                bridge.fast_handoff_request_user_interrupt(thread.nativeContext)
-                bridge.fast_handoff_unpark(thread.nativeContext)
+                thread.nativeTask.access {
+                    bridge.fast_handoff_request_user_interrupt(it)
+                    bridge.fast_handoff_unpark(it)
+                }
             } else if (task.frozen) Scheduler.wake(thread)
         }
     }

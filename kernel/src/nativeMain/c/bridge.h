@@ -46,7 +46,6 @@ uint64_t get_sys_clone_recorded_count(void);
 uint64_t get_sys_clone_stack_at(uint64_t index);
 uint64_t get_sys_clone_tls_at(uint64_t index);
 uint64_t get_kernel_clone_thread_entry_address(void);
-uint64_t create_kernel_runtime_tcb(void);
 bool can_use_runtime(void);
 void set_runtime_use_mask(bool enabled);
 uint64_t get_asm_syscall_handle_address(void);

@@ -204,7 +204,6 @@ uint64_t fast_handoff_current_task_id(void);
 uint64_t fast_handoff_current_task_handle(void);
 bool capture_sys_clone_context(uint64_t stack, uint64_t tls);
 uint64_t allocate_runtime_tid(void);
-uint64_t create_kernel_runtime_tcb(void);
 void set_kernel_runtime_fs_base(uint64_t pointer);
 void serial_print(const char *buffer, size_t size);
 uint64_t irq_save(void);

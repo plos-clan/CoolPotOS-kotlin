@@ -105,6 +105,11 @@ SECTIONS
         *(.tcommon)
     } :data :tls
 
+    __kernel_tls_start = ADDR(.tdata);
+    __kernel_tls_file_size = SIZEOF(.tdata);
+    __kernel_tls_size = ADDR(.tbss) + SIZEOF(.tbss) - ADDR(.tdata);
+    __kernel_tls_align = MAX(ALIGNOF(.tdata), ALIGNOF(.tbss));
+
     /* NOTE: .bss needs to be the last thing mapped to :data, otherwise lots of */
     /* unnecessary zeros will be written to the binary. */
     /* If you need, for example, .init_array and .fini_array, those should be placed */
