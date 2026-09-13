@@ -47,6 +47,10 @@ internal enum class ProcessFile(val fileName: String) {
 
     fun create(fileSystem: ProcfsInstance, superBlock: SuperBlock, target: PidHandle): Inode {
         val process = target.thread.process
+        val id = ProcInode.process(process.id, ordinal.toUInt() + 1u)
+        if (this == MOUNTS || this == MOUNT_INFO) {
+            return fileSystem.file(superBlock, id, process, backend = MountsFile(process, this == MOUNT_INFO))
+        }
         val write = if (this == OOM_SCORE_ADJUSTMENT) {
             { caller: VfsOperationContext, input: ByteArray -> update(process, caller, input) }
         } else {
@@ -54,7 +58,7 @@ internal enum class ProcessFile(val fileName: String) {
         }
         return fileSystem.text(
             superBlock = superBlock,
-            id = ProcInode.process(process.id, ordinal.toUInt() + 1u),
+            id = id,
             owner = process,
             write = write,
             positionedWrite = this != OOM_SCORE_ADJUSTMENT,
@@ -74,8 +78,7 @@ internal enum class ProcessFile(val fileName: String) {
         STATISTICS -> process.stat().encodeToByteArray()
         STATUS -> process.status().encodeToByteArray()
         MAPS -> process.maps().encodeToByteArray()
-        MOUNTS -> MountsFile.render(process)
-        MOUNT_INFO -> MountsFile.render(process, mountInfo = true)
+        MOUNTS, MOUNT_INFO -> error("Mount tables require an open filesystem context")
         CGROUP -> "0::".encodeToByteArray() + Cgroups.path(process) + '\n'.code.toByte()
         OOM_SCORE_ADJUSTMENT -> "${process.oomScoreAdjustment.value}\n".encodeToByteArray()
     }

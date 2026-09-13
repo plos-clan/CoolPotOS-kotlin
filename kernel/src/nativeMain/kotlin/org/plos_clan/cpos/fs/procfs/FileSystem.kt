@@ -1,11 +1,19 @@
 package org.plos_clan.cpos.fs.procfs
 
 import org.plos_clan.cpos.fs.FileSystemManager
+import org.plos_clan.cpos.fs.vfs.Dentry
+import org.plos_clan.cpos.fs.vfs.FileSystemContext
+import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.fs.vfs.MountFlags
-import org.plos_clan.cpos.fs.vfs.Dentry
+import org.plos_clan.cpos.fs.vfs.OpenFileBackend
+import org.plos_clan.cpos.fs.vfs.OpenOptions
+import org.plos_clan.cpos.fs.vfs.RegularFileBackend
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.tasks.Process
+import org.plos_clan.cpos.utils.PollEvents
 
 object FilesystemsFile : ProcFSRender {
     override fun render(): ByteArray =
@@ -21,7 +29,28 @@ object FilesystemsFile : ProcFSRender {
         }.encodeToByteArray()
 }
 
-object MountsFile {
+internal class MountsFile(
+    private val process: Process,
+    private val mountInfo: Boolean,
+) : RegularFileBackend() {
+    override fun open(
+        caller: VfsOperationContext,
+        inode: Inode,
+        options: OpenOptions,
+    ): VfsResult<OpenFileBackend> {
+        if (options.access.canWrite) return VfsResult.Err(VfsError.PERMISSION_DENIED)
+        val context = process.context?.forkAtRoot() ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        return try {
+            val handle = object : ProcTextHandle(render(context), { render(context) }, null, true) {
+                override fun release() = context.release()
+            }
+            VfsResult.Ok(ProcPollHandle({ context.namespace.version }, handle, PollEvents.NORMAL_INPUT))
+        } catch (failure: Throwable) {
+            context.release()
+            throw failure
+        }
+    }
+
     private fun StringBuilder.appendField(value: String) {
         value.forEach { character ->
             when (character) {
@@ -42,8 +71,7 @@ object MountsFile {
         }
     }
 
-    fun render(process: Process, mountInfo: Boolean = false): ByteArray {
-        val context = process.context ?: return ByteArray(0)
+    private fun render(context: FileSystemContext): ByteArray {
         val mounts = context.namespace.snapshotMounts()
         val root = context.root
 

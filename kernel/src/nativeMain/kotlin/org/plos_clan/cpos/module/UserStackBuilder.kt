@@ -101,8 +101,8 @@ object UserStackBuilder {
 
         val writer = StackWriter(addressSpace, stackStart, stackTop)
         val execfnAddress = writer.pushCString(executablePath)
-        val argumentAddresses = arguments.map { writer.pushCString(it) }
-        val environmentAddresses = environment.map { writer.pushCString(it) }
+        val environmentAddresses = environment.asReversed().map { writer.pushCString(it) }.asReversed()
+        val argumentAddresses = arguments.asReversed().map { writer.pushCString(it) }.asReversed()
         if (execfnAddress == null ||
             argumentAddresses.any { it == null } ||
             environmentAddresses.any { it == null }

@@ -86,6 +86,9 @@ rm -rf "$rootfs/var/log"/* "$rootfs/var/tmp"/*
 
 cp -a --no-preserve=ownership /usr/local/share/cpos/rootfs/. "$rootfs/"
 
+systemctl --root="$rootfs" enable NetworkManager.service
+systemctl --root="$rootfs" disable NetworkManager-wait-online.service
+
 mkfs.erofs \
     -x-1 \
     -z zstd,level=3 \

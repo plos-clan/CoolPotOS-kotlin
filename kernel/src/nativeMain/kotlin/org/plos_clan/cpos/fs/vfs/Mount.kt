@@ -147,6 +147,10 @@ class MountNamespace internal constructor(val root: Mount) {
     private val lock = IrqSpinLock()
     private val mounts = mutableMapOf<VfsPath, Mount>()
     private val references = AtomicInt(0)
+    private val changes = AtomicInt(0)
+
+    internal val version: Int
+        get() = changes.load()
 
     internal fun retain(): Boolean {
         var observed = references.load()
@@ -190,6 +194,7 @@ class MountNamespace internal constructor(val root: Mount) {
             flags = flags,
             attachment = target,
         )
+        changes.fetchAndAdd(1)
         VfsResult.Ok(Unit)
     }
 
@@ -205,6 +210,7 @@ class MountNamespace internal constructor(val root: Mount) {
             return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
         mounts[target] = mount
+        changes.fetchAndAdd(1)
         VfsResult.Ok(Unit)
     }
 
@@ -229,6 +235,7 @@ class MountNamespace internal constructor(val root: Mount) {
             propagation = source.mount.propagation,
             attachment = target,
         )
+        changes.fetchAndAdd(1)
         VfsResult.Ok(Unit)
     }
 
@@ -237,6 +244,7 @@ class MountNamespace internal constructor(val root: Mount) {
             val target = attachedAt(mount) ?: return@withLock false
             if (!mount.tryBeginUnmount()) return@withLock false
             mounts.remove(target)
+            changes.fetchAndAdd(1)
             true
         }
         if (!detached) return VfsResult.Err(VfsError.BUSY)
@@ -260,6 +268,7 @@ class MountNamespace internal constructor(val root: Mount) {
                 ?: return@withLock VfsResult.Err(VfsError.NOT_FOUND)
             mounts.remove(source)
             mounts[target] = mount
+            changes.fetchAndAdd(1)
             VfsResult.Ok(attachment)
         }
         return when (previous) {
@@ -278,12 +287,12 @@ class MountNamespace internal constructor(val root: Mount) {
     ) {
         lock.withLock {
             mount.setAttributes(attributes)
-            if (!recursive || !contains(mount)) return@withLock
-            mounts.values.forEach { candidate ->
-                if (candidate !== mount && candidate.isDescendantOf(mount)) {
-                    candidate.setAttributes(attributes)
-                }
+            if (!contains(mount)) return@withLock
+            if (recursive) for (candidate in mounts.values) {
+                if (candidate === mount || !candidate.isDescendantOf(mount)) continue
+                candidate.setAttributes(attributes)
             }
+            changes.fetchAndAdd(1)
         }
     }
 
@@ -298,7 +307,7 @@ class MountNamespace internal constructor(val root: Mount) {
                     add(candidate)
                     iterator.remove()
                 }
-            }
+            }.also { changes.fetchAndAdd(1) }
         } ?: return VfsResult.Err(VfsError.BUSY)
         mount.detachFromParent()
         mount.release()
@@ -388,6 +397,10 @@ class FileSystemContext internal constructor(
             checkNotNull(currentRoot),
             checkNotNull(currentWorkingDirectory),
         )
+    }
+
+    internal fun forkAtRoot(): FileSystemContext? = lock.withLock {
+        currentRoot?.let { FileSystemContext(namespace, it) }
     }
 
     internal fun release() {

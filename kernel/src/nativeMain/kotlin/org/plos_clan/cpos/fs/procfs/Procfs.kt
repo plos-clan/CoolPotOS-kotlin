@@ -170,10 +170,18 @@ internal class ProcfsInstance : SuperBlockBackend {
         positionedWrite: Boolean = true,
         pollVersion: (() -> Int)? = null,
         render: () -> ByteArray?,
+    ): Inode = file(superBlock, id, owner, mode, ProcTextFile(render, write, positionedWrite, pollVersion))
+
+    internal fun file(
+        superBlock: SuperBlock,
+        id: ULong,
+        owner: Process? = null,
+        mode: UInt = FILE_MODE,
+        backend: RegularFileBackend,
     ): Inode = Inode(
         id = InodeId(id),
         superBlock = superBlock,
-        backend = ProcTextFile(render, write, positionedWrite, pollVersion),
+        backend = backend,
         initialAttributes = InodeAttributeSnapshot(
             InodeAttributes(
                 InodeMetadata(
@@ -380,9 +388,10 @@ private class ProcTextFile(
     }
 }
 
-private class ProcPollHandle(
+internal class ProcPollHandle(
     private val version: () -> Int,
     backend: OpenFileBackend,
+    private val defaultEvents: Int = PollEvents.DEFAULT_FILE_EVENTS,
 ) : OpenFileBackend by backend {
     private val observed = AtomicInt(readinessVersion)
 
@@ -403,12 +412,12 @@ private class ProcPollHandle(
         val current = readinessVersion
         val changed = current != previous && (!consume || observed.compareAndSet(previous, current))
         val ready = if (changed) PollEvents.NORMAL_INPUT or PollEvents.POLLPRI or PollEvents.POLLERR
-        else PollEvents.DEFAULT_FILE_EVENTS
+        else defaultEvents
         return (ready and (events or PollEvents.UNCONDITIONALLY_REPORTED)).toLong()
     }
 }
 
-private class ProcTextHandle(
+internal open class ProcTextHandle(
     private var content: ByteArray,
     private val refresh: () -> ByteArray?,
     private val write: ((VfsOperationContext, ByteArray) -> VfsResult<Unit>)?,
