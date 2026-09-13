@@ -210,17 +210,16 @@ private class MlibcConfig(
     val cFlags = (
         listOf(
             "-pipe",
-            "-Wall", "-Wextra", "-nostdinc", "-ffreestanding",
+            "-Wall", "-Wextra", "-nostdlibinc", "-ffreestanding",
             "-fno-stack-protector", "-fno-stack-check",
         ) + FullLto.compilerArgs + listOf(
             "-fno-PIC",
             "-ffunction-sections", "-fdata-sections",
             "-m64", "-march=x86-64", "-mno-red-zone", "-mcmodel=kernel",
             "-D__thread=''", "-D_Thread_local=''", "-D_GNU_SOURCE",
-            "-idirafter", paths.freestandingInclude.absolutePath,
         )
     ).joinToString(" ")
-    val cxxFlags = "$cFlags -fno-rtti -fno-exceptions -fno-sized-deallocation"
+    val cxxFlags = "$cFlags -nostdinc++ -fno-rtti -fno-exceptions -fno-sized-deallocation"
     val libraries = listOf("libc.a", "libm.a", "libpthread.a")
         .map(prefix.resolve("lib")::resolve)
 
@@ -283,7 +282,7 @@ private class KernelConfig(
     val linkArgs = FullLto.linkerArgs + listOf(
         "-m", "elf_$arch", "-nostdlib", "--eh-frame-hdr",
         "-z", "max-page-size=0x1000", "--gc-sections",
-        "-u", "sched_yield", "-u", "frg_panic",
+        "-u", "sched_yield", "-u", "frg_panic", "-u", "pthread_exit",
         "-T", paths.linkerScript.absolutePath,
     )
     val assemblyArgs = listOf("-target", "$arch-freestanding")
@@ -629,7 +628,6 @@ val buildMlibc = tasks.register("buildMlibc") {
     group = "build"
     description = "Builds the mlibc C library."
     notCompatibleWithConfigurationCache("Runs an external source build.")
-    dependsOn(prepareFreestndHeaders)
 
     inputs.property("buildType", config.mlibc.buildType)
     inputs.property("compilerFlags", listOf(config.mlibc.cFlags, config.mlibc.cxxFlags))
@@ -675,12 +673,17 @@ val buildMlibc = tasks.register("buildMlibc") {
                     )
             ) { "Failed to apply ${config.paths.mlibcPatch.name}" }
 
+            check(run(listOf("meson", "subprojects", "update", "--reset", "--sourcedir", source.path))) {
+                "Failed to update mlibc subprojects"
+            }
+
             val meson = listOf(
                 "meson", "setup", source.path,
                 "--cross-file", crossFile.path,
                 "--buildtype=$buildType",
                 "--prefix=${prefix.path}",
                 "-Ddefault_library=static",
+                "-Db_staticpic=false",
                 "-Dlibgcc_dependency=false",
                 "-Duse_freestnd_hdrs=enabled",
             )

@@ -1,25 +1,61 @@
 diff --git a/meson.build b/meson.build
-index df1f291b..96170fe9 100644
+index ccc5818e..db97c8d6 100644
 --- a/meson.build
 +++ b/meson.build
-@@ -286,6 +286,12 @@ elif host_machine.system() == 'menix'
- 	internal_conf.set10('MLIBC_MMAP_ALLOCATE_DSO', true)
+@@ -235,7 +235,6 @@ internal_conf.set10('MLIBC_MAP_DSO_SEGMENTS', false)
+ internal_conf.set10('MLIBC_MMAP_ALLOCATE_DSO', false)
+ internal_conf.set10('MLIBC_MAP_FILE_WINDOWS', false)
+ internal_conf.set10('MLIBC_DEBUG_ALLOCATOR', get_option('debug_allocator'))
+-internal_conf.set10('MLIBC_IFUNCS_SUPPORTED', ifuncs_supported)
+ 
+ #----------------------------------------------------------------------------------------
+ # Configuration based on sysdeps.
+@@ -315,6 +314,11 @@ elif host_machine.system() == 'ethereal'
+ 	internal_conf.set10('MLIBC_MMAP_ALLOCATE_DSO', false)
  	internal_conf.set10('MLIBC_MAP_FILE_WINDOWS', true)
- 	subdir('sysdeps/menix')
+ 	subdir('sysdeps/ethereal')
 +elif host_machine.system() == 'template'
-+	disable_linux_option = true
-+	static_pic_enabled = false
++	ifuncs_supported = false
 +	rtld_include_dirs += include_directories('sysdeps/template/include')
 +	libc_include_dirs += include_directories('sysdeps/template/include')
 +	subdir('sysdeps/template')
  # ANCHOR: demo-sysdeps
  elif host_machine.system() == 'demo'
  	subdir('sysdeps/demo')
+@@ -453,6 +457,8 @@ libc_include_dirs += include_directories('.')
+ 
+ #----------------------------------------------------------------------------------------
+ 
++internal_conf.set10('MLIBC_IFUNCS_SUPPORTED', ifuncs_supported)
++
+ configure_file(input: 'internal-config.h.in',
+ 	output: 'internal-config.h',
+ 	configuration: internal_conf)
+diff --git a/options/ansi/x86_64/meson.build b/options/ansi/x86_64/meson.build
+index 45665a61..3487d30d 100644
+--- a/options/ansi/x86_64/meson.build
++++ b/options/ansi/x86_64/meson.build
+@@ -1,10 +1,5 @@
+-ansi_sources += files(
+-	'strcmp.cpp'
+-)
+-
+-arch_defines = [
+-	'-DMLIBC_ARCH_HAS_STRCMP=1',
+-]
+-
+-libc_cpp_args += arch_defines
+-ld_cpp_args += arch_defines
++if ifuncs_supported
++	ansi_sources += files('strcmp.cpp')
++	libc_cpp_args += '-DMLIBC_ARCH_HAS_STRCMP=1'
++	ld_cpp_args += '-DMLIBC_ARCH_HAS_STRCMP=1'
++endif
 diff --git a/options/rtld/generic/main.cpp b/options/rtld/generic/main.cpp
-index d4660cb5..d5dd9ec0 100644
+index 106916ae..0218a668 100644
 --- a/options/rtld/generic/main.cpp
 +++ b/options/rtld/generic/main.cpp
-@@ -541,11 +541,6 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
+@@ -602,11 +602,6 @@ extern "C" void *interpreterMain(uintptr_t *entry_stack) {
  #else
  	(void)env_ld_library_path;
  	(void)env_ld_preload;
@@ -31,24 +67,21 @@ index d4660cb5..d5dd9ec0 100644
  #endif
  	__ensure(phdr_pointer);
  	__ensure(entry_pointer);
-@@ -986,7 +981,10 @@ int __dlapi_reverse(const void *ptr, __dlapi_symbol *info) {
+@@ -1017,7 +1012,7 @@ int __dlapi_reverse(const void *ptr, __dlapi_symbol *info) {
  			start_symbols = hash_table->symbolOffset;
  			num_symbols = last_sym;
  		} else {
 -			__ensure(!"unexpected hash style!");
-+			// Static kernel images are not required to expose a dynamic hash
-+			// table. They cannot be searched through the rtld repository, but
-+			// that must not make best-effort stack symbolization fatal.
 +			continue;
  		}
  
  		for(size_t i = start_symbols; i < num_symbols; i++) {
 diff --git a/sysdeps/template/generic/generic.cpp b/sysdeps/template/generic/generic.cpp
 new file mode 100644
-index 00000000..142a1aa6
+index 00000000..784087ca
 --- /dev/null
 +++ b/sysdeps/template/generic/generic.cpp
-@@ -0,0 +1,913 @@
+@@ -0,0 +1,869 @@
 +#include <bits/ensure.h>
 +#include <errno.h>
 +#include <fcntl.h>
@@ -74,7 +107,7 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+void sys_libc_log(const char *message) {
++void Sysdeps<LibcLog>::operator()(const char *message) {
 +	if(!message)
 +		return;
 +	auto size = strlen(message);
@@ -82,11 +115,11 @@ index 00000000..142a1aa6
 +		::syscall(SYS_write, 2, message, size);
 +}
 +
-+void sys_libc_panic() {
++void Sysdeps<LibcPanic>::operator()() {
 +	__builtin_trap();
 +}
 +
-+void sys_exit(int status) {
++void Sysdeps<Exit>::operator()(int status) {
 +	::syscall(SYS_exit_group, status);
 +	__builtin_unreachable();
 +}
@@ -97,20 +130,16 @@ index 00000000..142a1aa6
 +	__dlapi_vdsosym("__vdso_clock_gettime", nullptr)
 +);
 +
-+void sys_thread_exit() {
++void Sysdeps<ThreadExit>::operator()() {
 +	::syscall(SYS_exit, 0);
 +	__builtin_unreachable();
 +}
 +
-+int sys_thread_setname(void *, const char *) {
-+	return ENOSYS;
-+}
-+
-+void sys_yield() {
++void Sysdeps<Yield>::operator()() {
 +	::syscall(SYS_sched_yield);
 +}
 +
-+int sys_clone(void *tcb, pid_t *pid_out, void *stack) {
++int Sysdeps<Clone>::operator()(void *tcb, pid_t *pid_out, void *stack) {
 +	if(!pid_out || !stack)
 +		return EINVAL;
 +
@@ -126,7 +155,7 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_prepare_stack(
++int Sysdeps<PrepareStack>::operator()(
 +	void **stack,
 +	void *entry,
 +	void *arg,
@@ -150,7 +179,7 @@ index 00000000..142a1aa6
 +	*guard_size = 0;
 +
 +	if(!*stack) {
-+		int e = sys_anon_allocate(*stack_size, stack_base);
++		int e = sysdep<AnonAllocate>(*stack_size, stack_base);
 +		if(e)
 +			return e;
 +	} else {
@@ -173,21 +202,21 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_kill(pid_t pid, int signal) {
++int Sysdeps<Kill>::operator()(pid_t pid, int signal) {
 +	auto ret = ::syscall(SYS_kill, pid, signal);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_tcgetattr(int fd, struct termios *attr) {
++int Sysdeps<Tcgetattr>::operator()(int fd, struct termios *attr) {
 +	auto ret = ::syscall(SYS_ioctl, fd, TCGETS, attr);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_tcsetattr(int fd, int optional_action, const struct termios *attr) {
++int Sysdeps<Tcsetattr>::operator()(int fd, int optional_action, const struct termios *attr) {
 +	unsigned long request = 0;
 +	switch(optional_action) {
 +		case TCSANOW:
@@ -211,7 +240,7 @@ index 00000000..142a1aa6
 +
 +#endif
 +
-+int sys_tcb_set(void *pointer) {
++int Sysdeps<TcbSet>::operator()(void *pointer) {
 +#if defined(__x86_64__)
 +	auto ret = ::syscall(SYS_arch_prctl, ARCH_SET_FS, pointer);
 +	if(int e = sc_error(ret); e)
@@ -224,9 +253,9 @@ index 00000000..142a1aa6
 +
 +#ifndef MLIBC_BUILDING_RTLD
 +
-+int sys_ppoll(
++int Sysdeps<Ppoll>::operator()(
 +	struct pollfd *fds,
-+	int nfds,
++	nfds_t nfds,
 +	const struct timespec *timeout,
 +	const sigset_t *sigmask,
 +	int *num_events
@@ -241,7 +270,7 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_poll(struct pollfd *fds, nfds_t count, int timeout, int *num_events) {
++int Sysdeps<Poll>::operator()(struct pollfd *fds, nfds_t count, int timeout, int *num_events) {
 +	struct timespec ts = {};
 +	struct timespec *pts = nullptr;
 +	if(timeout >= 0) {
@@ -249,10 +278,10 @@ index 00000000..142a1aa6
 +		ts.tv_nsec = (timeout % 1000) * 1000000;
 +		pts = &ts;
 +	}
-+	return sys_ppoll(fds, static_cast<int>(count), pts, nullptr, num_events);
++	return sysdep<Ppoll>(fds, count, pts, nullptr, num_events);
 +}
 +
-+int sys_pselect(
++int Sysdeps<Pselect>::operator()(
 +	int nfds,
 +	fd_set *read_set,
 +	fd_set *write_set,
@@ -290,14 +319,14 @@ index 00000000..142a1aa6
 +
 +#endif
 +
-+int sys_futex_wait(int *pointer, int expected, const struct timespec *time) {
++int Sysdeps<FutexWait>::operator()(int *pointer, int expected, const struct timespec *time) {
 +	auto ret = ::syscall(SYS_futex, pointer, FUTEX_WAIT, expected, time, nullptr, 0);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_futex_wake(int *pointer, bool all) {
++int Sysdeps<FutexWake>::operator()(int *pointer, bool all) {
 +	auto ret = ::syscall(SYS_futex, pointer, FUTEX_WAKE, all ? INT_MAX : 1, nullptr, nullptr, 0);
 +	if(int e = sc_error(ret); e)
 +		return e;
@@ -306,7 +335,7 @@ index 00000000..142a1aa6
 +
 +#ifndef MLIBC_BUILDING_RTLD
 +
-+int sys_ioctl(int fd, unsigned long request, void *arg, int *result) {
++int Sysdeps<Ioctl>::operator()(int fd, unsigned long request, void *arg, int *result) {
 +	auto ret = ::syscall(SYS_ioctl, fd, request, arg);
 +	if(int e = sc_error(ret); e)
 +		return e;
@@ -315,7 +344,7 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_isatty(int fd) {
++int Sysdeps<Isatty>::operator()(int fd) {
 +	unsigned short winsize_hack[4];
 +	auto ret = ::syscall(SYS_ioctl, fd, TIOCGWINSZ, &winsize_hack);
 +	if(int e = sc_error(ret); e)
@@ -323,7 +352,7 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_getcwd(char *buffer, size_t size) {
++int Sysdeps<GetCwd>::operator()(char *buffer, size_t size) {
 +	auto ret = ::syscall(SYS_getcwd, buffer, size);
 +	if(int e = sc_error(ret); e)
 +		return e;
@@ -332,7 +361,7 @@ index 00000000..142a1aa6
 +
 +#endif
 +
-+int sys_openat(int dirfd, const char *path, int flags, mode_t mode, int *fd) {
++int Sysdeps<Openat>::operator()(int dirfd, const char *path, int flags, mode_t mode, int *fd) {
 +	if(!fd)
 +		return EINVAL;
 +	auto ret = ::syscall(SYS_openat, dirfd, path, flags, mode);
@@ -342,17 +371,17 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_open(const char *path, int flags, mode_t mode, int *fd) {
-+	return sys_openat(AT_FDCWD, path, flags, mode, fd);
++int Sysdeps<Open>::operator()(const char *path, int flags, mode_t mode, int *fd) {
++	return sysdep<Openat>(AT_FDCWD, path, flags, mode, fd);
 +}
 +
 +#ifndef MLIBC_BUILDING_RTLD
 +
-+int sys_open_dir(const char *path, int *handle) {
-+	return sys_open(path, O_DIRECTORY, 0, handle);
++int Sysdeps<OpenDir>::operator()(const char *path, int *handle) {
++	return sysdep<Open>(path, O_DIRECTORY, 0, handle);
 +}
 +
-+int sys_read_entries(int fd, void *buffer, size_t max_size, size_t *bytes_read) {
++int Sysdeps<ReadEntries>::operator()(int fd, void *buffer, size_t max_size, size_t *bytes_read) {
 +	if(!bytes_read)
 +		return EINVAL;
 +	auto ret = ::syscall(SYS_getdents64, fd, buffer, max_size);
@@ -364,14 +393,14 @@ index 00000000..142a1aa6
 +
 +#endif
 +
-+int sys_close(int fd) {
++int Sysdeps<Close>::operator()(int fd) {
 +	auto ret = ::syscall(SYS_close, fd);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_seek(int fd, off_t offset, int whence, off_t *new_offset) {
++int Sysdeps<Seek>::operator()(int fd, off_t offset, int whence, off_t *new_offset) {
 +	if(!new_offset)
 +		return EINVAL;
 +	auto ret = ::syscall(SYS_lseek, fd, offset, whence);
@@ -381,7 +410,7 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_read(int fd, void *buf, size_t count, ssize_t *bytes_read) {
++int Sysdeps<Read>::operator()(int fd, void *buf, size_t count, ssize_t *bytes_read) {
 +	if(!bytes_read)
 +		return EINVAL;
 +	auto ret = ::syscall(SYS_read, fd, buf, count);
@@ -393,7 +422,7 @@ index 00000000..142a1aa6
 +
 +#ifndef MLIBC_BUILDING_RTLD
 +
-+int sys_write(int fd, const void *buf, size_t count, ssize_t *bytes_written) {
++int Sysdeps<Write>::operator()(int fd, const void *buf, size_t count, ssize_t *bytes_written) {
 +	auto ret = ::syscall(SYS_write, fd, buf, count);
 +	if(int e = sc_error(ret); e)
 +		return e;
@@ -402,7 +431,7 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_readlink(const char *path, void *data, size_t max_size, ssize_t *length) {
++int Sysdeps<Readlink>::operator()(const char *path, void *data, size_t max_size, ssize_t *length) {
 +	if(!length)
 +		return EINVAL;
 +	auto ret = ::syscall(SYS_readlinkat, AT_FDCWD, path, data, max_size);
@@ -412,11 +441,11 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_link(const char *old_path, const char *new_path) {
-+	return sys_linkat(AT_FDCWD, old_path, AT_FDCWD, new_path, 0);
++int Sysdeps<Link>::operator()(const char *old_path, const char *new_path) {
++	return sysdep<Linkat>(AT_FDCWD, old_path, AT_FDCWD, new_path, 0);
 +}
 +
-+int sys_linkat(
++int Sysdeps<Linkat>::operator()(
 +	int olddirfd, const char *old_path, int newdirfd, const char *new_path, int flags
 +) {
 +	auto ret = ::syscall(SYS_linkat, olddirfd, old_path, newdirfd, new_path, flags);
@@ -425,21 +454,21 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_unlinkat(int fd, const char *path, int flags) {
++int Sysdeps<Unlinkat>::operator()(int fd, const char *path, int flags) {
 +	auto ret = ::syscall(SYS_unlinkat, fd, path, flags);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_fchmod(int fd, mode_t mode) {
++int Sysdeps<Fchmod>::operator()(int fd, mode_t mode) {
 +	auto ret = ::syscall(SYS_fchmod, fd, mode);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_rmdir(const char *path) {
++int Sysdeps<Rmdir>::operator()(const char *path) {
 +	auto ret = ::syscall(SYS_unlinkat, AT_FDCWD, path, AT_REMOVEDIR);
 +	if(int e = sc_error(ret); e)
 +		return e;
@@ -448,7 +477,7 @@ index 00000000..142a1aa6
 +
 +#endif
 +
-+int sys_vm_map(void *hint, size_t size, int prot, int flags, int fd, off_t offset, void **window) {
++int Sysdeps<VmMap>::operator()(void *hint, size_t size, int prot, int flags, int fd, off_t offset, void **window) {
 +	if(!window)
 +		return EINVAL;
 +	if(offset < 0 || (offset % 4096))
@@ -467,7 +496,7 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_vm_unmap(void *pointer, size_t size) {
++int Sysdeps<VmUnmap>::operator()(void *pointer, size_t size) {
 +	auto ret = ::syscall(SYS_munmap, pointer, size);
 +	if(int e = sc_error(ret); e)
 +		return e;
@@ -476,7 +505,7 @@ index 00000000..142a1aa6
 +
 +#ifndef MLIBC_BUILDING_RTLD
 +
-+int sys_vm_protect(void *pointer, size_t size, int prot) {
++int Sysdeps<VmProtect>::operator()(void *pointer, size_t size, int prot) {
 +	auto ret = ::syscall(SYS_mprotect, pointer, size, prot);
 +	if(int e = sc_error(ret); e)
 +		return e;
@@ -485,8 +514,8 @@ index 00000000..142a1aa6
 +
 +#endif
 +
-+int sys_anon_allocate(size_t size, void **pointer) {
-+	return sys_vm_map(
++int Sysdeps<AnonAllocate>::operator()(size_t size, void **pointer) {
++	return sysdep<VmMap>(
 +		nullptr,
 +		size,
 +		PROT_READ | PROT_WRITE,
@@ -497,55 +526,55 @@ index 00000000..142a1aa6
 +	);
 +}
 +
-+int sys_anon_free(void *pointer, size_t size) {
-+	return sys_vm_unmap(pointer, size);
++int Sysdeps<AnonFree>::operator()(void *pointer, size_t size) {
++	return sysdep<VmUnmap>(pointer, size);
 +}
 +
 +#ifndef MLIBC_BUILDING_RTLD
 +
-+pid_t sys_getpid() {
++pid_t Sysdeps<GetPid>::operator()() {
 +	auto ret = ::syscall(SYS_getpid);
 +	if(sc_error(ret))
 +		return 0;
 +	return static_cast<pid_t>(ret);
 +}
 +
-+pid_t sys_getppid() {
++pid_t Sysdeps<GetPpid>::operator()() {
 +	auto ret = ::syscall(SYS_getppid);
 +	if(sc_error(ret))
 +		return 0;
 +	return static_cast<pid_t>(ret);
 +}
 +
-+uid_t sys_getuid() {
++uid_t Sysdeps<GetUid>::operator()() {
 +	auto ret = ::syscall(SYS_getuid);
 +	if(sc_error(ret))
 +		return 0;
 +	return static_cast<uid_t>(ret);
 +}
 +
-+uid_t sys_geteuid() {
++uid_t Sysdeps<GetEuid>::operator()() {
 +	auto ret = ::syscall(SYS_geteuid);
 +	if(sc_error(ret))
 +		return 0;
 +	return static_cast<uid_t>(ret);
 +}
 +
-+gid_t sys_getgid() {
++gid_t Sysdeps<GetGid>::operator()() {
 +	auto ret = ::syscall(SYS_getgid);
 +	if(sc_error(ret))
 +		return 0;
 +	return static_cast<gid_t>(ret);
 +}
 +
-+int sys_setgid(gid_t gid) {
++int Sysdeps<SetGid>::operator()(gid_t gid) {
 +	auto ret = ::syscall(SYS_setgid, gid);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_getpgid(pid_t pid, pid_t *pgid) {
++int Sysdeps<GetPgid>::operator()(pid_t pid, pid_t *pgid) {
 +	auto ret = ::syscall(SYS_getpgid, pid);
 +	if(int e = sc_error(ret); e)
 +		return e;
@@ -554,25 +583,25 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+gid_t sys_getegid() {
++gid_t Sysdeps<GetEgid>::operator()() {
 +	auto ret = ::syscall(SYS_getegid);
 +	if(sc_error(ret))
 +		return 0;
 +	return static_cast<gid_t>(ret);
 +}
 +
-+int sys_setpgid(pid_t pid, pid_t pgid) {
++int Sysdeps<SetPgid>::operator()(pid_t pid, pid_t pgid) {
 +	auto ret = ::syscall(SYS_setpgid, pid, pgid);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_ttyname(int fd, char *buf, size_t size) {
++int Sysdeps<Ttyname>::operator()(int fd, char *buf, size_t size) {
 +	if(!buf || !size)
 +		return EINVAL;
 +
-+	if(int e = sys_isatty(fd); e)
++	if(int e = sysdep<Isatty>(fd); e)
 +		return e;
 +
 +	char link_path[64];
@@ -581,7 +610,7 @@ index 00000000..142a1aa6
 +		return ENAMETOOLONG;
 +
 +	ssize_t length = 0;
-+	if(int e = sys_readlink(link_path, buf, size, &length); e)
++	if(int e = sysdep<Readlink>(link_path, buf, size, &length); e)
 +		return e;
 +	if(length < 0 || static_cast<size_t>(length) >= size)
 +		return ERANGE;
@@ -589,9 +618,9 @@ index 00000000..142a1aa6
 +
 +	struct stat path_stat = {};
 +	struct stat fd_stat = {};
-+	if(int e = sys_stat(fsfd_target::path, -1, buf, 0, &path_stat); e)
++	if(int e = sysdep<Stat>(fsfd_target::path, -1, buf, 0, &path_stat); e)
 +		return e;
-+	if(int e = sys_stat(fsfd_target::fd, fd, "", 0, &fd_stat); e)
++	if(int e = sysdep<Stat>(fsfd_target::fd, fd, "", 0, &fd_stat); e)
 +		return e;
 +
 +	if(path_stat.st_dev != fd_stat.st_dev || path_stat.st_ino != fd_stat.st_ino)
@@ -600,7 +629,7 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_clock_get(int clock, time_t *secs, long *nanos) {
++int Sysdeps<ClockGet>::operator()(int clock, time_t *secs, long *nanos) {
 +	if(!secs || !nanos)
 +		return EINVAL;
 +
@@ -617,7 +646,7 @@ index 00000000..142a1aa6
 +}
 +
 +int
-+sys_stat(fsfd_target fsfdt, int fd, const char *path, int flags, struct stat *statbuf) {
++Sysdeps<Stat>::operator()(fsfd_target fsfdt, int fd, const char *path, int flags, struct stat *statbuf) {
 +	if(fsfdt == fsfd_target::path)
 +		fd = AT_FDCWD;
 +	else if(fsfdt == fsfd_target::fd)
@@ -635,18 +664,18 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_faccessat(int dirfd, const char *pathname, int mode, int flags) {
++int Sysdeps<Faccessat>::operator()(int dirfd, const char *pathname, int mode, int flags) {
 +	auto ret = ::syscall(SYS_faccessat, dirfd, pathname, mode, flags);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_access(const char *path, int mode) {
-+	return sys_faccessat(AT_FDCWD, path, mode, 0);
++int Sysdeps<Access>::operator()(const char *path, int mode) {
++	return sysdep<Faccessat>(AT_FDCWD, path, mode, 0);
 +}
 +
-+int sys_pipe(int *fds, int flags) {
++int Sysdeps<Pipe>::operator()(int *fds, int flags) {
 +#if defined(SYS_pipe2)
 +	auto ret = ::syscall(SYS_pipe2, fds, flags);
 +#else
@@ -659,25 +688,25 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_chdir(const char *path) {
++int Sysdeps<Chdir>::operator()(const char *path) {
 +	auto ret = ::syscall(SYS_chdir, path);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_mkdir(const char *path, mode_t mode) {
-+	return sys_mkdirat(AT_FDCWD, path, mode);
++int Sysdeps<Mkdir>::operator()(const char *path, mode_t mode) {
++	return sysdep<Mkdirat>(AT_FDCWD, path, mode);
 +}
 +
-+int sys_mkdirat(int dirfd, const char *path, mode_t mode) {
++int Sysdeps<Mkdirat>::operator()(int dirfd, const char *path, mode_t mode) {
 +	auto ret = ::syscall(SYS_mkdirat, dirfd, path, mode);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_socket(int domain, int type_and_flags, int proto, int *fd) {
++int Sysdeps<Socket>::operator()(int domain, int type_and_flags, int proto, int *fd) {
 +	if(!fd)
 +		return EINVAL;
 +	auto ret = ::syscall(SYS_socket, domain, type_and_flags, proto);
@@ -687,28 +716,28 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_socketpair(int domain, int type_and_flags, int proto, int *fds) {
++int Sysdeps<Socketpair>::operator()(int domain, int type_and_flags, int proto, int *fds) {
 +	auto ret = ::syscall(SYS_socketpair, domain, type_and_flags, proto, fds, 0, 0);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_bind(int fd, const struct sockaddr *addr_ptr, socklen_t addr_length) {
++int Sysdeps<Bind>::operator()(int fd, const struct sockaddr *addr_ptr, socklen_t addr_length) {
 +	auto ret = ::syscall(SYS_bind, fd, addr_ptr, addr_length);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_connect(int fd, const struct sockaddr *addr_ptr, socklen_t addr_length) {
++int Sysdeps<Connect>::operator()(int fd, const struct sockaddr *addr_ptr, socklen_t addr_length) {
 +	auto ret = ::syscall(SYS_connect, fd, addr_ptr, addr_length);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_accept(
++int Sysdeps<Accept>::operator()(
 +	int fd, int *newfd, struct sockaddr *addr_ptr, socklen_t *addr_length, int flags
 +) {
 +	if(!newfd)
@@ -726,7 +755,7 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_getsockopt(
++int Sysdeps<GetSockopt>::operator()(
 +	int fd, int layer, int number, void *__restrict buffer, socklen_t *__restrict size
 +) {
 +	auto ret = ::syscall(SYS_getsockopt, fd, layer, number, buffer, size, 0);
@@ -735,14 +764,14 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_setsockopt(int fd, int layer, int number, const void *buffer, socklen_t size) {
++int Sysdeps<SetSockopt>::operator()(int fd, int layer, int number, const void *buffer, socklen_t size) {
 +	auto ret = ::syscall(SYS_setsockopt, fd, layer, number, buffer, size, 0);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_msg_recv(int sockfd, struct msghdr *hdr, int flags, ssize_t *length) {
++int Sysdeps<MsgRecv>::operator()(int sockfd, struct msghdr *hdr, int flags, ssize_t *length) {
 +	if(!length)
 +		return EINVAL;
 +	auto ret = ::syscall(SYS_recvmsg, sockfd, hdr, flags);
@@ -752,7 +781,7 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_peername(
++int Sysdeps<Peername>::operator()(
 +	int fd, struct sockaddr *addr_ptr, socklen_t max_addr_length, socklen_t *actual_length
 +) {
 +	if(!actual_length)
@@ -764,24 +793,14 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_listen(int fd, int backlog) {
++int Sysdeps<Listen>::operator()(int fd, int backlog) {
 +	auto ret = ::syscall(SYS_listen, fd, backlog);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_inotify_create(int flags, int *fd) {
-+	if(!fd)
-+		return EINVAL;
-+	auto ret = ::syscall(SYS_inotify_init1, flags);
-+	if(int e = sc_error(ret); e)
-+		return e;
-+	*fd = static_cast<int>(ret);
-+	return 0;
-+}
-+
-+int sys_fork(pid_t *child) {
++int Sysdeps<Fork>::operator()(pid_t *child) {
 +	if(!child)
 +		return EINVAL;
 +#if defined(SYS_clone)
@@ -795,14 +814,14 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_execve(const char *path, char *const argv[], char *const envp[]) {
++int Sysdeps<Execve>::operator()(const char *path, char *const argv[], char *const envp[]) {
 +	auto ret = ::syscall(SYS_execve, path, argv, envp);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_fcntl(int fd, int request, va_list args, int *result) {
++int Sysdeps<Fcntl>::operator()(int fd, int request, va_list args, int *result) {
 +	auto arg = va_arg(args, unsigned long);
 +	auto ret = ::syscall(SYS_fcntl, fd, request, arg);
 +	if(int e = sc_error(ret); e)
@@ -812,7 +831,7 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_dup(int fd, int flags, int *newfd) {
++int Sysdeps<Dup>::operator()(int fd, int flags, int *newfd) {
 +	if(!newfd)
 +		return EINVAL;
 +	if(flags)
@@ -824,7 +843,7 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_dup2(int fd, int flags, int newfd) {
++int Sysdeps<Dup2>::operator()(int fd, int flags, int newfd) {
 +#if defined(SYS_dup3)
 +	auto ret = ::syscall(SYS_dup3, fd, newfd, flags);
 +#else
@@ -838,31 +857,21 @@ index 00000000..142a1aa6
 +}
 +
 +int
-+sys_sigprocmask(int how, const sigset_t *__restrict set, sigset_t *__restrict retrieve) {
++Sysdeps<Sigprocmask>::operator()(int how, const sigset_t *__restrict set, sigset_t *__restrict retrieve) {
 +	auto ret = ::syscall(SYS_rt_sigprocmask, how, set, retrieve, NSIG / 8);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_sigaction(int signum, const struct sigaction *act, struct sigaction *oldact) {
++int Sysdeps<Sigaction>::operator()(int signum, const struct sigaction *act, struct sigaction *oldact) {
 +	auto ret = ::syscall(SYS_rt_sigaction, signum, act, oldact, NSIG / 8);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_signalfd_create(const sigset_t *masks, int flags, int *fd) {
-+	if(!fd)
-+		return EINVAL;
-+	auto ret = ::syscall(SYS_signalfd4, *fd, masks, NSIG / 8, flags);
-+	if(int e = sc_error(ret); e)
-+		return e;
-+	*fd = static_cast<int>(ret);
-+	return 0;
-+}
-+
-+int sys_waitpid(pid_t pid, int *status, int flags, struct rusage *ru, pid_t *ret_pid) {
++int Sysdeps<Waitpid>::operator()(pid_t pid, int *status, int flags, struct rusage *ru, pid_t *ret_pid) {
 +	if(!ret_pid)
 +		return EINVAL;
 +	auto ret = ::syscall(SYS_wait4, pid, status, flags, ru);
@@ -872,7 +881,7 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_getgroups(size_t size, gid_t *list, int *_ret) {
++int Sysdeps<GetGroups>::operator()(size_t size, gid_t *list, int *_ret) {
 +	if(!_ret)
 +		return EINVAL;
 +	auto ret = ::syscall(SYS_getgroups, size, list);
@@ -882,27 +891,7 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_mount(
-+	const char *source,
-+	const char *target,
-+	const char *fstype,
-+	unsigned long flags,
-+	const void *data
-+) {
-+	auto ret = ::syscall(SYS_mount, source, target, fstype, flags, data);
-+	if(int e = sc_error(ret); e)
-+		return e;
-+	return 0;
-+}
-+
-+int sys_umount2(const char *target, int flags) {
-+	auto ret = ::syscall(SYS_umount2, target, flags);
-+	if(int e = sc_error(ret); e)
-+		return e;
-+	return 0;
-+}
-+
-+int sys_gethostname(char *buffer, size_t bufsize) {
++int Sysdeps<GetHostname>::operator()(char *buffer, size_t bufsize) {
 +	if(!buffer || !bufsize)
 +		return EINVAL;
 +
@@ -918,14 +907,14 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_sethostname(const char *buffer, size_t bufsize) {
++int Sysdeps<SetHostname>::operator()(const char *buffer, size_t bufsize) {
 +	auto ret = ::syscall(SYS_sethostname, buffer, bufsize);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_sleep(time_t *secs, long *nanos) {
++int Sysdeps<Sleep>::operator()(time_t *secs, long *nanos) {
 +	if(!secs || !nanos)
 +		return EINVAL;
 +	if(*nanos < 0 || *nanos >= 1'000'000'000)
@@ -945,14 +934,14 @@ index 00000000..142a1aa6
 +	return 0;
 +}
 +
-+int sys_getitimer(int which, struct itimerval *curr_value) {
++int Sysdeps<GetItimer>::operator()(int which, struct itimerval *curr_value) {
 +	auto ret = ::syscall(SYS_getitimer, which, curr_value);
 +	if(int e = sc_error(ret); e)
 +		return e;
 +	return 0;
 +}
 +
-+int sys_setitimer(int which, const struct itimerval *new_value, struct itimerval *old_value) {
++int Sysdeps<SetItimer>::operator()(int which, const struct itimerval *new_value, struct itimerval *old_value) {
 +	auto ret = ::syscall(SYS_setitimer, which, new_value, old_value);
 +	if(int e = sc_error(ret); e)
 +		return e;
@@ -969,6 +958,14 @@ index 00000000..cb839316
 +++ b/sysdeps/template/include/abi-bits/access.h
 @@ -0,0 +1 @@
 +../../../../abis/linux/access.h
+\ No newline at end of file
+diff --git a/sysdeps/template/include/abi-bits/aio.h b/sysdeps/template/include/abi-bits/aio.h
+new file mode 120000
+index 00000000..79b41689
+--- /dev/null
++++ b/sysdeps/template/include/abi-bits/aio.h
+@@ -0,0 +1 @@
++../../../../abis/linux/aio.h
 \ No newline at end of file
 diff --git a/sysdeps/template/include/abi-bits/auxv.h b/sysdeps/template/include/abi-bits/auxv.h
 new file mode 120000
@@ -1442,9 +1439,112 @@ index 00000000..66412d70
 @@ -0,0 +1 @@
 +../../../../abis/linux/xattr.h
 \ No newline at end of file
+diff --git a/sysdeps/template/include/mlibc/sysdeps.hpp b/sysdeps/template/include/mlibc/sysdeps.hpp
+new file mode 100644
+index 00000000..94a57b16
+--- /dev/null
++++ b/sysdeps/template/include/mlibc/sysdeps.hpp
+@@ -0,0 +1,97 @@
++#pragma once
++
++#include <mlibc/sysdep-signatures.hpp>
++
++namespace mlibc {
++
++struct TemplateSysdepTags :
++	Accept,
++	Access,
++	AnonAllocate,
++	AnonFree,
++	Bind,
++	Chdir,
++	ClockGet,
++	Clone,
++	Close,
++	Connect,
++	Dup,
++	Dup2,
++	Execve,
++	Exit,
++	Faccessat,
++	Fchmod,
++	Fcntl,
++	Fork,
++	FutexWait,
++	FutexWake,
++	GetCwd,
++	GetEgid,
++	GetEuid,
++	GetGid,
++	GetGroups,
++	GetHostname,
++	GetItimer,
++	GetPgid,
++	GetPid,
++	GetPpid,
++	GetSockopt,
++	GetUid,
++	Ioctl,
++	Isatty,
++	Kill,
++	LibcLog,
++	LibcPanic,
++	Link,
++	Linkat,
++	Listen,
++	Mkdir,
++	Mkdirat,
++	MsgRecv,
++	Open,
++	OpenDir,
++	Openat,
++	Peername,
++	Pipe,
++	Poll,
++	Ppoll,
++	PrepareStack,
++	Pselect,
++	Read,
++	ReadEntries,
++	Readlink,
++	Rmdir,
++	Seek,
++	SetGid,
++	SetHostname,
++	SetItimer,
++	SetPgid,
++	SetSockopt,
++	Sigaction,
++	Sigprocmask,
++	Sleep,
++	Socket,
++	Socketpair,
++	Stat,
++	TcbSet,
++	Tcgetattr,
++	Tcsetattr,
++	ThreadExit,
++	Ttyname,
++	Unlinkat,
++	VmMap,
++	VmProtect,
++	VmUnmap,
++	Waitpid,
++	Write,
++	Yield
++{};
++
++template<typename Tag>
++using Sysdeps = SysdepOf<TemplateSysdepTags, Tag>;
++
++struct SysdepTraits {
++	static constexpr bool usesRtNetlink = false;
++};
++
++}
 diff --git a/sysdeps/template/include/sys/syscall.h b/sysdeps/template/include/sys/syscall.h
 new file mode 100644
-index 00000000..9dadd929
+index 00000000..bc605634
 --- /dev/null
 +++ b/sysdeps/template/include/sys/syscall.h
 @@ -0,0 +1,105 @@
@@ -1568,10 +1668,10 @@ index 00000000..b397c33b
 +)
 +libc_include_dirs += include_directories('include')
 diff --git a/options/internal/generic/threads.cpp b/options/internal/generic/threads.cpp
-index 898bf82a..885df9ae 100644
+index bfbb31be..7cab2fc5 100644
 --- a/options/internal/generic/threads.cpp
 +++ b/options/internal/generic/threads.cpp
-@@ -20,6 +20,12 @@
+@@ -20,6 +20,12 @@ struct key_global_info {
  
  	void (*dtor)(void *);
  	uint64_t generation;
@@ -1584,7 +1684,7 @@ index 898bf82a..885df9ae 100644
  };
  
  constinit frg::array<
-@@ -224,6 +230,18 @@ static constexpr unsigned int mutexShared = 4;
+@@ -252,6 +258,18 @@ static constexpr unsigned int mutexShared = 4;
  static constexpr unsigned int mutex_owner_mask = (static_cast<uint32_t>(1) << 30) - 1;
  static constexpr unsigned int mutex_waiters_bit = static_cast<uint32_t>(1) << 31;
  
@@ -1603,7 +1703,7 @@ index 898bf82a..885df9ae 100644
  int thread_mutex_init(struct __mlibc_mutex *__restrict mutex,
  		const struct __mlibc_mutexattr *__restrict attr) {
  	auto type = attr ? attr->__mlibc_type : __MLIBC_THREAD_MUTEX_DEFAULT;
-@@ -275,6 +293,10 @@ int thread_mutex_timedlock(struct __mlibc_mutex *mutex, const struct timespec *_
+@@ -305,6 +323,10 @@ int thread_mutex_timedlock(struct __mlibc_mutex *mutex, const struct timespec *_
  			// If this (recursive) mutex is already owned by us, increment the recursion level.
  			if((expected & mutex_owner_mask) == this_tid) {
  				if(!(mutex->__mlibc_flags & mutexRecursive)) {
@@ -1611,10 +1711,10 @@ index 898bf82a..885df9ae 100644
 +						++mutex->__mlibc_recursion;
 +						return 0;
 +					}
- 					if (!abstime)
- 						return EDEADLK;
+ 					return EDEADLK;
  				} else {
-@@ -342,6 +364,10 @@ int thread_mutex_trylock(struct __mlibc_mutex *mutex) {
+ 					++mutex->__mlibc_recursion;
+@@ -371,6 +393,10 @@ int thread_mutex_trylock(struct __mlibc_mutex *mutex) {
  		// If this (recursive) mutex is already owned by us, increment the recursion level.
  		if((expected & mutex_owner_mask) == this_tid) {
  			if(!(mutex->__mlibc_flags & mutexRecursive)) {
@@ -1625,7 +1725,7 @@ index 898bf82a..885df9ae 100644
  				return EBUSY;
  			}
  			++mutex->__mlibc_recursion;
-@@ -549,12 +575,27 @@
+@@ -581,12 +607,27 @@ void *thread_key_get(__mlibc_uintptr key) {
  	if (key >= PTHREAD_KEYS_MAX || !key_globals_[key].in_use)
  		return nullptr;
  
@@ -1633,8 +1733,6 @@ index 898bf82a..885df9ae 100644
 -		(*self->localKeys)[key].value = nullptr;
 -		(*self->localKeys)[key].generation = key_globals_[key].generation;
 -	}
--
--	return (*self->localKeys)[key].value;
 +	return key_globals_[key].get((*self->localKeys)[key]);
 +}
 +
@@ -1649,7 +1747,8 @@ index 898bf82a..885df9ae 100644
 +		return EAGAIN;
 +	if (!key_mutex_.try_lock())
 +		return EBUSY;
-+
+ 
+-	return (*self->localKeys)[key].value;
 +	auto g = frg::unique_lock{frg::adopt_lock, key_mutex_};
 +	if (!key_globals_[key].in_use)
 +		return EINVAL;
@@ -1660,61 +1759,63 @@ index 898bf82a..885df9ae 100644
  
  int thread_key_set(__mlibc_uintptr key, const void *value) {
 diff --git a/options/posix/generic/pthread.cpp b/options/posix/generic/pthread.cpp
-index 0d133859..63715092 100644
+index d7e3dc47..c7f3c785 100644
 --- a/options/posix/generic/pthread.cpp
 +++ b/options/posix/generic/pthread.cpp
-@@ -685,5 +685,9 @@ int pthread_atfork(void (*prepare) (void), void (*parent) (void), void (*child)
+@@ -698,7 +698,11 @@ int pthread_atfork(void (*prepare) (void), void (*parent) (void), void (*child)
  int pthread_key_create(pthread_key_t *out, void (*destructor)(void *)) {
--	SCOPE_TRACE();
--
+ 	SCOPE_TRACE();
+ 
 -	return mlibc::thread_key_create(out, destructor);
-+	SCOPE_TRACE();
-+
 +	__mlibc_uintptr key;
 +	auto error = mlibc::thread_key_create(&key, destructor);
 +	if(!error)
 +		*out = static_cast<pthread_key_t>(key);
 +	return error;
  }
-@@ -699,6 +703,10 @@
- 	SCOPE_TRACE();
  
+ int pthread_key_delete(pthread_key_t key) {
+@@ -714,6 +718,10 @@ void *pthread_getspecific(pthread_key_t key) {
  	return mlibc::thread_key_get(key);
-+}
-+
-+int mlibc_try_getspecific(pthread_key_t key, void **value) {
-+	return mlibc::thread_key_try_get(key, value);
  }
  
++int mlibc_try_getspecific(pthread_key_t key, void **value) {
++	return mlibc::thread_key_try_get(key, value);
++}
++
  int pthread_setspecific(pthread_key_t key, const void *value) {
+ 	SCOPE_TRACE();
+ 
 diff --git a/options/posix/include/bits/posix/pthread_types.h b/options/posix/include/bits/posix/pthread_types.h
-index 34a63654..5067300f 100644
+index 34a63654..c4e25f5a 100644
 --- a/options/posix/include/bits/posix/pthread_types.h
 +++ b/options/posix/include/bits/posix/pthread_types.h
-@@ -10,3 +10,5 @@ typedef struct __mlibc_cond pthread_cond_t;
+@@ -8,7 +8,7 @@ typedef struct __mlibc_barrier pthread_barrier_t;
+ typedef struct __mlibc_barrierattr_struct pthread_barrierattr_t;
+ typedef struct __mlibc_cond pthread_cond_t;
  typedef struct __mlibc_condattr pthread_condattr_t;
 -typedef __mlibc_uintptr pthread_key_t;
-+// Match the Linux/glibc ABI used by Kotlin/Native. pthread_key_t is an
-+// unsigned 32-bit key, not a pointer-sized value on x86_64.
 +typedef __mlibc_uint32 pthread_key_t;
  typedef struct __mlibc_mutex pthread_mutex_t;
+ typedef struct __mlibc_mutexattr pthread_mutexattr_t;
+ typedef struct __mlibc_once pthread_once_t;
 diff --git a/options/internal/include/mlibc/threads.hpp b/options/internal/include/mlibc/threads.hpp
-index c2766a47..e75eb000 100644
+index 91fb8d30..209926fc 100644
 --- a/options/internal/include/mlibc/threads.hpp
 +++ b/options/internal/include/mlibc/threads.hpp
-@@ -40,6 +40,7 @@
+@@ -43,6 +43,7 @@ int thread_cond_timedwait(struct __mlibc_cond *__restrict cond, __mlibc_mutex *_
  int thread_key_create(__mlibc_uintptr *out, void (*destructor)(void *));
  int thread_key_delete(__mlibc_uintptr key);
  void *thread_key_get(__mlibc_uintptr key);
 +int thread_key_try_get(__mlibc_uintptr key, void **value);
  int thread_key_set(__mlibc_uintptr key, const void *value);
  
- } // namespace mlibc
+ // Calling this functionally inserts a cancellation point.
 diff --git a/options/posix/include/pthread.h b/options/posix/include/pthread.h
-index 8d1fee57..88624fd5 100644
+index 1ec506cd..e4893b40 100644
 --- a/options/posix/include/pthread.h
 +++ b/options/posix/include/pthread.h
-@@ -181,6 +181,7 @@
+@@ -181,6 +181,7 @@ int pthread_key_create(pthread_key_t *__key, void (*__destructor) (void *__data)
  int pthread_key_delete(pthread_key_t __key);
  
  void *pthread_getspecific(pthread_key_t __key);
