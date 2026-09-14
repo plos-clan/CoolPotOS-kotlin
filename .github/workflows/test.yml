@@ -1,0 +1,26 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  jvm:
+    uses: ./.github/workflows/build.yml
+    with:
+      task: jvmTest
+      platform: jvm
+      artifacts: |
+        kernel/build/test-results/jvmTest/
+        kernel/build/reports/tests/jvmTest/
+
+  qemu:
+    uses: ./.github/workflows/build.yml
+    with:
+      task: qemuTest
+      platform: qemu
+      artifacts: kernel/build/qemuTest/results/

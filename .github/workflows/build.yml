@@ -1,28 +1,39 @@
-name: CI
+name: Build
 
 on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      task:
+        type: string
+        default: assemble
+      platform:
+        type: string
+        default: native
+      artifacts:
+        type: string
+        default: kernel/build/kernel.elf
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ inputs.task || 'assemble' }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
-    name: Build kernel
-    runs-on: ubuntu-latest
+    name: ${{ inputs.task || 'assemble' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
         with:
-          submodules: recursive
+          submodules: ${{ inputs.platform != 'jvm' && 'recursive' || 'false' }}
           persist-credentials: false
 
       - name: Set up Java
@@ -37,6 +48,7 @@ jobs:
           GRADLE_USER_HOME: ${{ github.workspace }}/.gradle
 
       - name: Cache Kotlin/Native toolchain
+        if: inputs.platform != 'jvm'
         uses: actions/cache@v6
         with:
           path: ~/.konan
@@ -45,38 +57,40 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-konan-
 
       - name: Install latest stable LLVM and Clang
+        if: inputs.platform != 'jvm'
         uses: ZhongRuoyu/setup-llvm@v0
 
       - name: Install native build dependencies
+        if: inputs.platform != 'jvm'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             meson \
             ninja-build
 
-      - name: Build kernel
+      - name: Set up QEMU
+        if: inputs.platform == 'qemu'
+        run: |
+          sudo apt-get install --yes --no-install-recommends acl qemu-system-x86 xorriso
+          sudo setfacl --modify "u:$(id -un):rw" /dev/kvm
+
+      - name: Run Gradle
+        env:
+          GRADLE_TASK: ${{ inputs.task || 'assemble' }}
         run: >-
-          ./gradlew build
+          ./gradlew "$GRADLE_TASK"
           --no-daemon
           --no-configuration-cache
           --console=plain
           --stacktrace
 
-      - name: Upload build diagnostics
-        if: failure()
+      - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: CoolPotOS-build-diagnostics-${{ github.sha }}
+          name: CoolPotOS-${{ inputs.task || 'kernel' }}-${{ github.sha }}
           path: |
+            ${{ inputs.artifacts || 'kernel/build/kernel.elf' }}
             kernel/build/mlibc-x86_64/meson-logs/
-            kernel/build/reports/
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Upload kernel ELF
-        uses: actions/upload-artifact@v7
-        with:
-          name: CoolPotOS-kernel-${{ github.sha }}
-          path: kernel/build/kernel.elf
           if-no-files-found: error
           retention-days: 7

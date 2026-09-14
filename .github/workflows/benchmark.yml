@@ -1,0 +1,24 @@
+name: Benchmark
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  jvm:
+    uses: ./.github/workflows/build.yml
+    with:
+      task: benchmark
+      platform: jvm
+      artifacts: kernel/build/reports/benchmarks/
+
+  qemu:
+    uses: ./.github/workflows/build.yml
+    with:
+      task: qemuBenchmark
+      platform: qemu
+      artifacts: kernel/build/qemuBenchmark/results/
