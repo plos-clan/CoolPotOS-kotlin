@@ -2,29 +2,21 @@ name: Build
 
 on:
   push:
-  pull_request:
-  workflow_dispatch:
+  workflow_run:
+    workflows: [Test, Benchmark]
+    types: [completed]
   workflow_call:
     inputs:
-      task:
-        type: string
-        default: assemble
-      platform:
-        type: string
-        default: native
-      artifacts:
-        type: string
-        default: kernel/build/kernel.elf
+      task: { type: string }
+      platform: { type: string }
+      artifacts: { type: string }
 
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ inputs.task || 'assemble' }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build:
+    if: github.event_name != 'workflow_run'
     name: ${{ inputs.task || 'assemble' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -64,9 +56,7 @@ jobs:
         if: inputs.platform != 'jvm'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            meson \
-            ninja-build
+          sudo apt-get install --yes --no-install-recommends meson ninja-build
 
       - name: Set up QEMU
         if: inputs.platform == 'qemu'
@@ -88,9 +78,19 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: CoolPotOS-${{ inputs.task || 'kernel' }}-${{ github.sha }}
+          name: CoolPotOS-${{ inputs.task || 'kernel' }}-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             ${{ inputs.artifacts || 'kernel/build/kernel.elf' }}
             kernel/build/mlibc-x86_64/meson-logs/
           if-no-files-found: error
           retention-days: 7
+
+  notify:
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.METRICS_TOKEN }}
+          repository: ${{ vars.METRICS_REPOSITORY }}
+          event-type: metrics-ready
