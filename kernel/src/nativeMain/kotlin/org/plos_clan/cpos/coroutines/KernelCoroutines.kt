@@ -63,7 +63,7 @@ object KernelCoroutines {
             return false
         }
 
-        val dispatcher = KernelDispatcher(::reportFailure)
+        val dispatcher = KernelDispatcher(TscClock, IrqSpinLock(), { bridge.fast_handoff_wake_bsp() }, ::reportFailure)
         val exceptionHandler = CoroutineExceptionHandler { _, failure ->
             reportFailure(failure)
         }

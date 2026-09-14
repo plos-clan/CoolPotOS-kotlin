@@ -18,6 +18,7 @@ import org.plos_clan.cpos.drivers.input.KeyboardInputDevice
 import org.plos_clan.cpos.fault.IRQ_BASE_VECTOR
 import org.plos_clan.cpos.fault.IrqController
 import org.plos_clan.cpos.utils.ByteRingBuffer
+import org.plos_clan.cpos.utils.IrqSpinLock
 
 private data class Ps2KeyboardConfiguration(
     val dataPort: UInt,
@@ -73,7 +74,7 @@ object Ps2Keyboard {
     private const val SCAN_CODE_BATCH_SIZE = 32
     private const val PHYSICAL_PATH = "isa0060/serio0"
 
-    private val scanCodes = ByteRingBuffer(256)
+    private val scanCodes = ByteRingBuffer(256, IrqSpinLock())
     private var scanCodeWakeup: KernelEvent? = null
 
     private var configuration: Ps2KeyboardConfiguration? = null

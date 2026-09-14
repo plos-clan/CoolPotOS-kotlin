@@ -11,7 +11,6 @@ import kotlinx.cinterop.plus
 import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.mem.addressspace.PageFaultResult
-import org.plos_clan.cpos.mem.page.PageDirectory
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -21,21 +20,15 @@ import platform.posix.memcpy
 import platform.posix.memmove
 import platform.posix.memset
 
-class UserMemory private constructor(
-    private val pageDirectory: PageDirectory,
+class UserMemory internal constructor(
+    private val addressSpace: AddressSpace,
     val address: ULong,
-    private val addressSpace: AddressSpace?,
-) : IoBuffer {
+) : NativeBuffer(), IoBuffer {
+    private val pageDirectory = addressSpace.pageDirectory
     private var preparedVirtualPage = ULong.MAX_VALUE
     private var preparedWritable = false
     private var firstPhysicalPage = 0uL
     private var additionalPhysicalPages: ULongArray? = null
-
-    internal constructor(pageDirectory: PageDirectory, address: ULong) :
-        this(pageDirectory, address, null)
-
-    internal constructor(addressSpace: AddressSpace, address: ULong) :
-        this(addressSpace.pageDirectory, address, addressSpace)
 
     fun copyFromUser(size: Int): ByteArray? {
         if (size < 0) {
@@ -79,15 +72,17 @@ class UserMemory private constructor(
                     chunk.toULong(),
                 )
                 bridge.open_smap()
+                chunk
             }
         }
     }
 
-    override fun copyTo(sourceOffset: Int, destination: CPointer<UByteVar>, count: Int): Int =
+    override fun copyToNative(sourceOffset: Int, destination: CPointer<UByteVar>, count: Int): Int =
         transfer(sourceOffset, count, false) { source, copied, chunk ->
             bridge.close_smap()
             memmove(requireNotNull(destination + copied), source, chunk.toULong())
             bridge.open_smap()
+            chunk
         }
 
     override fun copyFrom(
@@ -106,6 +101,7 @@ class UserMemory private constructor(
                     chunk.toULong(),
                 )
                 bridge.open_smap()
+                chunk
             }
         }
     }
@@ -116,17 +112,20 @@ class UserMemory private constructor(
             bridge.close_smap()
             memset(destination, value.toInt(), chunk.toULong())
             bridge.open_smap()
+            chunk
         }
     }
 
     override fun copyFrom(
         destinationOffset: Int,
-        source: CPointer<UByteVar>,
+        source: BufferSource,
+        sourceOffset: Int,
         count: Int,
-    ): Int = transfer(destinationOffset, count, true) { destination, copied, chunk ->
-        bridge.close_smap()
-        memmove(destination, requireNotNull(source + copied), chunk.toULong())
-        bridge.open_smap()
+    ): Int {
+        if (source !is NativeBuffer) return source.copyTo(sourceOffset, this, destinationOffset, count)
+        return transfer(destinationOffset, count, true) { destination, copied, chunk ->
+            source.copyToNative(sourceOffset + copied, destination, chunk)
+        }
     }
 
     private fun prepare(offset: Int, count: Int, writable: Boolean): Boolean {
@@ -239,9 +238,6 @@ class UserMemory private constructor(
         return true
     }
 
-
-    fun getAddress(): ULong = address
-
     private fun resolveUserPhysicalAddress(
         virtualAddress: ULong,
         requireWritable: Boolean,
@@ -249,8 +245,7 @@ class UserMemory private constructor(
         pageDirectory.resolveUserPhysicalAddress(virtualAddress, requireWritable)?.let {
             return it
         }
-        val owner = addressSpace ?: return null
-        if (owner.faultIn(virtualAddress, write = requireWritable) != PageFaultResult.RESOLVED) {
+        if (addressSpace.faultIn(virtualAddress, write = requireWritable) != PageFaultResult.RESOLVED) {
             return null
         }
         return pageDirectory.resolveUserPhysicalAddress(virtualAddress, requireWritable)
@@ -274,7 +269,7 @@ class UserMemory private constructor(
         offset: Int,
         count: Int,
         requireWritable: Boolean,
-        operation: (CPointer<UByteVar>, Int, Int) -> Unit,
+        operation: (CPointer<UByteVar>, Int, Int) -> Int,
     ): Int {
         if (!validUserRange(offset, count)) return 0
         var copied = 0
@@ -285,8 +280,10 @@ class UserMemory private constructor(
                 ?: break
             val pointer = physicalAddress.toVirtualPointer<UByteVar>() ?: break
             val chunk = pageChunkSize(currentAddress, count - copied)
-            operation(pointer, copied, chunk)
-            copied += chunk
+            val transferred = operation(pointer, copied, chunk)
+            if (transferred !in 1..chunk) break
+            copied += transferred
+            if (transferred < chunk) break
         }
         return copied
     }

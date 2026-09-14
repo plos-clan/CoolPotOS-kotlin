@@ -30,7 +30,7 @@ import org.plos_clan.cpos.mem.PageCacheFailure
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.ResidentPage
-import org.plos_clan.cpos.mem.addressspace.AddressSpace
+import org.plos_clan.cpos.mem.addressspace.MemoryRegionOwner
 import org.plos_clan.cpos.mem.page.UserFrameReferences
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -46,7 +46,7 @@ internal class TmpfsRegularFile(
     private val lock = IrqSpinLock()
     private val pages = mutableMapOf<ULong, ResidentPage>()
     private val seals = FileSeals(initialSeals)
-    private val mappings = mutableMapOf<AddressSpace, Int>()
+    private val mappings = mutableMapOf<MemoryRegionOwner, Int>()
 
     override fun attachContent(inode: Inode, content: FileContent, offset: Int, size: Int): Boolean =
         lock.withLock {
@@ -361,11 +361,11 @@ internal class TmpfsRegularFile(
             offset < file.inode.metadata().size && pages[offset / PAGE_SIZE_BYTES]?.frame == frame
         }
 
-        override fun attached(addressSpace: AddressSpace) = lock.withLock {
+        override fun attached(addressSpace: MemoryRegionOwner) = lock.withLock {
             mappings[addressSpace] = (mappings[addressSpace] ?: 0) + 1
         }
 
-        override fun detached(addressSpace: AddressSpace) = lock.withLock {
+        override fun detached(addressSpace: MemoryRegionOwner) = lock.withLock {
             val remaining = checkNotNull(mappings[addressSpace]) - 1
             if (remaining == 0) mappings.remove(addressSpace) else mappings[addressSpace] = remaining
             Unit
@@ -402,7 +402,7 @@ internal class TmpfsRegularFile(
     ) {
         try {
             val privateFrames = if (privateCopies) null else retired.mapTo(mutableSetOf()) { it.frame }
-            val visited = mutableSetOf<AddressSpace>()
+            val visited = mutableSetOf<MemoryRegionOwner>()
             while (true) {
                 val pending = lock.withLock { mappings.keys.filter { it !in visited } }
                 if (pending.isEmpty()) break

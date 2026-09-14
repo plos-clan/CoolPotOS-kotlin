@@ -8,6 +8,7 @@ import org.plos_clan.cpos.fs.vfs.SuperBlock
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.tasks.UtsNamespace
+import org.plos_clan.cpos.tasks.UtsNamespaces
 import org.plos_clan.cpos.utils.BootIdentity
 import org.plos_clan.cpos.utils.KernelRandom
 import kotlin.concurrent.atomics.AtomicInt
@@ -101,9 +102,9 @@ internal object ProcSysTree {
 
     private class UtsName(private val field: UtsNamespace.MutableField) : Setting() {
         override val version: Int
-            get() = UtsNamespace.initial.version(this.field)
+            get() = UtsNamespaces.initial.version(this.field)
 
-        override fun render(): ByteArray = UtsNamespace.initial.name(field) + '\n'.code.toByte()
+        override fun render(): ByteArray = UtsNamespaces.initial.name(field) + '\n'.code.toByte()
 
         override fun update(input: ByteArray): VfsResult<Unit> {
             var length = 0
@@ -111,7 +112,7 @@ internal object ProcSysTree {
             while (length < maximum && input[length] != 0.toByte() && input[length] != '\n'.code.toByte()) {
                 length++
             }
-            UtsNamespace.initial.setName(field, input.copyOf(length))
+            UtsNamespaces.initial.setName(field, input.copyOf(length))
             return VfsResult.Ok(Unit)
         }
     }

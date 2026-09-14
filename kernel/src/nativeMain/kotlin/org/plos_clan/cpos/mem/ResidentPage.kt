@@ -5,47 +5,23 @@ package org.plos_clan.cpos.mem
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
-import kotlinx.cinterop.addressOf
-import kotlinx.cinterop.plus
-import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.mem.page.UserFrameReferences
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
-import platform.posix.memmove
-import platform.posix.memset
 
-internal class ResidentPage private constructor(val frame: ULong) : BufferDestination {
-    private val pointer: CPointer<UByteVar>
+internal class ResidentPage private constructor(val frame: ULong) : NativeMemory() {
+    override val pointer: CPointer<UByteVar>
         get() = checkNotNull(Hhdm.toVirtualPointer(frame))
 
     fun read(destination: PreparedBufferDestination, offset: Int, pageOffset: Int, count: Int): Int =
-        destination.copyFrom(offset, checkNotNull(pointer + pageOffset), count)
+        destination.copyFrom(offset, this, pageOffset, count)
 
     fun write(source: PreparedBufferSource, offset: Int, pageOffset: Int, count: Int): Int =
-        source.copyTo(offset, checkNotNull(pointer + pageOffset), count)
+        source.copyTo(offset, this, pageOffset, count)
 
     fun release() = UserFrameReferences.release(frame)
 
-    override fun prepareWrite(offset: Int, count: Int): PreparedBufferDestination? =
-        if (offset >= 0 && count >= 0 && offset <= PAGE_SIZE_BYTES.toInt() - count) {
-            PreparedBufferDestination(this)
-        } else null
-
-    override fun copyFrom(destinationOffset: Int, source: ByteArray, sourceOffset: Int, count: Int): Int {
-        if (count != 0) source.usePinned {
-            memmove(checkNotNull(pointer + destinationOffset), it.addressOf(sourceOffset), count.toULong())
-        }
-        return count
-    }
-
-    override fun copyFrom(destinationOffset: Int, source: CPointer<UByteVar>, count: Int): Int {
-        memmove(checkNotNull(pointer + destinationOffset), source, count.toULong())
-        return count
-    }
-
-    override fun fill(destinationOffset: Int, count: Int, value: Byte): Int {
-        memset(checkNotNull(pointer + destinationOffset), value.toInt(), count.toULong())
-        return count
-    }
+    override val size: Int
+        get() = PAGE_SIZE_BYTES.toInt()
 
     companion object {
         fun allocate(): ResidentPage? {

@@ -13,7 +13,7 @@ import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.fs.vfs.VfsTimestamp
+import org.plos_clan.cpos.time.Instant
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.utils.LittleEndianBuffer
@@ -361,9 +361,9 @@ internal object FuseDecoder {
         val accessNanoseconds = reply.readU32(offset + 48)
         val modificationNanoseconds = reply.readU32(offset + 52)
         val changeNanoseconds = reply.readU32(offset + 56)
-        if (accessNanoseconds >= VfsTimestamp.NANOSECONDS_PER_SECOND ||
-            modificationNanoseconds >= VfsTimestamp.NANOSECONDS_PER_SECOND ||
-            changeNanoseconds >= VfsTimestamp.NANOSECONDS_PER_SECOND
+        if (accessNanoseconds >= Instant.NANOSECONDS_PER_SECOND ||
+            modificationNanoseconds >= Instant.NANOSECONDS_PER_SECOND ||
+            changeNanoseconds >= Instant.NANOSECONDS_PER_SECOND
         ) {
             return null
         }
@@ -394,12 +394,12 @@ internal object FuseDecoder {
             uid = reply.readU32(offset + 68),
             gid = reply.readU32(offset + 72),
             timestamps = InodeTimestamps(
-                accessTime = VfsTimestamp(reply.readU64(offset + 24).toLong(), accessNanoseconds),
-                modificationTime = VfsTimestamp(
+                accessTime = Instant(reply.readU64(offset + 24).toLong(), accessNanoseconds),
+                modificationTime = Instant(
                     reply.readU64(offset + 32).toLong(),
                     modificationNanoseconds,
                 ),
-                changeTime = VfsTimestamp(reply.readU64(offset + 40).toLong(), changeNanoseconds),
+                changeTime = Instant(reply.readU64(offset + 40).toLong(), changeNanoseconds),
                 birthTime = null,
             ),
         )
@@ -414,7 +414,7 @@ internal object FuseDecoder {
     }
 
     private fun validity(seconds: ULong, nanoseconds: UInt): CacheValidity? {
-        if (nanoseconds >= VfsTimestamp.NANOSECONDS_PER_SECOND) return null
+        if (nanoseconds >= Instant.NANOSECONDS_PER_SECOND) return null
         return CacheValidity.expiresAfter(TscClock.nanoTime(), seconds, nanoseconds)
     }
 }

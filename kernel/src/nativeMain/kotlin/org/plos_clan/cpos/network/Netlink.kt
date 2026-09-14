@@ -22,46 +22,6 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
 
-internal enum class NetlinkProtocolKind(val number: Int) {
-    ROUTE(0),
-    USERSOCK(2),
-    KOBJECT_UEVENT(15),
-    GENERIC(16),
-    ;
-
-    companion object {
-        fun fromNumber(number: Int): NetlinkProtocolKind? = entries.firstOrNull {
-            it.number == number
-        }
-    }
-}
-
-internal data class NetlinkSocketAddress(
-    val portId: UInt,
-    val groups: UInt,
-) : SocketAddress {
-    override val domain = SocketDomain.NETLINK
-}
-
-internal data class NetlinkReply(
-    val type: Int,
-    val payload: ByteArray = ByteArray(0),
-    val flags: Int = 0,
-)
-
-internal sealed interface NetlinkResult {
-    data class Success(
-        val replies: List<NetlinkReply> = emptyList(),
-        val multipart: Boolean = false,
-    ) : NetlinkResult
-
-    data class Failure(
-        val error: VfsError,
-        val message: String? = null,
-        val offset: Int? = null,
-    ) : NetlinkResult
-}
-
 internal data class NetlinkRequest(
     val process: Process,
     val message: NetlinkMessage,

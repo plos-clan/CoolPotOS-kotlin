@@ -23,6 +23,7 @@ import org.plos_clan.cpos.fs.vfs.FilePosition
 import org.plos_clan.cpos.fs.vfs.FileSystemConfiguration
 import org.plos_clan.cpos.fs.vfs.FileSystemOptions
 import org.plos_clan.cpos.fs.vfs.FileSystemParameter
+import org.plos_clan.cpos.fs.vfs.FileSystemFileParameter
 import org.plos_clan.cpos.fs.vfs.FileSystemStatistics
 import org.plos_clan.cpos.fs.vfs.FileSystemType
 import org.plos_clan.cpos.fs.vfs.Inode
@@ -54,7 +55,7 @@ import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.fs.vfs.VfsTimestamp
+import org.plos_clan.cpos.time.Instant
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.PageCache
 import org.plos_clan.cpos.mem.PageCacheFailure
@@ -81,7 +82,7 @@ object Fuse : FileSystemType("fuse", FuseAbi.SUPER_MAGIC) {
         parameter: FileSystemParameter,
     ): VfsResult<Unit> {
         val valid = existing.none { it.key == parameter.key } && when (parameter.key) {
-            "fd" -> parameter is FileSystemParameter.FileValue ||
+            "fd" -> parameter is FileSystemFileParameter && parameter.type == FileSystemFileParameter.Type.DESCRIPTOR ||
                 parameter.stringValue()?.toIntOrNull()?.let { it >= 0 } == true
             "rootmode" -> parameter.stringValue()?.toUIntOrNull(8)
                 ?.let { it and FuseAbi.S_IFMT == FuseAbi.S_IFDIR } == true
@@ -167,13 +168,14 @@ private data class FuseMountConfiguration(
             }
 
             val device = when (val parameter = values.remove("fd")) {
-                is FileSystemParameter.FileValue -> FuseMountDevice.File(parameter.file)
+                is FileSystemFileParameter -> if (parameter.type == FileSystemFileParameter.Type.DESCRIPTOR) {
+                    FuseMountDevice.File(parameter.file)
+                } else null
                 is FileSystemParameter.StringValue -> parameter.value.toIntOrNull()
                     ?.takeIf { it >= 0 }
                     ?.let(FuseMountDevice::Descriptor)
-                    ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-                else -> return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-            }
+                else -> null
+            } ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
             val rootMode = values.removeString("rootmode")?.toUIntOrNull(8)
                 ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
             if (rootMode and FuseAbi.S_IFMT != FuseAbi.S_IFDIR) {
@@ -889,7 +891,7 @@ private class FuseDirectoryNode(
         private val entries = mutableMapOf<VfsName, CacheValidity.Invalidatable>()
         private val listing = mutableMapOf<Long, CachedRecord>()
         private val ends = mutableSetOf<Long>()
-        private var modificationTime: VfsTimestamp? = null
+        private var modificationTime: Instant? = null
         private var readdirPlusAdvised = false
 
         fun track(name: VfsName, lookup: DirectoryLookup): DirectoryLookup {
@@ -912,7 +914,7 @@ private class FuseDirectoryNode(
             }
         }
 
-        fun validateListing(currentModificationTime: VfsTimestamp) {
+        fun validateListing(currentModificationTime: Instant) {
             val retired = lock.withLock {
                 if (modificationTime != null && modificationTime != currentModificationTime) {
                     clearListingLocked()

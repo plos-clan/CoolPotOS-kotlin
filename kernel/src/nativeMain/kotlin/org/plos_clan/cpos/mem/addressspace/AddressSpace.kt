@@ -37,11 +37,11 @@ class AddressSpace internal constructor(
     private val start: ULong,
     private val end: ULong,
     private val user: Boolean,
-) {
+) : MemoryRegionOwner {
     private val references = AtomicInt(1)
     private val limit = if (user) USER_VIRTUAL_ADDRESS_LIMIT else end
 
-    private val regions = MemoryRegionMap(start, end, limit, this)
+    private val regions = MemoryRegionMap(start, end, limit, PAGE_SIZE_BYTES, this)
     private val lock = IrqSpinLock()
     private var executable: OpenFileDescription? = null
     private val reusableFaultScratch = AtomicReference<ByteArray?>(null)
@@ -473,7 +473,7 @@ class AddressSpace internal constructor(
         )
     }
 
-    internal fun invalidateFile(
+    override fun invalidateFile(
         identity: Any,
         offset: ULong,
         end: ULong,

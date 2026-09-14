@@ -64,11 +64,11 @@ object Aml {
         val ssdts = Acpi.findTables("SSDT").filter { it.isValidAmlTable() }
 
         val loader = AmlLoader(namespace)
-        val dsdtResult = loader.load(dsdt)
+        val dsdtResult = loader.load(dsdt.signature, AmlPointerSource(dsdt.pointer, dsdt.length))
         if (!dsdtResult.success) {
             return false
         }
-        ssdts.forEach { loader.load(it) }
+        ssdts.forEach { loader.load(it.signature, AmlPointerSource(it.pointer, it.length)) }
 
         initialized = true
         println(

@@ -8,7 +8,7 @@ import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.InodeMetadata
 import org.plos_clan.cpos.fs.vfs.InodeTimestamps
 import org.plos_clan.cpos.fs.vfs.InodeType
-import org.plos_clan.cpos.fs.vfs.VfsTimestamp
+import org.plos_clan.cpos.time.Instant
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.module.ModuleData
 import org.plos_clan.cpos.utils.alignUp
@@ -56,8 +56,8 @@ internal data class DiskInode(
             }
             val modificationTime = if (extended) {
                 val nanoseconds = image.u32(location + 40uL)
-                if (nanoseconds >= VfsTimestamp.NANOSECONDS_PER_SECOND.toULong()) return null
-                VfsTimestamp(image.u64(location + 32uL).toLong(), nanoseconds.toUInt())
+                if (nanoseconds >= Instant.NANOSECONDS_PER_SECOND.toULong()) return null
+                Instant(image.u64(location + 32uL).toLong(), nanoseconds.toUInt())
             } else {
                 header.buildTime
             }
@@ -119,7 +119,7 @@ internal data class Header(
     val blockSize: Int,
     val rootNid: ULong,
     val packedNid: ULong,
-    val buildTime: VfsTimestamp,
+    val buildTime: Instant,
     private val metadataStart: ULong,
 ) {
     companion object {
@@ -162,12 +162,12 @@ internal data class Header(
             val packedNid = image.u64(offset + 96uL)
             if (packedNid == 0uL) return null
             val buildTimeNanoseconds = image.u32(offset + 32uL)
-            if (buildTimeNanoseconds >= VfsTimestamp.NANOSECONDS_PER_SECOND.toULong()) return null
+            if (buildTimeNanoseconds >= Instant.NANOSECONDS_PER_SECOND.toULong()) return null
             return Header(
                 blockSize,
                 image.u16(offset + 14uL).toULong(),
                 packedNid,
-                VfsTimestamp(image.u64(offset + 24uL).toLong(), buildTimeNanoseconds.toUInt()),
+                Instant(image.u64(offset + 24uL).toLong(), buildTimeNanoseconds.toUInt()),
                 image.u32(offset + 40uL) * blockSize.toULong(),
             )
         }

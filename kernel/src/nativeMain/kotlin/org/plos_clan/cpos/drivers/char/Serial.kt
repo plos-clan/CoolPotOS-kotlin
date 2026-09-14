@@ -227,7 +227,7 @@ private class SerialTerminal(
 private class Uart16550(
     private val configuration: SerialPortConfiguration,
 ) {
-    private val received = ByteRingBuffer(RECEIVE_BUFFER_SIZE)
+    private val received = ByteRingBuffer(RECEIVE_BUFFER_SIZE, IrqSpinLock())
 
     fun initialize(wakeup: () -> Unit): Boolean {
         val divisor = baudDivisor() ?: run {

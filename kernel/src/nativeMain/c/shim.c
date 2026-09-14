@@ -38,15 +38,14 @@ union double_bits {
     unsigned long long u64;
 };
 
-static int is_nan_bits(union double_bits bits) {
-    return (bits.u64 & 0x7ff0000000000000ULL) == 0x7ff0000000000000ULL
-        && (bits.u64 & 0x000fffffffffffffULL) != 0;
+static unsigned long long magnitude_bits(union double_bits bits) {
+    return bits.u64 & 0x7fffffffffffffffULL;
 }
 
-int isnan(double x) { return is_nan_bits((union double_bits){.f64 = x}); }
+int isnan(double x) { return magnitude_bits((union double_bits){.f64 = x}) > 0x7ff0000000000000ULL; }
+int isinf(double x) { return magnitude_bits((union double_bits){.f64 = x}) == 0x7ff0000000000000ULL; }
 NO_OPTIMIZE int __unorddf2(double a, double b) {
-    return is_nan_bits((union double_bits){.f64 = a})
-        || is_nan_bits((union double_bits){.f64 = b});
+    return isnan(a) || isnan(b);
 }
 
 void _ZdlPv(void *ptr) { free(ptr); }

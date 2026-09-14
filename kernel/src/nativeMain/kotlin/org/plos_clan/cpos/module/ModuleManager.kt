@@ -16,12 +16,12 @@ import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 
 class ModuleData internal constructor(
-    private val address: CPointer<UByteVar>,
+    override val pointer: CPointer<UByteVar>,
     override val size: Int,
-) : FileContent {
+) : org.plos_clan.cpos.mem.NativeMemorySource(), FileContent {
     operator fun get(index: Int): Byte {
         require(index in 0 until size)
-        return address[index].toByte()
+        return pointer[index].toByte()
     }
 
     override fun copyInto(
@@ -33,7 +33,8 @@ class ModuleData internal constructor(
         require(sourceOffset >= 0 && count >= 0 && sourceOffset <= size - count)
         return destination.copyFrom(
             destinationOffset,
-            requireNotNull(address + sourceOffset),
+            this,
+            sourceOffset,
             count,
         )
     }
@@ -48,7 +49,7 @@ class ModuleData internal constructor(
 
     internal fun addressAt(offset: Int, count: Int): CPointer<UByteVar> {
         require(offset >= 0 && count >= 0 && offset <= size - count)
-        return requireNotNull(address + offset)
+        return requireNotNull(pointer + offset)
     }
 }
 

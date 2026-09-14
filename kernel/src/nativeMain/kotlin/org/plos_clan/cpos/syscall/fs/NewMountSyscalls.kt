@@ -9,6 +9,7 @@ import org.plos_clan.cpos.fs.vfs.AccessMode
 import org.plos_clan.cpos.fs.vfs.DetachedMountHandle
 import org.plos_clan.cpos.fs.vfs.FileSystemCreation
 import org.plos_clan.cpos.fs.vfs.FileSystemParameter
+import org.plos_clan.cpos.fs.vfs.FileSystemFileParameter
 import org.plos_clan.cpos.fs.vfs.MountAttributeUpdate
 import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.fs.vfs.MountFlags
@@ -568,7 +569,7 @@ internal object NewMountSyscalls {
                     inode,
                     OpenOptions(access = AccessMode.PATH),
                 )) {
-                    is VfsResult.Ok -> VfsResult.Ok(FileSystemParameter.PathValue(key, result.value))
+                    is VfsResult.Ok -> VfsResult.Ok(FileSystemFileParameter(key, result.value, FileSystemFileParameter.Type.PATH))
                     is VfsResult.Err -> result
                 }
             }
@@ -578,7 +579,7 @@ internal object NewMountSyscalls {
                 }
                 val file = process.fdTable.acquire(auxiliary)
                     ?: return VfsResult.Err(VfsError.BAD_DESCRIPTOR)
-                VfsResult.Ok(FileSystemParameter.FileValue(key, file))
+                VfsResult.Ok(FileSystemFileParameter(key, file, FileSystemFileParameter.Type.DESCRIPTOR))
             }
             else -> VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }

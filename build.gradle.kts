@@ -16,16 +16,19 @@ tasks.register<Delete>("cleanAll") {
 }
 
 listOf(
+    "benchmark",
     "buildIso",
     "buildMlibc",
     "compileC",
     "linkKernel",
-    "nativeTest",
+    "jvmTest",
+    "qemuTest",
+    "qemuBenchmark",
     "prepareUserland",
     "run",
 ).forEach { taskName ->
     tasks.register(taskName) {
-        group = if (taskName == "nativeTest") "verification" else "build"
+        group = if (taskName.endsWith("Test") || taskName.endsWith("Benchmark")) "verification" else "build"
         description = "Delegates to :kernel:$taskName."
         dependsOn(":kernel:$taskName")
     }

@@ -31,7 +31,7 @@ import org.plos_clan.cpos.utils.TermiosConstants
 abstract class TerminalBackend : TtySessionBackend {
     internal val input = TerminalInput(this)
     protected val outputLock = KernelMutex()
-    private val echoes = ByteRingBuffer(OUTPUT_CHUNK_SIZE)
+    private val echoes = ByteRingBuffer(OUTPUT_CHUNK_SIZE, IrqSpinLock())
     private val transferBuffer = ByteArray(OUTPUT_CHUNK_SIZE)
     private val processedOutput = ByteArray(OUTPUT_CHUNK_SIZE * TAB_WIDTH)
     private val version = kotlin.concurrent.atomics.AtomicInt(0)

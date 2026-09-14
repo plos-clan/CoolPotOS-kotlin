@@ -29,63 +29,6 @@ import org.plos_clan.cpos.tasks.SignalRouter
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 
-private const val DEFAULT_SOCKET_BUFFER_SIZE = 212_992
-
-internal enum class SocketDomain(val abiValue: Int) {
-    UNIX(1),
-    IPV4(2),
-    NETLINK(16),
-    PACKET(17),
-    ;
-
-    companion object {
-        fun fromAbi(value: Int): SocketDomain? = entries.firstOrNull { it.abiValue == value }
-    }
-}
-
-internal enum class SocketType(val abiValue: Int, val connectionOriented: Boolean) {
-    STREAM(1, true),
-    DATAGRAM(2, false),
-    RAW(3, false),
-    SEQUENCED_PACKET(5, true),
-    ;
-
-    companion object {
-        fun fromAbi(value: Int): SocketType? = entries.firstOrNull { it.abiValue == value }
-    }
-}
-
-internal interface SocketAddress {
-    val domain: SocketDomain
-}
-
-internal data object UnspecifiedSocketAddress : SocketAddress {
-    override val domain = SocketDomain.UNIX
-}
-
-internal enum class SocketShutdownMode(val reads: Boolean, val writes: Boolean) {
-    READ(reads = true, writes = false),
-    WRITE(reads = false, writes = true),
-    BOTH(reads = true, writes = true),
-}
-
-internal data class SocketLinger(val enabled: Boolean = false, val seconds: Int = 0)
-
-internal data class SocketOptions(
-    val sendBufferSize: Int = DEFAULT_SOCKET_BUFFER_SIZE,
-    val receiveBufferSize: Int = DEFAULT_SOCKET_BUFFER_SIZE,
-    val passCredentials: Boolean = false,
-    val receiveTimestamp: Boolean = false,
-    val receiveLowWatermark: Int = 1,
-    val sendTimeoutNanos: ULong? = null,
-    val receiveTimeoutNanos: ULong? = null,
-    val reuseAddress: Boolean = false,
-    val broadcast: Boolean = false,
-    val keepAlive: Boolean = false,
-    val linger: SocketLinger = SocketLinger(),
-    val boundInterfaceIndex: Int? = null,
-)
-
 internal data class SocketSendRequest(
     val process: Process,
     val source: PreparedBufferSource,
@@ -120,67 +63,6 @@ internal data class SocketReceiveResult(
     val receivedAtNanos: ULong? = null,
     val controlMessages: List<SocketControlMessage> = emptyList(),
 )
-
-internal class SocketTimestampQueue(bufferedBytes: Int = 0) {
-    private data class Span(
-        val start: ULong,
-        var end: ULong,
-        val receivedAtNanos: ULong,
-    )
-
-    private val spans = ArrayDeque<Span>()
-    private var readSequence = 0uL
-    private var writeSequence: ULong
-
-    init {
-        require(bufferedBytes >= 0)
-        writeSequence = bufferedBytes.toULong()
-    }
-
-    fun append(byteCount: Int, receivedAtNanos: ULong?) {
-        require(byteCount >= 0)
-        if (byteCount == 0) return
-        val start = writeSequence
-        val end = start + byteCount.toULong()
-        writeSequence = end
-        if (receivedAtNanos == null) return
-        val last = spans.lastOrNull()
-        if (last?.end == start && last.receivedAtNanos == receivedAtNanos) {
-            last.end = end
-        } else {
-            spans += Span(start, end, receivedAtNanos)
-        }
-    }
-
-    fun read(byteCount: Int, consume: Boolean): ULong? {
-        require(byteCount >= 0 && byteCount.toULong() <= writeSequence - readSequence)
-        if (byteCount == 0) return null
-        val end = readSequence + byteCount.toULong()
-        if (!consume) {
-            for (span in spans) {
-                if (end <= span.start) break
-                if (end <= span.end) return span.receivedAtNanos
-            }
-            return null
-        }
-
-        var timestamp: ULong? = null
-        while (spans.firstOrNull()?.end?.let { it <= end } == true) {
-            val span = spans.removeFirst()
-            if (span.end == end) timestamp = span.receivedAtNanos
-        }
-        spans.firstOrNull()?.takeIf { it.start < end }?.let {
-            timestamp = it.receivedAtNanos
-        }
-        readSequence = end
-        if (readSequence == writeSequence) {
-            spans.clear()
-            readSequence = 0uL
-            writeSequence = 0uL
-        }
-        return timestamp
-    }
-}
 
 internal data class AcceptedSocket(
     val socket: AbstractSocket,

@@ -9,13 +9,14 @@ import org.plos_clan.cpos.tasks.CapEnum
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.UtsNamespace
+import org.plos_clan.cpos.tasks.UtsNamespaces
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
 
 internal object UtsSyscalls {
     fun uname(regs: PtraceRegisters, process: Process): Long {
         val output = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI])
-        return if (UtsNamespace.initial.copyTo(output)) 0L else errno(Errno.EFAULT)
+        return if (UtsNamespaces.initial.copyTo(output)) 0L else errno(Errno.EFAULT)
     }
 
     fun setHostname(regs: PtraceRegisters, process: Process): Long =
@@ -41,7 +42,7 @@ internal object UtsSyscalls {
             .copyFromUser(length.toInt())
             ?: return errno(Errno.EFAULT)
 
-        UtsNamespace.initial.setName(field, name)
+        UtsNamespaces.initial.setName(field, name)
         return 0L
     }
 }

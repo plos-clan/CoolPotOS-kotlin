@@ -30,14 +30,17 @@ This project uses Gradle for kernel build, ISO packaging, and QEMU run.
 - Supports kernel build, ISO packaging, and QEMU run
 - Uses the official Limine 12.x prebuilt release and transparent loading
   of a maximum-compression gzip kernel
-- Cross-platform compatible (Linux/macOS/Windows)
+- The kernel targets x86_64; portable Kotlin code and tests also compile for the JVM
 
 **Available Gradle tasks:**
 - `./gradlew build`: Build kernel ELF
 - `./gradlew prepareUserland`: Build the CachyOS EROFS root filesystem
 - `./gradlew buildIso`: Build the UEFI ISO image
 - `./gradlew run`: Run the ISO image in QEMU
-- `./gradlew nativeTest`: Run host-side Kotlin/Native unit tests
+- `./gradlew jvmTest`: Run portable Kotlin unit tests on the host
+- `./gradlew qemuTest`: Run portable and native tests inside the kernel
+- `./gradlew benchmark`: Run portable benchmarks on the JVM
+- `./gradlew qemuBenchmark`: Run portable and native benchmarks inside the kernel
 - `./gradlew clean`: Clean kernel build outputs
 - `./gradlew cleanAll`: Remove entire build directory
 - `./gradlew buildMlibc`: Build bundled mlibc
@@ -127,8 +130,52 @@ value for a build.
 | `QEMU_MEMORY=2g`                                  | Guest memory passed to QEMU.           |
 | `ACPI_AML_TABLE_DIR`                              | Firmware tables used by AML tests.     |
 
-`ACPI_AML_TABLE_DIR` enables the full firmware regression in `nativeTest` and
+`ACPI_AML_TABLE_DIR` enables the full firmware regression in `jvmTest` and
 must contain `dsdt.dat` plus `ssdt1.dat` through `ssdt17.dat`.
+The regression is reported as skipped when the directory is not configured.
+
+## Shared code and verification
+
+`commonMain` owns portable algorithms, binary codecs, buffers, time values,
+coroutine dispatch, memory-region bookkeeping, and their platform contracts.
+`nativeMain` supplies native memory access, IRQ critical sections, clocks,
+page-cache backing, hardware integration, and kernel initialization.
+`kernelMain` supplies the production boot workload. Common code is checked by
+the JVM compiler without C interop, mlibc, or bootloader dependencies.
+
+`commonTest` and `commonBenchmark` contain shared verification workloads.
+`nativeTest` and `nativeBenchmark` contain kernel-specific workloads; they are
+compiled into independent QEMU images, not executed as host programs.
+`qemuMain` supplies serial reporting and completion, while `qemuTest` and
+`qemuBenchmark` supply their own boot entries and runners. Tests use the
+Kotlin/Native compiler's generated suites. Benchmarks use kotlinx-benchmark's
+generated descriptors for parameterization, setup, teardown, and blackholes.
+
+QEMU verification needs Python 3.11+, QEMU, xorriso, and a KVM host exposing
+TSC-deadline support. It uses a headless UEFI image with no userspace rootfs and
+does not run Podman. `qemuCpu`, `qemuAcceleration`, `qemuSmp`, and `qemuMemory`
+configure the machine; changing acceleration does not remove the kernel's
+clock and timer requirements. `qemuTimeout` sets the host timeout in seconds
+(default 600), and `qemuFilter` selects case names using a regular expression.
+
+```shell
+./gradlew qemuTest -PqemuFilter='KernelDispatcherTest|NativeMemoryTest'
+./gradlew qemuBenchmark -PbenchmarkWarmups=1 -PbenchmarkIterations=2 -PbenchmarkIterationMillis=10
+```
+
+Both benchmark runners share `benchmarkWarmups`, `benchmarkIterations`, and
+`benchmarkIterationMillis`, defaulting to 5, 10, and 500. Short runs validate
+the workloads; performance comparisons need longer sampling on the same
+machine, acceleration, compiler, and GC settings. QEMU timing excludes boot,
+setup, teardown, and serial output and records each sample's operation count
+and elapsed nanoseconds.
+
+QEMU writes `serial.log`, `results.json`, and `junit.xml` beneath
+`kernel/build/qemuTest/results` or `kernel/build/qemuBenchmark/results`.
+Reports record the kernel hash and execution configuration. Missing cases,
+incomplete samples, failures, unexpected exits, and timeouts fail the task.
+Normal `check` runs JVM tests; QEMU runs are explicit. Normal `assemble` builds
+the production kernel without linking verification images.
 
 ## Kernel coroutines
 

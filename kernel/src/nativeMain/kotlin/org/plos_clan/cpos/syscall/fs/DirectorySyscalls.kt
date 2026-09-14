@@ -32,7 +32,7 @@ internal fun getdents64(regs: PtraceRegisters, process: Process): Long {
     try {
         val result = file.iterate(process.vfsOperationContext) { entry, nextOffset ->
             encountered = true
-            val record = LinuxDirent64(entry, nextOffset)
+            val record = LinuxDirent64(entry.name, entry.inodeId, entry.type, nextOffset)
             if (record.recordSize > capacity - written) {
                 false
             } else {

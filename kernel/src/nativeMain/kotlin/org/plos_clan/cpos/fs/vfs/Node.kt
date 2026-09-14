@@ -2,6 +2,8 @@
 
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.drivers.RealtimeClock
+
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.utils.IrqSpinLock
 import kotlin.concurrent.atomics.AtomicReference
@@ -92,7 +94,7 @@ class Inode internal constructor(
 
     internal fun updateCachedTimestamps(update: InodeTimestampUpdate) = lock.withLock {
         if (evicted || !update.requiresCurrentTime) return@withLock
-        val timestamps = update.apply(currentMetadata.timestamps, VfsTimestamp.now())
+        val timestamps = update.apply(currentMetadata.timestamps, RealtimeClock.now())
         if (timestamps == currentMetadata.timestamps) return@withLock
         currentMetadata = currentMetadata.copy(timestamps = timestamps)
         attributeSnapshot = attributeSnapshot?.let { snapshot ->
@@ -216,7 +218,7 @@ class Inode internal constructor(
     ): InodeMetadata {
         val metadata = update(currentMetadata)
         if (!timestamps.requiresCurrentTime) return metadata
-        val updatedTimestamps = timestamps.apply(metadata.timestamps, VfsTimestamp.now())
+        val updatedTimestamps = timestamps.apply(metadata.timestamps, RealtimeClock.now())
         return if (updatedTimestamps == metadata.timestamps) metadata
         else metadata.copy(timestamps = updatedTimestamps)
     }

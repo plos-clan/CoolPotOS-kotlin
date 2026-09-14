@@ -12,7 +12,7 @@ import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.fs.vfs.MountFlags
 import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.fs.vfs.VfsTimestamp
+import org.plos_clan.cpos.time.Instant
 import org.plos_clan.cpos.syscall.fs.FsConstants
 import org.plos_clan.cpos.syscall.fs.LinuxDirent64
 import org.plos_clan.cpos.syscall.fs.LinuxFileStatus
@@ -39,10 +39,10 @@ class StatStructuresTest {
             uid = 1000u,
             gid = 1001u,
             timestamps = InodeTimestamps(
-                accessTime = VfsTimestamp(-2, 111u),
-                modificationTime = VfsTimestamp(2, 222u),
-                changeTime = VfsTimestamp(3, 333u),
-                birthTime = VfsTimestamp(1, 444u),
+                accessTime = Instant(-2, 111u),
+                modificationTime = Instant(2, 222u),
+                changeTime = Instant(3, 333u),
+                birthTime = Instant(1, 444u),
             ),
         ),
         blocks = 0x1234uL,
@@ -150,7 +150,7 @@ class StatStructuresTest {
             VfsName.fromBytes("kernel".encodeToByteArray()),
         ).value
         val entry = DirectoryEntry(name, InodeId(42uL), InodeType.DIRECTORY)
-        val record = LinuxDirent64(entry, nextOffset = -1)
+        val record = LinuxDirent64(entry.name, entry.inodeId, entry.type, nextOffset = -1)
         val bytes = record.toNativeBytes()
         val input = LittleEndianBuffer(bytes)
 
@@ -172,7 +172,7 @@ class StatStructuresTest {
             InodeType.SYMLINK to 10,
             InodeType.SOCKET to 12,
         ).forEach { (type, value) ->
-            val encoded = LinuxDirent64(entry.copy(type = type), 0).toNativeBytes()
+            val encoded = LinuxDirent64(entry.name, entry.inodeId, type, 0).toNativeBytes()
             assertEquals(value, encoded[18].toInt(), "type=$type")
         }
     }

@@ -16,7 +16,7 @@ import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPath
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.fs.vfs.VfsTimestamp
+import org.plos_clan.cpos.time.Instant
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.syscall.Syscall.copyPath
 import org.plos_clan.cpos.syscall.Syscall.errno
@@ -373,8 +373,8 @@ private fun timestampValue(
     val value = when (val nanoseconds = input.readU64(offset + Long.SIZE_BYTES).toLong()) {
         UTIME_NOW -> InodeTimestampSet.Value.Now
         UTIME_OMIT -> InodeTimestampSet.Value.Omit
-        in 0 until VfsTimestamp.NANOSECONDS_PER_SECOND.toLong() -> InodeTimestampSet.Value.Exact(
-            VfsTimestamp(input.readU64(offset).toLong(), nanoseconds.toUInt()),
+        in 0 until Instant.NANOSECONDS_PER_SECOND.toLong() -> InodeTimestampSet.Value.Exact(
+            Instant(input.readU64(offset).toLong(), nanoseconds.toUInt()),
         )
         else -> return VfsResult.Err(VfsError.INVALID_ARGUMENT)
     }

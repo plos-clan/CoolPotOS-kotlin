@@ -21,56 +21,12 @@ import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsNodeOperations
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPathResolver
-import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.IrqSpinLock
-
-internal class UnixSocketName private constructor(private val bytes: ByteArray) {
-    private val hash = bytes.contentHashCode()
-
-    fun copyBytes(): ByteArray = bytes.copyOf()
-
-    override fun equals(other: Any?): Boolean =
-        this === other || other is UnixSocketName && bytes.contentEquals(other.bytes)
-
-    override fun hashCode(): Int = hash
-
-    companion object {
-        fun fromBytes(bytes: ByteArray): UnixSocketName = UnixSocketName(bytes.copyOf())
-
-        fun fromHex(value: UInt, width: Int): UnixSocketName {
-            require(width in 1..UInt.SIZE_BYTES * 2)
-            val bytes = ByteArray(width)
-            var remaining = value
-            for (index in bytes.lastIndex downTo 0) {
-                val digit = (remaining and 0xFu).toInt()
-                bytes[index] = (if (digit < 10) '0'.code + digit
-                else 'a'.code + digit - 10).toByte()
-                remaining = remaining shr 4
-            }
-            return UnixSocketName(bytes)
-        }
-    }
-}
-
-internal sealed interface UnixSocketAddress : SocketAddress {
-    override val domain: SocketDomain
-        get() = SocketDomain.UNIX
-
-    data object Unnamed : UnixSocketAddress
-    data class Pathname(val pathname: VfsPathname) : UnixSocketAddress
-    data class Abstract(val name: UnixSocketName) : UnixSocketAddress
-}
-
-internal data class UnixCredentials(
-    val processId: Int,
-    val userId: UInt,
-    val groupId: UInt,
-)
 
 internal class UnixAncillaryData(
     private val files: MutableList<OpenFileDescription> = mutableListOf(),

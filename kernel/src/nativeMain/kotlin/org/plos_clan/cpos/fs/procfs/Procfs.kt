@@ -2,6 +2,8 @@
 
 package org.plos_clan.cpos.fs.procfs
 
+import org.plos_clan.cpos.drivers.RealtimeClock
+
 import KERNEL_NAME
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.vfs.CacheValidity
@@ -33,7 +35,6 @@ import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.fs.vfs.VfsTimestamp
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.PidHandle
@@ -154,7 +155,7 @@ internal class ProcfsInstance : SuperBlockBackend {
                     linkCount = 2u,
                     uid = owner?.credentials?.userIds?.effective?.toUInt() ?: 0u,
                     gid = owner?.credentials?.groupIds?.effective?.toUInt() ?: 0u,
-                    timestamps = InodeTimestamps.fromModificationTime(VfsTimestamp.now()),
+                    timestamps = InodeTimestamps.fromModificationTime(RealtimeClock.now()),
                 ),
             ),
             CacheValidity.Persistent,
@@ -188,7 +189,7 @@ internal class ProcfsInstance : SuperBlockBackend {
                     mode = FileMode(mode),
                     uid = owner?.credentials?.userIds?.effective?.toUInt() ?: 0u,
                     gid = owner?.credentials?.groupIds?.effective?.toUInt() ?: 0u,
-                    timestamps = InodeTimestamps.fromModificationTime(VfsTimestamp.now()),
+                    timestamps = InodeTimestamps.fromModificationTime(RealtimeClock.now()),
                 ),
             ),
             CacheValidity.Persistent,
@@ -211,7 +212,7 @@ internal class ProcfsInstance : SuperBlockBackend {
                     mode = FileMode(mode),
                     uid = owner?.credentials?.userIds?.effective?.toUInt() ?: 0u,
                     gid = owner?.credentials?.groupIds?.effective?.toUInt() ?: 0u,
-                    timestamps = InodeTimestamps.fromModificationTime(VfsTimestamp.now()),
+                    timestamps = InodeTimestamps.fromModificationTime(RealtimeClock.now()),
                 ),
             ),
             CacheValidity.Persistent,

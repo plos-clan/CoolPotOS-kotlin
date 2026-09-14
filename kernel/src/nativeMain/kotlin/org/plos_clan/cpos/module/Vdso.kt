@@ -13,13 +13,13 @@ import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_EXECUTABLE
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.mem.addressspace.MemoryRegion
-import org.plos_clan.cpos.mem.addressspace.MemoryRegionBacking
+import org.plos_clan.cpos.mem.addressspace.CachedRegionBacking
 import org.plos_clan.cpos.mem.addressspace.MemoryRegionType
 import org.plos_clan.cpos.mem.addressspace.USER_MMAP_END
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignUp
 
-object Vdso : MemoryRegionBacking() {
+object Vdso : CachedRegionBacking() {
     private var image = ByteArray(0)
     private var signalEntrypoints: SignalEntrypoints? = null
 

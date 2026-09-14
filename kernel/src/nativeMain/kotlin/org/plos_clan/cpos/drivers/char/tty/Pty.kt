@@ -28,7 +28,7 @@ internal class Pty(
     private val release: () -> Unit,
 ) : TerminalBackend() {
     val session = TtySession({ this }, deviceNumber, 38400)
-    private val output = ByteRingBuffer(65536)
+    private val output = ByteRingBuffer(65536, IrqSpinLock())
     private val lock = IrqSpinLock()
     private val readers = IoWaitQueue()
     private val masterWriteLock = KernelMutex()

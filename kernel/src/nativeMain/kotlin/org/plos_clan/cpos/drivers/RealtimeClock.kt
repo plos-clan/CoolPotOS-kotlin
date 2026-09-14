@@ -7,87 +7,11 @@ import bridge.io_in8
 import bridge.io_out8
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.acpi.fadt.Fadt
+import org.plos_clan.cpos.time.Instant
+import org.plos_clan.cpos.time.DateTime
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 object RealtimeClock {
-    data class Instant(
-        val seconds: Long,
-        val nanoseconds: UInt,
-    ) {
-        init {
-            require(nanoseconds.toULong() < NANOSECONDS_PER_SECOND)
-        }
-
-        fun toNanoseconds(): ULong {
-            if (seconds <= 0L) return if (seconds == 0L) nanoseconds.toULong() else 0uL
-            val wholeSeconds = seconds.toULong()
-            return if (wholeSeconds >
-                (ULong.MAX_VALUE - nanoseconds.toULong()) / NANOSECONDS_PER_SECOND
-            ) {
-                ULong.MAX_VALUE
-            } else {
-                wholeSeconds * NANOSECONDS_PER_SECOND + nanoseconds.toULong()
-            }
-        }
-
-        fun durationUntil(seconds: Long, nanoseconds: UInt): ULong {
-            if (seconds < this.seconds ||
-                seconds == this.seconds && nanoseconds <= this.nanoseconds
-            ) {
-                return 0uL
-            }
-
-            var wholeSeconds = (seconds - this.seconds).toULong()
-            val fractional = if (nanoseconds >= this.nanoseconds) {
-                (nanoseconds - this.nanoseconds).toULong()
-            } else {
-                wholeSeconds--
-                NANOSECONDS_PER_SECOND + nanoseconds.toULong() - this.nanoseconds.toULong()
-            }
-            return if (wholeSeconds > (ULong.MAX_VALUE - fractional) / NANOSECONDS_PER_SECOND) {
-                ULong.MAX_VALUE
-            } else {
-                wholeSeconds * NANOSECONDS_PER_SECOND + fractional
-            }
-        }
-    }
-
-    internal data class DateTime(
-        val year: Int,
-        val month: Int,
-        val day: Int,
-        val hour: Int,
-        val minute: Int,
-        val second: Int,
-    ) {
-        fun toEpochSeconds(): Long? {
-            if (year !in 1970..9999 || month !in 1..12 ||
-                hour !in 0..23 || minute !in 0..59 || second !in 0..59
-            ) {
-                return null
-            }
-            val leapYear = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
-            val monthLength = MONTH_LENGTHS[month - 1] +
-                if (month == 2 && leapYear) 1 else 0
-            if (day !in 1..monthLength) return null
-
-            val precedingYear = year - 1
-            val leapDays = precedingYear / 4 - precedingYear / 100 + precedingYear / 400 -
-                (1969 / 4 - 1969 / 100 + 1969 / 400)
-            val precedingMonths = MONTH_STARTS[month - 1] +
-                if (month > 2 && leapYear) 1 else 0
-            val days = (year - 1970).toLong() * 365 + leapDays.toLong() +
-                precedingMonths.toLong() + day - 1
-            return days * SECONDS_PER_DAY + hour.toLong() * SECONDS_PER_HOUR +
-                minute.toLong() * SECONDS_PER_MINUTE + second.toLong()
-        }
-
-        private companion object {
-            val MONTH_LENGTHS = intArrayOf(31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
-            val MONTH_STARTS = intArrayOf(0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
-        }
-    }
-
     private data class Anchor(
         val epochSeconds: Long,
         val monotonicNanoseconds: ULong,
@@ -230,7 +154,4 @@ object RealtimeClock {
     private const val MAX_READ_ATTEMPTS = 8
     private const val UPDATE_POLL_ATTEMPTS = 100_000
     private const val NANOSECONDS_PER_SECOND = 1_000_000_000uL
-    private const val SECONDS_PER_MINUTE = 60L
-    private const val SECONDS_PER_HOUR = 60L * SECONDS_PER_MINUTE
-    private const val SECONDS_PER_DAY = 24L * SECONDS_PER_HOUR
 }

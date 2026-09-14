@@ -12,7 +12,7 @@ import org.plos_clan.cpos.utils.LittleEndianBuffer
 internal class UserIoVector private constructor(
     private val segments: Array<Segment>,
     val size: Int,
-) : IoBuffer {
+) : NativeBuffer(), IoBuffer {
     override fun prepareRead(offset: Int, count: Int): PreparedBufferSource? =
         if (prepare(offset, count, writable = false)) PreparedBufferSource(this) else null
 
@@ -50,17 +50,18 @@ internal class UserIoVector private constructor(
         }
     }
 
-    override fun copyTo(sourceOffset: Int, destination: CPointer<UByteVar>, count: Int): Int =
+    override fun copyToNative(sourceOffset: Int, destination: CPointer<UByteVar>, count: Int): Int =
         transfer(sourceOffset, count) { segment, segmentOffset, copied, chunk ->
-            segment.memory.copyTo(segmentOffset, requireNotNull(destination + copied), chunk)
+            segment.memory.copyToNative(segmentOffset, requireNotNull(destination + copied), chunk)
         }
 
     override fun copyFrom(
         destinationOffset: Int,
-        source: CPointer<UByteVar>,
+        source: BufferSource,
+        sourceOffset: Int,
         count: Int,
     ): Int = transfer(destinationOffset, count) { segment, segmentOffset, copied, chunk ->
-        segment.memory.copyFrom(segmentOffset, requireNotNull(source + copied), chunk)
+        segment.memory.copyFrom(segmentOffset, source, sourceOffset + copied, chunk)
     }
 
     override fun fill(destinationOffset: Int, count: Int, value: Byte): Int =

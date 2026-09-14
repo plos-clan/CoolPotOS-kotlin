@@ -3,7 +3,6 @@
 package org.plos_clan.cpos.syscall.fs
 
 import org.plos_clan.cpos.fs.vfs.DeviceNumber
-import org.plos_clan.cpos.fs.vfs.DirectoryEntry
 import org.plos_clan.cpos.fs.vfs.FileSystemStatistics
 import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.vfs.InodeAttributes
@@ -11,9 +10,7 @@ import org.plos_clan.cpos.fs.vfs.InodeMetadata
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.fs.vfs.MountFlags
-import org.plos_clan.cpos.fs.vfs.VfsTimestamp
-import org.plos_clan.cpos.syscall.fs.FsConstants.DIRENT64_ALIGNMENT
-import org.plos_clan.cpos.syscall.fs.FsConstants.DIRENT64_HEADER_SIZE
+import org.plos_clan.cpos.time.Instant
 import org.plos_clan.cpos.syscall.fs.FsConstants.STATFS_SIZE
 import org.plos_clan.cpos.syscall.fs.FsConstants.STATX_ATTR_MOUNT_ROOT
 import org.plos_clan.cpos.syscall.fs.FsConstants.STATX_BTIME
@@ -140,7 +137,7 @@ internal class LinuxStatx(
         }
     }
 
-    private fun LittleEndianBuffer.writeTimestamp(offset: Int, timestamp: VfsTimestamp) {
+    private fun LittleEndianBuffer.writeTimestamp(offset: Int, timestamp: Instant) {
         writeU64(offset, timestamp.seconds.toULong())
         writeU32(offset + Long.SIZE_BYTES, timestamp.nanoseconds)
     }
@@ -181,42 +178,4 @@ internal class LinuxStatFs(
         RELATIVE_ATIME(MountFlag.RELATIVE_ATIME, ST_RELATIME),
         NO_SYMLINK_FOLLOW(MountFlag.NO_SYMLINK_FOLLOW, ST_NOSYMFOLLOW),
     }
-}
-
-internal class LinuxDirent64(
-    private val entry: DirectoryEntry,
-    private val nextOffset: Long,
-) : NativeStruct {
-    private val name = entry.name.copyBytes()
-
-    val recordSize: Int =
-        (DIRENT64_HEADER_SIZE + name.size + 1 + DIRENT64_ALIGNMENT - 1) /
-            DIRENT64_ALIGNMENT * DIRENT64_ALIGNMENT
-
-    override fun toNativeBytes(): ByteArray = ByteArray(recordSize).also { buffer ->
-        LittleEndianBuffer(buffer).apply {
-            writeU64(0, entry.inodeId.value)
-            writeU64(8, nextOffset.toULong())
-            writeU16(16, recordSize.toUShort())
-        }
-        buffer[18] = entry.type?.directoryEntryType ?: 0
-        name.copyInto(buffer, DIRENT64_HEADER_SIZE)
-    }
-
-    private val InodeType.directoryEntryType: Byte
-        get() = when (this) {
-            InodeType.PIPE -> 1
-            InodeType.CHARACTER_DEVICE -> 2
-            InodeType.DIRECTORY -> 4
-            InodeType.BLOCK_DEVICE -> 6
-            InodeType.REGULAR -> 8
-            InodeType.SYMLINK -> 10
-            InodeType.SOCKET -> 12
-            InodeType.EVENTFD -> 0
-            InodeType.TIMERFD -> 0
-            InodeType.EPOLL -> 0
-            InodeType.INOTIFY -> 0
-            InodeType.PIDFD -> 0
-            InodeType.SIGNALFD -> 0
-        }
 }

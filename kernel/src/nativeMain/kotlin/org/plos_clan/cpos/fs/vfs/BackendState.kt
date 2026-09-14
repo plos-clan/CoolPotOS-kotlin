@@ -2,6 +2,8 @@
 
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.time.Instant
+
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
@@ -36,8 +38,8 @@ sealed interface CacheValidity {
             seconds: ULong,
             nanoseconds: UInt,
         ): CacheValidity {
-            require(nanoseconds < VfsTimestamp.NANOSECONDS_PER_SECOND)
-            val second = VfsTimestamp.NANOSECONDS_PER_SECOND.toULong()
+            require(nanoseconds < Instant.NANOSECONDS_PER_SECOND)
+            val second = Instant.NANOSECONDS_PER_SECOND.toULong()
             val secondsNanos = seconds * second
             if (seconds != 0uL && secondsNanos / second != seconds) return Persistent
 

@@ -8,7 +8,7 @@ import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.fs.vfs.VfsTimestamp
+import org.plos_clan.cpos.time.Instant
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
@@ -209,7 +209,7 @@ class SysfsTest {
         assertNull(registry.childOrNull(category.id, "lo"))
     }
 
-    private fun registry(): SysfsRegistry = SysfsRegistry { VfsTimestamp(1L, 0u) }
+    private fun registry(): SysfsRegistry = SysfsRegistry { Instant(1L, 0u) }
 
     private fun SysfsRegistry.child(directoryId: ULong, name: String): SysfsNode =
         assertNotNull(childOrNull(directoryId, name))

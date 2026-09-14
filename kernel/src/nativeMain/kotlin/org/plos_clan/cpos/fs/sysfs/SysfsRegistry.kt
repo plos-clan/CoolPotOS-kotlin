@@ -13,7 +13,7 @@ import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.fs.vfs.VfsTimestamp
+import org.plos_clan.cpos.time.Instant
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import kotlin.concurrent.atomics.AtomicBoolean
@@ -157,7 +157,7 @@ internal sealed class SysfsNode(
     val mode: UInt,
     val uid: UInt,
     val gid: UInt,
-    val createdAt: VfsTimestamp,
+    val createdAt: Instant,
     val permanent: Boolean,
 ) {
     var state = SysfsNodeState.LIVE
@@ -172,7 +172,7 @@ internal sealed class SysfsNode(
         mode: UInt,
         uid: UInt,
         gid: UInt,
-        createdAt: VfsTimestamp,
+        createdAt: Instant,
         permanent: Boolean,
         val mutableChildren: Boolean,
         val objectDirectory: Boolean = false,
@@ -190,7 +190,7 @@ internal sealed class SysfsNode(
         val attribute: SysfsAttribute,
         uid: UInt,
         gid: UInt,
-        createdAt: VfsTimestamp,
+        createdAt: Instant,
     ) : SysfsNode(
         id,
         parentId,
@@ -211,7 +211,7 @@ internal sealed class SysfsNode(
         parentId: ULong,
         name: VfsName,
         val targetId: ULong,
-        createdAt: VfsTimestamp,
+        createdAt: Instant,
     ) : SysfsNode(
         id,
         parentId,
@@ -244,7 +244,7 @@ internal data class SysfsDirectoryEntry(
 )
 
 internal class SysfsRegistry(
-    private val now: () -> VfsTimestamp = VfsTimestamp::now,
+    private val now: () -> Instant = org.plos_clan.cpos.drivers.RealtimeClock::now,
 ) {
     private data class DeviceKey(val type: DeviceType, val number: DeviceNumber)
 
@@ -785,7 +785,7 @@ internal class SysfsRegistry(
         parentId: ULong,
         name: String,
         targetId: ULong,
-        createdAt: VfsTimestamp,
+        createdAt: Instant,
     ): ULong {
         val link = SysfsNode.Link(
             allocateIdLocked(),
@@ -849,7 +849,7 @@ internal class SysfsRegistry(
         mode: UInt = SysfsObjectSpec.DIRECTORY_MODE,
         uid: UInt = 0u,
         gid: UInt = 0u,
-        createdAt: VfsTimestamp = now(),
+        createdAt: Instant = now(),
     ): SysfsNode.Directory = SysfsNode.Directory(
         allocateIdLocked(),
         parentId,
@@ -868,7 +868,7 @@ internal class SysfsRegistry(
         parentId: ULong?,
         name: String,
         mutableChildren: Boolean,
-        createdAt: VfsTimestamp,
+        createdAt: Instant,
     ) = installNodeLocked(
         SysfsNode.Directory(
             id,

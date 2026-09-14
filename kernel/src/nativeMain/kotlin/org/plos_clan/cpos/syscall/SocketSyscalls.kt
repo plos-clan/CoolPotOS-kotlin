@@ -30,8 +30,7 @@ import org.plos_clan.cpos.network.IpProtocol
 import org.plos_clan.cpos.network.NetlinkProtocolKind
 import org.plos_clan.cpos.network.NetlinkProtocols
 import org.plos_clan.cpos.network.PacketSocketProtocol
-import org.plos_clan.cpos.network.SocketAddressAbi
-import org.plos_clan.cpos.network.SocketAddressOutput
+import org.plos_clan.cpos.network.SocketAddressMemory
 import org.plos_clan.cpos.network.SocketConstants
 import org.plos_clan.cpos.network.TcpProtocol
 import org.plos_clan.cpos.network.UdpProtocol
@@ -204,7 +203,7 @@ internal object SocketSyscalls {
         process,
         regs[PtraceRegisters.IDX_RDI],
     ) { _, socket ->
-        val address = when (val decoded = SocketAddressAbi.read(
+        val address = when (val decoded = SocketAddressMemory.read(
             process,
             regs[PtraceRegisters.IDX_RSI],
             regs[PtraceRegisters.IDX_RDX],
@@ -223,7 +222,7 @@ internal object SocketSyscalls {
         process,
         regs[PtraceRegisters.IDX_RDI],
     ) { file, socket ->
-        val decoded = SocketAddressAbi.read(
+        val decoded = SocketAddressMemory.read(
             process,
             regs[PtraceRegisters.IDX_RSI],
             regs[PtraceRegisters.IDX_RDX],
@@ -263,7 +262,7 @@ internal object SocketSyscalls {
         process,
         regs[PtraceRegisters.IDX_RDI],
     ) { _, socket ->
-        val output = when (val result = SocketAddressOutput.prepare(
+        val output = when (val result = SocketAddressMemory.prepare(
             process,
             regs[PtraceRegisters.IDX_RSI],
             regs[PtraceRegisters.IDX_RDX],
@@ -279,7 +278,7 @@ internal object SocketSyscalls {
         process,
         regs[PtraceRegisters.IDX_RDI],
     ) { _, socket ->
-        val output = when (val result = SocketAddressOutput.prepare(
+        val output = when (val result = SocketAddressMemory.prepare(
             process,
             regs[PtraceRegisters.IDX_RSI],
             regs[PtraceRegisters.IDX_RDX],
@@ -337,7 +336,7 @@ internal object SocketSyscalls {
         val count = minOf(regs[PtraceRegisters.IDX_RDX], FsConstants.MAX_RW_COUNT).toInt()
         val destination = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
             .prepareWrite(0, count) ?: return@withSocket errno(Errno.EFAULT)
-        val output = when (val result = SocketAddressOutput.prepare(
+        val output = when (val result = SocketAddressMemory.prepare(
             process,
             regs[PtraceRegisters.IDX_R8],
             regs[PtraceRegisters.IDX_R9],
@@ -630,7 +629,7 @@ internal object SocketSyscalls {
             if (flags and (SOCK_NONBLOCK or SOCK_CLOEXEC).inv() != 0) {
                 return@withSocket errno(Errno.EINVAL)
             }
-            val output = when (val result = SocketAddressOutput.prepare(
+            val output = when (val result = SocketAddressMemory.prepare(
                 process,
                 regs[PtraceRegisters.IDX_RSI],
                 regs[PtraceRegisters.IDX_RDX],
@@ -727,7 +726,7 @@ internal object SocketSyscalls {
         }
         val vector = header.vector(process) ?: return errno(Errno.EFAULT)
         val destination = vector.prepareWrite(0, vector.size) ?: return errno(Errno.EFAULT)
-        val addressOutput = when (val result = SocketAddressOutput.prepareMessage(
+        val addressOutput = when (val result = SocketAddressMemory.prepareMessage(
             process,
             header.nameAddress,
             header.nameLength,
@@ -874,7 +873,7 @@ internal object SocketSyscalls {
             return if (addressLength == 0uL) VfsResult.Ok(null)
             else VfsResult.Err(VfsError.FAULT)
         }
-        val address = when (val result = SocketAddressAbi.read(
+        val address = when (val result = SocketAddressMemory.read(
             process,
             addressPointer,
             addressLength,

@@ -1,3 +1,6 @@
+import org.jetbrains.kotlin.gradle.plugin.mpp.StaticLibrary
+import org.jetbrains.kotlin.gradle.plugin.mpp.NativeBuildType
+import kotlinx.benchmark.gradle.NativeSourceGeneratorTask
 import org.apache.tools.ant.filters.ReplaceTokens
 import groovy.json.JsonSlurper
 import java.io.OutputStream
@@ -80,10 +83,29 @@ abstract class GzipFileTask : DefaultTask() {
     }
 }
 
+@CacheableTask
+abstract class KernelBootConfigTask : DefaultTask() {
+    @get:Input
+    abstract val commandLine: Property<String>
+
+    @get:OutputFile
+    abstract val destinationFile: RegularFileProperty
+
+    @TaskAction
+    fun write() {
+        destinationFile.get().asFile.writeText(
+            "timeout: 0\n/CoolPotOS\n    protocol: limine\n    path: boot():/boot/kernel.elf\n    cmdline: ${commandLine.get()}\n",
+        )
+    }
+}
+
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.kotlinxBenchmark)
+    alias(libs.plugins.kotlinAllOpen)
 }
+
+allOpen { annotation("org.openjdk.jmh.annotations.State") }
 
 @CacheableTask
 abstract class KernelBitcodeTask @Inject constructor(private val exec: ExecOperations) : DefaultTask() {
@@ -302,7 +324,6 @@ private class KernelConfig(
         File(toolRoot, "lib/gcc/$arch-unknown-linux-gnu/8.3.0/libgcc.a"),
         File(toolRoot, "lib/gcc/$arch-unknown-linux-gnu/8.3.0/libgcc_eh.a"),
     )
-    val linkInputs = objects + vdso.blob + kotlinBitcode + runtimeLibraries + staticLibraries
     val compileArgs = listOf(
         "-target", "$arch-freestanding",
         "-std=c23", "-ffreestanding", "-nostdinc", "-fno-builtin",
@@ -334,9 +355,21 @@ private data class QemuConfig(
     val flags: List<String>,
 )
 
+private data class BenchmarkSettings(val warmups: Int, val iterations: Int, val iterationMillis: Long) {
+    init {
+        require(warmups >= 0 && iterations > 0 && warmups <= Int.MAX_VALUE - iterations)
+        require(iterationMillis in 1..Long.MAX_VALUE / 1_000_000L)
+    }
+}
+
 private class BuildConfig(private val project: Project) {
     val arch = "x86_64"
     val debug = settingBoolean("debugMode", "DEBUG_MODE", false)
+    val benchmark = BenchmarkSettings(
+        setting("benchmarkWarmups", "BENCHMARK_WARMUPS", "5").toInt(),
+        setting("benchmarkIterations", "BENCHMARK_ITERATIONS", "10").toInt(),
+        setting("benchmarkIterationMillis", "BENCHMARK_ITERATION_MILLIS", "500").toLong(),
+    )
     val console = setting("console", "CONSOLE", "fb0")
     val paths = BuildPaths(project)
     val tools = ToolSettings(
@@ -496,47 +529,40 @@ val generateRuntimeLayout = tasks.register("generateRuntimeLayout") {
     }
 }
 
-val compileKotlinBitcode = tasks.register<KernelBitcodeTask>("compileKotlinBitcode") {
-    group = "build"
-    description = "Prepares Kotlin/Native bitcode for freestanding full LTO."
-    llvmLink.set(config.tools.llvmLink)
-    compileCommand.set(
-        listOf(config.tools.cc) + FullLto.compilerArgs + listOf(
-            "-target", "${config.arch}-freestanding", "-x", "ir", "-c", "-emit-llvm",
-            "-Wno-override-module",
+val kotlinBitcodeTasks = listOf("main", "qemuTest", "qemuBenchmark").associateWith { variant ->
+    val taskName = if (variant == "main") "compileKotlinBitcode" else "compile${variant.replaceFirstChar(Char::uppercaseChar)}Bitcode"
+    tasks.register<KernelBitcodeTask>(taskName) {
+        group = "build"
+        description = "Prepares Kotlin/Native bitcode for freestanding full LTO."
+        llvmLink.set(config.tools.llvmLink)
+        compileCommand.set(
+            listOf(config.tools.cc) + FullLto.compilerArgs + listOf(
+                "-target", "${config.arch}-freestanding", "-x", "ir", "-c", "-emit-llvm",
+                "-Wno-override-module",
+            )
         )
-    )
-    destinationFile.set(config.kernel.kotlinBitcode)
+        destinationFile.set(if (variant == "main") config.kernel.kotlinBitcode else config.paths.root.resolve("$variant/kernel.bc"))
+    }
 }
 
 kotlin {
-    val hostOs = System.getProperty("os.name")
-    val isArm64 = System.getProperty("os.arch") == "aarch64"
-    val isMingwX64 = hostOs.startsWith("Windows")
-
-    val nativeTarget = when {
-        hostOs == "Mac OS X" && isArm64 -> macosArm64("native")
-        hostOs == "Linux" && isArm64 -> linuxArm64("native")
-        hostOs == "Linux" && !isArm64 -> linuxX64("native")
-        isMingwX64 -> mingwX64("native")
-        else -> throw GradleException("Host OS is not supported in Kotlin/Native.")
+    val jvmTarget = jvm()
+    val nativeTarget = linuxX64("native")
+    val commonMain = sourceSets.getByName("commonMain")
+    val commonTest = sourceSets.getByName("commonTest")
+    commonMain.dependencies { implementation(libs.kotlinx.coroutines.core) }
+    commonTest.dependencies { implementation(kotlin("test")) }
+    val commonBenchmark = sourceSets.create("commonBenchmark") {
+        dependencies { implementation(libs.kotlinx.benchmark.runtime) }
+    }
+    jvmTarget.compilations.create("benchmark") {
+        associateWith(jvmTarget.compilations.getByName("main"))
+        defaultSourceSet.dependsOn(commonBenchmark)
     }
 
     nativeTarget.binaries.staticLib {
-        baseName = "kernel"
-        freeCompilerArgs += listOf(
-            "-native-library", runtimeCallbacks.get().asFile.absolutePath,
-            "-Xoverride-clang-options=-cc1,-emit-llvm-bc,-disable-llvm-passes,-x,ir",
-        )
-        linkTaskProvider.configure {
-            dependsOn(compileRuntimeCallbacks)
-            inputs.file(runtimeCallbacks)
-        }
-        if (buildType.debuggable) {
-            freeCompilerArgs += listOf("-g", "-Xruntime-logs=gc=info")
-        }
         if (buildType.debuggable == config.debug) {
-            compileKotlinBitcode.configure {
+            kotlinBitcodeTasks.getValue("main").configure {
                 dependsOn(linkTaskProvider)
                 sourceFile.set(outputFile)
             }
@@ -560,39 +586,100 @@ kotlin {
             }
         }
         benchmark.compileDependencyFiles += main.compileDependencyFiles
-    }
-
-    sourceSets.named("nativeMain") {
-        kotlin.srcDir(files(runtimeLayout).builtBy(generateRuntimeLayout))
-        dependencies {
-            implementation(libs.kotlinx.coroutines.core)
+        tasks.register<NativeSourceGeneratorTask>("generateNativeBenchmarks") {
+            group = "benchmark"
+            title = "nativeBenchmark"
+            this.nativeTarget = benchmark.target.konanTarget.name
+            inputClassesDirs = benchmark.output.classesDirs
+            inputDependencies = benchmark.compileDependencyFiles
+            outputSourcesDir = layout.buildDirectory.dir("benchmarks/nativeBenchmark/sources").get().asFile
+            outputResourcesDir = layout.buildDirectory.dir("benchmarks/nativeBenchmark/resources").get().asFile
         }
     }
 
+    for (variant in listOf("qemuTest", "qemuBenchmark")) {
+        val shared = sourceSets.create("${variant}Common") {
+            kotlin.srcDirs(commonMain.kotlin.sourceDirectories)
+            dependencies { implementation(libs.kotlinx.coroutines.core) }
+        }
+        val verification = nativeTarget.compilations.create(variant) {
+            defaultSourceSet {
+                dependsOn(shared)
+                kotlin.srcDirs((if (variant == "qemuTest") commonTest else commonBenchmark).kotlin.sourceDirectories)
+                dependencies {
+                    implementation(if (variant == "qemuTest") kotlin("test") else libs.kotlinx.benchmark.runtime)
+                }
+                kotlin.srcDirs("src/nativeMain/kotlin", "src/qemuMain/kotlin", "src/$variant/kotlin")
+                kotlin.srcDir(if (variant == "qemuTest") "src/nativeTest/kotlin" else "src/nativeBenchmark/kotlin")
+                kotlin.srcDir(files(runtimeLayout).builtBy(generateRuntimeLayout))
+                if (variant == "qemuBenchmark") {
+                    kotlin.srcDir(files(layout.buildDirectory.dir("benchmarks/nativeBenchmark/sources"))
+                        .builtBy("generateNativeBenchmarks"))
+                }
+            }
+            compileDependencyFiles += nativeTarget.compilations.getByName("main").compileDependencyFiles
+            if (variant == "qemuTest") {
+                compileTaskProvider.configure {
+                    compilerOptions.freeCompilerArgs.add("-generate-no-exit-test-runner")
+                }
+            }
+        }
+        nativeTarget.binaries.staticLib(variant, listOf(if (config.debug) NativeBuildType.DEBUG else NativeBuildType.RELEASE)) {
+            compilation = verification
+            kotlinBitcodeTasks.getValue(variant).configure {
+                dependsOn(linkTaskProvider)
+                sourceFile.set(outputFile)
+            }
+        }
+    }
+
+    nativeTarget.binaries.withType<StaticLibrary>().configureEach {
+        baseName = "kernel"
+        freeCompilerArgs += listOf(
+            "-native-library", runtimeCallbacks.get().asFile.absolutePath,
+            "-Xoverride-clang-options=-cc1,-emit-llvm-bc,-disable-llvm-passes,-x,ir",
+        )
+        linkTaskProvider.configure {
+            dependsOn(compileRuntimeCallbacks)
+            inputs.file(runtimeCallbacks)
+        }
+        if (buildType.debuggable) {
+            freeCompilerArgs += listOf("-g", "-Xruntime-logs=gc=info")
+        }
+    }
+
+    sourceSets.named("nativeMain") {
+        dependsOn(commonMain)
+        kotlin.srcDir("src/kernelMain/kotlin")
+        kotlin.srcDir(files(runtimeLayout).builtBy(generateRuntimeLayout))
+    }
+
     sourceSets.named("nativeTest") {
+        dependsOn(commonTest)
         dependencies {
             implementation(kotlin("test"))
         }
     }
 
     sourceSets.named("nativeBenchmark") {
+        dependsOn(commonBenchmark)
         dependencies {
             implementation(libs.kotlinx.benchmark.runtime)
         }
     }
 }
 
-tasks.named("nativeTest") {
+tasks.named("jvmTest") {
     inputs.property("acpiAmlTableDir", System.getenv("ACPI_AML_TABLE_DIR") ?: "")
 }
 
 benchmark {
-    targets.register("nativeBenchmark")
+    targets.register("jvmBenchmark")
 
     configurations.named("main") {
-        warmups = 5
-        iterations = 10
-        iterationTime = 500
+        warmups = config.benchmark.warmups
+        iterations = config.benchmark.iterations
+        iterationTime = config.benchmark.iterationMillis
         iterationTimeUnit = "ms"
         mode = "avgt"
         outputTimeUnit = "ns"
@@ -837,33 +924,31 @@ val compileC = tasks.register("compileC") {
     }
 }
 
-val linkKernel = tasks.register<Exec>("linkKernel") {
-    group = "build"
-    description = "Links the kernel and runtime libraries into an ELF executable."
-    dependsOn(compileKotlinBitcode, compileC, embedVdso, buildMlibc)
-
-    inputs.files(config.kernel.linkInputs)
-    inputs.file(config.paths.linkerScript)
-    outputs.file(config.paths.kernelElf)
-
-    val linkCommand = buildList {
-        add(config.tools.linker)
-        addAll(config.kernel.linkArgs)
-        add("-o")
-        add(config.paths.kernelElf.absolutePath)
-        addAll(config.kernel.objects.map(File::getAbsolutePath))
-        add(config.vdso.blob.absolutePath)
-        add(config.kernel.kotlinBitcode.absolutePath)
-        add("--start-group")
-        addAll(config.kernel.staticLibraries.map(File::getAbsolutePath))
-        addAll(config.kernel.runtimeLibraries.map(File::getAbsolutePath))
-        add("--end-group")
+val kernelLinks = kotlinBitcodeTasks.mapValues { (variant, bitcode) ->
+    val output = if (variant == "main") config.paths.kernelElf else config.paths.root.resolve("$variant/kernel.elf")
+    val name = if (variant == "main") "linkKernel" else "link${variant.replaceFirstChar(Char::uppercaseChar)}Kernel"
+    tasks.register<Exec>(name) {
+        group = "build"
+        description = "Links the kernel and runtime libraries into an ELF executable."
+        dependsOn(bitcode, compileC, embedVdso, buildMlibc)
+        val kotlinObject = bitcode.flatMap { it.destinationFile }
+        inputs.files(config.kernel.objects, config.vdso.blob, config.kernel.staticLibraries, config.kernel.runtimeLibraries)
+        inputs.file(kotlinObject)
+        inputs.file(config.paths.linkerScript)
+        outputs.file(output)
+        commandLine(
+            listOf(config.tools.linker) + config.kernel.linkArgs + listOf("-o", output.absolutePath) +
+                config.kernel.objects.map(File::getAbsolutePath) + config.vdso.blob.absolutePath +
+                kotlinObject.get().asFile.absolutePath + "--start-group" +
+                config.kernel.staticLibraries.map(File::getAbsolutePath) +
+                config.kernel.runtimeLibraries.map(File::getAbsolutePath) + "--end-group",
+        )
     }
-    commandLine(linkCommand)
 }
+val linkKernel = kernelLinks.getValue("main")
 
-tasks.named("build") {
-    dependsOn(linkKernel)
+tasks.named("assemble") {
+    setDependsOn(listOf(linkKernel))
 }
 
 val compressKernel = tasks.register<GzipFileTask>("compressKernel") {
@@ -923,6 +1008,67 @@ tasks.register<Exec>("run") {
     commandLine(runCommand)
     standardInput = System.`in`
 }
+
+for (variant in listOf("qemuTest", "qemuBenchmark")) {
+    val title = variant.replaceFirstChar(Char::uppercaseChar)
+    val directory = config.paths.root.resolve(variant)
+    val image = directory.resolve("kernel.iso")
+    val staging = directory.resolve("iso")
+    val measurement = if (variant == "qemuBenchmark") "verify.warmups=${config.benchmark.warmups} " +
+        "verify.iterations=${config.benchmark.iterations} verify.millis=${config.benchmark.iterationMillis}" else ""
+    val commandLine = providers.gradleProperty("qemuFilter").orElse(".*").map { filter ->
+        require(filter.none { it == '\n' || it == '\r' || it == '\u0000' })
+        val quoted = filter.replace("\\", "\\\\").replace("\"", "\\\"")
+        "console=ttyS0,115200n8 verify.filter=\"$quoted\" $measurement"
+    }
+    val bootConfig = tasks.register<KernelBootConfigTask>("configure$title") {
+        this.commandLine.set(commandLine)
+        destinationFile.set(directory.resolve("limine.conf"))
+    }
+    val stage = tasks.register<Sync>("stage$title") {
+        dependsOn(kernelLinks.getValue(variant), prepareLimine, bootConfig)
+        into(staging)
+        from(directory.resolve("kernel.elf")) { into("boot") }
+        from(directory.resolve("limine.conf")) { into("limine") }
+        from(config.paths.limineUefi) { into("limine") }
+        from(config.paths.limineEfi) { into("EFI/BOOT") }
+    }
+    val buildImage = tasks.register<Exec>("build${title}Iso") {
+        dependsOn(stage)
+        inputs.dir(staging)
+        outputs.file(image)
+        commandLine(config.tools.xorriso, "-as", "mkisofs", "--efi-boot", "limine/limine-uefi-cd.bin",
+            "-efi-boot-part", "--efi-boot-image", staging.absolutePath, "-o", image.absolutePath)
+    }
+    tasks.register<Exec>(variant) {
+        group = "verification"
+        description = "Runs $variant in the kernel and records its results."
+        dependsOn(buildImage)
+        val acceleration = providers.gradleProperty("qemuAcceleration").orElse("kvm").get()
+        val cpu = providers.gradleProperty("qemuCpu").orElse(if (acceleration == "kvm") "host" else "max").get()
+        commandLine(
+            "python3", config.paths.assets.resolve("qemu.py"),
+            "--mode", if (variant == "qemuTest") "test" else "benchmark",
+            "--output", directory.resolve("results"),
+            "--timeout", providers.gradleProperty("qemuTimeout").orElse("600").get(),
+            "--kernel", directory.resolve("kernel.elf"),
+            "--build-type", if (config.debug) "debug" else "release",
+            "--gc", providers.gradleProperty("kotlin.native.binary.gc").get(),
+            "--", config.tools.qemu,
+            "-machine", "q35,accel=$acceleration", "-cpu", cpu,
+            "-m", providers.gradleProperty("qemuMemory").orElse("2g").get(),
+            "-smp", providers.gradleProperty("qemuSmp").orElse("4").get(),
+            "-display", "none", "-monitor", "none", "-serial", "stdio", "-no-reboot",
+            "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+            "-drive", "if=pflash,format=raw,readonly=on,file=${config.paths.assets.resolve("ovmf-code.fd")}",
+            "-drive", "file=${image.absolutePath},format=raw,snapshot=on",
+        )
+    }
+}
+
+tasks.named("nativeTest") { enabled = false }
+tasks.matching { it.name == "linkDebugTestNative" }.configureEach { enabled = false }
+tasks.named("check") { setDependsOn(listOf(tasks.named("jvmTest"))) }
 
 tasks.named<Delete>("clean") {
     description = "Deletes kernel build artifacts except mlibc."
