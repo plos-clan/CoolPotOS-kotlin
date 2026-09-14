@@ -57,7 +57,7 @@ static inline void initialize_xstate_header(xstate_t *state) {
 
 static inline void save_xstate(xstate_t *state) {
     __asm__ volatile(
-        "xsaveopt64 %0"
+        "xsave64 %0"
         : "+m"(*state)
         : "a"(xstate_mask), "d"(0)
         : "memory"

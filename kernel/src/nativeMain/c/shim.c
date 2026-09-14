@@ -237,7 +237,7 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "rep stosq\n"
         "movl $" CPOS_ASM_STRINGIFY(XSTATE_MASK_VALUE) ", %eax\n"
         "xorl %edx, %edx\n"
-        "xsaveopt64 256(%rsp)\n"
+        "xsave64 256(%rsp)\n"
         "xrstor64 initial_xstate(%rip)\n"
 
         "xorq %rax, %rax\n"
