@@ -60,7 +60,7 @@ void fast_handoff_set_quantum(uint64_t task, uint64_t cycles);
 uint64_t fast_handoff_queue_size(uint64_t lapic_id);
 uint64_t fast_handoff_service(void);
 void fast_handoff_wake_bsp(void);
-void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence);
+void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence, bool may_sleep);
 _Noreturn void fast_handoff_idle(void);
 bool fast_handoff_configure_timer(uint8_t vector);
 uint64_t fast_handoff_create_task(
@@ -93,7 +93,6 @@ void *__rtld_allocateTcb(void);
 typedef struct {
     uintptr_t allocation;
     uint64_t task;
-    uint8_t created;
     uint8_t owns_stack;
 } runtime_tls_t;
 runtime_tls_t *runtime_tls_owner(uintptr_t tcb);

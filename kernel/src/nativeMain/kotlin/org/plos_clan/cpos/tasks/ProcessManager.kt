@@ -3,7 +3,6 @@
 package org.plos_clan.cpos.tasks
 
 import kotlin.concurrent.atomics.AtomicInt
-import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.experimental.ExperimentalNativeApi
@@ -260,7 +259,6 @@ class Thread internal constructor(
     internal val parentThread: Thread?
         get() = parent?.get()
 
-    private val scheduledCpu = AtomicLong(-1)
     private val parentDeathSignalNumber = AtomicInt(0)
     internal val priority = NicePriority(nice)
 
@@ -278,17 +276,6 @@ class Thread internal constructor(
         if (!priority.set(requested, limit, privileged)) return@access false
         if (handle != 0uL) bridge.fast_handoff_set_quantum(handle, Scheduler.policy.quantumCycles(priority.value))
         true
-    }
-
-    internal fun bindToCpu(lapicId: UInt) {
-        val requested = lapicId.toLong()
-        val assigned = scheduledCpu.load()
-        check(
-            assigned == requested || assigned == -1L &&
-                    scheduledCpu.compareAndSet(-1L, requested)
-        ) {
-            "thread $id cannot migrate from LAPIC $assigned to $lapicId"
-        }
     }
 
     var clearChildTid: ULong = 0uL

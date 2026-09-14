@@ -1,4 +1,6 @@
 #include "bridge.h"
+#include "native.h"
+#include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include "generated/runtime-layout/runtime_layout.h"
@@ -6,6 +8,7 @@
 static pthread_key_t runtime_key;
 static const unsigned char ready_marker;
 static bool key_ready;
+static uint64_t next_runtime_tid = 2;
 
 #define TCB(pointer, type, field) (*(type *)((uintptr_t)(pointer) + Tcb_##field))
 
@@ -15,6 +18,8 @@ runtime_tls_t *runtime_tls_owner(uintptr_t tcb) {
 
 void *__wrap___rtld_allocateTcb(void) {
     extern const uint8_t __kernel_tls_start[], __kernel_tls_file_size[], __kernel_tls_size[], __kernel_tls_align[];
+    const uint64_t tid = __atomic_fetch_add(&next_runtime_tid, 1, __ATOMIC_RELAXED);
+    if (tid > INT32_MAX / 2) return NULL;
     uintptr_t align = (uintptr_t)__kernel_tls_align > Tcb_ALIGN ? (uintptr_t)__kernel_tls_align : Tcb_ALIGN;
     if (align < LocalKeys_ALIGN) align = LocalKeys_ALIGN;
     const uintptr_t tls = ((uintptr_t)__kernel_tls_size + align - 1) & ~(align - 1);
@@ -25,6 +30,7 @@ void *__wrap___rtld_allocateTcb(void) {
     const uintptr_t tcb = ((uintptr_t)allocation + tls + align - 1) & ~(align - 1);
     __builtin_memcpy((void *)(tcb - tls), __kernel_tls_start, (uintptr_t)__kernel_tls_file_size);
     TCB(tcb, uintptr_t, selfPointer) = tcb;
+    TCB(tcb, int, tid) = (int)tid;
     TCB(tcb, uintptr_t, dtvSize) = tls != 0;
     TCB(tcb, uintptr_t, dtvPointers) = tcb + dtv;
     *(uintptr_t *)(tcb + dtv) = tcb - tls;
@@ -40,6 +46,25 @@ int __real_pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *)
 int __real_pthread_join(pthread_t, void **);
 int __real_pthread_detach(pthread_t);
 
+long runtime_thread_prepare(void *stack, int *parent_tid, void *tls) {
+    if (!stack || !parent_tid || !tls) return -EINVAL;
+    const int tid = TCB(tls, int, tid);
+    if (tid <= 0) return -EAGAIN;
+    *parent_tid = tid;
+    const bool use_runtime = can_use_runtime();
+    if (use_runtime) set_runtime_use_mask(false);
+    const bool started = fast_handoff_prepare_runtime((uintptr_t)stack, (uintptr_t)tls);
+    if (use_runtime) set_runtime_use_mask(true);
+    if (!started) *parent_tid = 0;
+    return started ? (long)tid : -ENOMEM;
+}
+
+int runtime_thread_id(void) {
+    int tid;
+    __asm__ volatile("movl %%fs:%c1, %0" : "=r"(tid) : "i"(Tcb_tid));
+    return tid;
+}
+
 int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*entry)(void *), void *arg) {
     void *stack = NULL;
     size_t size;
@@ -48,8 +73,7 @@ int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(
     if (result) return result;
     runtime_tls_t *owner = runtime_tls_owner((uintptr_t)*thread);
     owner->owns_stack = stack == NULL;
-    __atomic_store_n(&owner->created, true, __ATOMIC_RELEASE);
-    fast_handoff_wake_bsp();
+    fast_handoff_publish_runtime(owner->task);
     return 0;
 }
 
@@ -70,8 +94,7 @@ int __wrap_pthread_detach(pthread_t thread) {
 }
 
 bool runtime_tls_reclaimable(uintptr_t tcb) {
-    return __atomic_load_n(&runtime_tls_owner(tcb)->created, __ATOMIC_ACQUIRE) &&
-        !__atomic_load_n(&TCB(tcb, int, isJoinable), __ATOMIC_ACQUIRE);
+    return !__atomic_load_n(&TCB(tcb, int, isJoinable), __ATOMIC_ACQUIRE);
 }
 
 void runtime_tls_destroy(uintptr_t tcb) {

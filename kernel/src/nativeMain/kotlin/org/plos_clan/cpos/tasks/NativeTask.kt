@@ -12,7 +12,6 @@ import kotlinx.cinterop.sizeOf
 import kotlinx.cinterop.toLong
 import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.value
-import kotlinx.cinterop.IntVar
 import kotlinx.cinterop.ULongVar
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
@@ -28,9 +27,6 @@ private external fun copyMemory(destination: ULong, source: ULong, size: ULong):
 
 @GCUnsafeCall("memset")
 private external fun clearMemory(destination: ULong, value: Int, size: ULong): ULong
-
-@GCUnsafeCall("allocate_runtime_tid")
-private external fun allocateRuntimeTid(): ULong
 
 @GCUnsafeCall("fast_handoff_task_cpu_time")
 private external fun taskCpuTime(task: ULong): ULong
@@ -170,12 +166,7 @@ internal class NativeTask private constructor(
         override fun close() = bridge.runtime_tls_destroy(fsBase)
 
         companion object {
-            fun allocate(): Runtime? {
-                val pointer = bridge.__rtld_allocateTcb() ?: return null
-                val tcb = pointer.toLong().toULong()
-                (tcb + TcbLayout.tid).toPointer<IntVar>()!!.pointed.value = allocateRuntimeTid().toInt()
-                return Runtime(tcb)
-            }
+            fun allocate(): Runtime? = bridge.__rtld_allocateTcb()?.let { Runtime(it.toLong().toULong()) }
         }
     }
 

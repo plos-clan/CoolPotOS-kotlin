@@ -310,8 +310,10 @@ static void update_scheduler_timer(fast_cpu_t *cpu) {
 
 static void wake_cpu(fast_cpu_t *cpu) {
     __atomic_add_fetch(&cpu->wake_sequence, 1, __ATOMIC_RELEASE);
-    if (cpu->state == cpu_offline) return;
-    if (cpu != current_cpu())
+    const enum fast_cpu_state state = __atomic_load_n(&cpu->state, __ATOMIC_ACQUIRE);
+    if (state == cpu_offline) return;
+    if (cpu != current_cpu() || state == cpu_bootstrapping ||
+        __atomic_load_n(&cpu->current, __ATOMIC_ACQUIRE) == cpu->idle)
         lapic_send_reschedule(cpu->lapic_id);
 }
 
@@ -604,14 +606,14 @@ void fast_handoff_wake_bsp(void) {
     wake_cpu(cpu);
 }
 
-void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence) {
+void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence, bool may_sleep) {
     const uint64_t flags = interrupt_save();
     fast_cpu_t *cpu = current_cpu();
     if (__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) &&
         cpu->state != cpu_offline)
         fast_handoff_schedule_current(cpu, schedule_reschedule, NULL);
     lock_cpu(cpu);
-    const bool idle = cpu->state == cpu_online && cpu->current == cpu->idle &&
+    const bool idle = may_sleep && cpu->state == cpu_online && cpu->current == cpu->idle &&
         !cpu->head && wake_sequence ==
             __atomic_load_n(&cpu->wake_sequence, __ATOMIC_ACQUIRE);
     uint64_t deadline = idle
@@ -631,7 +633,7 @@ void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence) {
 _Noreturn void fast_handoff_idle(void) {
     for (;;) {
         const uint64_t sequence = fast_handoff_service();
-        fast_handoff_park_kotlin(0, sequence);
+        fast_handoff_park_kotlin(0, sequence, true);
     }
 }
 
@@ -705,7 +707,7 @@ _Noreturn void fast_handoff_exit_current(void) {
     fast_handoff_idle();
 }
 
-bool fast_handoff_start_runtime(uint64_t rsp, uint64_t fs_base) {
+bool fast_handoff_prepare_runtime(uint64_t rsp, uint64_t fs_base) {
     fast_task_t *task = task_from_handle(
         fast_handoff_create_task(UINT32_MAX, 0, rsp, fs_base, 0)
     );
@@ -717,8 +719,11 @@ bool fast_handoff_start_runtime(uint64_t rsp, uint64_t fs_base) {
         .rip = (uintptr_t)&kernel_clone_thread_entry,
     };
     task->rsp = (uintptr_t)frame;
-    publish_runtime(&runtime_tasks, task);
     return true;
+}
+
+void fast_handoff_publish_runtime(uint64_t handle) {
+    publish_runtime(&runtime_tasks, task_from_handle(handle));
 }
 
 bool fast_handoff_bind_current(
@@ -744,7 +749,7 @@ bool fast_handoff_bind_current(
     __atomic_store_n(&task->cpu, cpu, __ATOMIC_RELEASE);
     if (cpu->is_bsp)
         __atomic_store_n(&bsp_lapic_id, lapic_id, __ATOMIC_RELEASE);
-    cpu->state = cpu_bootstrapping;
+    __atomic_store_n(&cpu->state, cpu_bootstrapping, __ATOMIC_RELEASE);
     if (!task->kernel_fs_base)
         task->kernel_fs_base = rdmsr(ia32_fs_base_msr);
     task_state_store(task, task_running);
@@ -764,7 +769,7 @@ bool fast_handoff_finish_bootstrap(uint64_t handle) {
     lock_cpu(cpu);
     const bool finished = cpu->state == cpu_bootstrapping &&
         cpu->current == task && cpu->idle == task;
-    if (finished) cpu->state = cpu_online;
+    if (finished) __atomic_store_n(&cpu->state, cpu_online, __ATOMIC_RELEASE);
     unlock_cpu(cpu);
     interrupt_restore(flags);
     return finished;

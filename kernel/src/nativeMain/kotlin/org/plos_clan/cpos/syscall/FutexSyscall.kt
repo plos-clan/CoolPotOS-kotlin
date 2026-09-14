@@ -45,6 +45,7 @@ private enum class FutexOperation(val code: Int) {
 private data class FutexKey(
     val scope: Any,
     val address: ULong,
+    val private: Boolean,
 )
 
 private data class FutexAddress(
@@ -69,8 +70,8 @@ object Futex {
     private val lock = IrqSpinLock()
     private val queues = mutableMapOf<FutexKey, ArrayDeque<FutexWaiter>>()
 
-    fun wakePrivate(process: Process, address: ULong): Long {
-        val futex = resolveAddress(process, address, true) ?: return error(Errno.EFAULT)
+    fun wake(process: Process, address: ULong): Long {
+        val futex = resolveAddress(process, address, false) ?: return error(Errno.EFAULT)
         return wake(futex.key, 1, FUTEX_MATCH_ANY)
     }
 
@@ -287,15 +288,8 @@ object Futex {
     private fun resolveAddress(process: Process, address: ULong, private: Boolean): FutexAddress? {
         if (address and (Int.SIZE_BYTES - 1).toULong() != 0uL) return null
         readWord(process, address) ?: return null
-        val key = if (private) {
-            FutexKey(process.addressSpace, address)
-        } else {
-            val location = process.addressSpace.sharedMemoryLocation(
-                address,
-                Int.SIZE_BYTES.toULong(),
-            ) ?: return null
-            FutexKey(location.identity, location.offset)
-        }
+        val location = if (private) null else process.addressSpace.sharedMemoryLocation(address, Int.SIZE_BYTES.toULong())
+        val key = FutexKey(location?.identity ?: process.addressSpace, location?.offset ?: address, private)
         return FutexAddress(key, address)
     }
 

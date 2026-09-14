@@ -97,12 +97,11 @@ object KernelCoroutines {
             val wakeSequence = bridge.fast_handoff_service()
             val pendingSwitch = TaskReaper.reapRuntime()
             dispatcher.runReadyBatch()
-            if (pendingSwitch || dispatcher.hasReadyWork()) {
-                continue
-            }
+            val idle = !pendingSwitch && !dispatcher.hasReadyWork()
             bridge.fast_handoff_park_kotlin(
-                dispatcher.nextDeadlineNanos() ?: 0uL,
+                if (idle) dispatcher.nextDeadlineNanos() ?: 0uL else 0uL,
                 wakeSequence,
+                idle,
             )
         }
     }

@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -6,13 +7,6 @@
 #include "native.h"
 #include "syscall.h"
 
-#define EAGAIN 11
-#define EBADF 9
-#define EEXIST 17
-#define EINVAL 22
-#define ENOMEM 12
-#define ENOSYS 38
-#define ETIMEDOUT 110
 #define SYS_gettid 186
 
 #define PAGE_SIZE 0x1000u
@@ -265,7 +259,7 @@ static long futex_wait(
         spin_unlock(&bucket->lock);
         irq_restore(interrupt_flags);
 
-        const bool parked = waiter.task && fast_handoff_park_current(deadline);
+        const bool parked = state == futex_waiting && waiter.task && fast_handoff_park_current(deadline);
         if (!parked && !fast_handoff_yield()) cpu_relax();
     }
 }
@@ -296,8 +290,8 @@ static long futex_wake(int *pointer, int requested) {
     while (selected) {
         struct futex_waiter *next = selected->next;
         const uint64_t task = selected->task;
-        __atomic_store_n(&selected->state, futex_woken, __ATOMIC_RELEASE);
         if (task) fast_handoff_unpark(task);
+        __atomic_store_n(&selected->state, futex_woken, __ATOMIC_RELEASE);
         selected = next;
     }
     return count;
@@ -403,28 +397,8 @@ static long munmap_call(void *pointer, size_t size) {
 
 static long write_call(int fd, const void *buffer, size_t count) {
     if (fd < 0) return -EBADF;
-    if (fd <= 2) serial_print(buffer, count);
+    if (fd <= 2 && can_use_runtime()) serial_print(buffer, count);
     return (long)count;
-}
-
-static long clone_call(void *stack, int *parent_tid, void *tls) {
-    if (!stack || !parent_tid) return -EINVAL;
-
-    const uint64_t tid = allocate_runtime_tid();
-    if (tid > INT32_MAX) return -EAGAIN;
-    *parent_tid = (int)tid;
-    const bool use_runtime = can_use_runtime();
-    if (use_runtime) set_runtime_use_mask(false);
-    const bool started = fast_handoff_start_runtime((uintptr_t)stack, (uintptr_t)tls);
-    if (use_runtime) set_runtime_use_mask(true);
-    if (!started) *parent_tid = 0;
-    return started ? (long)tid : -ENOMEM;
-}
-
-static long gettid_call(void) {
-    int tid;
-    __asm__ volatile("movl %%fs:24, %0" : "=r"(tid));
-    return tid;
 }
 
 static long arch_prctl_call(int code, uint64_t pointer) {
@@ -475,7 +449,7 @@ long syscall(long number, ...) {
         int *parent_tid = ARG(int *);
         SKIP_ARG(void *);
         void *tls = ARG(void *);
-        ret = clone_call(stack, parent_tid, tls);
+        ret = runtime_thread_prepare(stack, parent_tid, tls);
         break;
     }
     case SYS_arch_prctl: {
@@ -489,7 +463,7 @@ long syscall(long number, ...) {
         ret = 0;
         break;
     case SYS_gettid:
-        ret = gettid_call();
+        ret = runtime_thread_id();
         break;
     case SYS_futex: {
         int *futex_ptr = ARG(int *);

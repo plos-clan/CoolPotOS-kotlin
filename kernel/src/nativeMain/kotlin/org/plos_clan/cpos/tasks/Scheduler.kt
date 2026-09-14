@@ -100,10 +100,7 @@ object Scheduler {
         val accepted = thread.nativeTask.access {
             bridge.fast_handoff_enqueue(it, targetLapicId.toULong())
         }
-        if (accepted) {
-            thread.bindToCpu(targetLapicId)
-            SignalRouter.requestDelivery(thread)
-        }
+        if (accepted) SignalRouter.requestDelivery(thread)
         return accepted
     }
 
@@ -149,8 +146,6 @@ object Scheduler {
             println("Scheduler: cannot bind bootstrap thread on core ${local.lapicId}")
             return false
         }
-        thread.bindToCpu(local.lapicId.toUInt())
-
         localScheduler.bootstrapThread = thread
 
         if (isBsp) {

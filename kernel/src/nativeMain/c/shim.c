@@ -115,12 +115,6 @@ void io_out32(uint16_t port, uint32_t value) {
 void enable_interrupt(void) { __asm__ volatile("sti" : : : "memory"); }
 void disable_interrupt(void) { __asm__ volatile("cli" : : : "memory"); }
 
-static uint64_t next_runtime_tid = 2;
-
-uint64_t allocate_runtime_tid(void) {
-    return __atomic_fetch_add(&next_runtime_tid, 1, __ATOMIC_RELAXED);
-}
-
 void pthread_exit(void *ret_val) __attribute__((noreturn));
 int pthread_key_create(uint32_t *key, void (*destructor)(void *));
 

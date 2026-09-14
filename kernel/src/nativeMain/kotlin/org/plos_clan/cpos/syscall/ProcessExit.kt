@@ -56,7 +56,7 @@ internal object ProcessExit {
         if (address != 0uL &&
             UserMemory(thread.process.addressSpace, address).copyToUser(ByteArray(Int.SIZE_BYTES))
         ) {
-            Futex.wakePrivate(thread.process, address)
+            Futex.wake(thread.process, address)
         }
     }
 }

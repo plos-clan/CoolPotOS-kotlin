@@ -354,8 +354,12 @@ object Syscall {
         val thread = ProcessManager.currentThread()
         if (thread != null) Keys.applyPendingSession(thread)
         if (number == Vdso.SIGNAL_GATEWAY_SYSCALL) {
-            if (thread != null && SignalDelivery.deliverGateway(regs, thread)) return
-            regs[PtraceRegisters.IDX_RAX] = errno(Errno.ENOSYS).toULong()
+            if (thread != null && SignalDelivery.deliverGateway(regs, thread)) {
+                regs[PtraceRegisters.IDX_RFLAGS] =
+                    regs[PtraceRegisters.IDX_RFLAGS] or FORCE_IRET_FLAG
+            } else {
+                regs[PtraceRegisters.IDX_RAX] = errno(Errno.ENOSYS).toULong()
+            }
             return
         }
         val definition = if (number < definitions.size.toULong()) {
