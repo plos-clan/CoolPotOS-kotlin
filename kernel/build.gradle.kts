@@ -6,6 +6,7 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.util.zip.Deflater
 import java.util.zip.GZIPOutputStream
+import org.gradle.process.ExecOperations
 
 @DisableCachingByDefault(because = "Downloads third-party artifacts")
 abstract class DownloadFileTask : DefaultTask() {
@@ -84,10 +85,50 @@ plugins {
     alias(libs.plugins.kotlinxBenchmark)
 }
 
+@CacheableTask
+abstract class KernelBitcodeTask @Inject constructor(private val exec: ExecOperations) : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val sourceFile: RegularFileProperty
+
+    @get:Input
+    abstract val llvmLink: Property<String>
+
+    @get:Input
+    abstract val compileCommand: ListProperty<String>
+
+    @get:OutputFile
+    abstract val destinationFile: RegularFileProperty
+
+    @TaskAction
+    fun compile() {
+        val linked = temporaryDir.resolve("linked.ll")
+        val freestanding = temporaryDir.resolve("freestanding.ll")
+        val output = destinationFile.get().asFile
+        exec.exec {
+            commandLine(llvmLink.get(), "-S", sourceFile.get().asFile, "-o", linked)
+        }
+        freestanding.bufferedWriter().use { writer ->
+            linked.forEachLine { line ->
+                writer.appendLine(
+                    if (line.startsWith("attributes #") && "\"no-builtins\"" !in line)
+                        line.replaceFirst("{", "{ \"no-builtins\"")
+                    else line
+                )
+            }
+        }
+        output.parentFile.mkdirs()
+        exec.exec {
+            commandLine(compileCommand.get() + listOf(freestanding.absolutePath, "-o", output.absolutePath))
+        }
+    }
+}
+
 private data class ToolSettings(
     val cc: String,
     val cxx: String,
     val linker: String,
+    val llvmLink: String,
     val objcopy: String,
     val xorriso: String,
     val qemu: String,
@@ -100,7 +141,7 @@ private data class RemoteArtifact(
 
 private object FullLto {
     val compilerArgs = listOf("-flto=full", "-funified-lto")
-    val linkerArgs = listOf("--lto=full", "--lto-O3")
+    fun linkerArgs(debug: Boolean = false) = listOf("--lto=full", if (debug) "--lto-O0" else "--lto-O3")
 }
 
 private class BuildPaths(project: Project) {
@@ -165,7 +206,7 @@ private class VdsoConfig(
         "-c", source.absolutePath,
         "-o", objectFile.absolutePath,
     )
-    val linkCommand = listOf(tools.linker) + FullLto.linkerArgs + listOf(
+    val linkCommand = listOf(tools.linker) + FullLto.linkerArgs() + listOf(
         "-shared", "-nostdlib", "--hash-style=sysv",
         "-soname=linux-vdso.so.1", "-z", "max-page-size=0x1000", "-z", "noexecstack",
         "--build-id=none", "--orphan-handling=error",
@@ -251,10 +292,7 @@ private class KernelConfig(
         "idt.c", "handoff.c", "smp.c", "tls.c", "zstd_bridge.c",
     ).map(paths.kernelC::resolve)
     val objects = sources.map { paths.cObjects.resolve("${it.nameWithoutExtension}.o") }
-    val kotlinLinkTask = if (debug) "linkDebugStaticNative" else "linkReleaseStaticNative"
-    val kotlinLibrary = paths.root.resolve(
-        "bin/native/${if (debug) "debugStatic" else "releaseStatic"}/libkernel.a",
-    )
+    val kotlinBitcode = paths.root.resolve("kernel.bc")
     val staticLibraries = listOf(
         "libos_terminal.a",
         "libzstd-decompress.a",
@@ -264,7 +302,7 @@ private class KernelConfig(
         File(toolRoot, "lib/gcc/$arch-unknown-linux-gnu/8.3.0/libgcc.a"),
         File(toolRoot, "lib/gcc/$arch-unknown-linux-gnu/8.3.0/libgcc_eh.a"),
     )
-    val linkInputs = objects + vdso.blob + kotlinLibrary + runtimeLibraries + staticLibraries
+    val linkInputs = objects + vdso.blob + kotlinBitcode + runtimeLibraries + staticLibraries
     val compileArgs = listOf(
         "-target", "$arch-freestanding",
         "-std=c23", "-ffreestanding", "-nostdinc", "-fno-builtin",
@@ -281,7 +319,7 @@ private class KernelConfig(
         paths.mlibc.resolve("sysdeps/template/include"),
         paths.freestandingInclude,
     ).map { "-I${it.absolutePath}" } + if (debug) listOf("-Og") else listOf("-O3")
-    val linkArgs = FullLto.linkerArgs + listOf(
+    val linkArgs = FullLto.linkerArgs(debug) + listOf(
         "-m", "elf_$arch", "-nostdlib", "--eh-frame-hdr",
         "-z", "max-page-size=0x1000", "--gc-sections",
         "-u", "sched_yield", "-u", "frg_panic", "-u", "pthread_exit",
@@ -305,6 +343,7 @@ private class BuildConfig(private val project: Project) {
         cc = setting("crossCc", "CROSS_CC", "clang"),
         cxx = setting("crossCxx", "CROSS_CXX", "clang++"),
         linker = setting("linker", "LINKER", "ld.lld"),
+        llvmLink = setting("llvmLink", "LLVM_LINK", "llvm-link"),
         objcopy = setting("objcopy", "OBJCOPY", "llvm-objcopy"),
         xorriso = setting("xorriso", "XORRISO", "xorriso"),
         qemu = setting("qemu", "QEMU", "qemu-system-x86_64"),
@@ -457,6 +496,19 @@ val generateRuntimeLayout = tasks.register("generateRuntimeLayout") {
     }
 }
 
+val compileKotlinBitcode = tasks.register<KernelBitcodeTask>("compileKotlinBitcode") {
+    group = "build"
+    description = "Prepares Kotlin/Native bitcode for freestanding full LTO."
+    llvmLink.set(config.tools.llvmLink)
+    compileCommand.set(
+        listOf(config.tools.cc) + FullLto.compilerArgs + listOf(
+            "-target", "${config.arch}-freestanding", "-x", "ir", "-c", "-emit-llvm",
+            "-Wno-override-module",
+        )
+    )
+    destinationFile.set(config.kernel.kotlinBitcode)
+}
+
 kotlin {
     val hostOs = System.getProperty("os.name")
     val isArm64 = System.getProperty("os.arch") == "aarch64"
@@ -472,13 +524,22 @@ kotlin {
 
     nativeTarget.binaries.staticLib {
         baseName = "kernel"
-        freeCompilerArgs += listOf("-native-library", runtimeCallbacks.get().asFile.absolutePath)
+        freeCompilerArgs += listOf(
+            "-native-library", runtimeCallbacks.get().asFile.absolutePath,
+            "-Xoverride-clang-options=-cc1,-emit-llvm-bc,-disable-llvm-passes,-x,ir",
+        )
         linkTaskProvider.configure {
             dependsOn(compileRuntimeCallbacks)
             inputs.file(runtimeCallbacks)
         }
         if (buildType.debuggable) {
             freeCompilerArgs += listOf("-g", "-Xruntime-logs=gc=info")
+        }
+        if (buildType.debuggable == config.debug) {
+            compileKotlinBitcode.configure {
+                dependsOn(linkTaskProvider)
+                sourceFile.set(outputFile)
+            }
         }
     }
 
@@ -827,7 +888,7 @@ val compileC = tasks.register("compileC") {
 val linkKernel = tasks.register<Exec>("linkKernel") {
     group = "build"
     description = "Links the kernel and runtime libraries into an ELF executable."
-    dependsOn(config.kernel.kotlinLinkTask, compileC, embedVdso, buildMlibc)
+    dependsOn(compileKotlinBitcode, compileC, embedVdso, buildMlibc)
 
     inputs.files(config.kernel.linkInputs)
     inputs.file(config.paths.linkerScript)
@@ -840,7 +901,7 @@ val linkKernel = tasks.register<Exec>("linkKernel") {
         add(config.paths.kernelElf.absolutePath)
         addAll(config.kernel.objects.map(File::getAbsolutePath))
         add(config.vdso.blob.absolutePath)
-        add(config.kernel.kotlinLibrary.absolutePath)
+        add(config.kernel.kotlinBitcode.absolutePath)
         add("--start-group")
         addAll(config.kernel.staticLibraries.map(File::getAbsolutePath))
         addAll(config.kernel.runtimeLibraries.map(File::getAbsolutePath))
