@@ -76,7 +76,7 @@ rm -rf \
     "$rootfs/usr/share/"{licenses,locale,man,pixmaps,readline}
 
 find "$rootfs/usr" -type f \( -name '*.a' -o -name '*.o' -o -name '*.debug' \) -delete
-cp -a --no-preserve=ownership /usr/local/share/cpos/rootfs/. "$rootfs/"
+install -Dm755 /usr/local/share/cpos/init "$rootfs/init"
 systemctl --root="$rootfs" enable NetworkManager.service dropbear.service
 
 mkfs.erofs \
