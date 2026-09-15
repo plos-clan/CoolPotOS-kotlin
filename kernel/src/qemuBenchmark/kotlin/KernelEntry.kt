@@ -5,6 +5,7 @@ import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
 import kotlinx.io.readString
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.DurationUnit
 import platform.linux.RB_POWER_OFF
 import platform.linux.reboot
 import platform.posix.fflush
@@ -33,7 +34,8 @@ fun main() {
             CommandBenchmark(
                 "pipe.yesDd[bytes=$transferBytes]",
                 "/usr/bin/bash -c '$transfer; $completed'",
-            ),
+                "MiB/s",
+            ) { elapsed -> transferBytes / (1024.0 * 1024) / elapsed.toDouble(DurationUnit.SECONDS) },
         )
         val report = VerificationReport("system", Snapshot::bootNanoseconds) { record ->
             print("\n$record")

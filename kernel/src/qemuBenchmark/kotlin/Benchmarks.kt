@@ -83,12 +83,17 @@ object GetPidBenchmark : TimedBenchmark("syscall.getpid", "ns/op") {
     }
 }
 
-class CommandBenchmark(name: String, private val command: String) : TimedBenchmark(name, "ns") {
+class CommandBenchmark(
+    name: String,
+    private val command: String,
+    unit: String,
+    private val measure: (Duration) -> Double,
+) : TimedBenchmark(name, unit) {
     override fun sample(duration: Duration): Double {
         val start = TimeSource.Monotonic.markNow()
         val status = system(command)
-        val elapsed = start.elapsedNow().inWholeNanoseconds
+        val elapsed = start.elapsedNow()
         check(status == 0) { "Command exited with wait status $status: $command" }
-        return elapsed.toDouble()
+        return measure(elapsed)
     }
 }

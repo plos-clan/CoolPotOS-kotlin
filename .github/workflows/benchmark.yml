@@ -30,4 +30,9 @@ jobs:
           token: ${{ secrets.METRICS_TOKEN }}
           repository: ${{ vars.METRICS_REPOSITORY }}
           event-type: metrics-ready
-          client-payload: '{"runId": ${{ github.run_id }}}'
+          client-payload: >-
+            {
+              "runId": ${{ github.run_id }},
+              "workflow": ${{ toJSON(github.workflow) }},
+              "message": ${{ toJSON(github.event.head_commit.message) }}
+            }
