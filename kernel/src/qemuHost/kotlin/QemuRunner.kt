@@ -135,6 +135,10 @@ internal class QemuRunner(private val config: QemuConfiguration) {
         val filename = if (config.mode == QemuMode.SYSTEM) "boot.json" else config.mode.reportFile
         report.write(output.resolve(filename), details)
         if (config.mode == QemuMode.TEST) report.writeJUnit(output.resolve("junit.xml"))
+        if (!report.successful) {
+            report.errors.forEach(System.err::println)
+            if (log.isFile) log.readLines().takeLast(40).forEach(System.err::println)
+        }
         return report
     }
 }

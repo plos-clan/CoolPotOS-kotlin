@@ -542,10 +542,7 @@ kotlin {
     val commonBenchmark = sourceSets.create("commonBenchmark") {
         dependencies { implementation(libs.kotlinx.benchmark.runtime) }
     }
-    jvmTarget.compilations.create("benchmark") {
-        associateWith(jvmTarget.compilations.getByName("main"))
-        defaultSourceSet.dependsOn(commonBenchmark)
-    }
+    jvmTarget.compilations.getByName("main").defaultSourceSet.dependsOn(commonBenchmark)
 
     val qemuHost = jvmTarget.compilations.create("qemuHost") {
         defaultSourceSet {
@@ -649,7 +646,7 @@ tasks.named("jvmTest") {
 }
 
 benchmark {
-    targets.register("jvmBenchmark")
+    targets.register("jvm")
 
     configurations.named("main") {
         warmups = config.benchmark.warmups
