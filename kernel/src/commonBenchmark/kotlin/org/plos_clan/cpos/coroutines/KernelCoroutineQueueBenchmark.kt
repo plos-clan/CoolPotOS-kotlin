@@ -9,7 +9,7 @@ import kotlinx.coroutines.Runnable
 
 @State(Scope.Benchmark)
 class KernelCoroutineQueueBenchmark {
-    @Param("16", "256", "4096")
+    @Param("16", "4096")
     var taskCount = 0
 
     private lateinit var queue: KernelCoroutineQueue
@@ -29,26 +29,5 @@ class KernelCoroutineQueueBenchmark {
         deadline++
         queue.scheduleAt(deadline, ready)
         return ready
-    }
-}
-
-@State(Scope.Benchmark)
-class KernelCoroutineBatchBenchmark {
-    @Param("1", "64")
-    var taskCount = 0
-
-    private lateinit var queue: KernelCoroutineQueue
-    private lateinit var runnable: Runnable
-
-    @Setup
-    fun prepare() {
-        queue = KernelCoroutineQueue()
-        runnable = Runnable {}
-    }
-
-    @Benchmark
-    fun enqueueAndClaim(): List<Runnable> {
-        repeat(taskCount) { queue.enqueue(runnable) }
-        return queue.claimReady(0uL, taskCount)
     }
 }

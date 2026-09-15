@@ -33,11 +33,11 @@ Include = /etc/pacman.d/cachyos-v3-mirrorlist\
 [cachyos-extra-v3]\
 Include = /etc/pacman.d/cachyos-v3-mirrorlist\
 ' /etc/pacman.conf
-printf 'Server = https://mirrors.ustc.edu.cn/archlinux/$repo/os/$arch\n' \
+printf 'Server = https://mirrors.sustech.edu.cn/archlinux/$repo/os/$arch\n' \
     > /etc/pacman.d/mirrorlist
-printf 'Server = https://mirrors.ustc.edu.cn/cachyos/repo/$arch/$repo\n' \
+printf 'Server = https://mirrors.sustech.edu.cn/cachyos/repo/$arch/$repo\n' \
     > /etc/pacman.d/cachyos-mirrorlist
-printf 'Server = https://mirrors.ustc.edu.cn/cachyos/repo/$arch_v3/$repo\n' \
+printf 'Server = https://mirrors.sustech.edu.cn/cachyos/repo/$arch_v3/$repo\n' \
     > /etc/pacman.d/cachyos-v3-mirrorlist
 
 pacman -Sy --needed --noconfirm --disable-sandbox-network erofs-utils
@@ -77,7 +77,9 @@ rm -rf \
 
 find "$rootfs/usr" -type f \( -name '*.a' -o -name '*.o' -o -name '*.debug' \) -delete
 install -Dm755 /usr/local/share/cpos/init "$rootfs/init"
-systemctl --root="$rootfs" enable NetworkManager.service dropbear.service
+install -Dm755 /usr/local/share/cpos/benchmark.kexe "$rootfs/usr/lib/cpos/benchmark.kexe"
+install -Dm644 /usr/local/share/cpos/benchmark.service "$rootfs/usr/lib/systemd/system/benchmark.service"
+systemctl --root="$rootfs" enable NetworkManager.service dropbear.service benchmark.service
 
 mkfs.erofs \
     -x-1 \

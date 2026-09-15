@@ -40,7 +40,7 @@ This project uses Gradle for kernel build, ISO packaging, and QEMU run.
 - `./gradlew jvmTest`: Run portable Kotlin unit tests on the host
 - `./gradlew qemuTest`: Run portable and native tests inside the kernel
 - `./gradlew benchmark`: Run portable benchmarks on the JVM
-- `./gradlew qemuBenchmark`: Run portable and native benchmarks inside the kernel
+- `./gradlew qemuBenchmark`: Boot the production rootfs and run system benchmarks
 - `./gradlew clean`: Clean kernel build outputs
 - `./gradlew cleanAll`: Remove entire build directory
 - `./gradlew buildMlibc`: Build bundled mlibc
@@ -143,39 +143,85 @@ page-cache backing, hardware integration, and kernel initialization.
 `kernelMain` supplies the production boot workload. Common code is checked by
 the JVM compiler without C interop, mlibc, or bootloader dependencies.
 
-`commonTest` and `commonBenchmark` contain shared verification workloads.
-`nativeTest` and `nativeBenchmark` contain kernel-specific workloads; they are
-compiled into independent QEMU images, not executed as host programs.
-`qemuMain` supplies serial reporting and completion, while `qemuTest` and
-`qemuBenchmark` supply their own boot entries and runners. Tests use the
-Kotlin/Native compiler's generated suites. Benchmarks use kotlinx-benchmark's
-generated descriptors for parameterization, setup, teardown, and blackholes.
+`commonTest` runs on the JVM and alongside `nativeTest` in the QEMU test
+image. `qemuMain` supplies serial reporting and completion; `qemuTest` uses
+the Kotlin/Native compiler's generated suites. `commonBenchmark` contains
+JVM algorithm benchmarks for memory-region lookup, pathname parsing, and
+the coroutine timer queue: eight parameter combinations in total.
 
-QEMU verification needs Python 3.11+, QEMU, xorriso, and a KVM host exposing
-TSC-deadline support. It uses a headless UEFI image with no userspace rootfs and
-does not run Podman. `qemuCpu`, `qemuAcceleration`, `qemuSmp`, and `qemuMemory`
-configure the machine; changing acceleration does not remove the kernel's
-clock and timer requirements. `qemuTimeout` sets the host timeout in seconds
-(default 600), and `qemuFilter` selects case names using a regular expression.
+QEMU tests need QEMU, xorriso, and a KVM host exposing
+TSC-deadline support. The test image has no userspace rootfs. `qemuCpu`,
+`qemuAcceleration`, `qemuSmp`, and `qemuMemory` configure this image;
+changing acceleration does not remove the kernel's clock requirements.
+`qemuTimeout` sets the timeout per boot in seconds (default 600), and
+`qemuFilter` selects test case names using a regular expression.
 
 ```shell
 ./gradlew qemuTest -PqemuFilter='KernelDispatcherTest|NativeMemoryTest'
-./gradlew qemuBenchmark -PbenchmarkWarmups=1 -PbenchmarkIterations=2 -PbenchmarkIterationMillis=10
+./gradlew benchmark
+./gradlew qemuBenchmark
 ```
 
-Both benchmark runners share `benchmarkWarmups`, `benchmarkIterations`, and
-`benchmarkIterationMillis`, defaulting to 5, 10, and 500. Short runs validate
-the workloads; performance comparisons need longer sampling on the same
-machine, acceleration, compiler, and GC settings. QEMU timing excludes boot,
-setup, teardown, and serial output and records each sample's operation count
-and elapsed nanoseconds.
+JVM benchmarks use three independent JMH forks. `benchmarkWarmups`,
+`benchmarkIterations`, and `benchmarkIterationMillis` default to 5, 10,
+and 1000. Warmup and measurement iterations each last one second by default.
+The raw report retains all fork samples. Repetition reduces sampling and JIT
+variation, but shared CI workers can still differ substantially between runs.
 
-QEMU writes `serial.log`, `results.json`, and `junit.xml` beneath
-`kernel/build/qemuTest/results` or `kernel/build/qemuBenchmark/results`.
-Reports record the kernel hash and execution configuration. Missing cases,
-incomplete samples, failures, unexpected exits, and timeouts fail the task.
-Normal `check` runs JVM tests; QEMU runs are explicit. Normal `assemble` builds
-the production kernel without linking verification images.
+`qemuBenchmark` builds the production kernel and rootfs, including the usual
+init, overlay filesystem, systemd services, and QEMU devices. It adds the
+`cpos.benchmark` boot argument to activate `benchmark.service` after
+`multi-user.target`. Normal boots do not run the service. Rootfs changes are
+part of the measured system; kernel and rootfs hashes are retained in reports.
+Podman is required to build the rootfs.
+
+The default system measurements are:
+
+- `boot.toBenchmarkService`: guest boot-clock nanoseconds when the benchmark
+  service starts its Kotlin/Native workload, after `multi-user.target`. This includes
+  service timeouts and runtime startup, but excludes firmware and the
+  bootloader; the kernel clock starts during kernel initialization.
+- `boot.usedMemory`: `(MemTotal - MemAvailable) * 1024` from `/proc/meminfo`,
+  before command warmup. This uses the kernel's managed-memory accounting.
+- `syscall.getpid`: average nanoseconds per userspace `getpid()` call through
+  glibc and the real kernel syscall entry, including Kotlin/Native call overhead.
+- `scheduler.threadWakeup`: average nanoseconds from signaling a condition
+  variable to the waiting POSIX thread resuming and acquiring its mutex. A
+  handshake places the receiver back in its wait before the next signal.
+  This includes synchronization and scheduler overhead, not just context switching.
+- `pipe.yesDd[bytes=67108864]`: elapsed nanoseconds for a userspace `yes | dd`
+  pipeline transferring 64 MiB through 512-byte full-block reads into
+  `/dev/null`. Progress output is disabled and both pipeline exit statuses
+  are checked.
+
+`benchmarkBoots` defaults to three independent boots. Each boot records its
+startup and memory samples once, then runs each timed benchmark with five
+warmup samples and ten retained samples. Syscall and thread samples each run
+for one second; command samples run to completion. These settings are defined
+in `kernel/src/qemuBenchmark/kotlin/KernelEntry.kt`, independently of the JVM
+benchmark Gradle properties; only the benchmark boot switch is passed through
+the kernel command line. Measurements execute sequentially alongside
+normal system services. Add `Benchmark` implementations or `CommandBenchmark`
+instances in `kernel/src/qemuBenchmark/kotlin` to extend the suite.
+
+`qemuBenchmark` is a standard Kotlin/Native userspace executable compiled
+independently of the kernel HAL and installed into the production rootfs.
+It uses Kotlin time APIs, kotlinx-io, and the existing POSIX bindings. The
+shared Kotlin report protocol lives in `src/qemuMain`; `src/qemuTest` runs
+compiler-generated kernel tests. The Kotlin/JVM runner in `src/qemuHost` launches QEMU,
+validates the serial protocol, and serializes reports with kotlinx-serialization.
+There is no Python runner, custom C shim, or benchmark-specific kernel entry.
+
+QEMU tests write `serial.log`, `results.json`, and `junit.xml` beneath
+`kernel/build/qemuTest/results`. System benchmarks write per-boot serial logs
+and `boot.json` reports, plus one combined `system.json`, beneath
+`kernel/build/qemuBenchmark/results`. Timeouts, command failures, missing
+measurements, and unexpected QEMU exits fail the task. Raw samples from all
+boots are preserved; a failed boot stops the series. Host report validation can be run with
+`./gradlew jvmTest`.
+
+Normal `check` runs JVM tests. Normal `assemble` builds the production kernel
+without linking verification images.
 
 ## Kernel coroutines
 

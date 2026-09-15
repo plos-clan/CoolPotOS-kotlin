@@ -11,7 +11,7 @@ import org.plos_clan.cpos.fs.vfs.VfsResult
 
 @State(Scope.Benchmark)
 class VfsPathnameBenchmark {
-    @Param("1", "8", "64", "512")
+    @Param("8", "64")
     var componentCount = 0
 
     private lateinit var pathname: VfsPathname

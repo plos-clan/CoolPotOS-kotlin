@@ -12,7 +12,7 @@ private const val PAGE_SIZE_BYTES = 4096uL
 
 @State(Scope.Benchmark)
 class MemoryRegionMapBenchmark {
-    @Param("16", "256", "4096")
+    @Param("16", "4096")
     var regionCount = 0
 
     private lateinit var map: MemoryRegionMap
