@@ -1,4 +1,4 @@
-name: Test
+name: Benchmark
 
 on: [push]
 
@@ -9,23 +9,21 @@ jobs:
   jvm:
     uses: ./.github/workflows/build.yml
     with:
-      task: jvmTest
+      task: jvmBenchmark
       platform: jvm
-      artifacts: |
-        kernel/build/test-results/jvmTest/
-        kernel/build/reports/tests/jvmTest/
+      artifacts: kernel/build/reports/benchmarks/
 
   qemu:
     uses: ./.github/workflows/build.yml
     with:
-      task: qemuTest
+      task: qemuBenchmark
       platform: qemu
-      artifacts: kernel/build/qemuTest/results/
+      artifacts: kernel/build/qemuBenchmark/results/
 
   notify:
     if: always()
     needs: [jvm, qemu]
     uses: ./.github/workflows/notify.yml
     with:
-      workflow: test
+      workflow: bench
     secrets: inherit

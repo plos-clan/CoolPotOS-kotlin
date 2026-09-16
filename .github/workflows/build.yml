@@ -40,8 +40,7 @@ jobs:
         with:
           path: ~/.konan
           key: ${{ runner.os }}-${{ runner.arch }}-konan-${{ hashFiles('gradle/libs.versions.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-konan-
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-konan-
 
       - name: Install latest stable LLVM and Clang
         if: inputs.platform != 'jvm'
@@ -65,12 +64,7 @@ jobs:
       - name: Run Gradle
         env:
           GRADLE_TASK: ${{ inputs.task }}
-        run: >-
-          ./gradlew "$GRADLE_TASK"
-          --no-daemon
-          --no-configuration-cache
-          --console=plain
-          --stacktrace
+        run: ./gradlew "$GRADLE_TASK" --no-daemon --no-configuration-cache --console=plain --stacktrace
 
       - name: Upload artifacts
         if: always()
