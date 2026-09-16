@@ -101,7 +101,6 @@ import org.plos_clan.cpos.syscall.fs.write
 import org.plos_clan.cpos.syscall.fs.writev
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
-import org.plos_clan.cpos.tasks.TaskState
 import org.plos_clan.cpos.tasks.keys.Keys
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
@@ -117,9 +116,11 @@ private const val KERNEL_CODE_SELECTOR = 0x08uL
 private const val USER_DATA_SELECTOR = 0x1buL
 
 private const val PATH_MAX = 4096
-
-private typealias SyscallHandler = (PtraceRegisters, Process) -> Long
 private const val FORCE_IRET_FLAG = 0x0002_0000uL
+
+private fun interface SyscallHandler {
+    operator fun invoke(regs: PtraceRegisters, process: Process): Long
+}
 
 private enum class LinuxSyscall(
     val number: Int,
@@ -368,7 +369,6 @@ object Syscall {
             null
         }
         val result = if (definition == null) {
-            if(number != 12UL) println("SYSCALL: no implement $number")
             errno(Errno.ENOSYS)
         } else {
             val process = thread?.process
@@ -377,10 +377,7 @@ object Syscall {
         if (thread != null) Keys.applyPendingSession(thread)
         val frameInstalled = regs.signalFrameInstalled
         if (!frameInstalled) regs[PtraceRegisters.IDX_RAX] = result.toULong()
-        if (thread != null && thread.state != TaskState.ZOMBIE &&
-            ProcessManager.currentThread() === thread &&
-            !frameInstalled
-        ) {
+        if (thread != null && !frameInstalled) {
             SignalDelivery.deliverPending(regs, thread)
         }
         if (regs[PtraceRegisters.IDX_FUNC] == PtraceRegisters.SIGNAL_RETURN) {

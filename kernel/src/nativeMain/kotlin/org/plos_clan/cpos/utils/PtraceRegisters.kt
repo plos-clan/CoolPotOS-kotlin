@@ -18,7 +18,7 @@ private const val USER_DATA_SELECTOR = 0x1buL
 private const val USER_ENTRY_FLAGS = 0x202uL
 
 @ExperimentalForeignApi
-class PtraceRegisters(private val registers: CPointer<ULongVar>) {
+value class PtraceRegisters(private val registers: CPointer<ULongVar>) {
     companion object {
         const val IDX_R15 = 0
         const val IDX_R14 = 1
@@ -51,18 +51,17 @@ class PtraceRegisters(private val registers: CPointer<ULongVar>) {
         const val SIGNAL_RETURN = 0xffff_ffff_ffff_fffeuL
         private const val SIGNAL_FRAME_INSTALLED = ULong.MAX_VALUE
         private const val EXTENDED_STATE_OFFSET = 256
-        private val VALID_REGISTER_INDEXES = 0 until REGISTER_COUNT
     }
 
     operator fun get(index: Int): ULong =
-        if (index in VALID_REGISTER_INDEXES) {
+        if (index in 0 until REGISTER_COUNT) {
             registers[index]
         } else {
             0uL
         }
 
     operator fun set(index: Int, value: ULong) {
-        if (index in VALID_REGISTER_INDEXES) {
+        if (index in 0 until REGISTER_COUNT) {
             registers[index] = value
         }
     }

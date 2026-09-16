@@ -5,11 +5,37 @@ package org.plos_clan.cpos.utils
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.allocArray
+import kotlinx.cinterop.get
 import kotlinx.cinterop.memScoped
+import kotlinx.cinterop.plus
+import kotlinx.cinterop.set
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
 
 class PtraceRegistersTest {
+    @Test
+    fun registerViewsWriteThroughWithinFrameBounds() = memScoped {
+        val count = PtraceRegisters.REGISTER_COUNT
+        val storage = allocArray<ULongVar>(count + 2)
+        repeat(count + 2) { storage[it] = ULong.MAX_VALUE }
+        val frame = requireNotNull(storage + 1)
+        val registers = PtraceRegisters(frame)
+        val other = PtraceRegisters(frame)
+
+        repeat(count) { index ->
+            registers[index] = index.toULong()
+            assertEquals(index.toULong(), other[index])
+            assertEquals(index.toULong(), storage[index + 1])
+        }
+        for (index in listOf(Int.MIN_VALUE, -1, count, Int.MAX_VALUE)) {
+            registers[index] = 0uL
+            assertEquals(0uL, registers[index])
+        }
+        assertEquals(ULong.MAX_VALUE, storage[0])
+        assertEquals(ULong.MAX_VALUE, storage[count + 1])
+    }
+
     @Test
     fun execCreatesCleanUserEntryContext() = memScoped {
         val registers = PtraceRegisters(allocArray<ULongVar>(PtraceRegisters.REGISTER_COUNT))
