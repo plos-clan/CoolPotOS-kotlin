@@ -6,6 +6,7 @@ import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.experimental.ExperimentalNativeApi
+import kotlin.native.concurrent.ThreadLocal
 import kotlin.native.ref.WeakReference
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.pointed
@@ -568,6 +569,9 @@ class Process internal constructor(
     internal fun completeVfork() = vforkCompletion?.complete()
 }
 
+@ThreadLocal
+private var currentThreadContext: Thread? = null
+
 object ProcessManager {
     private val nextTaskId = AtomicInt(2)
     private val processes = mutableListOf<Process>()
@@ -607,12 +611,13 @@ object ProcessManager {
     fun getKernelProcess(): Process? = bootstrapThread?.process
 
     fun currentThread(): Thread? {
+        currentThreadContext?.let { return it }
         val task = bridge.fast_handoff_current_task_handle().toPointer<bridge.fast_task_t>() ?: return null
         val id = task.pointed.id.toULong()
         if (id > Int.MAX_VALUE.toULong()) {
             return null
         }
-        return threadTableLock.withLock { threadTable[id.toInt()] }
+        return findThread(id.toInt())?.also { currentThreadContext = it }
     }
 
     fun currentProcess(): Process? = currentThread()?.process
