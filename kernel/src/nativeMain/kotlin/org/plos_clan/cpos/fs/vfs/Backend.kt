@@ -550,6 +550,9 @@ interface FileContent {
 }
 
 interface OpenFileBackend {
+    val byteSize: ULong?
+        get() = null
+
     val peerDentry: Dentry?
         get() = null
 

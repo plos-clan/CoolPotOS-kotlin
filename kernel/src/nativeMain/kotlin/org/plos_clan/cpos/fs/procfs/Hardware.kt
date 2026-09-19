@@ -23,7 +23,7 @@ object MemoryInfoFile : ProcFSRender {
             appendMetric("MemTotal", physical.totalBytes / KIBIBYTE, "kB")
             appendMetric("MemFree", physical.freeBytes / KIBIBYTE, "kB")
             appendMetric("MemAvailable", available / KIBIBYTE, "kB")
-            appendMetric("Buffers", 0uL, "kB")
+            appendMetric("Buffers", cache.bufferBytes / KIBIBYTE, "kB")
             appendMetric("Cached", cache.cachedBytes / KIBIBYTE, "kB")
             appendMetric("SwapCached", 0uL, "kB")
             appendMetric("SwapTotal", 0uL, "kB")

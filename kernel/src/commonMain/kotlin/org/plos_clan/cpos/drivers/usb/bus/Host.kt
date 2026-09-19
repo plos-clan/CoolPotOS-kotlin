@@ -23,7 +23,12 @@ interface HostController {
 
     suspend fun submit(slotId: UByte, transfer: UsbTransfer): Boolean
 
-    suspend fun cancel(slotId: UByte, endpointAddress: UByte, status: TransferStatus): Boolean
+    suspend fun cancel(
+        slotId: UByte,
+        endpointAddress: UByte,
+        status: TransferStatus,
+        streamId: UShort? = null,
+    ): Boolean
 
     suspend fun clearHalt(slotId: UByte, endpointAddress: UByte): Boolean
 
@@ -44,13 +49,23 @@ suspend fun UsbDevice.transfer(request: UsbTransfer, timeoutMillis: Long): Trans
         if (result != null) return result
         if (submitted)
             withContext(NonCancellable) {
-                host.cancel(slotId, request.endpointAddress, TransferStatus.TIMEOUT)
+                host.cancel(
+                    slotId,
+                    request.endpointAddress,
+                    TransferStatus.TIMEOUT,
+                    request.streamId,
+                )
             }
         return if (submitted) request.await() else TransferResult(TransferStatus.TIMEOUT, 0u)
     } finally {
         if (submitted && !request.isCompleted)
             withContext(NonCancellable) {
-                host.cancel(slotId, request.endpointAddress, TransferStatus.CANCELLED)
+                host.cancel(
+                    slotId,
+                    request.endpointAddress,
+                    TransferStatus.CANCELLED,
+                    request.streamId,
+                )
             }
     }
 }

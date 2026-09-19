@@ -49,10 +49,14 @@ class BusTest {
             slotId: UByte,
             endpointAddress: UByte,
             status: TransferStatus,
+            streamId: UShort?,
         ): Boolean {
             cancellations.add(status)
             requests
-                .filter { it.endpointAddress == endpointAddress }
+                .filter {
+                    it.endpointAddress == endpointAddress &&
+                        (streamId == null || it.streamId == streamId)
+                }
                 .forEach {
                     it.complete(TransferResult(status, 0u))
                 }

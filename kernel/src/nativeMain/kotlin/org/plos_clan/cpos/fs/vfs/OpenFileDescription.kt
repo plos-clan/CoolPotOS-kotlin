@@ -584,11 +584,11 @@ class OpenFileDescription private constructor(
                 SeekOrigin.START -> 0L
                 SeekOrigin.CURRENT -> position.value
                 SeekOrigin.END -> {
-                    val attributes = when (val result = inode.attributes(caller)) {
-                        is VfsResult.Ok -> result.value
+                    val size = backend.byteSize ?: when (val result = inode.attributes(caller)) {
+                        is VfsResult.Ok -> result.value.metadata.size
                         is VfsResult.Err -> return@withLock result
                     }
-                    attributes.metadata.size.takeIf { it <= Long.MAX_VALUE.toULong() }?.toLong()
+                    size.takeIf { it <= Long.MAX_VALUE.toULong() }?.toLong()
                         ?: return@withLock VfsResult.Err(VfsError.FILE_TOO_LARGE)
                 }
             }

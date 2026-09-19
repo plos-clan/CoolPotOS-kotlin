@@ -17,6 +17,8 @@ import org.plos_clan.cpos.drivers.acpi.aml.Aml
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.tasks.TaskReaper
+import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.Scheduler
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
@@ -48,6 +50,22 @@ object KernelCoroutines {
                block: suspend CoroutineScope.() -> Unit) = jobLock.withLock{
         val job = scope.launch(CoroutineName(name), start, block)
         jobs += CoroutineEntry(nextId.fetchAndAdd(1), name, job)
+    }
+
+    fun <T> await(block: suspend () -> T): T {
+        val thread = checkNotNull(ProcessManager.currentThread())
+        val lock = IrqSpinLock()
+        var result: Result<T>? = null
+        scope.launch(CoroutineName("kernel-io")) {
+            val completed = runCatching { block() }
+            lock.withLock { result = completed }
+            Scheduler.wake(thread)
+        }
+        while (true) {
+            val completed = lock.withLock { result }
+            if (completed != null) return completed.getOrThrow()
+            if (!Scheduler.parkCurrent()) Scheduler.yieldCurrent()
+        }
     }
 
     fun initialize(): Boolean {

@@ -171,23 +171,39 @@ internal constructor(
         space.trySend(Unit)
     }
 
-    suspend fun cancel(status: TransferStatus): Boolean {
-        val stopped = quiesce(status)
+    suspend fun cancel(status: TransferStatus, stream: Int? = null): Boolean {
+        if (
+            stream != null &&
+                (streamCount == 0 && stream != 0 || streamCount != 0 && stream !in 1..streamCount)
+        ) {
+            return false
+        }
+        val stopped = quiesce(status, stream)
         if (stopped) resume()
         return stopped
     }
 
-    suspend fun quiesce(status: TransferStatus): Boolean {
+    suspend fun quiesce(status: TransferStatus, stream: Int? = null): Boolean {
         controller.eventLock.withLock {
             if (state != State.CLOSED) state = State.PAUSED
             space.trySend(Unit)
         }
-        return mutex.withLock { reset(status) }
+        return mutex.withLock { reset(status, stream) }
     }
 
     fun resume() {
         controller.eventLock.withLock {
-            if (state == State.PAUSED) state = State.READY
+            if (state != State.PAUSED) return@withLock
+            state = State.READY
+            queues.forEachIndexed { index, queue ->
+                if (queue.ring.queue.used != 0) {
+                    controller.doorbell.ring(
+                        slot.id,
+                        dci.toUInt(),
+                        if (streamCount == 0) 0 else index + 1,
+                    )
+                }
+            }
         }
     }
 
@@ -210,16 +226,19 @@ internal constructor(
         return hardwareState == 3u
     }
 
-    private suspend fun reset(status: TransferStatus): Boolean {
+    private suspend fun reset(status: TransferStatus, selectedStream: Int? = null): Boolean {
         if (state == State.CLOSED) return true
         if (!stop()) return false
         for ((index, queue) in queues.withIndex()) {
             val stream = if (streamCount == 0) 0 else index + 1
+            if (selectedStream != null && selectedStream != stream) continue
             val command = Trb.newSetDequeue(slot.id, dci, queue.ring.dequeuePointer, stream)
             if (controller.sendCommand(command).first != 1u) return false
         }
         controller.eventLock.withLock {
-            queues.forEach { queue ->
+            queues.forEachIndexed { index, queue ->
+                val stream = if (streamCount == 0) 0 else index + 1
+                if (selectedStream != null && selectedStream != stream) return@forEachIndexed
                 queue.ring.queue.discard()
                 queue.pending.forEach {
                     controller.completions.addLast(it to TransferResult(status, 0u))

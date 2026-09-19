@@ -16,6 +16,9 @@ interface PageCacheSource : PageCacheProvider {
     val readAheadSize: Int
         get() = 0
 
+    val cacheKind: PageCacheKind
+        get() = PageCacheKind.FILE
+
     fun read(offset: ULong, destination: ByteArray): Int
 
     companion object {
@@ -23,6 +26,8 @@ interface PageCacheSource : PageCacheProvider {
         internal const val READ_INTERRUPTED = Int.MIN_VALUE + 1
     }
 }
+
+enum class PageCacheKind { FILE, BLOCK }
 
 internal enum class PageCacheFailure {
     OUT_OF_MEMORY,
@@ -101,4 +106,5 @@ internal value class PageCacheReadResult private constructor(private val value: 
 internal data class PageCacheStatistics(
     val cachedBytes: ULong,
     val reclaimableBytes: ULong,
+    val bufferBytes: ULong,
 )

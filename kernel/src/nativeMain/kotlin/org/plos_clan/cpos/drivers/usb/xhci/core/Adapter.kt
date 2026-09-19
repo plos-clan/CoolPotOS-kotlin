@@ -40,10 +40,11 @@ class XhciHostController(private val xhci: Xhci) : HostController {
         slotId: UByte,
         endpointAddress: UByte,
         status: TransferStatus,
+        streamId: UShort?,
     ): Boolean =
         withContext(NonCancellable) {
             val endpoint = endpoint(slotId, endpointAddress) ?: return@withContext true
-            if (!endpoint.cancel(status)) xhci.fail()
+            if (!endpoint.cancel(status, streamId?.toInt())) xhci.fail()
             true
         }
 

@@ -18,6 +18,7 @@ import platform.posix.memcpy
 private data class PageCacheKey(
     val identity: Any,
     val offset: ULong,
+    val kind: PageCacheKind,
 )
 
 private class CachedPage(
@@ -68,7 +69,7 @@ internal object PageCache : FrameReclaimer {
         scratch: ByteArray,
     ): PageCacheAcquireResult {
         require(offset.isPageAligned() && scratch.size >= PAGE_SIZE_BYTES.toInt())
-        val key = PageCacheKey(source.identity, offset)
+        val key = PageCacheKey(source.identity, offset, source.cacheKind)
         return when (val lookup = lookup(key)) {
             is PageLookup.Cached -> PageCacheAcquireResult.acquired(
                 lookup.page.frame,
@@ -97,7 +98,7 @@ internal object PageCache : FrameReclaimer {
         while (copied < count) {
             val position = sourceOffset + copied.toULong()
             val pageOffset = position.alignDown(PAGE_SIZE_BYTES)
-            val key = PageCacheKey(identity, pageOffset)
+            val key = PageCacheKey(identity, pageOffset, source.cacheKind)
             val page = when (val lookup = lookup(key)) {
                 is PageLookup.Cached -> lookup.page
                 is PageLookup.Missing -> {
@@ -191,15 +192,18 @@ internal object PageCache : FrameReclaimer {
     fun statistics(): PageCacheStatistics {
         var reclaimableFrames = 0uL
         var cachedFrames = 0uL
+        var bufferFrames = 0uL
         lock.withLock {
             cachedFrames = pages.size.toULong()
             for (page in clock) {
+                if (page.key.kind == PageCacheKind.BLOCK) bufferFrames++
                 if (UserFrameReferences.isExclusive(page.frame)) reclaimableFrames++
             }
         }
         return PageCacheStatistics(
-            cachedBytes = cachedFrames * PAGE_SIZE_BYTES,
+            cachedBytes = (cachedFrames - bufferFrames) * PAGE_SIZE_BYTES,
             reclaimableBytes = reclaimableFrames * PAGE_SIZE_BYTES,
+            bufferBytes = bufferFrames * PAGE_SIZE_BYTES,
         )
     }
 
@@ -292,7 +296,7 @@ internal object PageCache : FrameReclaimer {
                 while (offset <= size.toULong() - PAGE_SIZE_BYTES &&
                     key.offset <= ULong.MAX_VALUE - offset
                 ) {
-                    add(PageLoad(PageCacheKey(key.identity, key.offset + offset)).also(loads::add))
+                    add(PageLoad(key.copy(offset = key.offset + offset)).also(loads::add))
                     offset += PAGE_SIZE_BYTES
                 }
             }

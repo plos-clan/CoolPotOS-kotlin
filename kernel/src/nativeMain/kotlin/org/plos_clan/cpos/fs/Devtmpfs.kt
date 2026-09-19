@@ -131,6 +131,15 @@ internal sealed class DeviceOpenFile(
     protected val device: Device,
     protected val backend: DeviceBackend,
 ) : OpenFileBackend, MountResourceProvider {
+    override val byteSize: ULong?
+        get() = backend.byteSize
+
+    override fun syncHandle(caller: VfsOperationContext, inode: Inode, dataOnly: Boolean): VfsResult<Unit> {
+        val result = backend.sync(device)
+        return if (result == 0L) VfsResult.Ok(Unit)
+        else VfsResult.Err(VfsError.fromErrno((-result).toInt()))
+    }
+
     companion object {
         fun open(device: Device, backend: DeviceBackend, peer: Dentry? = null): DeviceOpenFile = when (backend) {
             is ModeAwareDeviceBackend -> ModeAware(device, backend, peer)

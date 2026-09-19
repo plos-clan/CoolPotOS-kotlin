@@ -34,6 +34,11 @@ enum class LinuxDeviceMajor(val number: UInt) {
 }
 
 interface DeviceBackend {
+    val byteSize: ULong?
+        get() = null
+
+    fun sync(device: Device): Long = 0
+
     fun open(device: Device): VfsResult<DeviceBackend> = VfsResult.Ok(this)
 
     fun open(device: Device, caller: VfsOperationContext, options: OpenOptions): VfsResult<DeviceBackend> =
