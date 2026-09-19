@@ -67,7 +67,7 @@ jobs:
       - name: Install image build dependencies
         if: inputs.platform == 'qemu'
         run: >-
-          sudo apt-get install --yes --no-install-recommends e2fsprogs util-linux
+          sudo apt-get install --yes --no-install-recommends e2fsprogs fakeroot
           ${{ steps.rootfs.outputs.cache-hit != 'true' && 'podman' || '' }}
 
       - name: Set up QEMU

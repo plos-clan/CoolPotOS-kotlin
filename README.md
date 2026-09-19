@@ -96,7 +96,7 @@ You need to install:
 - Clang (`clang`, `clang++`)
 - LLD (`ld.lld`)
 - Rootless Podman (for userland packaging)
-- Rust/Cargo, e2fsprogs, and util-linux `unshare` (for sparse GPT image creation)
+- Rust/Cargo, e2fsprogs, and fakeroot (for sparse GPT image creation)
 - `qemu-system-x86_64` (for emulation)
 - Git and Gradle (included with Kotlin/Native)
 
@@ -156,7 +156,7 @@ the Kotlin/Native compiler's generated suites. `commonBenchmark` contains
 JVM algorithm benchmarks for memory-region lookup, pathname parsing, and
 the coroutine timer queue: eight parameter combinations in total.
 
-QEMU tests need QEMU, Rust/Cargo, e2fsprogs, Podman, and a KVM host exposing
+QEMU tests need QEMU, Rust/Cargo, e2fsprogs, fakeroot, Podman, and a KVM host exposing
 TSC-deadline support. The test kernel mounts EROFS from disk without starting
 userspace. `qemuCpu`, `qemuAcceleration`, `qemuSmp`, and `qemuMemory` configure this image;
 changing acceleration does not remove the kernel's clock requirements.

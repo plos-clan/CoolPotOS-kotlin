@@ -200,7 +200,7 @@ abstract class Ext4ImageTask @Inject constructor(private val exec: ExecOperation
             }
             val contents = if (seed.isPresent) listOf("-d", seed.get().asFile.path) else emptyList()
             val command = listOf(
-                "unshare", "--user", "--map-root-user",
+                "fakeroot", "--",
                 "mkfs.ext4", "-q", "-F",
                 "-O", "^has_journal",
                 "-E", "lazy_itable_init=0",
