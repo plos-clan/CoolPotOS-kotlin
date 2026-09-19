@@ -1,108 +1,299 @@
+@file:OptIn(ExperimentalForeignApi::class)
+
 package org.plos_clan.cpos.drivers.usb.xhci.core
 
-import org.plos_clan.cpos.drivers.usb.bus.CompletionEvent
-import org.plos_clan.cpos.drivers.usb.bus.ControlTransferArgs
-import org.plos_clan.cpos.drivers.usb.bus.GeneralTransferArgs
+import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.ULongVar
+import kotlinx.cinterop.set
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import org.plos_clan.cpos.drivers.usb.bus.TransferResult
 import org.plos_clan.cpos.drivers.usb.bus.TransferStatus
-import org.plos_clan.cpos.drivers.usb.bus.dispatchCompletion
-import org.plos_clan.cpos.drivers.usb.defs.REQ_DIR_IN
+import org.plos_clan.cpos.drivers.usb.bus.UsbTransfer
+import org.plos_clan.cpos.mem.MmioRegion
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 
-suspend fun Xhci.submitTransfer(args: GeneralTransferArgs): Unit? {
-    val endpointNumber = args.endpointAddress and 0x0fu.toUByte()
-    val isIn = args.endpointAddress and REQ_DIR_IN != 0u.toUByte()
-
-    val dci = if (isIn) {
-        endpointNumber.toUInt() * 2u + 1u
-    } else {
-        endpointNumber.toUInt() * 2u
-    }
-    if (dci !in 2u..31u) {
-        return null
-    }
-
-    val endpoint = slots[args.slotId.toInt()].endpoints[dci.toInt()] ?: return null
-    endpoint.semaphore.acquire()
-    endpoint.ring.enqueue(Trb.newNormal(args.bufferPhysicalAddress, args.length))
-    doorbell.ring(args.slotId, dci)
-    return Unit
-}
-
-suspend fun Xhci.submitControl(args: ControlTransferArgs): Unit? {
-    val isIn = args.setup.requestType and REQ_DIR_IN != 0u.toUByte()
-
-    val setup = args.setup
-    val slotId = args.slotId
-    val paramLow = setup.requestType.toUInt() or
-        (setup.request.toUInt() shl 8) or
-        (setup.value.toUInt() shl 16)
-    val paramHigh = setup.index.toUInt() or
-        (setup.length.toUInt() shl 16)
-
-    val hasDataStage = setup.length.toUInt() > 0u
-    val trt = when {
-        !hasDataStage -> 0u
-        isIn -> 3u
-        else -> 2u
+class Endpoint
+internal constructor(
+    private val controller: Xhci,
+    private val slot: Slot,
+    private val dci: Int,
+    var packetSize: UInt,
+    val streamCount: Int = 0,
+) {
+    private enum class State {
+        READY,
+        HALTED,
+        PAUSED,
+        CLOSED,
     }
 
-    val endpoint = slots[slotId.toInt()].endpoints[1] ?: return null
-
-    val trbCount = if (hasDataStage) 3 else 2
-    repeat(trbCount) {
-        endpoint.semaphore.acquire()
+    private class Queue(memory: DmaMemory) {
+        var ring = ProducerRing(memory)
+        val pending = mutableSetOf<PendingTransfer>()
     }
 
-    endpoint.ring.enqueue(Trb.newSetupStage(paramLow, paramHigh, trt))
+    private val mutex = Mutex()
+    private val space = Channel<Unit>(Channel.CONFLATED)
+    private val queues = mutableListOf<Queue>()
+    private val pages = mutableMapOf<ULong, Pair<Queue, Int>>()
+    private var streamContexts: MmioRegion? = null
+    private var state = State.READY
 
-    if (hasDataStage) {
-        val dataTrb = Trb.newDataStage(args.bufferPhysicalAddress, setup.length.toUInt(), isIn)
-        endpoint.ring.enqueue(dataTrb)
+    val contextEntries: Int
+        get() =
+            StreamAllocation(streamCount, streamCount, controller.capability.maxStreamContexts)
+                .contextEntries
+
+    val dequeuePointer: ULong
+        get() = streamContexts?.physicalAddress ?: queues[0].ring.dequeuePointer
+
+    private val hardwareState: UInt
+        get() =
+            slot.outContext?.let { EndpointContext(it, dci, controller.contextSize, false).state }
+                ?: 0u
+
+    init {
+        try {
+            if (streamCount != 0) {
+                val size = contextEntries.toULong() * 16uL
+                streamContexts =
+                    controller.memory.allocate((size + PAGE_SIZE_BYTES - 1uL) / PAGE_SIZE_BYTES)
+            }
+            repeat(if (streamCount == 0) 1 else streamCount) {
+                queues.add(Queue(controller.memory))
+            }
+            queues.forEachIndexed { index, queue ->
+                queue.ring.pages.forEachIndexed { segment, page -> pages[page] = queue to segment }
+                streamContexts
+                    ?.view<ULongVar>()
+                    ?.set((index + 1) * 2, queue.ring.dequeuePointer or 2uL)
+            }
+        } catch (failure: Throwable) {
+            free()
+            throw failure
+        }
     }
 
-    val index = endpoint.ring.enqueueIndex
-    endpoint.promises[index].reset()
-
-    val statusDirectionIn = !hasDataStage || !isIn
-    endpoint.ring.enqueue(Trb.newStatusStage(statusDirectionIn))
-    doorbell.ring(slotId, 1u)
-
-    val event = endpoint.promises[index].recv()
-    repeat(trbCount) {
-        endpoint.semaphore.release()
+    suspend fun submit(request: UsbTransfer): Boolean = mutex.withLock {
+        if (state == State.CLOSED || state == State.PAUSED || !slot.active || request.isCompleted) {
+            return@withLock false
+        }
+        val stream = request.streamId.toInt()
+        if (streamCount == 0 && stream != 0 || streamCount != 0 && stream !in 1..streamCount) {
+            return@withLock false
+        }
+        val index = if (streamCount == 0) 0 else stream - 1
+        if (
+            state == State.HALTED &&
+                (dci != 1 || !withContext(NonCancellable) { reset(TransferStatus.CANCELLED) })
+        ) {
+            return@withLock false
+        }
+        if (request.setup != null && dci != 1 || request.setup == null && dci == 1)
+            return@withLock false
+        val pending =
+            try {
+                PendingTransfer(request, controller.memory, packetSize)
+            } catch (_: DmaMemory.AllocationFailure) {
+                return@withLock false
+            }
+        var submitted = false
+        try {
+            val descriptor = pending.descriptor
+            val queue = queues[index]
+            if (
+                descriptor.trbs.size > queue.ring.capacity &&
+                    !grow(queue, descriptor.trbs.size, stream)
+            ) {
+                return@withLock false
+            }
+            var shortLength: UInt? = null
+            val entry =
+                RingEntry(descriptor.trbs) { position, event ->
+                    val code = event.completionCode
+                    if (code in 26u..28u) return@RingEntry false
+                    val status =
+                        when (code) {
+                            1u -> TransferStatus.COMPLETED
+                            13u -> TransferStatus.SHORT_PACKET
+                            2u,
+                            3u -> TransferStatus.DATA_ERROR
+                            4u -> TransferStatus.BABBLE
+                            5u -> TransferStatus.TRB_ERROR
+                            6u -> TransferStatus.STALL
+                            36u -> TransferStatus.SPLIT_ERROR
+                            else -> TransferStatus.UNKNOWN
+                        }
+                    if (code == 13u && request.setup != null) {
+                        shortLength = descriptor.actualLength(position, event.transferLength)
+                        return@RingEntry false
+                    }
+                    val actual =
+                        shortLength
+                            ?: if (code == 1u && event.transferLength == 0u) descriptor.length
+                            else descriptor.actualLength(position, event.transferLength)
+                    val finalStatus =
+                        if (code == 1u && actual < descriptor.length) TransferStatus.SHORT_PACKET
+                        else status
+                    if (!status.successful && state == State.READY) state = State.HALTED
+                    queue.pending.remove(pending)
+                    controller.completions.addLast(pending to TransferResult(finalStatus, actual))
+                    status.successful
+                }
+            while (true) {
+                val queued =
+                    controller.eventLock.withLock {
+                        if (state != State.READY || !slot.active) return@withLock null
+                        if (!queue.ring.enqueue(entry)) return@withLock false
+                        queue.pending.add(pending)
+                        submitted = true
+                        controller.doorbell.ring(slot.id, dci.toUInt(), stream)
+                        true
+                    } ?: return@withLock false
+                if (queued) return@withLock true
+                space.receive()
+            }
+            @Suppress("UNREACHABLE_CODE") false
+        } finally {
+            if (!submitted) pending.free()
+        }
     }
 
-    val code = event.completionCode
-    if (code != 1u && code != 13u) {
-        println("Control transfer failed. Code: $code")
-        return null
-    }
-    return Unit
-}
-
-internal fun Xhci.completeTransfer(slotId: UByte, dci: UInt, code: UInt, length: UInt) {
-    val slot = slots[slotId.toInt()]
-    val endpoint = slot.endpoints[dci.toInt()] ?: return
-    endpoint.semaphore.release()
-
-    val device = slot.usbDevice ?: return
-
-    val endpointNumber = (dci / 2u).toUByte()
-    val isIn = dci % 2u != 0u
-
-    val status = when (code) {
-        1u -> TransferStatus.COMPLETED
-        13u -> TransferStatus.SHORT_PACKET
-        4u -> TransferStatus.BABBLE
-        5u -> TransferStatus.TRB_ERROR
-        6u -> TransferStatus.STALL
-        else -> TransferStatus.UNKNOWN
+    internal fun complete(event: Trb) {
+        val target = pages[event.parameter and (PAGE_SIZE_BYTES - 1uL).inv()] ?: return
+        val (queue, segment) = target
+        val index = queue.ring.indexOf(event.parameter, segment) ?: return
+        queue.ring.queue.complete(index, event)
+        space.trySend(Unit)
     }
 
-    device.dispatchCompletion(
-        CompletionEvent(
-            endpointAddress = if (isIn) endpointNumber or REQ_DIR_IN else endpointNumber,
-            status = status,
-            residualLength = length,
-        ),
-    )
+    suspend fun cancel(status: TransferStatus): Boolean {
+        val stopped = quiesce(status)
+        if (stopped) resume()
+        return stopped
+    }
+
+    suspend fun quiesce(status: TransferStatus): Boolean {
+        controller.eventLock.withLock {
+            if (state != State.CLOSED) state = State.PAUSED
+            space.trySend(Unit)
+        }
+        return mutex.withLock { reset(status) }
+    }
+
+    fun resume() {
+        controller.eventLock.withLock {
+            if (state == State.PAUSED) state = State.READY
+        }
+    }
+
+    private suspend fun stop(): Boolean {
+        val state = hardwareState
+        if (
+            state == 1u &&
+                controller
+                    .sendCommand(Trb.newEndpointCommand(TRB_STOP_ENDPOINT, slot.id, dci))
+                    .first != 1u
+        )
+            return false
+        if (
+            hardwareState == 2u &&
+                controller
+                    .sendCommand(Trb.newEndpointCommand(TRB_RESET_ENDPOINT, slot.id, dci))
+                    .first != 1u
+        )
+            return false
+        return hardwareState == 3u
+    }
+
+    private suspend fun reset(status: TransferStatus): Boolean {
+        if (state == State.CLOSED) return true
+        if (!stop()) return false
+        for ((index, queue) in queues.withIndex()) {
+            val stream = if (streamCount == 0) 0 else index + 1
+            val command = Trb.newSetDequeue(slot.id, dci, queue.ring.dequeuePointer, stream)
+            if (controller.sendCommand(command).first != 1u) return false
+        }
+        controller.eventLock.withLock {
+            queues.forEach { queue ->
+                queue.ring.queue.discard()
+                queue.pending.forEach {
+                    controller.completions.addLast(it to TransferResult(status, 0u))
+                }
+                queue.pending.clear()
+            }
+            if (state == State.HALTED) state = State.READY
+            space.trySend(Unit)
+        }
+        controller.completeTransfers()
+        return true
+    }
+
+    private suspend fun grow(queue: Queue, capacity: Int, stream: Int): Boolean {
+        while (controller.eventLock.withLock { queue.ring.queue.used != 0 }) {
+            if (state != State.READY) return false
+            space.receive()
+        }
+        val ring =
+            try {
+                ProducerRing(controller.memory, capacity)
+            } catch (_: DmaMemory.AllocationFailure) {
+                return false
+            }
+        return withContext(NonCancellable) {
+            if (!stop()) {
+                ring.free()
+                return@withContext false
+            }
+            if (
+                controller
+                    .sendCommand(Trb.newSetDequeue(slot.id, dci, ring.dequeuePointer, stream))
+                    .first != 1u
+            ) {
+                ring.free()
+                return@withContext false
+            }
+            val previous = queue.ring
+            controller.eventLock.withLock {
+                previous.pages.forEach(pages::remove)
+                queue.ring = ring
+                ring.pages.forEachIndexed { segment, page -> pages[page] = queue to segment }
+                queues.forEachIndexed { index, other ->
+                    if (other.ring.queue.used != 0)
+                        controller.doorbell.ring(
+                            slot.id,
+                            dci.toUInt(),
+                            if (streamCount == 0) 0 else index + 1,
+                        )
+                }
+            }
+            previous.free()
+            true
+        }
+    }
+
+    fun close(status: TransferStatus) {
+        state = State.CLOSED
+        queues.forEach { queue ->
+            queue.pending.forEach {
+                controller.completions.addLast(it to TransferResult(status, 0u))
+            }
+            queue.pending.clear()
+            queue.ring.queue.discard()
+        }
+        space.trySend(Unit)
+    }
+
+    suspend fun dispose() {
+        mutex.withLock { free() }
+    }
+
+    fun free() {
+        queues.forEach { it.ring.free() }
+        streamContexts?.free()
+    }
 }

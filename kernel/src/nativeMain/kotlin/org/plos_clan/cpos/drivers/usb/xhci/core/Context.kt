@@ -48,7 +48,7 @@ class SlotContext(buffer: MmioRegion, contextSize: Int) {
         }
 
     fun setEntries(count: UInt) {
-        info1 = info1 or ((count and 0x1fu) shl 27)
+        info1 = (info1 and (0x1fu shl 27).inv()) or ((count and 0x1fu) shl 27)
     }
 
     fun setRootHubPort(port: UInt) {
@@ -85,9 +85,20 @@ class InputControlContext(buffer: MmioRegion) {
         }
 }
 
-class EndpointContext(buffer: MmioRegion, dci: Int, contextSize: Int) {
+class EndpointContext(buffer: MmioRegion, dci: Int, contextSize: Int, input: Boolean = true) {
     private val words = buffer.view<UIntVar>()
-    private val base = (dci + 1) * contextSize / UInt.SIZE_BYTES
+    private val base = (dci + if (input) 1 else 0) * contextSize / UInt.SIZE_BYTES
+
+    val state: UInt
+        get() = info1 and 7u
+
+    fun setStreams(entries: Int) {
+        val exponent = if (entries == 0) 0 else 31 - entries.countLeadingZeroBits() - 1
+        info1 =
+            (info1 and (0x3fu shl 10).inv()) or
+                (exponent.toUInt() shl 10) or
+                if (entries == 0) 0u else 1u shl 15
+    }
 
     private var info1: UInt
         get() = words[base]
@@ -152,7 +163,7 @@ class EndpointContext(buffer: MmioRegion, dci: Int, contextSize: Int) {
     }
 
     fun setDequeuePointer(pointer: ULong) {
-        trDequeueLow = pointer.toUInt() or 1u
+        trDequeueLow = pointer.toUInt()
         trDequeueHigh = (pointer shr 32).toUInt()
     }
 }

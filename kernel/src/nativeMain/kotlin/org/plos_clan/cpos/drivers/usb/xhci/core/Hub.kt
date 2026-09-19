@@ -70,16 +70,22 @@ internal suspend fun Xhci.attachDevice(port: Port) {
         return
     }
 
-    val slotId = enableSlot()
-        ?: run {
-            println("Failed to enable slot for port ${port.id}")
-            return
-        }
+    val slotId =
+        enableSlot()
+            ?: run {
+                println("Failed to enable slot for port ${port.id}")
+                return
+            }
 
     println("Device assigned to slot $slotId")
 
-    setupSlotDevice(port, slotId) ?: run {
-        println("Device init failed for slot $slotId")
+    try {
+        setupSlotDevice(port, slotId)
+            ?: run {
+                println("Device init failed for slot $slotId")
+                cleanupSlot(slotId)
+            }
+    } catch (_: DmaMemory.AllocationFailure) {
         cleanupSlot(slotId)
     }
 }
@@ -90,20 +96,20 @@ internal suspend fun Xhci.setupSlotDevice(port: Port, slotId: UByte): Unit? {
 
     addressDevice(port.id, slotId, speedId) ?: return null
 
-    val device = UsbDevice(
-        host = hostController,
-        slotId = slotId,
-        portId = port.id,
-        speed = speedId,
-    )
+    val device =
+        UsbDevice(
+            host = hostController,
+            slotId = slotId,
+            portId = port.id,
+            speed = speedId,
+        )
     slots[slotId.toInt()].usbDevice = device
 
-    device.enumerate() ?: run {
-        println("Enumeration failed for slot $slotId")
-        device.free()
-        slots[slotId.toInt()].usbDevice = null
-        return null
-    }
+    device.enumerate()
+        ?: run {
+            println("Enumeration failed for slot $slotId")
+            return null
+        }
 
     portToSlot[port.id] = slotId
     return Unit

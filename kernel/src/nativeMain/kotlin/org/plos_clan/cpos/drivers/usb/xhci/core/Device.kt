@@ -7,6 +7,10 @@ import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.plus
 import kotlinx.cinterop.set
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import org.plos_clan.cpos.drivers.usb.bus.TransferStatus
 import org.plos_clan.cpos.drivers.usb.bus.UsbEndpoint
 import org.plos_clan.cpos.drivers.usb.defs.EP_TYPE_CONTROL
 import org.plos_clan.cpos.drivers.usb.defs.EP_TYPE_INT
@@ -22,20 +26,22 @@ import platform.posix.memcpy
 suspend fun Xhci.addressDevice(portId: Int, slotId: UByte, speedId: UInt): Unit? {
     println("Addressing device on slot $slotId...")
 
-    val outContext = requireNotNull(MmioRegion.allocate())
+    val slot = Slot(id = slotId, active = true, portId = portId, speed = speedId)
+    slots[slotId.toInt()] = slot
+    val outContext = memory.allocate()
+    slot.outContext = outContext
     dcbaa!!.view<ULongVar>()[slotId.toInt()] = outContext.physicalAddress
-    slots[slotId.toInt()] = Slot(
-        id = slotId,
-        active = true,
-        portId = portId,
-        speed = speedId,
-        outContext = outContext,
-    )
 
-    val ep0 = Endpoint()
+    val mps =
+        when {
+            speedId >= SPEED_SUPER.toUInt() -> 512u
+            speedId == SPEED_HIGH.toUInt() -> 64u
+            else -> 8u
+        }
+    val ep0 = Endpoint(this, slots[slotId.toInt()], 1, mps)
     slots[slotId.toInt()].endpoints[1] = ep0
 
-    val inContext = requireNotNull(MmioRegion.allocate())
+    val inContext = memory.allocate()
     try {
         val ctrlContext = InputControlContext(inContext)
         ctrlContext.addFlags = 1u or (1u shl 1)
@@ -47,19 +53,13 @@ suspend fun Xhci.addressDevice(portId: Int, slotId: UByte, speedId: UInt): Unit?
         slotContext.setSpeed(speedId)
         slotContext.setInterrupterTarget(0u)
 
-        val mps = when (speedId) {
-            SPEED_SUPER.toUInt() -> 512u
-            SPEED_LOW.toUInt() -> 8u
-            else -> 64u
-        }
-
         val ep0Context = EndpointContext(inContext, 1, contextSize)
         ep0Context.setEpType(EP_TYPE_CONTROL.toUInt() + 4u)
         ep0Context.setMaxPacketSize(mps)
         ep0Context.setMaxBurst(0u)
         ep0Context.setErrorCount(3u)
         ep0Context.setAverageTrbLen(8u)
-        ep0Context.setDequeuePointer(ep0.ring.physicalAddress or 1uL)
+        ep0Context.setDequeuePointer(ep0.dequeuePointer)
 
         val command = Trb.newAddressDevice(inContext.physicalAddress, slotId)
         val (code, _) = sendCommand(command)
@@ -74,38 +74,104 @@ suspend fun Xhci.addressDevice(portId: Int, slotId: UByte, speedId: UInt): Unit?
     return Unit
 }
 
-suspend fun Xhci.configureEndpoints(slotId: UByte, endpoints: List<UsbEndpoint>): Unit? {
-    val inContext = requireNotNull(MmioRegion.allocate())
-    try {
-        val ctrlContext = InputControlContext(inContext)
-        ctrlContext.addFlags = 1u
+suspend fun Xhci.configureEndpoints(
+    slotId: UByte,
+    endpoints: List<UsbEndpoint>,
+    streams: Map<UByte, Int> = emptyMap(),
+): Unit? =
+    withContext(NonCancellable) {
+        val slot = slots[slotId.toInt()]
+        slot.mutex.withLock {
+            if (!slot.active) return@withLock null
+            val selected = endpoints.associateBy { it.desc.endpointAddress }
+            if (selected.size != endpoints.size || endpoints.any { it.desc.number == 0 })
+                return@withLock null
+            val inContext = memory.allocate()
+            val replacements = mutableMapOf<Int, Endpoint>()
+            val removed = mutableListOf<Endpoint>()
+            var configured = false
+            try {
+                memcpy(
+                    inContext.view<UByteVar>() + contextSize,
+                    slot.outContext!!.view<UByteVar>(),
+                    contextSize.toULong(),
+                )
+                val ctrlContext = InputControlContext(inContext)
+                ctrlContext.addFlags = 1u
+                val indices =
+                    endpoints.map { it.desc.number * 2 + if (it.desc.isIn) 1 else 0 }.toSet()
+                for (dci in 2 until MAX_ENDPOINTS) {
+                    val old = slot.endpoints[dci] ?: continue
+                    val address = ((dci / 2) or if (dci and 1 != 0) 0x80 else 0).toUByte()
+                    val descriptor = selected[address]
+                    val streamCount = streams[address] ?: descriptor?.streamCount ?: 0
+                    if (descriptor === slot.descriptors[dci] && old.streamCount == streamCount)
+                        continue
+                    if (!old.quiesce(TransferStatus.CANCELLED)) {
+                        fail()
+                        return@withLock null
+                    }
+                    removed.add(old)
+                    ctrlContext.dropFlags = ctrlContext.dropFlags or (1u shl dci)
+                }
+                for (endpoint in endpoints) {
+                    val dci = endpoint.desc.number * 2 + if (endpoint.desc.isIn) 1 else 0
+                    val old = slot.endpoints[dci]
+                    if (old != null && old !in removed) continue
+                    val count = streams[endpoint.desc.endpointAddress] ?: endpoint.streamCount
+                    val replacement =
+                        Endpoint(
+                            this@configureEndpoints,
+                            slot,
+                            dci,
+                            (endpoint.desc.maxPacketSize.toUInt() and 0x7ffu),
+                            count,
+                        )
+                    replacements[dci] = replacement
+                    setupOneEndpoint(slotId, inContext, endpoint, replacement)
+                }
 
-        var maxDci = 0u
-        for (endpoint in endpoints) {
-            val dci = setupOneEndpoint(slotId, inContext, endpoint) ?: 0u
-            if (dci > maxDci) {
-                maxDci = dci
+                val slotContext = SlotContext(inContext, contextSize)
+                slotContext.setEntries((indices.maxOrNull() ?: 1).toUInt())
+
+                val command = Trb.newConfigureEndpoint(inContext.physicalAddress, slotId)
+                val (code, _) = sendCommand(command)
+
+                if (code != 1u) {
+                    println("Configure endpoint failed: $code")
+                    return@withLock null
+                }
+                eventLock.withLock {
+                    for (dci in 2 until MAX_ENDPOINTS) {
+                        val old = slot.endpoints[dci]
+                        if (old in removed) {
+                            old?.close(TransferStatus.CANCELLED)
+                            slot.endpoints[dci] = null
+                            slot.descriptors[dci] = null
+                        }
+                        replacements[dci]?.let { slot.endpoints[dci] = it }
+                    }
+                    endpoints.forEach { endpoint ->
+                        val dci = endpoint.desc.number * 2 + if (endpoint.desc.isIn) 1 else 0
+                        slot.descriptors[dci] = endpoint
+                        endpoint.streamCount = slot.endpoints[dci]!!.streamCount
+                    }
+                }
+                configured = true
+                removed.forEach { it.free() }
+            } finally {
+                if (!configured) {
+                    replacements.values.forEach { it.free() }
+                    removed.forEach { it.resume() }
+                }
+                inContext.free()
             }
+            Unit
         }
-
-        val slotContext = SlotContext(inContext, contextSize)
-        slotContext.setEntries(maxDci)
-
-        val command = Trb.newConfigureEndpoint(inContext.physicalAddress, slotId)
-        val (code, _) = sendCommand(command)
-
-        if (code != 1u) {
-            println("Configure endpoint failed: $code")
-            return null
-        }
-    } finally {
-        inContext.free()
     }
-    return Unit
-}
 
 suspend fun Xhci.updateEp0Mps(slotId: UByte, mps: UInt): Unit? {
-    val inContext = requireNotNull(MmioRegion.allocate())
+    val inContext = memory.allocate()
     try {
         val source = slots[slotId.toInt()].outContext ?: return null
 
@@ -129,6 +195,7 @@ suspend fun Xhci.updateEp0Mps(slotId: UByte, mps: UInt): Unit? {
             println("Evaluate Context failed: $code")
             return null
         }
+        slots[slotId.toInt()].endpoints[1]?.packetSize = mps
     } finally {
         inContext.free()
     }
@@ -139,29 +206,29 @@ internal fun Xhci.setupOneEndpoint(
     slotId: UByte,
     contextBuffer: MmioRegion,
     endpoint: UsbEndpoint,
+    newEndpoint: Endpoint,
 ): UInt? {
     val address = endpoint.desc.endpointAddress
     val endpointNumber = address and 0x0fu.toUByte()
     val isIn = address and REQ_DIR_IN != 0u.toUByte()
 
-    val dci = if (isIn) {
-        endpointNumber.toUInt() * 2u + 1u
-    } else {
-        endpointNumber.toUInt() * 2u
-    }
+    val dci =
+        if (isIn) {
+            endpointNumber.toUInt() * 2u + 1u
+        } else {
+            endpointNumber.toUInt() * 2u
+        }
     if (dci !in 2u..31u) {
         return null
     }
 
-    val newEndpoint = Endpoint()
-    slots[slotId.toInt()].endpoints[dci.toInt()] = newEndpoint
-
     val attributes = endpoint.desc.attributes and 0x3u.toUByte()
-    val endpointType = if (isIn) {
-        attributes.toUInt() + 4u
-    } else {
-        attributes.toUInt()
-    }
+    val endpointType =
+        if (isIn) {
+            attributes.toUInt() + 4u
+        } else {
+            attributes.toUInt()
+        }
 
     val rawMps = endpoint.desc.maxPacketSize
     val mps = rawMps and 0x7ffu.toUShort()
@@ -169,52 +236,59 @@ internal fun Xhci.setupOneEndpoint(
 
     val errorCount = if (attributes == EP_TYPE_ISO) 0u else 3u
 
-    val averageTrbLength = when (attributes) {
-        EP_TYPE_CONTROL -> 8u
-        EP_TYPE_INT -> 1024u
-        EP_TYPE_ISO -> mps.toUInt()
-        else -> 3072u
-    }
+    val averageTrbLength =
+        when (attributes) {
+            EP_TYPE_CONTROL -> 8u
+            EP_TYPE_INT -> 1024u
+            EP_TYPE_ISO -> mps.toUInt()
+            else -> 3072u
+        }
 
     val isIsochronousOrInterrupt = attributes == EP_TYPE_INT || attributes == EP_TYPE_ISO
     val hsBurst = if (isIsochronousOrInterrupt) (rawMps.toUInt() shr 11) and 0x03u else 0u
     val ssBurst = endpoint.ssDesc?.maxBurst?.toUInt() ?: 0u
-    val maxBurst = when (speed) {
-        SPEED_HIGH.toUInt() -> hsBurst
-        SPEED_SUPER.toUInt() -> ssBurst
-        else -> 0u
-    }
+    val maxBurst =
+        when (speed) {
+            SPEED_HIGH.toUInt() -> hsBurst
+            in SPEED_SUPER.toUInt()..UInt.MAX_VALUE -> ssBurst
+            else -> 0u
+        }
 
     val rawInterval = endpoint.desc.interval
-    val lsFsInterval = if (rawInterval > 0u.toUByte()) {
-        (31 - rawInterval.toUInt().countLeadingZeroBits() + 3).toUInt()
-    } else {
-        0u
-    }
-    val hsSsInterval = if (rawInterval > 0u.toUByte()) {
-        rawInterval.toUInt() - 1u
-    } else {
-        0u
-    }
+    val lsFsInterval =
+        if (rawInterval > 0u.toUByte()) {
+            (31 - rawInterval.toUInt().countLeadingZeroBits() + 3).toUInt()
+        } else {
+            0u
+        }
+    val hsSsInterval =
+        if (rawInterval > 0u.toUByte()) {
+            rawInterval.toUInt() - 1u
+        } else {
+            0u
+        }
     var interval = 0u
     if (isIsochronousOrInterrupt) {
-        interval = when (speed) {
-            SPEED_LOW.toUInt(), SPEED_FULL.toUInt() -> lsFsInterval
-            else -> hsSsInterval
-        }
+        interval =
+            when (speed) {
+                SPEED_LOW.toUInt(),
+                SPEED_FULL.toUInt() -> lsFsInterval
+                else -> hsSsInterval
+            }
     }
 
-    val isSuperSpeedIsochronous = speed == SPEED_SUPER.toUInt() && attributes == EP_TYPE_ISO
+    val isSuperSpeedIsochronous = speed >= SPEED_SUPER.toUInt() && attributes == EP_TYPE_ISO
     val ssIsoMult = endpoint.ssDesc?.let { (it.attributes and 0x3u.toUByte()).toUInt() } ?: 0u
     val mult = if (isSuperSpeedIsochronous) ssIsoMult else 0u
 
     var maxEsitPayload = 0u
     if (isIsochronousOrInterrupt) {
-        maxEsitPayload = when (speed) {
-            SPEED_SUPER.toUInt() -> endpoint.ssDesc?.bytesPerInterval?.toUInt()
-                ?: (mps.toUInt() * (maxBurst + 1u))
-            else -> mps.toUInt() * (maxBurst + 1u)
-        }
+        maxEsitPayload =
+            when (speed) {
+                in SPEED_SUPER.toUInt()..UInt.MAX_VALUE ->
+                    endpoint.ssDesc?.bytesPerInterval?.toUInt() ?: (mps.toUInt() * (maxBurst + 1u))
+                else -> mps.toUInt() * (maxBurst + 1u)
+            }
     }
 
     val endpointContext = EndpointContext(contextBuffer, dci.toInt(), contextSize)
@@ -223,7 +297,8 @@ internal fun Xhci.setupOneEndpoint(
     endpointContext.setMult(mult)
     endpointContext.setMaxBurst(maxBurst)
     endpointContext.setErrorCount(errorCount)
-    endpointContext.setDequeuePointer(newEndpoint.ring.physicalAddress or 1uL)
+    endpointContext.setStreams(newEndpoint.contextEntries)
+    endpointContext.setDequeuePointer(newEndpoint.dequeuePointer)
     endpointContext.setMaxPacketSize(mps.toUInt())
     endpointContext.setAverageTrbLen(averageTrbLength)
     endpointContext.setMaxEsitPayload(maxEsitPayload)
@@ -234,31 +309,38 @@ internal fun Xhci.setupOneEndpoint(
     return dci
 }
 
-suspend fun Xhci.cleanupSlot(slotId: UByte) {
-    println("Cleaning up resources for slot $slotId")
+suspend fun Xhci.cleanupSlot(slotId: UByte) =
+    withContext(NonCancellable) {
+        println("Cleaning up resources for slot $slotId")
 
-    val slot = slots[slotId.toInt()]
-    slot.usbDevice?.quiesce()
-    if (slot.active) {
-        disableSlot(slotId)
+        val slot = slots[slotId.toInt()]
+        slot.mutex.withLock {
+            slot.usbDevice?.quiesce()
+            if (slot.active) {
+                disableSlot(slotId)
+            }
+            slot.active = false
+            eventLock.withLock {
+                slot.endpoints.forEach { it?.close(TransferStatus.DISCONNECTED) }
+            }
+            completeTransfers()
+
+            slot.usbDevice?.free()
+            slot.usbDevice = null
+
+            val dcbaa = this@cleanupSlot.dcbaa
+            if (dcbaa != null) {
+                dcbaa.view<ULongVar>()[slotId.toInt()] = 0uL
+            }
+
+            for (index in 1 until MAX_ENDPOINTS) {
+                slot.endpoints[index]?.dispose()
+                slot.endpoints[index] = null
+                slot.descriptors[index] = null
+            }
+            slot.outContext?.free()
+            slot.outContext = null
+
+            println("Slot $slotId cleanup complete")
+        }
     }
-    slot.active = false
-
-    slot.usbDevice?.free()
-    slot.usbDevice = null
-
-    slot.outContext?.free()
-    slot.outContext = null
-
-    val dcbaa = this.dcbaa
-    if (dcbaa != null) {
-        dcbaa.view<ULongVar>()[slotId.toInt()] = 0uL
-    }
-
-    for (index in 1 until MAX_ENDPOINTS) {
-        slot.endpoints[index]?.free()
-        slot.endpoints[index] = null
-    }
-
-    println("Slot $slotId cleanup complete")
-}

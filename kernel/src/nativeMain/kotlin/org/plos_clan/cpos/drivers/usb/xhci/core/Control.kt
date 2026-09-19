@@ -16,7 +16,7 @@ private fun Xhci.waitReady(): Boolean {
     return false
 }
 
-private fun Xhci.waitHalted(): Boolean {
+internal fun Xhci.waitHalted(): Boolean {
     repeat(1_000_000) {
         if (operational.isHalted) {
             return true

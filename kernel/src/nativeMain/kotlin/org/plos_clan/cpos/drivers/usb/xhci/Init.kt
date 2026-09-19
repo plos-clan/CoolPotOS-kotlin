@@ -4,7 +4,12 @@ package org.plos_clan.cpos.drivers.usb.xhci
 
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.coroutines.KernelCoroutines
+import org.plos_clan.cpos.drivers.pcie.PCI_COMMAND_BUS_MASTER
 import org.plos_clan.cpos.drivers.pcie.PciDevice
+import org.plos_clan.cpos.drivers.pcie.PciHeader
+import org.plos_clan.cpos.drivers.pcie.Pcie
+import org.plos_clan.cpos.drivers.usb.xhci.core.DmaMemory
+import org.plos_clan.cpos.drivers.usb.xhci.core.Xhci as XhciController
 import org.plos_clan.cpos.drivers.usb.xhci.core.resetController
 import org.plos_clan.cpos.drivers.usb.xhci.core.setupCommandRing
 import org.plos_clan.cpos.drivers.usb.xhci.core.setupDcbaa
@@ -13,7 +18,6 @@ import org.plos_clan.cpos.drivers.usb.xhci.core.takeOwnership
 import org.plos_clan.cpos.drivers.usb.xhci.core.xhciHubThread
 import org.plos_clan.cpos.mem.MmioAddress
 import org.plos_clan.cpos.mem.MmioRegion
-import org.plos_clan.cpos.drivers.usb.xhci.core.Xhci as XhciController
 
 object Xhci {
     private val controllers = mutableListOf<XhciController>()
@@ -22,11 +26,20 @@ object Xhci {
         val bar = device.bars[0] ?: return
         val region = MmioRegion.map(bar.address, bar.size) ?: return
         val baseAddress = region.addressAt(0uL, 4) ?: return
-        initController(baseAddress, device)
+        try {
+            initController(baseAddress, device)
+        } catch (_: DmaMemory.AllocationFailure) {
+            println("Failed to allocate xHCI DMA memory")
+        }
     }
 
     private fun initController(baseAddress: MmioAddress, device: PciDevice) {
-        val xhci = XhciController(baseAddress)
+        val configuration = Pcie.configurationSpace(device.address) ?: return
+        val header = PciHeader(configuration)
+        val xhci =
+            XhciController(baseAddress) {
+                header.updateCommand(PCI_COMMAND_BUS_MASTER, false)
+            }
         printInfo(xhci)
 
         if (!xhci.takeOwnership()) {
@@ -46,20 +59,26 @@ object Xhci {
         xhci.setupCommandRing()
         xhci.setupInterrupter()
 
-        val interrupt = device.interrupt ?: run {
-            println("xHCI controller has no interrupt")
-            return
-        }
+        val interrupt =
+            device.interrupt
+                ?: run {
+                    println("xHCI controller has no interrupt")
+                    return
+                }
 
-        interrupt.register(xhci::handleIrq, device.bars, 0u) ?: run {
-            println("Failed to register xHCI interrupt")
-            return
-        }
+        interrupt.register(xhci::handleIrq, device.bars, 0u)
+            ?: run {
+                println("Failed to register xHCI interrupt")
+                return
+            }
 
         xhci.operational.start()
         println("xHCI Initialized successfully")
 
         controllers.add(xhci)
+        KernelCoroutines.launch("xhci-events") {
+            xhci.processEvents()
+        }
         KernelCoroutines.launch("xhci-hub") {
             xhci.xhciHubThread()
         }

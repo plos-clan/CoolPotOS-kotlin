@@ -13,6 +13,9 @@ const val TRB_SETUP_STAGE = 2u
 const val TRB_DATA_STAGE = 3u
 const val TRB_STATUS_STAGE = 4u
 const val TRB_LINK = 6u
+const val TRB_RESET_ENDPOINT = 14u
+const val TRB_STOP_ENDPOINT = 15u
+const val TRB_SET_DEQUEUE = 16u
 const val TRB_ENABLE_SLOT = 9u
 const val TRB_DISABLE_SLOT = 10u
 const val TRB_ADDRESS_DEVICE = 11u
@@ -47,66 +50,74 @@ data class Trb(
     val transferLength: UInt
         get() = status and 0xff_ff_ffu
 
+    val bufferLength: UInt
+        get() = status and 0x1ffffu
+
+    val parameter: ULong
+        get() = paramLow.toULong() or (paramHigh.toULong() shl 32)
+
     companion object {
-        fun newNoOpCmd(): Trb = Trb(
-            control = TRB_NO_OP_CMD shl 10,
-        )
+        fun newNoOpCmd(): Trb = Trb(control = TRB_NO_OP_CMD shl 10)
 
-        fun newNormal(buffer: ULong, length: UInt): Trb = Trb(
-            paramLow = buffer.toUInt(),
-            paramHigh = (buffer shr 32).toUInt(),
-            status = length,
-            control = (TRB_NORMAL shl 10) or TRB_IOC or TRB_ISP,
-        )
-
-        fun newEnableSlot(): Trb = Trb(
-            control = TRB_ENABLE_SLOT shl 10,
-        )
-
-        fun newDisableSlot(slotId: UByte): Trb = Trb(
-            control = (TRB_DISABLE_SLOT shl 10) or (slotId.toUInt() shl 24),
-        )
-
-        fun newSetupStage(requestLow: UInt, requestHigh: UInt, transferType: UInt): Trb = Trb(
-            paramLow = requestLow,
-            paramHigh = requestHigh,
-            status = 8u,
-            control = (TRB_SETUP_STAGE shl 10) or TRB_IDT or (transferType shl 16),
-        )
-
-        fun newDataStage(buffer: ULong, length: UInt, directionIn: Boolean): Trb {
-            val directionBit = if (directionIn) 1u shl 16 else 0u
+        fun newNormal(buffer: ULong, length: UInt): Trb {
+            require(length <= 0x10000u && (buffer and 0xffffuL) + length <= 0x10000uL)
             return Trb(
                 paramLow = buffer.toUInt(),
                 paramHigh = (buffer shr 32).toUInt(),
                 status = length,
-                control = (TRB_DATA_STAGE shl 10) or directionBit,
+                control = (TRB_NORMAL shl 10) or TRB_IOC or TRB_ISP,
             )
         }
+
+        fun newEndpointCommand(type: UInt, slotId: UByte, dci: Int): Trb =
+            Trb(control = (type shl 10) or (slotId.toUInt() shl 24) or (dci.toUInt() shl 16))
+
+        fun newSetDequeue(slotId: UByte, dci: Int, pointer: ULong, streamId: Int): Trb =
+            Trb(
+                paramLow = pointer.toUInt() or if (streamId == 0) 0u else 2u,
+                paramHigh = (pointer shr 32).toUInt(),
+                status = streamId.toUInt() shl 16,
+                control =
+                    (TRB_SET_DEQUEUE shl 10) or (slotId.toUInt() shl 24) or (dci.toUInt() shl 16),
+            )
+
+        fun newEnableSlot(): Trb = Trb(control = TRB_ENABLE_SLOT shl 10)
+
+        fun newDisableSlot(slotId: UByte): Trb =
+            Trb(control = (TRB_DISABLE_SLOT shl 10) or (slotId.toUInt() shl 24))
+
+        fun newSetupStage(requestLow: UInt, requestHigh: UInt, transferType: UInt): Trb =
+            Trb(
+                paramLow = requestLow,
+                paramHigh = requestHigh,
+                status = 8u,
+                control = (TRB_SETUP_STAGE shl 10) or TRB_IDT or (transferType shl 16),
+            )
 
         fun newStatusStage(directionIn: Boolean): Trb {
             val directionBit = if (directionIn) 1u shl 16 else 0u
-            return Trb(
-                control = (TRB_STATUS_STAGE shl 10) or directionBit or TRB_IOC,
-            )
+            return Trb(control = (TRB_STATUS_STAGE shl 10) or directionBit or TRB_IOC)
         }
 
-        fun newAddressDevice(contextPointer: ULong, slotId: UByte): Trb = Trb(
-            paramLow = contextPointer.toUInt(),
-            paramHigh = (contextPointer shr 32).toUInt(),
-            control = (TRB_ADDRESS_DEVICE shl 10) or (slotId.toUInt() shl 24),
-        )
+        fun newAddressDevice(contextPointer: ULong, slotId: UByte): Trb =
+            Trb(
+                paramLow = contextPointer.toUInt(),
+                paramHigh = (contextPointer shr 32).toUInt(),
+                control = (TRB_ADDRESS_DEVICE shl 10) or (slotId.toUInt() shl 24),
+            )
 
-        fun newConfigureEndpoint(contextPointer: ULong, slotId: UByte): Trb = Trb(
-            paramLow = contextPointer.toUInt(),
-            paramHigh = (contextPointer shr 32).toUInt(),
-            control = (TRB_CONFIG_ENDPOINT shl 10) or (slotId.toUInt() shl 24),
-        )
+        fun newConfigureEndpoint(contextPointer: ULong, slotId: UByte): Trb =
+            Trb(
+                paramLow = contextPointer.toUInt(),
+                paramHigh = (contextPointer shr 32).toUInt(),
+                control = (TRB_CONFIG_ENDPOINT shl 10) or (slotId.toUInt() shl 24),
+            )
 
-        fun newEvaluateContext(contextPointer: ULong, slotId: UByte): Trb = Trb(
-            paramLow = contextPointer.toUInt(),
-            paramHigh = (contextPointer shr 32).toUInt(),
-            control = (TRB_EVALUATE_CONTEXT shl 10) or (slotId.toUInt() shl 24),
-        )
+        fun newEvaluateContext(contextPointer: ULong, slotId: UByte): Trb =
+            Trb(
+                paramLow = contextPointer.toUInt(),
+                paramHigh = (contextPointer shr 32).toUInt(),
+                control = (TRB_EVALUATE_CONTEXT shl 10) or (slotId.toUInt() shl 24),
+            )
     }
 }

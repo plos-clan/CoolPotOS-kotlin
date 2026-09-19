@@ -21,6 +21,7 @@ const val DESC_REPORT: UByte = 0x22u
 const val DESC_PHYSICAL: UByte = 0x23u
 const val DESC_CS_INTERFACE: UByte = 0x24u
 const val DESC_CS_ENDPOINT: UByte = 0x25u
+const val DESC_PIPE_USAGE: UByte = 0x24u
 
 const val CDC_UNION_FUNCTIONAL_DESCRIPTOR: UByte = 0x06u
 
@@ -32,6 +33,8 @@ const val REQ_GET_DESCRIPTOR: UByte = 6u
 const val REQ_SET_DESCRIPTOR: UByte = 7u
 const val REQ_GET_CONFIGURATION: UByte = 8u
 const val REQ_SET_CONFIGURATION: UByte = 9u
+const val REQ_GET_INTERFACE: UByte = 10u
+const val REQ_SET_INTERFACE: UByte = 11u
 
 const val REQ_DIR_IN: UByte = 0x80u
 const val REQ_DIR_OUT: UByte = 0x00u

@@ -69,10 +69,25 @@ data class EndpointDescriptor(
     val attributes: UByte,
     val maxPacketSize: UShort,
     val interval: UByte,
-)
+) {
+    val number: Int
+        get() = endpointAddress.toInt() and 0x0f
+
+    val isIn: Boolean
+        get() = endpointAddress.toInt() and 0x80 != 0
+
+    val transferType: Int
+        get() = attributes.toInt() and 3
+}
 
 data class SsEndpointCompanionDescriptor(
     val maxBurst: UByte,
     val attributes: UByte,
     val bytesPerInterval: UShort,
-)
+) {
+    val maxStreams: Int
+        get() =
+            (attributes.toInt() and 0x1f).let {
+                if (it in 1..16) 1 shl it else 0
+            }
+}

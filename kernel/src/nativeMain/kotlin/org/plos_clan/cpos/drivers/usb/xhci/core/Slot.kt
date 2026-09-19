@@ -1,8 +1,8 @@
 package org.plos_clan.cpos.drivers.usb.xhci.core
 
-import org.plos_clan.cpos.coroutines.KernelOneShot
-import org.plos_clan.cpos.coroutines.KernelSemaphore
+import kotlinx.coroutines.sync.Mutex
 import org.plos_clan.cpos.drivers.usb.bus.UsbDevice
+import org.plos_clan.cpos.drivers.usb.bus.UsbEndpoint
 import org.plos_clan.cpos.mem.MmioRegion
 
 const val MAX_SLOTS = 256
@@ -16,15 +16,7 @@ class Slot(
     var outContext: MmioRegion? = null,
 ) {
     var usbDevice: UsbDevice? = null
+    val mutex = Mutex()
     val endpoints = arrayOfNulls<Endpoint>(MAX_ENDPOINTS)
-}
-
-class Endpoint {
-    val ring = TransferRing()
-    val semaphore = KernelSemaphore(ring.capacity)
-    val promises = Array(ring.capacity) { KernelOneShot<Trb>() }
-
-    fun free() {
-        ring.free()
-    }
+    val descriptors = arrayOfNulls<UsbEndpoint>(MAX_ENDPOINTS)
 }

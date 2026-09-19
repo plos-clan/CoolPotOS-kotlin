@@ -1,7 +1,9 @@
-@file:OptIn(ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class, ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.drivers.usb.xhci.core
 
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UIntVar
 import kotlinx.cinterop.get
@@ -10,157 +12,117 @@ import org.plos_clan.cpos.mem.MmioAddress
 import org.plos_clan.cpos.mem.MmioRegion
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 
-class CommandRing {
-    private val buffer = requireNotNull(MmioRegion.allocate())
-    private val words = buffer.view<UIntVar>()
+internal class ProducerRing(memory: DmaMemory, minimumCapacity: Int = 1) {
+    private val segmentCapacity = (PAGE_SIZE_BYTES / TRB_SIZE_BYTES.toULong()).toInt() - 1
+    private val segments = mutableListOf<MmioRegion>()
+    private val barrier = AtomicInt(0)
+    val queue: RingQueue
 
-    val physicalAddress = buffer.physicalAddress
-    val capacity: Int = (PAGE_SIZE_BYTES / TRB_SIZE_BYTES.toULong()).toInt()
+    val capacity: Int
+    val physicalAddress: ULong
+        get() = segments.first().physicalAddress
 
-    var enqueueIndex = 0
-        private set
+    val pages: List<ULong>
+        get() = segments.map { it.physicalAddress }
 
-    var cycleState = true
-        private set
+    val dequeuePointer: ULong
+        get() = address(queue.enqueueIndex) or if (queue.cycleState) 1uL else 0uL
 
-    fun enqueue(trb: Trb) {
-        if (enqueueIndex == capacity - 1) {
-            linkToStart()
+    init {
+        require(minimumCapacity > 0)
+        val count = (minimumCapacity.toLong() + segmentCapacity) / segmentCapacity
+        require(count * segmentCapacity <= Int.MAX_VALUE)
+        try {
+            repeat(count.toInt()) { segments.add(memory.allocate()) }
+        } catch (failure: Throwable) {
+            segments.forEach { it.free() }
+            throw failure
         }
-
-        val targetIndex = enqueueIndex
-        val control = if (cycleState) {
-            trb.control or TRB_CYCLE
-        } else {
-            trb.control and TRB_CYCLE.inv()
-        }
-
-        val offset = targetIndex * TRB_WORD_COUNT
-        words[offset] = trb.paramLow
-        words[offset + 1] = trb.paramHigh
-        words[offset + 2] = trb.status
-        words[offset + 3] = control
-        enqueueIndex++
+        capacity = segments.size * segmentCapacity - 1
+        queue = RingQueue(capacity + 1)
     }
 
-    private fun linkToStart() {
-        val linkIndex = enqueueIndex
-        var control = (TRB_LINK shl 10) or TRB_ENT
-        control = if (cycleState) {
-            control or TRB_CYCLE
-        } else {
-            control and TRB_CYCLE.inv()
-        }
+    fun address(index: Int): ULong =
+        segments[index / segmentCapacity].physicalAddress +
+            (index % segmentCapacity).toULong() * TRB_SIZE_BYTES.toULong()
 
-        val offset = linkIndex * TRB_WORD_COUNT
-        words[offset] = physicalAddress.toUInt()
-        words[offset + 1] = (physicalAddress shr 32).toUInt()
-        words[offset + 2] = 0u
-        words[offset + 3] = control
-        enqueueIndex = 0
-        cycleState = !cycleState
+    fun indexOf(pointer: ULong, segment: Int): Int? {
+        val offset = pointer - segments[segment].physicalAddress
+        if (offset % TRB_SIZE_BYTES.toULong() != 0uL) return null
+        val index = offset / TRB_SIZE_BYTES.toULong()
+        return if (index < segmentCapacity.toULong()) segment * segmentCapacity + index.toInt()
+        else null
+    }
+
+    fun enqueue(entry: RingEntry): Boolean {
+        val firstCycle = queue.cycleState
+        val enqueued =
+            queue.enqueue(entry) { index, cycleState, trb, first ->
+                val segment = index / segmentCapacity
+                val position = index % segmentCapacity
+                val words = segments[segment].view<UIntVar>()
+                val offset = position * TRB_WORD_COUNT
+                val cycle = if (cycleState) TRB_CYCLE else 0u
+                words[offset] = trb.paramLow
+                words[offset + 1] = trb.paramHigh
+                words[offset + 2] = trb.status
+                words[offset + 3] =
+                    (trb.control and TRB_CYCLE.inv()) or if (first) cycle xor TRB_CYCLE else cycle
+                if (position == segmentCapacity - 1) {
+                    val last = segment == segments.lastIndex
+                    val next = segments[if (last) 0 else segment + 1].physicalAddress
+                    val link = segmentCapacity * TRB_WORD_COUNT
+                    words[link] = next.toUInt()
+                    words[link + 1] = (next shr 32).toUInt()
+                    words[link + 2] = 0u
+                    words[link + 3] =
+                        (TRB_LINK shl 10) or
+                            cycle or
+                            (trb.control and TRB_CHAIN) or
+                            if (last) TRB_ENT else 0u
+                }
+            }
+        if (!enqueued) return false
+        barrier.exchange(0)
+        val words = segments[entry.first / segmentCapacity].view<UIntVar>()
+        val control = entry.first % segmentCapacity * TRB_WORD_COUNT + 3
+        words[control] =
+            (entry.trbs.first().control and TRB_CYCLE.inv()) or if (firstCycle) TRB_CYCLE else 0u
+        barrier.exchange(0)
+        return true
+    }
+
+    fun free() {
+        segments.forEach { it.free() }
     }
 }
 
-class EventRing(private val erdpRegister: MmioAddress) {
-    private val buffer = requireNotNull(MmioRegion.allocate())
+class EventRing(private val buffer: MmioRegion, private val erdpRegister: MmioAddress) {
     private val words = buffer.view<UIntVar>()
+    private val barrier = AtomicInt(0)
 
     val physicalAddress = buffer.physicalAddress
     val capacity: Int = (PAGE_SIZE_BYTES / TRB_SIZE_BYTES.toULong()).toInt()
-
-    var dequeueIndex = 0
-        private set
-
-    var cycleState = true
-        private set
-
-    fun hasEvent(): Boolean {
-        val control = words[dequeueIndex * TRB_WORD_COUNT + 3]
-        val expected = if (cycleState) TRB_CYCLE else 0u
-        return control and TRB_CYCLE == expected
-    }
+    private var dequeueIndex = 0
+    private var cycleState = true
 
     fun pop(): Trb? {
-        if (!hasEvent()) {
-            return null
-        }
-
         val offset = dequeueIndex * TRB_WORD_COUNT
-        val event = Trb(
-            paramLow = words[offset],
-            paramHigh = words[offset + 1],
-            status = words[offset + 2],
-            control = words[offset + 3],
-        )
+        barrier.exchange(0)
+        val control = words[offset + 3]
+        if (control and TRB_CYCLE != if (cycleState) TRB_CYCLE else 0u) return null
+        barrier.exchange(0)
+        val event = Trb(words[offset], words[offset + 1], words[offset + 2], control)
         dequeueIndex++
-
         if (dequeueIndex == capacity) {
             dequeueIndex = 0
             cycleState = !cycleState
         }
-
         return event
     }
 
     fun updateErdp() {
-        val currentPhysical = physicalAddress + dequeueIndex.toULong() * TRB_SIZE_BYTES.toULong()
-        erdpRegister.writeSplitU64(currentPhysical, lowMask = 1u shl 3)
-    }
-}
-
-class TransferRing {
-    private val buffer = requireNotNull(MmioRegion.allocate())
-    private val words = buffer.view<UIntVar>()
-
-    val physicalAddress = buffer.physicalAddress
-    val capacity: Int = (PAGE_SIZE_BYTES / TRB_SIZE_BYTES.toULong()).toInt()
-
-    var enqueueIndex = 0
-        private set
-
-    var cycleState = true
-        private set
-
-    fun enqueue(trb: Trb) {
-        if (enqueueIndex == capacity - 1) {
-            linkToStart()
-        }
-
-        val targetIndex = enqueueIndex
-        val control = if (cycleState) {
-            trb.control or TRB_CYCLE
-        } else {
-            trb.control and TRB_CYCLE.inv()
-        }
-
-        val offset = targetIndex * TRB_WORD_COUNT
-        words[offset] = trb.paramLow
-        words[offset + 1] = trb.paramHigh
-        words[offset + 2] = trb.status
-        words[offset + 3] = control
-        enqueueIndex++
-    }
-
-    private fun linkToStart() {
-        val linkIndex = enqueueIndex
-        var control = (TRB_LINK shl 10) or TRB_ENT
-        control = if (cycleState) {
-            control or TRB_CYCLE
-        } else {
-            control and TRB_CYCLE.inv()
-        }
-
-        val offset = linkIndex * TRB_WORD_COUNT
-        words[offset] = physicalAddress.toUInt()
-        words[offset + 1] = (physicalAddress shr 32).toUInt()
-        words[offset + 2] = 0u
-        words[offset + 3] = control
-        enqueueIndex = 0
-        cycleState = !cycleState
-    }
-
-    fun free() {
-        buffer.free()
+        val physical = physicalAddress + dequeueIndex.toULong() * TRB_SIZE_BYTES.toULong()
+        erdpRegister.writeSplitU64(physical, lowMask = 1u shl 3)
     }
 }

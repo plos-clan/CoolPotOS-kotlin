@@ -2,9 +2,7 @@ package org.plos_clan.cpos.drivers.usb.xhci.regs
 
 import org.plos_clan.cpos.mem.MmioAddress
 
-class Capability(
-    val baseAddress: MmioAddress,
-) : RegisterBlock(baseAddress) {
+class Capability(val baseAddress: MmioAddress) : RegisterBlock(baseAddress) {
     val length: UByte
         get() = readU8(CAP_LENGTH_OFFSET)
 
@@ -32,6 +30,12 @@ class Capability(
     val uses64ByteContext: Boolean
         get() = hccParams1 and (1u shl 2) != 0u
 
+    val maxStreamContexts: Int
+        get() =
+            ((hccParams1 shr 12) and 0xfu).toInt().let {
+                if (it == 0) 0 else 1 shl (it + 1)
+            }
+
     val xecp: UInt
         get() = ((hccParams1 shr 16) and 0xffffu) shl 2
 
@@ -42,8 +46,7 @@ class Capability(
             return (high shl 5) or low
         }
 
-    fun legacySupport(): LegacySupport? =
-        findExtCap(1u.toUByte())?.let(::LegacySupport)
+    fun legacySupport(): LegacySupport? = findExtCap(1u.toUByte())?.let(::LegacySupport)
 
     fun findExtCap(targetId: UByte): MmioAddress? {
         var offset = xecp.toULong()
