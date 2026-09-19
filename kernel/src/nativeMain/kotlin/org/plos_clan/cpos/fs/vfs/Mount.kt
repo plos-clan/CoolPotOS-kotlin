@@ -315,6 +315,23 @@ class MountNamespace internal constructor(val root: Mount) {
         return VfsResult.Ok(Unit)
     }
 
+    fun sync(caller: VfsOperationContext): VfsResult<Unit> {
+        val blocks = lock.withLock {
+            (listOf(root) + mounts.values).map { it.superBlock }.distinct().asReversed()
+                .filter { it.retain() }
+        }
+        var result: VfsResult<Unit> = VfsResult.Ok(Unit)
+        try {
+            for (block in blocks) {
+                val synced = block.backend.sync(caller)
+                if (synced is VfsResult.Err) result = synced
+            }
+        } finally {
+            blocks.forEach { it.release() }
+        }
+        return result
+    }
+
     internal fun snapshotMounts(): Map<VfsPath, Mount> = lock.withLock {
         LinkedHashMap<VfsPath, Mount>(mounts.size + 1).apply {
             put(VfsPath(root, root.root), root)

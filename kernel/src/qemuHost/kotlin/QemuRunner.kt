@@ -16,6 +16,7 @@ internal data class QemuConfiguration(
     val directory: File,
     val kernel: File,
     val rootfs: File?,
+    val benchmark: File? = null,
     val boots: Int,
     val timeoutSeconds: Long,
     val buildType: String,
@@ -35,7 +36,7 @@ internal data class QemuConfiguration(
             val options = arguments.take(separator).chunked(2)
             val settings = options.associate { (name, value) -> name to value }
             val names = setOf(
-                "--mode", "--output", "--kernel", "--rootfs",
+                "--mode", "--output", "--kernel", "--rootfs", "--benchmark",
                 "--boots", "--timeout", "--build-type", "--gc",
             )
             require(settings.size == options.size && settings.keys.all { it in names }) {
@@ -47,6 +48,7 @@ internal data class QemuConfiguration(
                 directory = File(settings.getValue("--output")),
                 kernel = File(settings.getValue("--kernel")),
                 rootfs = settings["--rootfs"]?.let(::File),
+                benchmark = settings["--benchmark"]?.let(::File),
                 boots = settings.getValue("--boots").toInt(),
                 timeoutSeconds = settings.getValue("--timeout").toLong(),
                 buildType = settings.getValue("--build-type"),
@@ -65,7 +67,12 @@ internal class QemuRunner(private val config: QemuConfiguration) {
             put("buildType", config.buildType)
             put("gc", config.gc)
             put("command", JsonArray(config.command.map(::JsonPrimitive)))
-            for ((name, file) in listOf("kernel" to config.kernel, "rootfs" to config.rootfs)) {
+            val images = listOf(
+                "kernel" to config.kernel,
+                "rootfs" to config.rootfs,
+                "benchmark" to config.benchmark,
+            )
+            for ((name, file) in images) {
                 if (file == null) continue
                 val digest = MessageDigest.getInstance("SHA-256")
                 DigestInputStream(file.inputStream(), digest).use { input ->
@@ -79,7 +86,15 @@ internal class QemuRunner(private val config: QemuConfiguration) {
         for (boot in 1..config.boots) {
             val output = if (config.mode == QemuMode.SYSTEM) directory.resolve("boot-$boot") else directory
             output.mkdirs()
-            val report = execute(output, metadata)
+            val benchmark = output.resolve("benchmark.img")
+            if (config.benchmark != null) {
+                val copied = ProcessBuilder(
+                    "cp", "--reflink=auto", "--sparse=always", "--", config.benchmark.path, benchmark.path,
+                ).inheritIO().start().waitFor()
+                check(copied == 0) { "Cannot create benchmark image" }
+            }
+            val command = config.command.map { it.replace("@benchmark@", benchmark.absolutePath) }
+            val report = execute(output, metadata, command)
             combined.merge(report, boot)
             completed = boot
             val status = if (report.successful) "PASSED" else "FAILED"
@@ -97,13 +112,13 @@ internal class QemuRunner(private val config: QemuConfiguration) {
         return combined.successful
     }
 
-    private fun execute(output: File, metadata: JsonObject): QemuReport {
+    private fun execute(output: File, metadata: JsonObject, command: List<String>): QemuReport {
         val report = QemuReport(config.mode)
         val log = output.resolve("serial.log")
         val start = System.nanoTime()
         var exitCode: Int? = null
         try {
-            val process = ProcessBuilder(config.command)
+            val process = ProcessBuilder(command)
                 .redirectErrorStream(true)
                 .redirectOutput(log)
                 .start()

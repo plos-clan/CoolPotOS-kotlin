@@ -86,16 +86,15 @@ internal class KeyboardInputDevice(
 
     internal fun install(): Boolean {
         val minor = EVENT_MINOR_BASE + eventIndex
-        return DeviceManager.register(
-            DeviceRegistration(
-                name = "input/event$eventIndex",
-                type = DeviceType.CHARACTER,
-                major = LinuxDeviceMajor.INPUT.number,
-                minor = minor.toUInt(),
-                backend = evdev,
-                sysfs = SysfsDevicePublication.virtual("input", "event$eventIndex"),
-            ),
-        ) != null
+        val registration = DeviceRegistration(
+            name = "input/event$eventIndex",
+            type = DeviceType.CHARACTER,
+            major = LinuxDeviceMajor.INPUT.number,
+            minor = minor.toUInt(),
+            backend = evdev,
+            sysfs = SysfsDevicePublication.virtual("input", "event$eventIndex"),
+        )
+        return DeviceManager.register(registration) != null
     }
 
     internal fun uninstall(): Boolean = DeviceManager.unregisterAll(evdev) != 0

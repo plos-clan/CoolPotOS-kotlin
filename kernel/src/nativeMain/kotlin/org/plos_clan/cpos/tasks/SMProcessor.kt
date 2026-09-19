@@ -121,16 +121,4 @@ object SMProcessor {
 
         println("MultiProcessor: loaded $cpu_count cores")
     }
-
-    fun setKernelStack(stack: ULong) {
-        val local = currentLocal()
-        bridge.set_kernel_stack(
-            local.lapicId.toULong(), stack,
-            (if (local.isBsp) {
-                1
-            } else {
-                0
-            }).toUByte()
-        )
-    }
 }

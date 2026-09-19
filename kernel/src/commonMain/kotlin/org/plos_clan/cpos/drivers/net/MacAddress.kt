@@ -1,5 +1,3 @@
-@file:OptIn(kotlin.ExperimentalUnsignedTypes::class)
-
 package org.plos_clan.cpos.drivers.net
 
 import kotlin.jvm.JvmInline
@@ -13,8 +11,6 @@ value class MacAddress private constructor(private val value: ULong) {
         require(index in 0 until SIZE_BYTES)
         return (value shr ((SIZE_BYTES - index - 1) * Byte.SIZE_BITS)).toUByte()
     }
-
-    fun toUByteArray(): UByteArray = UByteArray(SIZE_BYTES, ::get)
 
     fun copyTo(bytes: ByteArray, offset: Int = 0) {
         require(offset >= 0 && offset <= bytes.size - SIZE_BYTES)

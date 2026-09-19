@@ -40,14 +40,6 @@ object TtyManager {
         return true
     }
 
-    fun setActiveVT(number: Int): Boolean = consoleLock.withLock {
-        val target = virtualTerminals[number] ?: return@withLock false
-        if (!target.start()) return@withLock false
-        activeVirtualTerminal = target
-        target.withBackend { it.redraw() }
-        true
-    }
-
     internal fun openActiveVirtualTerminal(device: Device): VfsResult<DeviceBackend> = consoleLock.withLock {
         activeVirtualTerminal?.open(device) ?: VfsResult.Err(VfsError.NO_SUCH_DEVICE_OR_ADDRESS)
     }
@@ -121,16 +113,15 @@ object TtyManager {
 
         val registered = ArrayList<Device>(endpoints.size + 3)
         for ((endpoint, session) in endpointSessions) {
-            val device = DeviceManager.register(
-                DeviceRegistration(
-                    name = endpoint.name,
-                    type = DeviceType.CHARACTER,
-                    major = endpoint.major,
-                    minor = endpoint.minor,
-                    backend = session,
-                    sysfs = SysfsDevicePublication.virtual("tty", endpoint.name),
-                ),
-            ) ?: return rollbackInitialization(registered)
+            val registration = DeviceRegistration(
+                name = endpoint.name,
+                type = DeviceType.CHARACTER,
+                major = endpoint.major,
+                minor = endpoint.minor,
+                backend = session,
+                sysfs = SysfsDevicePublication.virtual("tty", endpoint.name),
+            )
+            val device = DeviceManager.register(registration) ?: return rollbackInitialization(registered)
             registered += device
         }
 

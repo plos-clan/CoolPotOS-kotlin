@@ -2,8 +2,6 @@ package org.plos_clan.cpos.fs.vfs
 
 import org.plos_clan.cpos.fs.sock.AbstractSocket
 import org.plos_clan.cpos.fs.sock.UnixCredentials
-import org.plos_clan.cpos.fs.sock.UnixSocket
-import org.plos_clan.cpos.fs.sock.UnixSocketAddress
 import org.plos_clan.cpos.fs.sock.UnixSocketSubsystem
 import org.plos_clan.cpos.fs.sock.SocketType
 import org.plos_clan.cpos.mem.PageCache
@@ -145,30 +143,6 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         nonBlocking: Boolean,
     ): VfsResult<Pair<OpenFileDescription, OpenFileDescription>> =
         sockets.pair(caller, context, type, credentials, nonBlocking)
-
-    internal fun bindUnixSocket(
-        caller: VfsOperationContext,
-        context: FileSystemContext,
-        socket: UnixSocket,
-        address: UnixSocketAddress,
-        mode: FileMode,
-        uid: UInt,
-        gid: UInt,
-    ): VfsResult<UnixSocketAddress> = sockets.bind(
-        caller,
-        context,
-        socket,
-        address,
-        mode,
-        uid,
-        gid,
-    )
-
-    internal fun resolveUnixSocket(
-        caller: VfsOperationContext,
-        context: FileSystemContext,
-        address: UnixSocketAddress,
-    ): VfsResult<UnixSocket> = sockets.resolve(caller, context, address)
 
     fun mount(
         caller: VfsOperationContext,

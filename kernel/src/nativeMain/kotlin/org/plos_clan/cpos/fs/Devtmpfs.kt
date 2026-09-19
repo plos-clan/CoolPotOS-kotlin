@@ -52,8 +52,9 @@ private class DevtmpfsInstance(options: TmpfsOptions) :
     override fun createRoot(superBlock: SuperBlock): Inode {
         val inode = super.createRoot(superBlock)
         root = inode
-        installSpecialNode(inode,
-            listOf((VfsName.fromBytes("ptmx".encodeToByteArray()) as VfsResult.Ok).value),
+        installSpecialNode(
+            inode,
+            path("ptmx"),
             TmpfsSymlink(VfsPathname.fromString("pts/ptmx")),
             InodeMetadata(mode = FileMode(0x1FFu), size = 8uL),
         )
@@ -65,7 +66,7 @@ private class DevtmpfsInstance(options: TmpfsOptions) :
         val root = root ?: return
         installSpecialNode(
             root = root,
-            path = devicePath(device),
+            path = path(device.name),
             backend = DeviceNode(
                 if (device.type == DeviceType.BLOCK) InodeType.BLOCK_DEVICE
                 else InodeType.CHARACTER_DEVICE,
@@ -77,11 +78,18 @@ private class DevtmpfsInstance(options: TmpfsOptions) :
                 deviceNumber = device.number.value,
             ),
         )
+        if (device.aliases.isEmpty()) return
+        val target = VfsPathname.fromString("/dev/${device.name}")
+        val metadata = InodeMetadata(mode = FileMode(0x1ffu), size = target.size.toULong())
+        for (alias in device.aliases) {
+            installSpecialNode(root, path(alias), TmpfsSymlink(target), metadata)
+        }
     }
 
     override fun deviceUnregistered(device: Device) {
         val root = root ?: return
-        removeSpecialNode(root, devicePath(device)) { backend ->
+        for (alias in device.aliases) removeSpecialNode(root, path(alias)) { it is TmpfsSymlink }
+        removeSpecialNode(root, path(device.name)) { backend ->
             backend is DeviceNode && backend.matches(device)
         }
     }
@@ -91,8 +99,8 @@ private class DevtmpfsInstance(options: TmpfsOptions) :
         root = null
     }
 
-    private fun devicePath(device: Device): List<VfsName> =
-        device.name.split('/').map { component ->
+    private fun path(name: String): List<VfsName> =
+        name.split('/').map { component ->
             val bytes = component.encodeToByteArray()
             VfsName.fromPath(bytes, 0, bytes.size)
         }
@@ -122,9 +130,11 @@ internal class DeviceNode(
         }
     }
 
-    fun matches(device: Device): Boolean = device.number == number &&
-        type == if (device.type == DeviceType.BLOCK) InodeType.BLOCK_DEVICE
-        else InodeType.CHARACTER_DEVICE
+    fun matches(device: Device): Boolean {
+        val deviceType = if (device.type == DeviceType.BLOCK) InodeType.BLOCK_DEVICE
+            else InodeType.CHARACTER_DEVICE
+        return device.number == number && type == deviceType
+    }
 }
 
 internal sealed class DeviceOpenFile(

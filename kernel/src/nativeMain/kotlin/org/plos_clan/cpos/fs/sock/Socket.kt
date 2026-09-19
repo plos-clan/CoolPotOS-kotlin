@@ -141,19 +141,20 @@ internal abstract class AbstractSocket(
         destinationOffset: Int,
         count: Int,
         mode: IoMode,
-    ): IoResult = when (val result = receiveSocket(
-        SocketReceiveRequest(
+    ): IoResult {
+        val request = SocketReceiveRequest(
             destination,
             destinationOffset,
             count,
             nonBlocking = mode == IoMode.NON_BLOCKING,
-        ),
-    )) {
-        is VfsResult.Ok -> {
-            result.value.ancillary?.release()
-            IoResult.success(result.value.copiedBytes)
+        )
+        return when (val result = receiveSocket(request)) {
+            is VfsResult.Ok -> {
+                result.value.ancillary?.release()
+                IoResult.success(result.value.copiedBytes)
+            }
+            is VfsResult.Err -> IoResult.failure(result.error)
         }
-        is VfsResult.Err -> IoResult.failure(result.error)
     }
 
     final override fun write(
@@ -166,15 +167,14 @@ internal abstract class AbstractSocket(
     ): IoResult {
         val process = ProcessManager.currentProcess()
             ?: return IoResult.failure(VfsError.NOT_FOUND)
-        return sendSocket(
-            SocketSendRequest(
-                process,
-                source,
-                sourceOffset,
-                count,
-                nonBlocking = mode == IoMode.NON_BLOCKING,
-            ),
+        val request = SocketSendRequest(
+            process,
+            source,
+            sourceOffset,
+            count,
+            nonBlocking = mode == IoMode.NON_BLOCKING,
         )
+        return sendSocket(request)
     }
 
     final override fun ioctl(

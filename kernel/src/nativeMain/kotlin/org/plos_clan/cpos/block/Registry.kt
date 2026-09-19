@@ -3,6 +3,11 @@
 package org.plos_clan.cpos.block
 
 import kotlin.concurrent.atomics.AtomicInt
+import kotlin.uuid.Uuid
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.withTimeoutOrNull
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceBackend
 import org.plos_clan.cpos.drivers.DeviceManager
@@ -15,24 +20,25 @@ import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.Errno
+import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
 
-class BlockDeviceBackend(val cache: BufferCache) : DeviceBackend {
+class BlockDeviceBackend(val volume: BlockVolume) : DeviceBackend {
     override val byteSize: ULong
-        get() = cache.device.geometry.byteSize
+        get() = volume.size
 
     override fun open(device: Device): VfsResult<DeviceBackend> =
-        if (cache.connected) VfsResult.Ok(this) else VfsResult.Err(VfsError.NO_DEVICE)
+        if (volume.cache.connected) VfsResult.Ok(this) else VfsResult.Err(VfsError.NO_DEVICE)
 
-    override fun sync(device: Device): Long = cache.flush().error
+    override fun sync(device: Device): Long = volume.cache.flush().error
 
     override fun ioctl(device: Device, command: Int, args: UserMemory): Long {
-        if (!cache.connected) return -Errno.ENODEV.toLong()
-        val geometry = cache.device.geometry
+        if (!volume.cache.connected) return -Errno.ENODEV.toLong()
+        val geometry = volume.geometry
         val (width, value) =
             when (command) {
-                0x125e -> 4 to if (cache.device.readOnly) 1uL else 0uL
+                0x125e -> 4 to if (volume.readOnly) 1uL else 0uL
                 0x1260 -> 8 to geometry.byteSize / 512uL
                 0x1268 -> 4 to geometry.blockSize.toULong()
                 0x80081272.toInt() -> 8 to geometry.byteSize
@@ -45,7 +51,7 @@ class BlockDeviceBackend(val cache: BufferCache) : DeviceBackend {
     }
 
     override fun poll(device: Device, events: Int): Long =
-        if (cache.connected) (events and PollEvents.DEFAULT_FILE_EVENTS).toLong()
+        if (volume.cache.connected) (events and PollEvents.DEFAULT_FILE_EVENTS).toLong()
         else (PollEvents.POLLERR or PollEvents.POLLHUP).toLong()
 
     override fun read(
@@ -62,7 +68,7 @@ class BlockDeviceBackend(val cache: BufferCache) : DeviceBackend {
         ) {
             return -Errno.EINVAL.toLong()
         }
-        return cache.read(offset, buffer, bufferOffset, size.toInt()).value
+        return volume.read(offset, buffer, bufferOffset, size.toInt()).value
     }
 
     override fun write(
@@ -80,7 +86,7 @@ class BlockDeviceBackend(val cache: BufferCache) : DeviceBackend {
             return -Errno.EINVAL.toLong()
         }
         if (size != 0uL && offset >= byteSize) return -Errno.ENOSPC.toLong()
-        return cache.write(offset, buffer, bufferOffset, size.toInt()).value
+        return volume.write(offset, buffer, bufferOffset, size.toInt()).value
     }
 
     private val BlockResult.value: Long
@@ -100,23 +106,87 @@ class BlockDeviceBackend(val cache: BufferCache) : DeviceBackend {
 
 object BlockDevices {
     private val sequence = AtomicInt(0)
+    private val lock = IrqSpinLock()
+    private val devices = mutableListOf<Device>()
+    private val changes = MutableStateFlow(0uL)
 
-    fun register(block: BlockDevice): Device? {
+    suspend fun register(block: BlockDevice): Device? {
+        val partitions = Gpt(block).read().orEmpty()
+        if (!block.connected) return null
         val name = "disk${sequence.fetchAndAdd(1)}"
-        return DeviceManager.register(
-            DeviceRegistration(
-                name,
-                DeviceType.BLOCK,
-                259u,
-                backend = BlockDeviceBackend(BufferCache(block)),
-                sysfs = SysfsDevicePublication.virtual("block", name),
-            )
-        )
+        val cache = BufferCache(block)
+        val disk = publish(name, BlockVolume(cache)) ?: return null
+        for (partition in partitions) {
+            if (publish("${name}p${partition.number}", BlockVolume(cache, partition)) == null) {
+                unregister(disk)
+                return null
+            }
+        }
+        return disk
+    }
+
+    fun find(source: String): Device? {
+        val id = if (source.startsWith("PARTUUID=", true)) {
+            Uuid.parseOrNull(source.substringAfter('=')) ?: return null
+        } else null
+        val name = source.removePrefix("/dev/")
+        return lock.withLock {
+            devices.singleOrNull { device ->
+                val volume = (device.backend as BlockDeviceBackend).volume
+                val matches = if (id != null) volume.partition?.id == id else device.name == name
+                volume.cache.connected && matches
+            }
+        }
+    }
+
+    suspend fun await(source: String, timeoutMillis: Long = 30_000): Device? =
+        withTimeoutOrNull(timeoutMillis) {
+            changes.mapNotNull { find(source) }.first()
+        }
+
+    fun flush(): BlockStatus {
+        val caches =
+            lock.withLock {
+                devices.map { (it.backend as BlockDeviceBackend).volume.cache }.distinct()
+            }
+        var status = BlockStatus.SUCCESS
+        for (cache in caches) {
+            val result = cache.flush()
+            if (result != BlockStatus.SUCCESS) status = result
+        }
+        return status
     }
 
     fun unregister(device: Device) {
         val backend = device.backend as? BlockDeviceBackend ?: return
-        backend.cache.detach()
-        DeviceManager.unregister(device)
+        backend.volume.cache.detach()
+        val removed =
+            lock.withLock {
+                val matches = devices.filter {
+                    (it.backend as BlockDeviceBackend).volume.cache === backend.volume.cache
+                }
+                devices.removeAll(matches.toSet())
+                changes.value++
+                matches
+            }
+        removed.asReversed().forEach(DeviceManager::unregister)
+    }
+
+    private fun publish(name: String, volume: BlockVolume): Device? {
+        val registration = DeviceRegistration(
+            name,
+            DeviceType.BLOCK,
+            259u,
+            backend = BlockDeviceBackend(volume),
+            sysfs = SysfsDevicePublication.virtual("block", name),
+            aliases = volume.partition?.let { listOf("disk/by-partuuid/${it.id}") }.orEmpty(),
+        )
+        val device = DeviceManager.register(registration) ?: return null
+        lock.withLock {
+            devices.add(device)
+            changes.value++
+        }
+        volume.partition?.let { println("Block: /dev/$name PARTUUID=${it.id}") }
+        return device
     }
 }

@@ -1,6 +1,5 @@
 package org.plos_clan.cpos.drivers.pcie
 
-import org.plos_clan.cpos.fs.sysfs.SysfsObjectHandle
 import org.plos_clan.cpos.mem.MmioRegion
 import org.plos_clan.cpos.utils.hex
 
@@ -54,8 +53,6 @@ object Pcie {
         }
         println("PCIe: enumeration complete devices=${devices.size}")
     }
-
-    fun sysfsObject(address: PciAddress): SysfsObjectHandle? = sysfs.handle(address)
 
     fun readConfig(
         segment: UInt,

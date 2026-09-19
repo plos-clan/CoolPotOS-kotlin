@@ -31,27 +31,44 @@ import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.ByteArrayBuffer
-import org.plos_clan.cpos.module.ModuleData
+import org.plos_clan.cpos.block.ByteSource
+import org.plos_clan.cpos.block.BlockDevices
+import org.plos_clan.cpos.block.BlockDeviceBackend
+import org.plos_clan.cpos.fs.vfs.FileSystemParameters
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.alignUp
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 
 private const val DEFAULT_CACHE_BYTES = 16 * 1024 * 1024
 
 data class ErofsOptions(
-    val data: ModuleData,
+    val data: ByteSource,
     val cacheBytes: Int = DEFAULT_CACHE_BYTES,
 ) : FileSystemOptions
 
 object Erofs : FileSystemType("erofs", 0xe0f5_e1e2uL, requiresDevice = true) {
+    override fun configure(source: String?, parameters: FileSystemParameters): VfsResult<FileSystemOptions> {
+        if (source == null || !parameters.isEmpty()) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        val device = BlockDevices.find(source) ?: return VfsResult.Err(VfsError.NO_DEVICE)
+        val volume = (device.backend as BlockDeviceBackend).volume
+        return VfsResult.Ok(ErofsOptions(volume.openReadOnly()))
+    }
+
     override fun createBackend(options: FileSystemOptions): VfsResult<SuperBlockBackend> {
         val configuration = options as? ErofsOptions
             ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         if (configuration.cacheBytes < 0) {
+            configuration.data.close()
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
-        val instance = ErofsInstance.open(configuration.data, configuration.cacheBytes)
-            ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        return VfsResult.Ok(instance)
+        val instance = try {
+            ErofsInstance.open(configuration.data, configuration.cacheBytes)
+        } catch (_: IllegalStateException) {
+            null
+        }
+        if (instance != null) return VfsResult.Ok(instance)
+        configuration.data.close()
+        return VfsResult.Err(VfsError.INVALID_ARGUMENT)
     }
 }
 
@@ -61,13 +78,15 @@ private class ErofsInstance private constructor(
     private val packed: PackedData,
 ) : SuperBlockBackend {
     companion object {
-        fun open(data: ModuleData, cacheBytes: Int): ErofsInstance? {
+        fun open(data: ByteSource, cacheBytes: Int): ErofsInstance? {
             val image = Image(data)
             val header = Header.read(image) ?: return null
             val packed = PackedData.open(image, header, cacheBytes) ?: return null
             return ErofsInstance(image, header, packed)
         }
     }
+
+    override fun release() = image.close()
 
     private val inodeLock = IrqSpinLock()
     private val inodeCache = mutableMapOf<ULong, Inode>()
@@ -143,7 +162,7 @@ private class ErofsInstance private constructor(
         ) {
             return null
         }
-        val mapHeader = image.align(inode.location + inode.inodeSize.toULong(), 8) ?: return null
+        val mapHeader = (inode.location + inode.inodeSize.toULong()).alignUp(8uL) ?: return null
         if (!image.contains(mapHeader, 8)) return null
         val fragmentHeader = image.u64(mapHeader)
         if (fragmentHeader and Header.FRAGMENT_INODE_FLAG == 0uL) return null

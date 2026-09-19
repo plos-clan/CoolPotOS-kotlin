@@ -1,23 +1,32 @@
 #!/usr/bin/bash
 set -euo pipefail
 
-readonly overlay_state=/run/fuse-overlayfs
-readonly overlay_lower=$overlay_state/lower
-readonly overlay_root=/run/root
-
-printf 'init: preparing overlay layers\n'
-mount -t tmpfs -o mode=0700,nosuid,nodev tmpfs /run
+mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
 mount -t proc -o nosuid,nodev,noexec proc /proc
-mkdir -p "$overlay_lower" "$overlay_state/upper" "$overlay_state/work" "$overlay_root"
-mount --bind / "$overlay_lower"
+mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
 
-printf 'init: starting fuse-overlayfs\n'
-fuse-overlayfs \
-    -o "lowerdir=$overlay_lower,upperdir=$overlay_state/upper,workdir=$overlay_state/work" \
-    "$overlay_root"
+readonly lower=/run/lower
+readonly merged=/run/root
+mkdir -p "$lower" "$merged"
+mount --bind / "$lower"
 
-printf 'init: mounting runtime filesystems\n'
-mkdir -p "$overlay_root"/{dev,proc,sys,run}
+source=
+for argument in $(cat /proc/cmdline); do
+    case "$argument" in
+        overlay=PARTUUID=*) source=/dev/disk/by-partuuid/${argument#overlay=PARTUUID=} ;;
+    esac
+done
+[ -n "$source" ]
+timeout 30 bash -c 'until test -b "$1"; do sleep 0.1; done' bash "$source"
 
-printf 'init: launching init process\n'
-exec chroot "$overlay_root" /usr/lib/systemd/systemd
+status=0
+e2fsck -p "$source" || status=$?
+[ "$status" -le 1 ]
+fuse2fs -o rw,allow_other "$source" /overlay
+mkdir -p /overlay/upper /overlay/work /overlay/results
+fuse-overlayfs -o "lowerdir=$lower,upperdir=/overlay/upper,workdir=/overlay/work" "$merged"
+mkdir -p "$merged"/{dev,proc,sys,run,overlay}
+for name in dev proc sys run overlay; do
+    mount --bind "/$name" "$merged/$name"
+done
+exec chroot "$merged" /usr/lib/systemd/systemd

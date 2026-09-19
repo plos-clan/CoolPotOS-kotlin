@@ -36,7 +36,6 @@ const val TAG_USAGE_MAX = 0b0010u
 
 const val FLAG_CONSTANT = 0x0000_0001u
 const val FLAG_VARIABLE = 0x0000_0002u
-const val FLAG_RELATIVE = 0x0000_0004u
 const val FLAG_WRAP = 0x0000_0008u
 const val FLAG_NONLINEAR = 0x0000_0010u
 const val FLAG_NO_PREF = 0x0000_0020u
@@ -68,10 +67,6 @@ class HidField(
     fun isConst(): Boolean = flags and FLAG_CONSTANT != 0u
 
     fun isVariable(): Boolean = flags and FLAG_VARIABLE != 0u
-
-    fun isArray(): Boolean = flags and FLAG_VARIABLE == 0u
-
-    fun isRelative(): Boolean = flags and FLAG_RELATIVE != 0u
 
     fun isRange(): Boolean = usageMin != usageMax
 

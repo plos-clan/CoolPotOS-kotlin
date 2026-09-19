@@ -426,10 +426,11 @@ private class PipeState(
                 IoEvent.READABLE -> buffer.size
                 IoEvent.WRITABLE -> buffer.remaining
             }
-            val becameReady = availableBytes >= minimumBytes || when (event) {
+            val peerClosed = when (event) {
                 IoEvent.READABLE -> writers == 0
                 IoEvent.WRITABLE -> readers == 0
             }
+            val becameReady = availableBytes >= minimumBytes || peerClosed
             if (!becameReady) {
                 waiter = queue.add(thread, minimumBytes)
             }

@@ -207,10 +207,6 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
         return true
     }
 
-    fun activate() {
-        bridge.write_cr3(pml4PhysicalAddress)
-    }
-
     internal fun resolveUserPhysicalAddress(
         virtualAddress: ULong,
         requireWritable: Boolean,

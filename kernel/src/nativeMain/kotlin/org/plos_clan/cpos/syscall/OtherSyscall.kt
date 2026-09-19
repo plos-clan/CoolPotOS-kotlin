@@ -226,34 +226,59 @@ internal fun getTimeOfDay(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-internal fun nanoSleep(regs: PtraceRegisters, process: Process): Long {
-    val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
-    val bytes = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI])
-        .copyFromUser(TimeSpec.NATIVE_SIZE)
-        ?: return errno(Errno.EFAULT)
-    val requested = TimeSpec(0, 0)
-    if (!requested.updateFromNativeBytes(bytes) || !requested.isValidDuration) {
-        return errno(Errno.EINVAL)
-    }
-    if (!TscClock.isReady) return errno(Errno.EIO)
+internal fun nanoSleep(regs: PtraceRegisters, process: Process): Long =
+    ClockSleep.wait(
+        process, Clock.System.MONOTONIC, false,
+        regs[PtraceRegisters.IDX_RDI], regs[PtraceRegisters.IDX_RSI],
+    )
 
-    val deadline = requested.deadlineFrom(TscClock.nanoTime())
-    while (TscClock.nanoTime() < deadline) {
-        if (thread.hasPendingSignal()) {
-            val remaining = deadline - TscClock.nanoTime().coerceAtMost(deadline)
-            val remainingAddress = regs[PtraceRegisters.IDX_RSI]
-            if (remainingAddress != 0uL &&
-                !UserMemory(process.addressSpace, remainingAddress).copyToUser(
-                    TimeSpec.fromDurationNanos(remaining).toNativeBytes(),
-                )
-            ) {
-                return errno(Errno.EFAULT)
+internal fun clockNanoSleep(regs: PtraceRegisters, process: Process): Long {
+    val clock = Clock.from(regs[PtraceRegisters.IDX_RDI].toInt(), process)
+        ?: return errno(Errno.EINVAL)
+    val flags = regs[PtraceRegisters.IDX_RSI]
+    if (flags > 1uL) return errno(Errno.EINVAL)
+    if (clock != Clock.System.REALTIME && clock != Clock.System.MONOTONIC &&
+        clock != Clock.System.BOOTTIME) return errno(Errno.EOPNOTSUPP)
+    return ClockSleep.wait(
+        process, clock, flags == 1uL,
+        regs[PtraceRegisters.IDX_RDX], regs[PtraceRegisters.IDX_R10],
+    )
+}
+
+private object ClockSleep {
+    fun wait(
+        process: Process,
+        clock: Clock,
+        absolute: Boolean,
+        requestedAddress: ULong,
+        remainingAddress: ULong,
+    ): Long {
+        val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
+        val bytes = UserMemory(process.addressSpace, requestedAddress).copyFromUser(TimeSpec.NATIVE_SIZE)
+            ?: return errno(Errno.EFAULT)
+        val requested = TimeSpec(0, 0)
+        if (!requested.updateFromNativeBytes(bytes) || !requested.isValidDuration) return errno(Errno.EINVAL)
+        if (!TscClock.isReady) return errno(Errno.EIO)
+        val relativeDeadline = requested.deadlineFrom(TscClock.nanoTime())
+        while (true) {
+            val now = TscClock.nanoTime()
+            val remaining = if (absolute) {
+                val current = clock.read().durationNanos
+                requested.durationNanos - minOf(current, requested.durationNanos)
+            } else relativeDeadline - minOf(now, relativeDeadline)
+            if (remaining == 0uL) return 0
+            if (thread.hasPendingSignal()) {
+                if (!absolute && remainingAddress != 0uL) {
+                    val destination = UserMemory(process.addressSpace, remainingAddress)
+                    val value = TimeSpec.fromDurationNanos(remaining).toNativeBytes()
+                    if (!destination.copyToUser(value)) return errno(Errno.EFAULT)
+                }
+                return errno(Errno.EINTR)
             }
-            return errno(Errno.EINTR)
+            val deadline = TimeSpec.fromDurationNanos(remaining).deadlineFrom(now)
+            if (!Scheduler.parkCurrentUntil(deadline)) return errno(Errno.ESRCH)
         }
-        if (!Scheduler.parkCurrentUntil(deadline)) return errno(Errno.ESRCH)
     }
-    return 0L
 }
 
 internal fun getRandom(regs: PtraceRegisters, process: Process): Long {

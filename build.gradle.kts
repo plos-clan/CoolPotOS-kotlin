@@ -17,7 +17,7 @@ tasks.register<Delete>("cleanAll") {
 
 listOf(
     "jvmBenchmark",
-    "buildIso",
+    "buildImage",
     "buildMlibc",
     "compileC",
     "linkKernel",

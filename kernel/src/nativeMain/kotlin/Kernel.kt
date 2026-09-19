@@ -1,6 +1,6 @@
+import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.pointed
 import kotlinx.cinterop.toKString
-import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.FrameBuffer
 import org.plos_clan.cpos.drivers.MemoryDevice
@@ -17,7 +17,6 @@ import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.RuntimeMemory
 import org.plos_clan.cpos.mem.page.KernelPageDirectory
-import org.plos_clan.cpos.module.ModuleManager
 import org.plos_clan.cpos.module.Vdso
 import org.plos_clan.cpos.network.NetworkStack
 import org.plos_clan.cpos.syscall.Syscall
@@ -94,12 +93,11 @@ object KernelBoot {
         }
         Acpi.enumerateDevices()
         Usb.initialize()
-        ModuleManager.initialize()
-        workload()
         if (!Scheduler.finishBootstrap()) {
             return
         }
         bridge.enable_interrupt()
+        workload()
         KernelCoroutines.runEventLoop()
     }
 }

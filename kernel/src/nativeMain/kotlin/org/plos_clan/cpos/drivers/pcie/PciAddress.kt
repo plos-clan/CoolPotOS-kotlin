@@ -1,7 +1,5 @@
 package org.plos_clan.cpos.drivers.pcie
 
-import org.plos_clan.cpos.mem.MmioAddress
-
 value class PciAddress(val raw: UInt) {
     val segment: UShort
         get() = ((raw shr 16) and 0xFFFFu).toUShort()
@@ -20,8 +18,6 @@ value class PciAddress(val raw: UInt) {
             bus.toInt().toString(16).padStart(2, '0') + ":" +
             device.toInt().toString(16).padStart(2, '0') + "." +
             function.toInt().toString(16)
-
-    fun mmioAddress(): MmioAddress? = Pcie.configurationSpace(this)?.baseAddress
 
     fun hasMultipleFunctions(): Boolean =
         PciHeader(Pcie.configurationSpace(this) ?: return false).isMultiFunction

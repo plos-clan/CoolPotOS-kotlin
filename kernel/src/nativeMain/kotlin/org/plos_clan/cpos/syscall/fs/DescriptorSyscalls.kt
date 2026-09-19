@@ -10,7 +10,6 @@ import org.plos_clan.cpos.fs.FileDescriptorTable
 import org.plos_clan.cpos.fs.OpenFlags
 import org.plos_clan.cpos.fs.vfs.AccessMode
 import org.plos_clan.cpos.fs.vfs.AnonymousFileBackend
-import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.SeekOrigin
 import org.plos_clan.cpos.fs.vfs.SealableFile
 import org.plos_clan.cpos.fs.vfs.VfsError
@@ -61,20 +60,13 @@ internal fun lseek(regs: PtraceRegisters, process: Process): Long {
     }
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
     return try {
-        when (file.inode.type) {
-            InodeType.CHARACTER_DEVICE,
-            InodeType.BLOCK_DEVICE,
-            InodeType.PIPE,
-            InodeType.SOCKET,
-            -> errno(Errno.ESPIPE)
-            else -> when (val result = file.seek(
-                process.vfsOperationContext,
-                regs[PtraceRegisters.IDX_RSI].toLong(),
-                origin,
-            )) {
-                is VfsResult.Ok -> result.value
-                is VfsResult.Err -> errno(result.error.errno)
-            }
+        when (val result = file.seek(
+            process.vfsOperationContext,
+            regs[PtraceRegisters.IDX_RSI].toLong(),
+            origin,
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> errno(result.error.errno)
         }
     } finally {
         file.release()

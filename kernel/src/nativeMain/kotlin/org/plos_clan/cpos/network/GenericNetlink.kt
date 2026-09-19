@@ -104,16 +104,15 @@ internal object GenericNetlinkProtocol : NetlinkKernelProtocol(NetlinkProtocolKi
             ?: return NetlinkResult.Failure(VfsError.INVALID_ARGUMENT, "Family header is truncated")
         val attributes = message.attributes(attributeOffset)
             ?: return NetlinkResult.Failure(VfsError.INVALID_ARGUMENT, "Malformed Generic Netlink attributes")
-        return family.handle(
-            GenericNetlinkRequest(
-                request,
-                registered,
-                command,
-                message.payload.readU8(1).toInt(),
-                userHeader,
-                attributes,
-            ),
+        val familyRequest = GenericNetlinkRequest(
+            request,
+            registered,
+            command,
+            message.payload.readU8(1).toInt(),
+            userHeader,
+            attributes,
         )
+        return family.handle(familyRequest)
     }
 
     private const val GENL_HEADER_SIZE = 4

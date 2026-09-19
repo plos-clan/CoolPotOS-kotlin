@@ -51,19 +51,18 @@ object Vdso : CachedRegionBacking() {
     fun install(addressSpace: AddressSpace): Boolean {
         if (image.isEmpty()) return false
         val length = image.size.toULong().alignUp(PAGE_SIZE_BYTES) ?: return false
-        return addressSpace.insert(
-            MemoryRegion(
-                start = USER_MMAP_END,
-                end = USER_MMAP_END + length,
-                access = MEMORY_REGION_READABLE or MEMORY_REGION_EXECUTABLE,
-                maximumAccess = MEMORY_REGION_READABLE or MEMORY_REGION_EXECUTABLE,
-                name = "[vdso]",
-                type = MemoryRegionType.VDSO,
-                shared = true,
-                backing = this,
-                sharedIdentity = this,
-            ),
+        val region = MemoryRegion(
+            start = USER_MMAP_END,
+            end = USER_MMAP_END + length,
+            access = MEMORY_REGION_READABLE or MEMORY_REGION_EXECUTABLE,
+            maximumAccess = MEMORY_REGION_READABLE or MEMORY_REGION_EXECUTABLE,
+            name = "[vdso]",
+            type = MemoryRegionType.VDSO,
+            shared = true,
+            backing = this,
+            sharedIdentity = this,
         )
+        return addressSpace.insert(region)
     }
 
     override fun read(offset: ULong, destination: ByteArray): Int {

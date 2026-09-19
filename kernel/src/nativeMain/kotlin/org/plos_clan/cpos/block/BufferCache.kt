@@ -18,6 +18,23 @@ class BufferCache(val device: BlockDevice) {
     private val bytes = BlockBytes(device)
     private val lock = KernelReadWriteLock()
     private val online = AtomicBoolean(true)
+    private val readers = mutableListOf<ReadLease>()
+
+    inner class ReadLease internal constructor(val start: ULong, val length: ULong) :
+        AutoCloseable {
+        override fun close() =
+            lock.withLock(true) {
+                readers.remove(this)
+                Unit
+            }
+    }
+
+    fun protect(start: ULong, length: ULong): ReadLease =
+        lock.withLock(true) {
+            require(start <= device.geometry.byteSize && length <= device.geometry.byteSize - start)
+            ReadLease(start, length).also(readers::add)
+        }
+
     private val source =
         object : PageCacheSource {
             override val cacheKind = PageCacheKind.BLOCK
@@ -26,15 +43,16 @@ class BufferCache(val device: BlockDevice) {
 
             override fun read(offset: ULong, destination: ByteArray): Int {
                 if (!connected) return PageCacheSource.READ_ERROR
-                val result = KernelCoroutines.await {
-                    bytes.transfer(
-                        BlockOperation.READ,
-                        offset,
-                        ByteArrayBuffer(destination),
-                        0,
-                        destination.size,
-                    )
-                }
+                val result =
+                    KernelCoroutines.await {
+                        bytes.transfer(
+                            BlockOperation.READ,
+                            offset,
+                            ByteArrayBuffer(destination),
+                            0,
+                            destination.size,
+                        )
+                    }
                 return if (result.successful || result.bytes > 0) result.bytes
                 else PageCacheSource.READ_ERROR
             }
@@ -86,6 +104,13 @@ class BufferCache(val device: BlockDevice) {
             if (position >= device.geometry.byteSize || length == 0)
                 return@withLock BlockResult(BlockStatus.SUCCESS)
             val count = minOf(length.toULong(), device.geometry.byteSize - position).toInt()
+            if (
+                readers.any {
+                    position < it.start + it.length && it.start < position + count.toUInt()
+                }
+            ) {
+                return@withLock BlockResult(BlockStatus.READ_ONLY)
+            }
             val capacity =
                 minOf(count, maxOf(device.geometry.blockSize, device.preferredTransferBytes))
             val memory =
@@ -98,15 +123,16 @@ class BufferCache(val device: BlockDevice) {
                     if (source.copyTo(offset + completed, memory, 0, chunk) != chunk) {
                         return@withLock BlockResult(BlockStatus.INVALID, completed)
                     }
-                    val result = KernelCoroutines.await {
-                        bytes.transfer(
-                            BlockOperation.WRITE,
-                            position + completed.toUInt(),
-                            memory,
-                            0,
-                            chunk,
-                        )
-                    }
+                    val result =
+                        KernelCoroutines.await {
+                            bytes.transfer(
+                                BlockOperation.WRITE,
+                                position + completed.toUInt(),
+                                memory,
+                                0,
+                                chunk,
+                            )
+                        }
                     completed += result.bytes
                     if (!result.successful || result.bytes != chunk)
                         return@withLock BlockResult(result.status, completed)

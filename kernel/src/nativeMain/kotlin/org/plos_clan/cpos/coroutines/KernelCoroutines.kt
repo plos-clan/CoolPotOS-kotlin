@@ -64,7 +64,9 @@ object KernelCoroutines {
         while (true) {
             val completed = lock.withLock { result }
             if (completed != null) return completed.getOrThrow()
-            if (!Scheduler.parkCurrent()) Scheduler.yieldCurrent()
+            if (thread === ProcessManager.getBootstrapThread()) {
+                runUntil { lock.withLock { result != null } }
+            } else if (!Scheduler.parkCurrent()) Scheduler.yieldCurrent()
         }
     }
 
@@ -110,11 +112,17 @@ object KernelCoroutines {
     }
 
     fun runEventLoop(): Nothing {
+        runUntil { false }
+        error("Kernel event loop stopped")
+    }
+
+    private fun runUntil(completed: () -> Boolean) {
         val dispatcher = dispatcher
-        while (true) {
+        while (!completed()) {
             val wakeSequence = bridge.fast_handoff_service()
             val pendingSwitch = TaskReaper.reapRuntime()
             dispatcher.runReadyBatch()
+            if (completed()) return
             val idle = !pendingSwitch && !dispatcher.hasReadyWork()
             bridge.fast_handoff_park_kotlin(
                 if (idle) dispatcher.nextDeadlineNanos() ?: 0uL else 0uL,

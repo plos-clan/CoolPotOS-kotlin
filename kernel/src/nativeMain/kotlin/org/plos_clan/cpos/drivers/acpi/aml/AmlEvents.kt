@@ -14,18 +14,10 @@ import org.plos_clan.cpos.fault.IRQ_LAST_DEVICE_VECTOR
 import org.plos_clan.cpos.fault.IrqController
 import org.plos_clan.cpos.utils.IrqSpinLock
 
-private const val EVENT_QUEUE_CAPACITY = 256
-private const val EVENT_GPE_LEVEL = 2
-private const val EVENT_GPE_EDGE = 3
 private const val PM1_POWER_BUTTON_STATUS = 0x0100u
 
 object AmlEvents {
     private val lock = IrqSpinLock()
-    private val eventKinds = IntArray(EVENT_QUEUE_CAPACITY)
-    private val eventValues = UIntArray(EVENT_QUEUE_CAPACITY)
-    private var head = 0
-    private var tail = 0
-    private var dropped = 0uL
     private var sciPending = false
     private var sciInstalled = false
     private var sciGsi = 0u
@@ -33,24 +25,10 @@ object AmlEvents {
     private var workerWakeup: KernelEvent? = null
     private val powerButtons = mutableSetOf<AmlName>()
 
-    val droppedEvents: ULong
-        get() = lock.withLock { dropped }
-
     fun signalSci(): Boolean {
         lock.withLock { sciPending = true }
         workerWakeup?.signal()
         return true
-    }
-
-    fun signalGpe(number: UInt, edgeTriggered: Boolean): Boolean {
-        val accepted = enqueue(
-            if (edgeTriggered) EVENT_GPE_EDGE else EVENT_GPE_LEVEL,
-            number,
-        )
-        if (accepted) {
-            workerWakeup?.signal()
-        }
-        return accepted
     }
 
     internal fun installWorkerWakeup(wakeup: KernelEvent) {
@@ -119,21 +97,9 @@ object AmlEvents {
     }
 
     internal fun processPending(maxEvents: Int): Int {
-        if (maxEvents <= 0) {
-            return 0
-        }
         var processed = 0
-        while (processed < maxEvents) {
-            if (takeSciPending()) {
-                processSci()
-                processed++
-                continue
-            }
-            val event = dequeue() ?: break
-            when (event.first) {
-                EVENT_GPE_LEVEL -> Aml.evaluateGpe(event.second, edgeTriggered = false)
-                EVENT_GPE_EDGE -> Aml.evaluateGpe(event.second, edgeTriggered = true)
-            }
+        while (processed < maxEvents && takeSciPending()) {
+            processSci()
             processed++
         }
         return processed
@@ -285,26 +251,5 @@ object AmlEvents {
         if (sciInstalled) {
             IoApic.setMasked(sciGsi, false)
         }
-    }
-
-    private fun enqueue(kind: Int, value: UInt): Boolean = lock.withLock {
-        val next = (head + 1) % EVENT_QUEUE_CAPACITY
-        if (next == tail) {
-            dropped++
-            return@withLock false
-        }
-        eventKinds[head] = kind
-        eventValues[head] = value
-        head = next
-        true
-    }
-
-    private fun dequeue(): Pair<Int, UInt>? = lock.withLock {
-        if (tail == head) {
-            return@withLock null
-        }
-        val result = eventKinds[tail] to eventValues[tail]
-        tail = (tail + 1) % EVENT_QUEUE_CAPACITY
-        result
     }
 }

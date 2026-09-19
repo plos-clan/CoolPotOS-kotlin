@@ -25,7 +25,8 @@ class TransferDescriptor(
                         (setup.request.toUInt() shl 8) or
                         (setup.value.toUInt() shl 16)
                 val high = setup.index.toUInt() or (setup.length.toUInt() shl 16)
-                add(Trb.newSetupStage(low, high, if (length == 0u) 0u else if (input) 3u else 2u))
+                val transferType = if (length == 0u) 0u else if (input) 3u else 2u
+                add(Trb.newSetupStage(low, high, transferType))
             }
             var transferred = 0u
             for (buffer in buffers) {
@@ -41,22 +42,20 @@ class TransferDescriptor(
                     val left = minOf(31uL, packets - transferred.toULong() / packetSize).toUInt()
                     val type = if (setup != null && first) TRB_DATA_STAGE else TRB_NORMAL
                     val direction = if (type == TRB_DATA_STAGE && input) 1u shl 16 else 0u
-                    val flags =
-                        TRB_ISP or
-                            direction or
-                            when {
-                                more -> TRB_CHAIN
-                                setup == null -> TRB_IOC
-                                else -> 0u
-                            }
-                    add(
-                        Trb(
-                            address.toUInt(),
-                            (address shr 32).toUInt(),
-                            chunk or ((if (more) left else 0u) shl 17),
-                            (type shl 10) or flags,
-                        )
+                    val completion = when {
+                        more -> TRB_CHAIN
+                        setup == null -> TRB_IOC
+                        else -> 0u
+                    }
+                    val flags = TRB_ISP or direction or completion
+                    val packetCount = if (more) left else 0u
+                    val trb = Trb(
+                        address.toUInt(),
+                        (address shr 32).toUInt(),
+                        chunk or (packetCount shl 17),
+                        (type shl 10) or flags,
                     )
+                    add(trb)
                     remaining -= chunk
                     address += chunk
                 }

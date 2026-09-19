@@ -57,8 +57,6 @@ internal class PciSysfsPublisher {
         }
     }
 
-    fun handle(address: PciAddress): SysfsObjectHandle? = functions[address]
-
     fun reset() {
         for (index in registrationOrder.indices.reversed()) {
             val handle = registrationOrder[index]

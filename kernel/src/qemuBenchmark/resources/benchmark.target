@@ -1,0 +1,6 @@
+[Unit]
+Description=CoolPotOS benchmark environment
+Requires=basic.target
+Wants=benchmark.service
+After=basic.target
+AllowIsolate=yes

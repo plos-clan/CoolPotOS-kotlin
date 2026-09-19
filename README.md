@@ -25,9 +25,9 @@
 
 ## Build
 
-This project uses Gradle for kernel build, ISO packaging, and QEMU run.
+This project uses Gradle for kernel build, GPT disk image packaging, and QEMU run.
 
-- Supports kernel build, ISO packaging, and QEMU run
+- Supports kernel build, GPT disk image packaging, and QEMU run
 - Uses the official Limine 12.x prebuilt release and transparent loading
   of a maximum-compression gzip kernel
 - The kernel targets x86_64; portable Kotlin code and tests also compile for the JVM
@@ -35,8 +35,8 @@ This project uses Gradle for kernel build, ISO packaging, and QEMU run.
 **Available Gradle tasks:**
 - `./gradlew build`: Build kernel ELF
 - `./gradlew prepareUserland`: Build the CachyOS EROFS root filesystem
-- `./gradlew buildIso`: Build the UEFI ISO image
-- `./gradlew run`: Run the ISO image in QEMU
+- `./gradlew buildImage`: Build the sparse UEFI GPT disk image
+- `./gradlew run`: Run the disk image in QEMU
 - `./gradlew jvmTest`: Run portable Kotlin unit tests on the host
 - `./gradlew qemuTest`: Run portable and native tests inside the kernel
 - `./gradlew benchmark`: Run portable benchmarks on the JVM
@@ -58,7 +58,7 @@ Release mode is the default; the commands below specify it explicitly.
 **Or step by step**
 
 ```shell
-./gradlew buildIso
+./gradlew buildImage
 ./gradlew run
 ```
 
@@ -96,14 +96,22 @@ You need to install:
 - Clang (`clang`, `clang++`)
 - LLD (`ld.lld`)
 - Rootless Podman (for userland packaging)
-- `xorriso` (for ISO creation)
+- Rust/Cargo, e2fsprogs, and util-linux `unshare` (for sparse GPT image creation)
 - `qemu-system-x86_64` (for emulation)
 - Git and Gradle (included with Kotlin/Native)
 
 `prepareUserland` builds the CachyOS root filesystem and installs `assets/init`
 as `/init`, which starts systemd inside the writable overlay root. Gradle tracks
 `assets/init` and `assets/userland.sh`; changes to either rebuild the EROFS archive.
-Run `./gradlew buildIso` to also update the bootable ISO before testing it.
+Run `./gradlew buildImage` to also update the bootable disk image before testing it.
+
+CI shares the generated EROFS archive between QEMU tests and benchmarks using
+[`actions/cache`](https://github.com/actions/cache). The cache key covers
+`assets/init`, `assets/userland.sh`, and `kernel/build.gradle.kts`. A matching cache
+skips Podman installation and rootfs generation. Cache misses use the normal
+Gradle task dependencies, and successful jobs automatically save new archives.
+Concurrent cache misses can still build separately. Delete the repository's
+rootfs cache to refresh upstream packages when these inputs have not changed.
 
 **Overridable environment variables:**
 
@@ -119,7 +127,6 @@ value for a build.
 | `CROSS_CXX=clang++`                               | C++ compiler executable.               |
 | `LINKER=ld.lld`                                   | Kernel linker executable.              |
 | `OBJCOPY=llvm-objcopy`                            | Object-copy executable.                |
-| `XORRISO=xorriso`                                 | ISO creation executable.               |
 | `QEMU=qemu-system-x86_64`                         | QEMU executable.                       |
 | `QEMU_DISPLAY=gtk`                                | QEMU display frontend.                 |
 | `QEMU_BRIDGE`                                     | Existing host bridge interface (`-PqemuBridge`). Unset uses user networking. |
@@ -149,9 +156,9 @@ the Kotlin/Native compiler's generated suites. `commonBenchmark` contains
 JVM algorithm benchmarks for memory-region lookup, pathname parsing, and
 the coroutine timer queue: eight parameter combinations in total.
 
-QEMU tests need QEMU, xorriso, and a KVM host exposing
-TSC-deadline support. The test image has no userspace rootfs. `qemuCpu`,
-`qemuAcceleration`, `qemuSmp`, and `qemuMemory` configure this image;
+QEMU tests need QEMU, Rust/Cargo, e2fsprogs, Podman, and a KVM host exposing
+TSC-deadline support. The test kernel mounts EROFS from disk without starting
+userspace. `qemuCpu`, `qemuAcceleration`, `qemuSmp`, and `qemuMemory` configure this image;
 changing acceleration does not remove the kernel's clock requirements.
 `qemuTimeout` sets the timeout per boot in seconds (default 600), and
 `qemuFilter` selects test case names using a regular expression.
@@ -252,6 +259,53 @@ than polling in the bootstrap loop.
 * mlibc [managarm/mlibc](https://github.com/managarm/mlibc)
 * libos-terminal [plos-clan/libos-terminal](https://github.com/plos-clan/libos-terminal)
 * libzstd-decompress [facebook/zstd](https://github.com/facebook/zstd)
+
+## Persistent disk images
+
+`./gradlew buildImage` creates `kernel/build/CoolPotOS.img`, a sparse raw GPT disk
+with FAT32 ESP, read-only EROFS root, and an ext4 persistent partition. The guest
+mounts the persistent filesystem through fuse2fs at `/overlay`, then combines
+`/overlay/upper` with EROFS through fuse-overlayfs. Partition selection uses
+PARTUUID; drivers share the same partition and buffer-cache implementation.
+
+`./gradlew run -PstorageTransport=bot` attaches the system disk through USB BOT.
+Use `-PstorageTransport=uas` for UASP. USB devices use explicit root ports so
+QEMU does not insert an implicit hub. A separate ESP-only `boot.img` loads the
+kernel independently of firmware support for the selected transport. `nvme` is
+also accepted as a QEMU attachment setting and requires an NVMe guest driver.
+
+Rebuilding updates the ESP and rootfs while preserving the daily writable
+partition. Stop QEMU before rebuilding. Changes to its partition layout require
+explicit migration. `clean` preserves the daily image; `cleanAll` removes it.
+`rootCapacityMiB` and `overlayCapacityMiB` configure partition capacity.
+
+The rootfs build does not depend on benchmark programs. `qemuBenchmark` creates
+`kernel/build/benchmark.img` with its program and service in the writable layer;
+each measured boot receives a fresh sparse copy in its results directory. A dedicated
+`benchmark.target` starts measurement after `basic.target`, without login or network
+services delaying the benchmark. The
+guest records results at `/overlay/results/benchmark.log` as well as on serial.
+The daily writable partition is not used by benchmark boots.
+
+Run the real storage tests with both transports:
+
+```sh
+./gradlew qemuTest -PqemuFilter=StorageDiskTest -PstorageTransport=bot
+./gradlew qemuTest -PqemuFilter=StorageDiskTest -PstorageTransport=uas
+```
+
+These tests use a dedicated scratch partition, check byte and partition
+boundaries, flush and concurrent transfers, and mount EROFS from the device.
+Reports are stored under `kernel/build/qemuTest/results-<transport>/`.
+
+Only sparse raw images are produced. They can be compressed for distribution and
+written directly to USB media; a sparse file is already a raw image. Write its
+entire logical contents, including zero ranges. When using a larger target,
+relocate the backup GPT and resize the writable partition with standard tools.
+
+fuse2fs does not journal its writes. The writable ext4 image therefore omits the
+unused journal, and early boot checks the filesystem before mounting it. This
+provides persistence but does not provide journaled crash recovery.
 
 ## License
 

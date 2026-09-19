@@ -2,6 +2,7 @@
 
 package org.plos_clan.cpos.syscall.fs
 
+import org.plos_clan.cpos.block.BlockDevices
 import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.OpenFlags
@@ -21,7 +22,6 @@ import org.plos_clan.cpos.fs.vfs.PathResolution
 import org.plos_clan.cpos.fs.vfs.PathResolutionBoundary
 import org.plos_clan.cpos.fs.vfs.SymlinkResolution
 import org.plos_clan.cpos.fs.vfs.UnmountMode
-import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
@@ -384,6 +384,25 @@ internal fun umount2(regs: PtraceRegisters, process: Process): Long {
     )) {
         is VfsResult.Ok -> 0L
         is VfsResult.Err -> errno(result.error.errno)
+    }
+}
+
+internal fun sync(regs: PtraceRegisters, process: Process): Long {
+    process.context?.namespace?.sync(process.vfsOperationContext)
+    BlockDevices.flush()
+    return 0
+}
+
+internal fun syncfs(regs: PtraceRegisters, process: Process): Long {
+    val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI]) ?: return errno(Errno.EBADF)
+    val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
+    return try {
+        when (val result = file.inode.superBlock.backend.sync(process.vfsOperationContext)) {
+            is VfsResult.Ok -> 0L
+            is VfsResult.Err -> errno(result.error.errno)
+        }
+    } finally {
+        file.release()
     }
 }
 

@@ -1,4 +1,5 @@
 import groovy.json.JsonSlurper
+import java.io.RandomAccessFile
 import java.io.OutputStream
 import java.net.URI
 import java.nio.file.Files
@@ -125,7 +126,93 @@ abstract class KernelBitcodeTask @Inject constructor(private val exec: ExecOpera
         }
         output.parentFile.mkdirs()
         exec.exec {
-            commandLine(compileCommand.get() + listOf(freestanding.absolutePath, "-o", output.absolutePath))
+            commandLine(compileCommand.get() + listOf(
+                freestanding.absolutePath,
+                "-o", output.absolutePath,
+            ))
+        }
+    }
+}
+
+@DisableCachingByDefault(because = "Preserves mutable disk partitions")
+abstract class DiskImageTask @Inject constructor(private val exec: ExecOperations) : DefaultTask() {
+    @get:Input
+    abstract val partitions: ListProperty<String>
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val builder: RegularFileProperty
+
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val contents: ConfigurableFileCollection
+
+    @get:OutputFile
+    abstract val image: RegularFileProperty
+
+    fun partition(
+        name: String,
+        id: String,
+        size: Long,
+        path: File? = null,
+        fat: Boolean = false,
+        preserve: Boolean = false,
+        readOnly: Boolean = false,
+    ) {
+        partitions.addAll("--partition", name, id, size.toString())
+        if (path != null) {
+            contents.from(path)
+            partitions.addAll(if (fat) "--fat" else "--image", path.path)
+        }
+        if (preserve) partitions.add("--preserve")
+        if (readOnly) partitions.add("--read-only")
+    }
+
+    @TaskAction
+    fun build() {
+        val command = listOf(builder.get().asFile.path, "--output", image.get().asFile.path) + partitions.get()
+        exec.exec { commandLine(command) }
+    }
+}
+
+@DisableCachingByDefault(because = "Creates filesystem images with filesystem utilities")
+abstract class Ext4ImageTask @Inject constructor(private val exec: ExecOperations) : DefaultTask() {
+    @get:Input
+    abstract val capacity: Property<Long>
+
+    @get:Optional
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val seed: DirectoryProperty
+
+    @get:OutputFile
+    abstract val image: RegularFileProperty
+
+    @TaskAction
+    fun build() {
+        val output = image.get().asFile
+        output.parentFile.mkdirs()
+        val temporary = output.resolveSibling("${output.name}.part")
+        try {
+            RandomAccessFile(temporary, "rw").use {
+                it.setLength(0)
+                it.setLength(capacity.get())
+            }
+            val contents = if (seed.isPresent) listOf("-d", seed.get().asFile.path) else emptyList()
+            val command = listOf(
+                "unshare", "--user", "--map-root-user",
+                "mkfs.ext4", "-q", "-F",
+                "-O", "^has_journal",
+                "-E", "lazy_itable_init=0",
+            ) + contents + temporary.path
+            exec.exec { commandLine(command) }
+            Files.move(
+                temporary.toPath(), output.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        } finally {
+            temporary.delete()
         }
     }
 }
@@ -136,7 +223,6 @@ private data class ToolSettings(
     val linker: String,
     val llvmLink: String,
     val objcopy: String,
-    val xorriso: String,
     val qemu: String,
 )
 
@@ -152,7 +238,7 @@ private object FullLto {
 
 private class BuildPaths(project: Project) {
     val root = project.layout.buildDirectory.get().asFile
-    val iso = root.resolve("iso")
+    val esp = root.resolve("esp")
     val downloads = root.resolve("downloads")
     val kernelC = project.file("src/nativeMain/c")
     val assets = project.rootProject.file("assets")
@@ -162,7 +248,6 @@ private class BuildPaths(project: Project) {
     val limine = root.resolve("limine")
     val limineInclude = limine.resolve("include")
     val limineHeader = limineInclude.resolve("limine.h")
-    val limineUefi = limine.resolve("boot/limine-uefi-cd.bin")
     val limineEfi = limine.resolve("boot/BOOTX64.EFI")
     val liminePrebuilt = RemoteArtifact(
         "https://github.com/Limine-Bootloader/Limine/releases/latest/download/limine-binary.tar.gz",
@@ -190,7 +275,7 @@ private class BuildPaths(project: Project) {
     val vdso = root.resolve("vdso")
     val kernelElf = root.resolve("kernel.elf")
     val kernelGzip = root.resolve("kernel.elf.gz")
-    val isoImage = root.resolve("${project.rootProject.name}.iso")
+    val diskImage = root.resolve("${project.rootProject.name}.img")
 }
 
 private class VdsoConfig(
@@ -288,7 +373,6 @@ private class MlibcConfig(
 private class KernelConfig(
     paths: BuildPaths,
     mlibc: MlibcConfig,
-    vdso: VdsoConfig,
     arch: String,
     debug: Boolean,
     toolRoot: File,
@@ -334,7 +418,6 @@ private class KernelConfig(
 }
 
 private data class QemuConfig(
-    val executable: String,
     val cpuSet: String,
     val flags: List<String>,
 )
@@ -362,7 +445,6 @@ private class BuildConfig(private val project: Project) {
         linker = setting("linker", "LINKER", "ld.lld"),
         llvmLink = setting("llvmLink", "LLVM_LINK", "llvm-link"),
         objcopy = setting("objcopy", "OBJCOPY", "llvm-objcopy"),
-        xorriso = setting("xorriso", "XORRISO", "xorriso"),
         qemu = setting("qemu", "QEMU", "qemu-system-x86_64"),
     )
     private val toolRoot = setting(
@@ -386,7 +468,7 @@ private class BuildConfig(private val project: Project) {
     )
     val vdso = VdsoConfig(paths, tools, arch)
     private val rootfsName = "rootfs-$arch.erofs"
-    val kernel = KernelConfig(paths, mlibc, vdso, arch, debug, toolRoot)
+    val kernel = KernelConfig(paths, mlibc, arch, debug, toolRoot)
     val userland = UserlandConfig(
         image = setting(
             "userlandImage",
@@ -400,25 +482,21 @@ private class BuildConfig(private val project: Project) {
     )
     private val qemuBridge = optionalSetting("qemuBridge", "QEMU_BRIDGE")
     val qemu = QemuConfig(
-        executable = tools.qemu,
         cpuSet = setting("qemuCpuSet", "QEMU_CPU_SET", "0-7"),
         flags = listOf(
             "-m", setting("qemuMemory", "QEMU_MEMORY", "2g"),
             "-M", "q35", "-cpu", "host", "-enable-kvm",
             "-no-reboot", "-smp", setting("qemuSmp", "QEMU_SMP", "4"),
             "-device", "qemu-xhci,id=xhci",
-            "-device", "usb-kbd,bus=xhci.0", "-device", "usb-mouse,bus=xhci.0",
+            "-device", "usb-kbd,bus=xhci.0,port=2", "-device", "usb-mouse,bus=xhci.0,port=3",
             "-netdev", qemuBridge?.let { "bridge,id=usbnet,br=$it" } ?: "user,id=usbnet",
-            "-device", "usb-net,id=rndis,bus=xhci.0,netdev=usbnet",
+            "-device", "usb-net,id=rndis,bus=xhci.0,port=4,netdev=usbnet",
             "-display", setting("qemuDisplay", "QEMU_DISPLAY", "gtk"),
             "-chardev", "stdio,id=console,mux=on,signal=off",
             "-serial", "chardev:console",
             "-drive",
             "if=pflash,format=raw,readonly=on,file=${paths.assets.resolve("ovmf-code.fd")}",
-        ) + (if (debug) listOf("-s", "-S") else emptyList()) + listOf(
-            "-drive",
-            "file=${paths.isoImage.absolutePath},format=raw,snapshot=on",
-        ),
+        ) + (if (debug) listOf("-s", "-S") else emptyList()),
     )
 
     private fun setting(prop: String, env: String, default: String): String =
@@ -480,10 +558,9 @@ val generateRuntimeLayout = tasks.register("generateRuntimeLayout") {
         val source = buildString {
             appendLine("package org.plos_clan.cpos.tasks")
             types.forEach { (name, type) ->
-                val record = records.single { it.lineSequence().firstOrNull { line -> '|' in line }
-                    ?.substringAfter("| ").let { declaration ->
-                        if (type.endsWith(',')) declaration?.startsWith(type) == true else declaration == type
-                    }
+                val record = records.single { record ->
+                    val declaration = record.lineSequence().firstOrNull { '|' in it }?.substringAfter("| ")
+                    if (type.endsWith(',')) declaration?.startsWith(type) == true else declaration == type
                 }
                 val size = Regex("sizeof=(\\d+),.*?align=(\\d+)").find(record)!!.groupValues
                 appendLine("internal object ${name}Layout {")
@@ -503,7 +580,9 @@ val generateRuntimeLayout = tasks.register("generateRuntimeLayout") {
             appendLine("#pragma once")
             var type = ""
             source.lineSequence().forEach { line ->
-                if (line.startsWith("internal object ")) type = line.substringAfter("object ").substringBefore("Layout")
+                if (line.startsWith("internal object ")) {
+                    type = line.substringAfter("object ").substringBefore("Layout")
+                }
                 if (line.trimStart().startsWith("const val ")) {
                     val declaration = line.substringAfter("const val ").replace(" = ", " ").removeSuffix("uL")
                     appendLine("#define ${type}_$declaration")
@@ -565,12 +644,11 @@ kotlin {
         linkerOpts("--as-needed")
     }
 
-    nativeTarget.binaries.staticLib {
-        if (buildType.debuggable == config.debug) {
-            kotlinBitcodeTasks.getValue("main").configure {
-                dependsOn(linkTaskProvider)
-                sourceFile.set(outputFile)
-            }
+    val kernelBuildType = if (config.debug) NativeBuildType.DEBUG else NativeBuildType.RELEASE
+    nativeTarget.binaries.staticLib(buildTypes = listOf(kernelBuildType)) {
+        kotlinBitcodeTasks.getValue("main").configure {
+            dependsOn(linkTaskProvider)
+            sourceFile.set(outputFile)
         }
     }
 
@@ -604,8 +682,7 @@ kotlin {
             compilerOptions.freeCompilerArgs.add("-generate-no-exit-test-runner")
         }
     }
-    val testBuildType = if (config.debug) NativeBuildType.DEBUG else NativeBuildType.RELEASE
-    nativeTarget.binaries.staticLib("qemuTest", listOf(testBuildType)) {
+    nativeTarget.binaries.staticLib("qemuTest", listOf(kernelBuildType)) {
         compilation = qemuTest
         kotlinBitcodeTasks.getValue("qemuTest").configure {
             dependsOn(linkTaskProvider)
@@ -684,8 +761,6 @@ val downloadFreestndHeaders = tasks.register<DownloadFileTask>("downloadFreestnd
 val userBenchmark = kotlin.targets.getByName<KotlinNativeTarget>("native")
     .binaries.getExecutable("qemuBenchmark", NativeBuildType.RELEASE)
 
-val benchmarkService = file("src/qemuBenchmark/resources/benchmark.service")
-
 val prepareUserland = tasks.register<Exec>("prepareUserland") {
     group = "build"
     description = "Builds a zstd-compressed CachyOS EROFS root filesystem."
@@ -694,9 +769,6 @@ val prepareUserland = tasks.register<Exec>("prepareUserland") {
     inputs.property("platform", config.userland.platform)
     inputs.file(config.userland.script).withPathSensitivity(PathSensitivity.NONE)
     inputs.file(config.paths.initScript).withPathSensitivity(PathSensitivity.NONE)
-    dependsOn(userBenchmark.linkTaskProvider)
-    inputs.file(userBenchmark.outputFile).withPathSensitivity(PathSensitivity.NONE)
-    inputs.file(benchmarkService).withPathSensitivity(PathSensitivity.NONE)
     outputs.file(config.userland.archive)
 
     commandLine(
@@ -706,8 +778,6 @@ val prepareUserland = tasks.register<Exec>("prepareUserland") {
         "--volume", "${config.userland.archive.parentFile.absolutePath}:/output:rw,Z",
         "--volume", "${config.userland.script.absolutePath}:/usr/local/bin/cpos-userland:ro,Z",
         "--volume", "${config.paths.initScript.absolutePath}:/usr/local/share/cpos/init:ro,Z",
-        "--volume", "${userBenchmark.outputFile.absolutePath}:/usr/local/share/cpos/benchmark.kexe:ro,Z",
-        "--volume", "${benchmarkService.absolutePath}:/usr/local/share/cpos/benchmark.service:ro,Z",
         config.userland.image,
         "/usr/local/bin/cpos-userland",
         config.userland.name,
@@ -740,7 +810,7 @@ val prepareLimine = tasks.register<Sync>("prepareLimine") {
     from({
         tarTree(resources.gzip(config.paths.liminePrebuilt.file))
     }) {
-        include("*/limine-uefi-cd.bin", "*/BOOTX64.EFI")
+        include("*/BOOTX64.EFI")
         eachFile { path = "boot/$name" }
         includeEmptyDirs = false
     }
@@ -907,8 +977,10 @@ val compileC = tasks.register("compileC") {
 }
 
 val kernelLinks = kotlinBitcodeTasks.mapValues { (variant, bitcode) ->
-    val output = if (variant == "main") config.paths.kernelElf else config.paths.root.resolve("$variant/kernel.elf")
-    val name = if (variant == "main") "linkKernel" else "link${variant.replaceFirstChar(Char::uppercaseChar)}Kernel"
+    val output = if (variant == "main") config.paths.kernelElf
+        else config.paths.root.resolve("$variant/kernel.elf")
+    val name = if (variant == "main") "linkKernel"
+        else "link${variant.replaceFirstChar(Char::uppercaseChar)}Kernel"
     tasks.register<Exec>(name) {
         group = "build"
         description = "Links the kernel and runtime libraries into an ELF executable."
@@ -944,13 +1016,73 @@ val compressKernel = tasks.register<GzipFileTask>("compressKernel") {
     destinationFile.set(config.paths.kernelGzip)
 }
 
+val scratchPartition = "302b9826-b5d9-438a-a4f3-ce73e435fa7f"
+val rootPartition = "8b849e5c-c8f5-4dc5-aab9-730f07b14f30"
+val overlayPartition = "4f68ed11-7e90-4587-9dd9-320f0c830153"
+val benchmarkPartition = "b31bf763-a967-4249-85ab-f83d63233d23"
+val espPartition = "ee336264-d9b3-4b09-a203-b46e0339701b"
+val mebibyte = 1024L * 1024
+val espCapacity = 128 * mebibyte
+val rootCapacity = providers.gradleProperty("rootCapacityMiB").orElse("1024").get().toLong() * mebibyte
+val overlayCapacity = providers.gradleProperty("overlayCapacityMiB").orElse("2048").get().toLong() * mebibyte
+val oibDirectory = rootProject.file("vendor/oib")
+val oibBinary = config.paths.root.resolve("oib/release/oib")
+val buildOib = tasks.register<Exec>("buildOib") {
+    inputs.files(fileTree(oibDirectory) { include("Cargo.toml", "Cargo.lock", "src/**") })
+    outputs.file(oibBinary)
+    commandLine(
+        "cargo", "build", "--locked", "--release",
+        "--manifest-path", oibDirectory.resolve("Cargo.toml"),
+        "--target-dir", config.paths.root.resolve("oib"),
+    )
+}
+
+tasks.withType<DiskImageTask>().configureEach {
+    dependsOn(buildOib)
+    builder.set(oibBinary)
+}
+
+val overlayImage = config.paths.root.resolve("overlay.ext4")
+val prepareOverlay = tasks.register<Ext4ImageTask>("prepareOverlay") {
+    capacity.set(overlayCapacity)
+    image.set(overlayImage)
+}
+val benchmarkSeed = tasks.register<Sync>("stageBenchmarkOverlay") {
+    dependsOn(userBenchmark.linkTaskProvider)
+    from(userBenchmark.outputFile) {
+        into("upper/usr/lib/cpos")
+        rename { "benchmark.kexe" }
+    }
+    from("src/qemuBenchmark/resources") { into("upper/etc/systemd/system") }
+    into(config.paths.root.resolve("benchmark-seed"))
+}
+val benchmarkExt4 = config.paths.root.resolve("benchmark.ext4")
+val prepareBenchmarkOverlay = tasks.register<Ext4ImageTask>("prepareBenchmarkOverlay") {
+    dependsOn(benchmarkSeed)
+    capacity.set(overlayCapacity)
+    seed.set(config.paths.root.resolve("benchmark-seed"))
+    image.set(benchmarkExt4)
+}
+val benchmarkImage = config.paths.root.resolve("benchmark.img")
+val buildBenchmarkImage = tasks.register<DiskImageTask>("buildBenchmarkImage") {
+    dependsOn(prepareBenchmarkOverlay)
+    image.set(benchmarkImage)
+    partition("benchmark", benchmarkPartition, overlayCapacity, benchmarkExt4)
+}
+
+val scratchImage = config.paths.root.resolve("storage-test.img")
+val buildStorageTestImage = tasks.register<DiskImageTask>("buildStorageTestImage") {
+    image.set(scratchImage)
+    partition("scratch", scratchPartition, 16 * mebibyte)
+}
+
 val bootConfigs = listOf("main", "qemuTest", "qemuBenchmark").associateWith { variant ->
     val title = variant.replaceFirstChar(Char::uppercaseChar)
     tasks.register<Copy>("configure$title") {
         val test = variant == "qemuTest"
         val console = if (variant == "main") config.console else "ttyS0,115200n8"
         val arguments = when (variant) {
-            "qemuBenchmark" -> listOf("cpos.benchmark")
+            "qemuBenchmark" -> listOf("cpos.benchmark", "systemd.unit=benchmark.target")
             "qemuTest" -> {
                 val filter = providers.gradleProperty("qemuFilter").orElse(".*").get()
                 require(filter.none { it == '\n' || it == '\r' || it == '\u0000' })
@@ -961,12 +1093,14 @@ val bootConfigs = listOf("main", "qemuTest", "qemuBenchmark").associateWith { va
         }
         val commandLine = buildList {
             add("console=$console")
-            if (!test) addAll(listOf("rootfs=${config.userland.name}", "rdinit=/init"))
+            add("root=PARTUUID=$rootPartition")
+            add("overlay=PARTUUID=${if (variant == "qemuBenchmark") benchmarkPartition else overlayPartition}")
+            if (!test) add("rdinit=/init")
+            if (test) add("verify.storage=PARTUUID=$scratchPartition")
             addAll(arguments)
         }.joinToString(" ")
         val tokens = mapOf(
             "kernel" to if (test) "boot():/boot/kernel.elf" else "\$boot():/boot/kernel.elf.gz",
-            "rootfs" to if (test) "" else config.userland.name,
             "commandLine" to commandLine,
         )
         inputs.property("tokens", tokens)
@@ -976,107 +1110,134 @@ val bootConfigs = listOf("main", "qemuTest", "qemuBenchmark").associateWith { va
     }
 }
 
-val stageIso = tasks.register<Sync>("stageIso") {
-    group = "build"
-    description = "Stages the compressed kernel, EROFS root filesystem, and Limine assets."
-    dependsOn(compressKernel, prepareLimine, prepareUserland)
-
-    into(config.paths.iso)
+val stageEsp = tasks.register<Sync>("stageEsp") {
+    dependsOn(compressKernel, prepareLimine)
+    into(config.paths.esp)
     from(bootConfigs.getValue("main")) { into("limine") }
-    from(config.paths.limineUefi) { into("limine") }
     from(config.paths.limineEfi) { into("EFI/BOOT") }
-    from(listOf(config.userland.archive, config.paths.kernelGzip)) { into("boot") }
+    from(config.paths.kernelGzip) { into("boot") }
 }
 
-val buildIso = tasks.register<Exec>("buildIso") {
+fun DiskImageTask.systemPartitions(esp: File, preserve: Boolean) {
+    partition("EFI", espPartition, espCapacity, esp, fat = true)
+    partition("rootfs", rootPartition, rootCapacity, config.userland.archive, readOnly = true)
+    partition("overlay", overlayPartition, overlayCapacity, overlayImage, preserve = preserve)
+}
+
+val buildImage = tasks.register<DiskImageTask>("buildImage") {
     group = "build"
-    description = "Builds the UEFI ISO image from staged assets."
-    dependsOn(stageIso)
+    dependsOn(stageEsp, prepareUserland, prepareOverlay)
+    image.set(config.paths.diskImage)
+    systemPartitions(config.paths.esp, preserve = true)
+}
 
-    inputs.dir(config.paths.iso)
-    outputs.file(config.paths.isoImage)
-
-    commandLine(
-        config.tools.xorriso,
-        "-as", "mkisofs",
-        "--efi-boot", "limine/limine-uefi-cd.bin",
-        "-efi-boot-part", "--efi-boot-image",
-        config.paths.iso.absolutePath,
-        "-o", config.paths.isoImage.absolutePath,
+fun storageFlags(
+    image: File,
+    transport: String,
+    id: String,
+    port: Int,
+    readOnly: Boolean = false,
+): List<String> {
+    val drive = listOf(
+        "-drive", "if=none,id=$id,format=raw,file=$image,readonly=${if (readOnly) "on" else "off"}",
     )
+    val device = when (transport) {
+        "bot" -> listOf("-device", "usb-storage,bus=xhci.0,port=$port,drive=$id")
+        "uas" -> listOf(
+            "-device", "usb-uas,id=$id-uas,bus=xhci.0,port=$port",
+            "-device", "scsi-hd,bus=$id-uas.0,scsi-id=0,lun=0,drive=$id",
+        )
+        "nvme" -> listOf("-device", "nvme,drive=$id,serial=$id")
+        else -> error("Unsupported storage transport: $transport")
+    }
+    return drive + device
+}
+val storageTransport = providers.gradleProperty("storageTransport").orElse("bot").get()
+
+val bootImage = config.paths.root.resolve("boot.img")
+val buildBootImage = tasks.register<DiskImageTask>("buildBootImage") {
+    dependsOn(stageEsp)
+    image.set(bootImage)
+    partition("EFI", espPartition, espCapacity, config.paths.esp, fat = true)
 }
 
 tasks.register<Exec>("run") {
     group = "build"
-    description = "Runs CoolPotOS in QEMU with serial on stdio."
-    dependsOn(buildIso)
-
-    commandLine(listOf("taskset", "--cpu-list", config.qemu.cpuSet, config.qemu.executable) + config.qemu.flags)
+    dependsOn(buildImage, buildBootImage)
+    commandLine(
+        listOf("taskset", "--cpu-list", config.qemu.cpuSet, config.tools.qemu) +
+            config.qemu.flags + listOf("-drive", "file=$bootImage,format=raw") +
+            storageFlags(config.paths.diskImage, storageTransport, "system", 1)
+    )
     standardInput = System.`in`
 }
 
 for (variant in listOf("qemuTest", "qemuBenchmark")) {
     val title = variant.replaceFirstChar(Char::uppercaseChar)
     val directory = config.paths.root.resolve(variant)
-    val image = directory.resolve("kernel.iso")
-    val staging = directory.resolve("iso")
+    val image = directory.resolve(config.paths.diskImage.name)
+    val staging = directory.resolve("esp")
     val benchmark = variant == "qemuBenchmark"
     val stage = tasks.register<Sync>("stage$title") {
         into(staging)
         from(bootConfigs.getValue(variant)) { into("limine") }
+        from(config.paths.limineEfi) { into("EFI/BOOT") }
+        dependsOn(prepareLimine)
         if (benchmark) {
-            dependsOn(stageIso)
-            from(config.paths.iso) { exclude("limine/limine.conf") }
+            dependsOn(compressKernel)
+            from(config.paths.kernelGzip) { into("boot") }
         } else {
-            dependsOn(kernelLinks.getValue(variant), prepareLimine)
+            dependsOn(kernelLinks.getValue(variant))
             from(directory.resolve("kernel.elf")) { into("boot") }
-            from(config.paths.limineUefi) { into("limine") }
-            from(config.paths.limineEfi) { into("EFI/BOOT") }
         }
     }
-    val buildImage = tasks.register<Exec>("build${title}Iso") {
+    val variantImage = tasks.register<DiskImageTask>("build${title}Image") {
+        dependsOn(stage, prepareUserland, prepareOverlay)
+        this.image.set(image)
+        systemPartitions(staging, preserve = false)
+    }
+    val boot = directory.resolve("boot.img")
+    val variantBoot = tasks.register<DiskImageTask>("build${title}Boot") {
         dependsOn(stage)
-        inputs.dir(staging)
-        outputs.file(image)
-        commandLine(
-            config.tools.xorriso, "-as", "mkisofs", "--efi-boot", "limine/limine-uefi-cd.bin",
-            "-efi-boot-part", "--efi-boot-image", staging.absolutePath, "-o", image.absolutePath,
-        )
+        this.image.set(boot)
+        partition("EFI", espPartition, espCapacity, staging, fat = true)
     }
     tasks.register<JavaExec>(variant) {
         group = "verification"
-        description = "Runs $variant in the kernel and records its results."
-        dependsOn(buildImage)
+        dependsOn(variantImage, variantBoot)
+        if (benchmark) dependsOn(buildBenchmarkImage) else dependsOn(buildStorageTestImage)
         val acceleration = providers.gradleProperty("qemuAcceleration").orElse("kvm").get()
         val cpu = providers.gradleProperty("qemuCpu").orElse(if (acceleration == "kvm") "host" else "max").get()
-        val flags = if (benchmark) config.qemu.flags.mapIndexed { index, argument ->
-            if (index > 0 && config.qemu.flags[index - 1] == "-display") "none"
-            else argument.replace(config.paths.isoImage.absolutePath, image.absolutePath)
-        } + listOf("-monitor", "none") else listOf(
+        val secondaryStorage = if (benchmark) {
+            storageFlags(File("@benchmark@"), storageTransport, "benchmark", 2)
+        } else {
+            storageFlags(scratchImage, storageTransport, "scratch", 2)
+        }
+        val flags = listOf(
             "-machine", "q35,accel=$acceleration", "-cpu", cpu,
             "-m", providers.gradleProperty("qemuMemory").orElse("2g").get(),
             "-smp", providers.gradleProperty("qemuSmp").orElse("4").get(),
             "-display", "none", "-monitor", "none", "-serial", "stdio", "-no-reboot",
+            "-device", "qemu-xhci,id=xhci",
             "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
             "-drive", "if=pflash,format=raw,readonly=on,file=${config.paths.assets.resolve("ovmf-code.fd")}",
-            "-drive", "file=${image.absolutePath},format=raw,snapshot=on",
-        )
+            "-drive", "file=$boot,format=raw",
+        ) + storageFlags(image, storageTransport, "system", 1, readOnly = benchmark) + secondaryStorage
         val host = kotlin.targets.getByName<KotlinJvmTarget>("jvm").compilations.getByName("qemuHost")
         dependsOn(host.compileAllTaskName)
         classpath(host.output.allOutputs, host.runtimeDependencyFiles)
         mainClass.set("QemuRunnerKt")
         val bootCount = if (benchmark) providers.gradleProperty("benchmarkBoots").orElse("3").get() else "1"
-        val kernelFile = if (benchmark) config.paths.kernelElf else directory.resolve("kernel.elf")
         args(
             "--mode", if (benchmark) "system" else "test",
             "--boots", bootCount,
-            "--output", directory.resolve("results"),
+            "--output", directory.resolve("results-$storageTransport"),
             "--timeout", providers.gradleProperty("qemuTimeout").orElse("600").get(),
-            "--kernel", kernelFile,
+            "--kernel", if (benchmark) config.paths.kernelElf else directory.resolve("kernel.elf"),
             "--build-type", if (config.debug) "debug" else "release",
             "--gc", providers.gradleProperty("kotlin.native.binary.gc").get(),
         )
-        if (benchmark) args("--rootfs", config.userland.archive)
+        if (benchmark) args("--rootfs", config.userland.archive, "--benchmark", benchmarkImage)
         args(listOf("--", config.tools.qemu) + flags)
     }
 }
@@ -1086,10 +1247,10 @@ tasks.matching { it.name == "linkDebugTestNative" }.configureEach { enabled = fa
 tasks.named("check") { setDependsOn(listOf(tasks.named("jvmTest"))) }
 
 tasks.named<Delete>("clean") {
-    description = "Deletes kernel build artifacts except mlibc."
+    description = "Deletes build artifacts while preserving mlibc and the daily disk image."
     setDelete(
         fileTree(config.paths.root) {
-            exclude(config.mlibc.build.name, "${config.mlibc.build.name}/**")
+            exclude(config.mlibc.build.name, "${config.mlibc.build.name}/**", config.paths.diskImage.name)
         }
     )
 }

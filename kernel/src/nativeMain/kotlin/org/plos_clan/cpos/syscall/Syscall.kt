@@ -42,6 +42,8 @@ import org.plos_clan.cpos.syscall.fs.fremovexattr
 import org.plos_clan.cpos.syscall.fs.fsetxattr
 import org.plos_clan.cpos.syscall.fs.fstat
 import org.plos_clan.cpos.syscall.fs.fstatfs
+import org.plos_clan.cpos.syscall.fs.sync
+import org.plos_clan.cpos.syscall.fs.syncfs
 import org.plos_clan.cpos.syscall.fs.fsync
 import org.plos_clan.cpos.syscall.fs.ftruncate
 import org.plos_clan.cpos.syscall.fs.getCwd
@@ -237,6 +239,7 @@ private enum class LinuxSyscall(
     PRCTL(157, ::prctl),
     ARCH_PRCTL(158, ::archPrctl),
     CHROOT(161, ::chroot),
+    SYNC(162, ::sync),
     MOUNT(165, ::mount),
     UMOUNT2(166, ::umount2),
     REBOOT(169, ::reboot),
@@ -265,6 +268,7 @@ private enum class LinuxSyscall(
     FADVISE64(221, ::fadvise64),
     CLOCK_GETTIME(228, ::clockGetTime),
     CLOCK_GETRES(229, ::clockGetRes),
+    CLOCK_NANOSLEEP(230, ::clockNanoSleep),
     EXIT_GROUP(231, ::exitGroup),
     EPOLL_WAIT(232, EpollSyscalls::wait),
     EPOLL_CTL(233, EpollSyscalls::control),
@@ -309,6 +313,7 @@ private enum class LinuxSyscall(
     RECVMMSG(299, SocketSyscalls::recvmmsg, restartable = true),
     PRLIMIT64(302, ::prlimit64),
     NAME_TO_HANDLE_AT(303, ::nameToHandleAt),
+    SYNCFS(306, ::syncfs),
     SENDMMSG(307, SocketSyscalls::sendmmsg, restartable = true),
     GETCPU(309, ::getCPU),
     RENAMEAT2(316, ::renameAt2),

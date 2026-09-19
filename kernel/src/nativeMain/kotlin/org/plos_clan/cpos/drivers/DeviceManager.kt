@@ -138,6 +138,7 @@ data class DeviceRegistration(
     val minor: UInt? = null,
     val backend: DeviceBackend,
     val sysfs: SysfsDevicePublication? = null,
+    val aliases: List<String> = emptyList(),
 )
 
 class Device internal constructor(
@@ -145,6 +146,7 @@ class Device internal constructor(
     val type: DeviceType,
     val number: DeviceNumber,
     val backend: DeviceBackend,
+    val aliases: List<String> = emptyList(),
 )
 
 interface DeviceRegistryObserver {
@@ -218,11 +220,17 @@ object DeviceManager {
     private val lock = IrqSpinLock()
 
     fun register(registration: DeviceRegistration): Device? {
-        if (registration.major > DeviceNumber.MAX_MAJOR || !validDevicePath(registration.name)) {
+        val names = (registration.aliases + registration.name).toSet()
+        if (registration.major > DeviceNumber.MAX_MAJOR ||
+            names.size != registration.aliases.size + 1 || names.any { !validDevicePath(it) }
+        ) {
             return null
         }
         val registered = lock.withLock {
-            if (devicesByName.containsKey(registration.name)) return@withLock null
+            val conflict = devicesByName.values.any { device ->
+                device.name in names || device.aliases.any { it in names }
+            }
+            if (conflict) return@withLock null
 
             val majorKey = MajorKey(registration.type, registration.major)
             val minor = registration.minor ?: allocateMinor(majorKey) ?: return@withLock null
@@ -236,6 +244,7 @@ object DeviceManager {
                 type = registration.type,
                 number = number,
                 backend = registration.backend,
+                aliases = registration.aliases,
             )
             devicesByName[device.name] = device
             devicesByNumber[key] = device
@@ -269,18 +278,6 @@ object DeviceManager {
         } ?: return 0
         publish(removed.second)
         return removed.first.size
-    }
-
-    fun findByBackend(backend: DeviceBackend): Device? = lock.withLock {
-        var match: Device? = null
-        for (device in devicesByName.values) {
-            if (device.backend === backend &&
-                (match == null || device.number.value < match.number.value)
-            ) {
-                match = device
-            }
-        }
-        match
     }
 
     fun find(type: DeviceType, number: DeviceNumber): Device? =

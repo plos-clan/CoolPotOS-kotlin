@@ -85,16 +85,14 @@ object UserStackBuilder {
 
         val stackStart = stackTop - stackSize
         val guardPage = stackStart - PAGE_SIZE_BYTES
-        if (!addressSpace.insert(
-                MemoryRegion(
-                    start = stackStart,
-                    end = stackTop,
-                    access = MEMORY_REGION_READABLE or MEMORY_REGION_WRITABLE,
-                    name = "[stack]",
-                    type = MemoryRegionType.STACK,
-                ),
-            )
-        ) {
+        val region = MemoryRegion(
+            start = stackStart,
+            end = stackTop,
+            access = MEMORY_REGION_READABLE or MEMORY_REGION_WRITABLE,
+            name = "[stack]",
+            type = MemoryRegionType.STACK,
+        )
+        if (!addressSpace.insert(region)) {
             println("UserStack: stack range overlaps an existing mapping")
             return null
         }

@@ -30,16 +30,17 @@ import org.plos_clan.cpos.utils.PollEvents
 internal object FuseDevice : PositionlessDeviceBackend {
     private const val MINOR = 229u
 
-    fun initialize(): Boolean = DeviceManager.register(
-        DeviceRegistration(
+    fun initialize(): Boolean {
+        val registration = DeviceRegistration(
             name = "fuse",
             type = DeviceType.CHARACTER,
             major = LinuxDeviceMajor.MISC.number,
             minor = MINOR,
             backend = this,
             sysfs = SysfsDevicePublication.virtual("misc", "fuse"),
-        ),
-    ) != null
+        )
+        return DeviceManager.register(registration) != null
+    }
 
     override fun open(device: Device): VfsResult<DeviceBackend> = VfsResult.Ok(FuseSession())
 

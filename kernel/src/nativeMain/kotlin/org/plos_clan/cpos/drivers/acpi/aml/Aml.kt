@@ -132,9 +132,6 @@ object Aml {
     fun evaluate(value: AmlObject): AmlObject? =
         if (initialized) evaluator.evaluate(value) else null
 
-    fun findDevicesById(id: String): List<AmlDeviceInfo> =
-        enumerateDevices().filter { it.matchesId(id) }
-
     fun processPendingEvents(maxEvents: Int = 64): Int =
         AmlEvents.processPending(maxEvents)
 

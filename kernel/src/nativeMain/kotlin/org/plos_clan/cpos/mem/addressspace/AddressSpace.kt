@@ -169,10 +169,6 @@ class AddressSpace internal constructor(
         regions.find(address)?.copy()
     }
 
-    fun findIntersection(start: ULong, end: ULong): MemoryRegion? = lock.withLock {
-        regions.intersection(start, end)?.copy()
-    }
-
     internal fun sharedMemoryLocation(address: ULong, size: ULong): SharedMemoryLocation? =
         lock.withLock {
             val region = regions.find(address) ?: return@withLock null

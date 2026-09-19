@@ -13,10 +13,6 @@ class Operational(
         writeU32(OP_USBCMD_OFFSET, value)
     }
 
-    fun writeUsbStatus(value: UInt) {
-        writeU32(OP_USBSTS_OFFSET, value)
-    }
-
     fun start() {
         writeUsbCommand(readUsbCommand() or 1u or (1u shl 2))
     }

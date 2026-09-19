@@ -199,11 +199,12 @@ internal class ChildWaitQueue {
     ): ChildWaitEvent? =
         lock.withLock {
             val index = events.indexOfFirst { event ->
-                event.child in children && when (event.kind) {
+                val requested = when (event.kind) {
                     ChildEventKind.EXITED -> exited
                     ChildEventKind.STOPPED -> stopped
                     ChildEventKind.CONTINUED -> continued
                 }
+                event.child in children && requested
             }
             if (index < 0) null
             else if (consume) events.removeAt(index)

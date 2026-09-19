@@ -20,7 +20,7 @@ jobs:
     with:
       task: qemuTest
       platform: qemu
-      artifacts: kernel/build/qemuTest/results/
+      artifacts: kernel/build/qemuTest/results-*/
 
   notify:
     if: always()

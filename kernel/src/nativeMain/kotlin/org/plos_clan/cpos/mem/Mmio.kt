@@ -116,19 +116,18 @@ class MmioRegion private constructor(
             byteLength: ULong,
             populate: Boolean,
         ): ULong? {
-            val result = KernelPageDirectory.addressSpace.map(
-                MemoryMapRequest(
-                    hint = 0uL,
-                    length = byteLength,
-                    access = MEMORY_REGION_READABLE or MEMORY_REGION_WRITABLE,
-                    fixed = false,
-                    noReplace = false,
-                    shared = false,
-                    type = MemoryRegionType.MMIO,
-                    offset = physicalAddress,
-                    populate = populate,
-                ),
+            val request = MemoryMapRequest(
+                hint = 0uL,
+                length = byteLength,
+                access = MEMORY_REGION_READABLE or MEMORY_REGION_WRITABLE,
+                fixed = false,
+                noReplace = false,
+                shared = false,
+                type = MemoryRegionType.MMIO,
+                offset = physicalAddress,
+                populate = populate,
             )
+            val result = KernelPageDirectory.addressSpace.map(request)
             return when (result) {
                 is MemoryMapResult.Ok -> result.value
                 is MemoryMapResult.Err -> null

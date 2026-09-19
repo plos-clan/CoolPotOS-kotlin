@@ -71,16 +71,14 @@ internal object IrqController {
 
         val index = (vector - IRQ_BASE_VECTOR).toInt()
         val target = currentTarget()
-        val descriptor = IrqDescriptor(
-            IrqAction(
-                irq,
-                target.cpuIndex,
-                name,
-                IrqControllerType.IO_APIC,
-                levelTriggered,
-            ),
-            handler,
+        val action = IrqAction(
+            irq,
+            target.cpuIndex,
+            name,
+            IrqControllerType.IO_APIC,
+            levelTriggered,
         )
+        val descriptor = IrqDescriptor(action, handler)
         val installed = lock.withLock {
             if (descriptors[index] != null) {
                 false
@@ -119,16 +117,14 @@ internal object IrqController {
             if (index == descriptors.size) return@withLock null
 
             val candidate = IRQ_BASE_VECTOR + index.toUInt()
-            descriptors[index] = IrqDescriptor(
-                IrqAction(
-                    irq ?: (candidate - IRQ_BASE_VECTOR + 1u),
-                    target.cpuIndex,
-                    name,
-                    type,
-                    levelTriggered,
-                ),
-                handler,
+            val action = IrqAction(
+                irq ?: (candidate - IRQ_BASE_VECTOR + 1u),
+                target.cpuIndex,
+                name,
+                type,
+                levelTriggered,
             )
+            descriptors[index] = IrqDescriptor(action, handler)
             candidate
         } ?: run {
             println("IrqController: no free PCI interrupt vector")

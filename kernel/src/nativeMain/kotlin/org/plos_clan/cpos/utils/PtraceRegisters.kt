@@ -78,11 +78,6 @@ value class PtraceRegisters(private val registers: CPointer<ULongVar>) {
             destination[index] = registers[index]
         }
 
-    fun restoreFrom(source: ULongArray) =
-        repeat(minOf(source.size, REGISTER_COUNT)) { index ->
-            registers[index] = source[index]
-        }
-
     fun resetForExec(entryPoint: ULong, stackPointer: ULong) {
         memset(registers, 0, (REGISTER_COUNT * ULong.SIZE_BYTES).toULong())
         registers[IDX_DS] = USER_DATA_SELECTOR

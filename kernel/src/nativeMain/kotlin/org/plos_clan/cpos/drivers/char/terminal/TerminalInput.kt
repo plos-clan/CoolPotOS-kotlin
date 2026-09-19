@@ -77,10 +77,11 @@ internal class TerminalInput(private val terminal: TerminalBackend) {
                 buffer.write(data, offset, count).also { if (it != 0) { terminal.changed(); readWaiters.wakeAll() } }
             }
         }
+        val inputMask = if (inputFlags and ISTRIP != 0) 0x7F else 0xFF
         var accepted = 0
         for (index in offset until offset + count) {
             if (!writable(session)) break
-            var value = data[index].toInt() and if (inputFlags and ISTRIP != 0) 0x7F else 0xFF
+            var value = data[index].toInt() and inputMask
             accepted++
             if (value == '\r'.code) {
                 if (inputFlags and IGNCR != 0) continue
@@ -198,8 +199,8 @@ internal class TerminalInput(private val terminal: TerminalBackend) {
             if (deadline != null && TscClock.nanoTime() >= deadline) return transferred.toLong()
             val thread = ProcessManager.currentThread() ?: return -Errno.EINTR.toLong()
             val waiter = lock.withLock {
-                if (file.isHungUp || if (canonical) buffer.committed != 0 else buffer.size != 0) null
-                else readWaiters.add(thread)
+                val readable = if (canonical) buffer.committed != 0 else buffer.size != 0
+                if (file.isHungUp || readable) null else readWaiters.add(thread)
             } ?: continue
             if (!readWaiters.await(lock, waiter, deadline)) {
                 return if (transferred != 0 || file.isHungUp) transferred.toLong() else -Errno.EINTR.toLong()
@@ -209,8 +210,9 @@ internal class TerminalInput(private val terminal: TerminalBackend) {
 
     fun poll(session: TtySession, events: Int): Int = lock.withLock {
         val settings = session.termios
+        val minimum = if (settings.character(VTIME) == 0) maxOf(1, settings.character(VMIN)) else 1
         val readable = if (settings.cLflag and ICANON != 0) buffer.committed != 0
-            else buffer.size >= if (settings.character(VTIME) == 0) maxOf(1, settings.character(VMIN)) else 1
+            else buffer.size >= minimum
         if (readable) events and PollEvents.NORMAL_INPUT else 0
     }
 

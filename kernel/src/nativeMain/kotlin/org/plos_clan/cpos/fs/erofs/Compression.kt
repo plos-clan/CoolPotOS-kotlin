@@ -7,6 +7,7 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.alignUp
 
 internal class CompactIndex private constructor(
     private val image: Image,
@@ -27,7 +28,7 @@ internal class CompactIndex private constructor(
         const val ZSTD = 3
 
         fun open(image: Image, header: Header, inode: DiskInode): CompactIndex? {
-            val mapHeader = image.align(inode.location + inode.inodeSize.toULong(), 8) ?: return null
+            val mapHeader = (inode.location + inode.inodeSize.toULong()).alignUp(8uL) ?: return null
             if (!image.contains(mapHeader, 8)) return null
             val advise = image.u16(mapHeader + 4uL)
             val clusterBits = image.u8(mapHeader + 7uL)
@@ -202,21 +203,20 @@ internal data class Extent(
         if (!image.contains(physicalOffset, physicalSize)) return null
         if (!compressed) return image.bytes(physicalOffset, logicalSize.toInt())
 
-        val physicalEnd = physicalOffset + physicalSize.toULong()
-        var source = physicalOffset
-        while (source < physicalEnd && image.u8(source) == 0) source++
-        if (source == physicalEnd || !image.contains(source, 4) ||
-            image.u32(source) != Header.ZSTD_MAGIC
-        ) return null
+        val input = image.bytes(physicalOffset, physicalSize) ?: return null
+        val source = input.indexOfFirst { it != 0.toByte() }
+        if (source < 0 || source > input.size - 4) return null
         val destination = ByteArray(logicalSize.toInt())
-        return destination.usePinned { output ->
-            val result = cp_zstd_decompress(
-                output.addressOf(0),
-                destination.size.toULong(),
-                image.addressAt(source, (physicalEnd - source).toInt()),
-                physicalEnd - source,
-            )
-            destination.takeIf { result == destination.size }
+        return input.usePinned { compressed ->
+            destination.usePinned { output ->
+                val result = cp_zstd_decompress(
+                    output.addressOf(0),
+                    destination.size.toULong(),
+                    compressed.addressOf(source),
+                    (input.size - source).toULong(),
+                )
+                destination.takeIf { result == destination.size }
+            }
         }
     }
 }

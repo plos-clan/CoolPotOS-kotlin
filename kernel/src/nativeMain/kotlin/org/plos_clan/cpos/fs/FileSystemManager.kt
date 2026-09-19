@@ -19,7 +19,9 @@ import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.module.ModuleManager
+import org.plos_clan.cpos.block.BlockDevices
+import org.plos_clan.cpos.block.BlockDeviceBackend
+import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Cmdline
 
@@ -44,19 +46,18 @@ object FileSystemManager {
 
     fun mountRootfs(): Boolean {
         if (kernelContext != null) return true
-        val moduleName = Cmdline["rootfs"] ?: "rootfs-x86_64.erofs"
-        val module = ModuleManager[moduleName] ?: run {
-            println("VFS: rootfs module '$moduleName' is unavailable")
+        val source = Cmdline["root"] ?: return false
+        val device = KernelCoroutines.await { BlockDevices.await(source) } ?: run {
+            println("VFS: root device '$source' is unavailable")
             return false
         }
-        val context = when (val result = vfs.createContext(
-            Erofs.name,
-            RootMountOptions(
-                source = moduleName,
-                flags = MountFlags.of(MountFlag.READ_ONLY),
-                fileSystemOptions = ErofsOptions(module.data),
-            ),
-        )) {
+        val volume = (device.backend as BlockDeviceBackend).volume
+        val options = RootMountOptions(
+            source = source,
+            flags = MountFlags.of(MountFlag.READ_ONLY),
+            fileSystemOptions = ErofsOptions(volume.openReadOnly()),
+        )
+        val context = when (val result = vfs.createContext(Erofs.name, options)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> {
                 println("VFS: failed to mount EROFS: ${result.error}")

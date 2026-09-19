@@ -1,17 +1,14 @@
-@file:OptIn(ExperimentalForeignApi::class)
-
 package org.plos_clan.cpos.fs.erofs
 
-import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.vfs.DeviceNumber
 import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.InodeMetadata
 import org.plos_clan.cpos.fs.vfs.InodeTimestamps
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.time.Instant
-import org.plos_clan.cpos.mem.ByteArrayBuffer
-import org.plos_clan.cpos.module.ModuleData
-import org.plos_clan.cpos.utils.alignUp
+import org.plos_clan.cpos.block.ByteSource
+import org.plos_clan.cpos.utils.KernelMutex
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 
 internal data class DiskInode(
     val location: ULong,
@@ -56,7 +53,7 @@ internal data class DiskInode(
             }
             val modificationTime = if (extended) {
                 val nanoseconds = image.u32(location + 40uL)
-                if (nanoseconds >= Instant.NANOSECONDS_PER_SECOND.toULong()) return null
+                if (nanoseconds >= Instant.NANOSECONDS_PER_SECOND) return null
                 Instant(image.u64(location + 32uL).toLong(), nanoseconds.toUInt())
             } else {
                 header.buildTime
@@ -130,7 +127,6 @@ internal data class Header(
         const val MAX_PCLUSTER_BLOCKS = 256
         const val MAX_DECOMPRESSED_PCLUSTER = 12 * 1024 * 1024
         const val FRAGMENT_INODE_FLAG = 0x8000_0000_0000_0000uL
-        const val ZSTD_MAGIC = 0xfd2f_b528uL
 
         private const val SUPER_OFFSET = 1024
         private const val SUPER_SIZE = 128
@@ -153,7 +149,8 @@ internal data class Header(
             ) return null
             val blocks = image.u32(offset + 36uL)
             val blockSize = 1 shl image.u8(offset + 12uL)
-            if (blocks * blockSize.toULong() != image.size.toULong()) return null
+            val length = blocks * blockSize.toULong()
+            if (length < blockSize.toULong() || !image.restrict(length)) return null
             val config = offset + SUPER_SIZE.toULong()
             if (!image.contains(config, 2 + ZSTD_CONFIG_SIZE) ||
                 image.u16(config) != ZSTD_CONFIG_SIZE ||
@@ -162,7 +159,7 @@ internal data class Header(
             val packedNid = image.u64(offset + 96uL)
             if (packedNid == 0uL) return null
             val buildTimeNanoseconds = image.u32(offset + 32uL)
-            if (buildTimeNanoseconds >= Instant.NANOSECONDS_PER_SECOND.toULong()) return null
+            if (buildTimeNanoseconds >= Instant.NANOSECONDS_PER_SECOND) return null
             return Header(
                 blockSize,
                 image.u16(offset + 14uL).toULong(),
@@ -176,30 +173,53 @@ internal data class Header(
     fun inodeLocation(nid: ULong): ULong = metadataStart + nid * COMPACT_INODE_SIZE.toULong()
 }
 
-internal class Image(private val data: ModuleData) {
-    val size: Int
-        get() = data.size
+internal class Image(private val data: ByteSource) : AutoCloseable {
+    var size: ULong = data.size
+        private set
+
+    private val lock = KernelMutex()
+    private var pageOffset = ULong.MAX_VALUE
+    private var page = ByteArray(0)
+
+    override fun close() = data.close()
+
+    fun restrict(length: ULong): Boolean {
+        if (length > size) return false
+        size = length
+        return true
+    }
 
     fun contains(offset: ULong, count: Int): Boolean =
         count >= 0 && contains(offset, count.toULong())
 
     fun contains(offset: ULong, count: ULong): Boolean =
-        offset <= size.toULong() && count <= size.toULong() - offset
+        offset <= size && count <= size - offset
 
-    fun align(offset: ULong, alignment: Int): ULong? =
-        offset.alignUp(alignment.toULong())
+    fun u8(offset: ULong): Int = scalar(offset, 1).toInt()
+    fun u16(offset: ULong): Int = scalar(offset, 2).toInt()
+    fun u32(offset: ULong): ULong = scalar(offset, 4)
+    fun u64(offset: ULong): ULong = scalar(offset, 8)
 
-    fun u8(offset: ULong): Int = data[offset.toInt()].toInt() and 0xff
-
-    fun u16(offset: ULong): Int = u8(offset) or (u8(offset + 1uL) shl 8)
-
-    fun u32(offset: ULong): ULong = u16(offset).toULong() or (u16(offset + 2uL).toULong() shl 16)
-
-    fun u64(offset: ULong): ULong = u32(offset) or (u32(offset + 4uL) shl 32)
+    private fun scalar(offset: ULong, width: Int): ULong = lock.withLock {
+        check(contains(offset, width)) { "EROFS field outside image" }
+        var result = 0uL
+        for (index in 0 until width) {
+            val position = offset + index.toUInt()
+            val base = position - position % PAGE_SIZE_BYTES
+            if (base != pageOffset) {
+                val loaded = ByteArray(minOf(PAGE_SIZE_BYTES, size - base).toInt())
+                check(data.read(base, loaded)) { "EROFS read failed" }
+                page = loaded
+                pageOffset = base
+            }
+            result = result or ((page[(position - base).toInt()].toULong() and 255uL) shl (index * 8))
+        }
+        result
+    }
 
     fun bytes(offset: ULong, count: Int): ByteArray? {
         if (!contains(offset, count)) return null
-        return data.copyOfRange(offset.toInt(), offset.toInt() + count)
+        return ByteArray(count).takeIf { data.read(offset, it) }
     }
 
     fun copyInto(
@@ -211,10 +231,9 @@ internal class Image(private val data: ModuleData) {
         if (!contains(sourceOffset, count) || destinationOffset < 0 ||
             destinationOffset > destination.size - count
         ) return false
-        val target = checkNotNull(ByteArrayBuffer(destination).prepareWrite(destinationOffset, count))
-        data.copyInto(target, destinationOffset, sourceOffset.toInt(), count)
+        if (destinationOffset == 0 && count == destination.size) return data.read(sourceOffset, destination)
+        val loaded = bytes(sourceOffset, count) ?: return false
+        loaded.copyInto(destination, destinationOffset)
         return true
     }
-
-    fun addressAt(offset: ULong, count: Int) = data.addressAt(offset.toInt(), count)
 }

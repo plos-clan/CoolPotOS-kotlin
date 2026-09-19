@@ -442,18 +442,9 @@ private fun copyStatFs(
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
-    return if (UserMemory(process.addressSpace, address).copyToUser(
-            LinuxStatFs(
-                fileSystemMagic,
-                path.mount.flags,
-                statistics,
-            ).toNativeBytes(),
-        )
-    ) {
-        0L
-    } else {
-        errno(Errno.EFAULT)
-    }
+    val status = LinuxStatFs(fileSystemMagic, path.mount.flags, statistics).toNativeBytes()
+    val destination = UserMemory(process.addressSpace, address)
+    return if (destination.copyToUser(status)) 0L else errno(Errno.EFAULT)
 }
 
 internal fun access(regs: PtraceRegisters, process: Process): Long {

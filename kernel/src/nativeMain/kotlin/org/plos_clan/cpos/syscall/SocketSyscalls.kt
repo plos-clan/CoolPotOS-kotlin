@@ -345,17 +345,16 @@ internal object SocketSyscalls {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return@withSocket errno(result.error.errno)
         }
-        val received = socket.receiveSocket(
-            SocketReceiveRequest(
-                destination,
-                0,
-                count,
-                nonBlocking = isNonBlocking(file, flags),
-                peek = flags and MSG_PEEK != 0,
-                waitAll = flags and MSG_WAITALL != 0,
-                returnFullLength = flags and MSG_TRUNC != 0,
-            ),
+        val request = SocketReceiveRequest(
+            destination,
+            0,
+            count,
+            nonBlocking = isNonBlocking(file, flags),
+            peek = flags and MSG_PEEK != 0,
+            waitAll = flags and MSG_WAITALL != 0,
+            returnFullLength = flags and MSG_TRUNC != 0,
         )
+        val received = socket.receiveSocket(request)
         val result = when (received) {
             is VfsResult.Ok -> received.value
             is VfsResult.Err -> return@withSocket errno(received.error.errno)
@@ -738,18 +737,17 @@ internal object SocketSyscalls {
             return errno(Errno.EFAULT)
         }
         val options = socket.socketOptions()
-        val received = socket.receiveSocket(
-            SocketReceiveRequest(
-                destination,
-                0,
-                vector.size,
-                nonBlocking = isNonBlocking(file, flags),
-                peek = flags and MSG_PEEK != 0,
-                waitAll = flags and MSG_WAITALL != 0,
-                returnFullLength = flags and MSG_TRUNC != 0,
-                deadline = deadline,
-            ),
+        val request = SocketReceiveRequest(
+            destination,
+            0,
+            vector.size,
+            nonBlocking = isNonBlocking(file, flags),
+            peek = flags and MSG_PEEK != 0,
+            waitAll = flags and MSG_WAITALL != 0,
+            returnFullLength = flags and MSG_TRUNC != 0,
+            deadline = deadline,
         )
+        val received = socket.receiveSocket(request)
         val result = when (received) {
             is VfsResult.Ok -> received.value
             is VfsResult.Err -> return errno(received.error.errno)
@@ -848,19 +846,18 @@ internal object SocketSyscalls {
                 return errno(result.error.errno)
             }
         }
-        return socket.sendSocket(
-            SocketSendRequest(
-                process,
-                source,
-                0,
-                count,
-                ancillary,
-                target,
-                isNonBlocking(file, flags),
-                flags and MSG_NOSIGNAL != 0,
-                flags and MSG_MORE != 0,
-            ),
-        ).raw
+        val request = SocketSendRequest(
+            process,
+            source,
+            0,
+            count,
+            ancillary,
+            target,
+            isNonBlocking(file, flags),
+            flags and MSG_NOSIGNAL != 0,
+            flags and MSG_MORE != 0,
+        )
+        return socket.sendSocket(request).raw
     }
 
     private fun messageAddress(

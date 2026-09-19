@@ -18,7 +18,7 @@ jobs:
     with:
       task: qemuBenchmark
       platform: qemu
-      artifacts: kernel/build/qemuBenchmark/results/
+      artifacts: kernel/build/qemuBenchmark/results-*/
 
   notify:
     if: always()

@@ -81,7 +81,8 @@ object Fuse : FileSystemType("fuse", FuseAbi.SUPER_MAGIC) {
         existing: List<FileSystemParameter>,
         parameter: FileSystemParameter,
     ): VfsResult<Unit> {
-        val valid = existing.none { it.key == parameter.key } && when (parameter.key) {
+        if (existing.any { it.key == parameter.key }) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        val valid = when (parameter.key) {
             "fd" -> parameter is FileSystemFileParameter && parameter.type == FileSystemFileParameter.Type.DESCRIPTOR ||
                 parameter.stringValue()?.toIntOrNull()?.let { it >= 0 } == true
             "rootmode" -> parameter.stringValue()?.toUIntOrNull(8)
@@ -216,20 +217,16 @@ private data class FuseMountConfiguration(
             }
             if (values.isNotEmpty()) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
 
-            return VfsResult.Ok(
-                FuseMountConfiguration(
-                    device,
-                    FuseMountOptions(
-                        rootMode,
-                        userId,
-                        groupId,
-                        defaultPermissions,
-                        allowOther,
-                        maxRead,
-                        blockSize,
-                    ),
-                ),
+            val options = FuseMountOptions(
+                rootMode,
+                userId,
+                groupId,
+                defaultPermissions,
+                allowOther,
+                maxRead,
+                blockSize,
             )
+            return VfsResult.Ok(FuseMountConfiguration(device, options))
         }
 
         private fun MutableMap<String, FileSystemParameter>.removeString(name: String): String? =

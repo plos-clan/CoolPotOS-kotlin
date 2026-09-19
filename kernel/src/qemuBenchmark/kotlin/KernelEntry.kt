@@ -10,6 +10,11 @@ import platform.linux.RB_POWER_OFF
 import platform.linux.reboot
 import platform.posix.fflush
 import platform.posix.stdout
+import platform.posix.fopen
+import platform.posix.fputs
+import platform.posix.fileno
+import platform.posix.fsync
+import platform.posix.fclose
 
 fun main() {
     val boot = Snapshot.bootNanoseconds()
@@ -20,6 +25,7 @@ fun main() {
         iterations = 10,
         duration = 1.seconds,
     )
+    val output = checkNotNull(fopen("/overlay/results/benchmark.log", "w"))
     try {
         val transferBytes = 64 * 1024 * 1024
         val blockSize = 512
@@ -40,9 +46,12 @@ fun main() {
         val report = VerificationReport("system", Snapshot::bootNanoseconds) { record ->
             print("\n$record")
             fflush(stdout)
+            check(fputs(record, output) >= 0)
         }
         report.run(benchmarks.size) { benchmarks.forEach { it.run(report, settings) } }
     } finally {
+        check(fflush(output) == 0 && fsync(fileno(output)) == 0)
+        check(fclose(output) == 0)
         check(reboot(RB_POWER_OFF) == 0) { "Cannot power off the benchmark guest" }
     }
 }

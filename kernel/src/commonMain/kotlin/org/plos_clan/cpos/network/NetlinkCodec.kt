@@ -214,9 +214,6 @@ internal sealed class NetlinkAttribute(
     companion object {
         fun binary(type: Int, value: ByteArray): NetlinkAttribute = Binary(type, value, 0)
 
-        fun networkBinary(type: Int, value: ByteArray): NetlinkAttribute =
-            Binary(type, value, NetlinkAbi.NLA_F_NET_BYTEORDER)
-
         fun u8(type: Int, value: UByte): NetlinkAttribute = UInt8(type, value)
 
         fun u16(type: Int, value: UShort): NetlinkAttribute = UInt16(type, value)

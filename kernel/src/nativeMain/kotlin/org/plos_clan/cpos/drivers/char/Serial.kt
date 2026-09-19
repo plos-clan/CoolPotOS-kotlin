@@ -135,15 +135,14 @@ internal object SerialConsole {
 
         for ((index, port) in LegacySerialPort.entries.withIndex()) {
             val line = if (port == selectedPort) selectedLine else SerialLineConfiguration()
-            val driver = SerialTtyDriver(
-                SerialPortConfiguration(
-                    deviceName = port.deviceName,
-                    index = index,
-                    ioBase = port.ioBase,
-                    irq = port.irq,
-                    line = line,
-                ),
+            val configuration = SerialPortConfiguration(
+                deviceName = port.deviceName,
+                index = index,
+                ioBase = port.ioBase,
+                irq = port.irq,
+                line = line,
             )
+            val driver = SerialTtyDriver(configuration)
             if (!TtyManager.install(driver)) return false
         }
         return true

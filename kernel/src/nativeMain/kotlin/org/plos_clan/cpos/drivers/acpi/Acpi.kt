@@ -243,9 +243,6 @@ object Acpi {
         Aml.enumerateDevices()
     }
 
-    fun findTable(signature: String): AcpiTable? =
-        findTables(signature).firstOrNull()
-
     fun findTables(signature: String): List<AcpiTable> {
         if (signature.length != 4) {
             return emptyList()

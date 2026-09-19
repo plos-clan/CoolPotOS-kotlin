@@ -42,6 +42,14 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-konan-${{ hashFiles('gradle/libs.versions.toml') }}
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-konan-
 
+      - name: Cache rootfs
+        if: inputs.platform == 'qemu'
+        id: rootfs
+        uses: actions/cache@v6
+        with:
+          path: kernel/build/generated/userland/
+          key: rootfs-v1-${{ hashFiles('assets/userland.sh', 'assets/init', 'kernel/build.gradle.kts') }}
+
       - name: Install latest stable LLVM and Clang
         if: inputs.platform != 'jvm'
         uses: ZhongRuoyu/setup-llvm@v0
@@ -52,10 +60,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends meson ninja-build
 
+      - name: Set up Rust
+        if: inputs.platform == 'qemu'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install image build dependencies
+        if: inputs.platform == 'qemu'
+        run: >-
+          sudo apt-get install --yes --no-install-recommends e2fsprogs util-linux
+          ${{ steps.rootfs.outputs.cache-hit != 'true' && 'podman' || '' }}
+
       - name: Set up QEMU
         if: inputs.platform == 'qemu'
         run: |
-          sudo apt-get install --yes --no-install-recommends qemu-system-x86 xorriso
+          sudo apt-get install --yes --no-install-recommends qemu-system-x86
           printf 'SUBSYSTEM=="misc", KERNEL=="kvm", OWNER="%s", MODE="0660"\n' "$(id -un)" |
             sudo tee /etc/udev/rules.d/99-kvm.rules
           sudo udevadm control --reload-rules
@@ -64,7 +82,10 @@ jobs:
       - name: Run Gradle
         env:
           GRADLE_TASK: ${{ inputs.task }}
-        run: ./gradlew "$GRADLE_TASK" --no-daemon --no-configuration-cache --console=plain --stacktrace
+        run: >-
+          ./gradlew "$GRADLE_TASK"
+          ${{ steps.rootfs.outputs.cache-hit == 'true' && '-x :kernel:prepareUserland' || '' }}
+          --no-daemon --no-configuration-cache --console=plain --stacktrace
 
       - name: Upload artifacts
         if: always()

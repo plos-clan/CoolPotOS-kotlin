@@ -84,13 +84,8 @@ internal class SocketAddressMemory private constructor(
                 .toInt()
             val memory = UserMemory(process.addressSpace, address)
             if (!memory.isWritable(writable)) return VfsResult.Err(VfsError.FAULT)
-            return VfsResult.Ok(
-                SocketAddressMemory(
-                    memory,
-                    capacity.coerceAtMost(Int.MAX_VALUE.toUInt()).toInt(),
-                    null,
-                ),
-            )
+            val length = capacity.coerceAtMost(Int.MAX_VALUE.toUInt()).toInt()
+            return VfsResult.Ok(SocketAddressMemory(memory, length, null))
         }
     }
 
@@ -147,17 +142,16 @@ internal data class UserMessageHeader(
             ) {
                 return VfsResult.Err(VfsError.MESSAGE_TOO_LONG)
             }
-            return VfsResult.Ok(
-                UserMessageHeader(
-                    memory,
-                    input.readU64(0),
-                    input.readU32(8),
-                    input.readU64(16),
-                    vectorCount.toInt(),
-                    input.readU64(32),
-                    controlLength.toInt(),
-                ),
+            val header = UserMessageHeader(
+                memory,
+                input.readU64(0),
+                input.readU32(8),
+                input.readU64(16),
+                vectorCount.toInt(),
+                input.readU64(32),
+                controlLength.toInt(),
             )
+            return VfsResult.Ok(header)
         }
     }
 }

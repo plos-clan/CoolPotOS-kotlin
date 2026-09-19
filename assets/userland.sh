@@ -76,10 +76,9 @@ rm -rf \
     "$rootfs/usr/share/"{licenses,locale,man,pixmaps,readline}
 
 find "$rootfs/usr" -type f \( -name '*.a' -o -name '*.o' -o -name '*.debug' \) -delete
+mkdir -p "$rootfs/overlay"
 install -Dm755 /usr/local/share/cpos/init "$rootfs/init"
-install -Dm755 /usr/local/share/cpos/benchmark.kexe "$rootfs/usr/lib/cpos/benchmark.kexe"
-install -Dm644 /usr/local/share/cpos/benchmark.service "$rootfs/usr/lib/systemd/system/benchmark.service"
-systemctl --root="$rootfs" enable NetworkManager.service dropbear.service benchmark.service
+systemctl --root="$rootfs" enable NetworkManager.service dropbear.service
 
 mkfs.erofs \
     -x-1 \

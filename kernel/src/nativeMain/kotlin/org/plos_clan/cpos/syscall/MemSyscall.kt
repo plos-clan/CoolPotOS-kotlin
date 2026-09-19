@@ -120,20 +120,17 @@ internal fun mmap(regs: PtraceRegisters, process: Process): Long {
     }
 
     if (anonymous) {
-        return mmapResult(
-            process.addressSpace.map(
-                MemoryMapRequest(
-                    hint = hint,
-                    length = length,
-                    access = access,
-                    fixed = fixed,
-                    noReplace = noReplace,
-                    shared = shared,
-                    type = MemoryRegionType.ANONYMOUS,
-                    populate = (flags and (MAP_POPULATE or MAP_LOCKED)) != 0uL,
-                ),
-            ),
+        val request = MemoryMapRequest(
+            hint = hint,
+            length = length,
+            access = access,
+            fixed = fixed,
+            noReplace = noReplace,
+            shared = shared,
+            type = MemoryRegionType.ANONYMOUS,
+            populate = (flags and (MAP_POPULATE or MAP_LOCKED)) != 0uL,
         )
+        return mmapResult(process.addressSpace.map(request))
     }
 
     val fd = fileDescriptor(fdValue) ?: return errno(Errno.EBADF)
@@ -170,21 +167,20 @@ internal fun mmap(regs: PtraceRegisters, process: Process): Long {
             null -> MappedFile(file, maximumAccess)
         }
         return try {
-            val result = process.addressSpace.map(
-                MemoryMapRequest(
-                    hint = hint,
-                    length = length,
-                    access = access,
-                    maximumAccess = backing.maximumAccess,
-                    fixed = fixed,
-                    noReplace = noReplace,
-                    shared = shared,
-                    type = MemoryRegionType.FILE,
-                    offset = offset,
-                    backing = backing,
-                    populate = (flags and (MAP_POPULATE or MAP_LOCKED)) != 0uL,
-                ),
+            val request = MemoryMapRequest(
+                hint = hint,
+                length = length,
+                access = access,
+                maximumAccess = backing.maximumAccess,
+                fixed = fixed,
+                noReplace = noReplace,
+                shared = shared,
+                type = MemoryRegionType.FILE,
+                offset = offset,
+                backing = backing,
+                populate = (flags and (MAP_POPULATE or MAP_LOCKED)) != 0uL,
             )
+            val result = process.addressSpace.map(request)
             if (result is MemoryMapResult.Ok) file.recordAccess(process.vfsOperationContext)
             mmapResult(result)
         } finally {
