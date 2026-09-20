@@ -19,7 +19,12 @@ private data class PageCacheKey(
     val identity: Any,
     val offset: ULong,
     val kind: PageCacheKind,
-)
+) {
+    fun intersects(start: ULong, end: ULong?): Boolean {
+        if (end != null && offset >= end) return false
+        return offset > ULong.MAX_VALUE - PAGE_SIZE_BYTES || start < offset + PAGE_SIZE_BYTES
+    }
+}
 
 private class CachedPage(
     val key: PageCacheKey,
@@ -38,7 +43,43 @@ private class CachedPage(
     }
 }
 
-private class PageLoad(val key: PageCacheKey) {
+private class CachedSource {
+    val pages = mutableMapOf<PageCacheKey, CachedPage>()
+    val loads = mutableSetOf<PageLoad>()
+
+    fun invalidate(identity: Any, offset: ULong, end: ULong?): List<CachedPage> {
+        for (load in loads) {
+            if (load.key.intersects(offset, end)) load.valid = false
+        }
+        val retired = mutableListOf<CachedPage>()
+        val first = offset.alignDown(PAGE_SIZE_BYTES)
+        val pageCount = end?.let { (it - 1uL - first) / PAGE_SIZE_BYTES + 1uL }
+        val kinds = PageCacheKind.entries
+        val scanThreshold = pages.size.toULong() / kinds.size.toUInt()
+        if (pageCount == null || pageCount >= scanThreshold) {
+            val iterator = pages.values.iterator()
+            while (iterator.hasNext()) {
+                val page = iterator.next()
+                if (!page.key.intersects(offset, end)) continue
+                retired += page
+                iterator.remove()
+            }
+            return retired
+        }
+        var position = first
+        repeat(pageCount.toInt()) {
+            for (kind in kinds) {
+                val key = PageCacheKey(identity, position, kind)
+                val page = pages.remove(key) ?: continue
+                retired += page
+            }
+            position += PAGE_SIZE_BYTES
+        }
+        return retired
+    }
+}
+
+private class PageLoad(val key: PageCacheKey, val source: CachedSource) {
     var valid = true
 }
 
@@ -55,9 +96,8 @@ private enum class ClockScanResult {
 
 internal object PageCache : FrameReclaimer {
     private val lock = IrqSpinLock()
-    private val pages = mutableMapOf<PageCacheKey, CachedPage>()
-    private val clock = ArrayDeque<CachedPage>()
-    private val loads = mutableSetOf<PageLoad>()
+    private val sources = mutableMapOf<Any, CachedSource>()
+    private val clock = linkedSetOf<CachedPage>()
 
     init {
         BuddyFrameAllocator.register(this)
@@ -161,22 +201,12 @@ internal object PageCache : FrameReclaimer {
     ) {
         if (length == 0uL) return
         val end = length?.let { if (it > ULong.MAX_VALUE - offset) null else offset + it }
-        val retired = mutableListOf<CachedPage>()
-        lock.withLock {
-            for (load in loads) {
-                if (load.key.intersects(identity, offset, end)) load.valid = false
-            }
-            val iterator = pages.iterator()
-            while (iterator.hasNext()) {
-                val entry = iterator.next()
-                if (!entry.key.intersects(identity, offset, end)) continue
-                retired += entry.value
-                iterator.remove()
-            }
-            repeat(clock.size) {
-                val page = clock.removeFirst()
-                if (pages[page.key] === page) clock.addLast(page)
-            }
+        val retired = lock.withLock {
+            val source = sources[identity] ?: return
+            val pages = source.invalidate(identity, offset, end)
+            pages.forEach(clock::remove)
+            removeEmptySource(identity, source)
+            pages
         }
         retired.forEach { UserFrameReferences.release(it.frame) }
     }
@@ -194,7 +224,7 @@ internal object PageCache : FrameReclaimer {
         var cachedFrames = 0uL
         var bufferFrames = 0uL
         lock.withLock {
-            cachedFrames = pages.size.toULong()
+            cachedFrames = clock.size.toULong()
             for (page in clock) {
                 if (page.key.kind == PageCacheKind.BLOCK) bufferFrames++
                 if (UserFrameReferences.isExclusive(page.frame)) reclaimableFrames++
@@ -208,14 +238,16 @@ internal object PageCache : FrameReclaimer {
     }
 
     private fun lookup(key: PageCacheKey): PageLookup = lock.withLock {
-        val page = pages[key]
+        val source = sources.getOrPut(key.identity, ::CachedSource)
+        val page = source.pages[key]
         if (page != null) {
             page.referenced = true
             UserFrameReferences.retain(page.frame)
-            PageLookup.Cached(page)
-        } else {
-            PageLookup.Missing(PageLoad(key).also(loads::add))
+            return@withLock PageLookup.Cached(page)
         }
+        val load = PageLoad(key, source)
+        source.loads.add(load)
+        PageLookup.Missing(load)
     }
 
     private fun load(
@@ -289,18 +321,21 @@ internal object PageCache : FrameReclaimer {
         return PageCacheAcquireResult.acquired(page.frame, page.validBytes)
     }
 
-    private fun reserveReadAhead(key: PageCacheKey, size: Int): List<PageLoad> =
-        lock.withLock {
-            buildList((size - 1) / PAGE_SIZE_BYTES.toInt()) {
-                var offset = PAGE_SIZE_BYTES
-                while (offset <= size.toULong() - PAGE_SIZE_BYTES &&
-                    key.offset <= ULong.MAX_VALUE - offset
-                ) {
-                    add(PageLoad(key.copy(offset = key.offset + offset)).also(loads::add))
-                    offset += PAGE_SIZE_BYTES
-                }
-            }
+    private fun reserveReadAhead(key: PageCacheKey, size: Int): List<PageLoad> = lock.withLock {
+        val source = sources.getValue(key.identity)
+        val availablePages = (ULong.MAX_VALUE - key.offset) / PAGE_SIZE_BYTES
+        val requestedPages = (size / PAGE_SIZE_BYTES.toInt() - 1).toULong()
+        val pageCount = minOf(requestedPages, availablePages).toInt()
+        val pending = ArrayList<PageLoad>(pageCount)
+        var offset = key.offset
+        repeat(pageCount) {
+            offset += PAGE_SIZE_BYTES
+            val load = PageLoad(key.copy(offset = offset), source)
+            source.loads.add(load)
+            pending.add(load)
         }
+        pending
+    }
 
     private fun publishReadAhead(
         load: PageLoad,
@@ -319,12 +354,16 @@ internal object PageCache : FrameReclaimer {
             memcpy(destination, data.addressOf(offset), PAGE_SIZE_BYTES)
         }
         val published = lock.withLock {
-            check(loads.remove(load))
-            if (!load.valid || pages.containsKey(load.key)) return@withLock false
+            val source = load.source
+            check(source.loads.remove(load))
+            if (!load.valid || source.pages.containsKey(load.key)) {
+                removeEmptySource(load.key.identity, source)
+                return@withLock false
+            }
             UserFrameReferences.retain(frame)
             val page = CachedPage(load.key, frame, validBytes)
-            pages[load.key] = page
-            clock.addLast(page)
+            source.pages[load.key] = page
+            clock.add(page)
             true
         }
         if (!published) BuddyFrameAllocator.free(frame, 1uL)
@@ -334,35 +373,36 @@ internal object PageCache : FrameReclaimer {
         val frame = candidate.frame
         UserFrameReferences.retain(frame)
         val acquired = lock.withLock {
-            check(loads.remove(load))
-            if (!load.valid) return@withLock candidate
-            val existing = pages[candidate.key]
+            val source = load.source
+            check(source.loads.remove(load))
+            if (!load.valid) {
+                removeEmptySource(load.key.identity, source)
+                return@withLock candidate
+            }
+            val existing = source.pages[candidate.key]
             if (existing != null) {
                 existing.referenced = true
                 UserFrameReferences.retain(existing.frame)
-                existing
-            } else {
-                pages[candidate.key] = candidate
-                clock.addLast(candidate)
-                UserFrameReferences.retain(frame)
-                candidate
+                return@withLock existing
             }
+            source.pages[candidate.key] = candidate
+            clock.add(candidate)
+            UserFrameReferences.retain(frame)
+            candidate
         }
         if (acquired !== candidate) UserFrameReferences.release(frame)
         return acquired
     }
 
     private fun cancel(load: PageLoad) {
-        lock.withLock { check(loads.remove(load)) }
+        lock.withLock {
+            check(load.source.loads.remove(load))
+            removeEmptySource(load.key.identity, load.source)
+        }
     }
 
-    private fun PageCacheKey.intersects(
-        identity: Any,
-        start: ULong,
-        end: ULong?,
-    ): Boolean {
-        if (this.identity != identity || end != null && offset >= end) return false
-        return offset > ULong.MAX_VALUE - PAGE_SIZE_BYTES || start < offset + PAGE_SIZE_BYTES
+    private fun removeEmptySource(identity: Any, source: CachedSource) {
+        if (source.pages.isEmpty() && source.loads.isEmpty()) sources.remove(identity)
     }
 
     private fun scanClock(): ClockScanResult {
@@ -376,19 +416,23 @@ internal object PageCache : FrameReclaimer {
         var remaining = if (resident > Int.MAX_VALUE / 2) Int.MAX_VALUE else resident * 2
         while (remaining > 0) {
             remaining--
-            val page = clock.removeFirst()
+            val iterator = clock.iterator()
+            val page = iterator.next()
+            iterator.remove()
             if (page.referenced) {
                 page.referenced = false
-                clock.addLast(page)
+                clock.add(page)
                 continue
             }
 
             val release = UserFrameReferences.releaseExclusive(page.frame)
             if (release == FrameReleaseResult.RELEASED) {
-                check(pages.remove(page.key) === page)
+                val source = sources.getValue(page.key.identity)
+                check(source.pages.remove(page.key) === page)
+                removeEmptySource(page.key.identity, source)
                 return ClockScanResult.RECLAIMED
             }
-            clock.addLast(page)
+            clock.add(page)
             if (release == FrameReleaseResult.CONTENDED) return ClockScanResult.CONTENDED
         }
         return ClockScanResult.UNAVAILABLE

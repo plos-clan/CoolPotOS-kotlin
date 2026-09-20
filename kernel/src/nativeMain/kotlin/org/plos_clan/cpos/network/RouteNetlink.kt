@@ -232,11 +232,16 @@ internal object RouteNetlinkProtocol :
             prefixLength,
             automaticPrefixRoute = flags and IFA_F_NOPREFIXROUTE == 0u,
         )
+        val replaceMask = NetlinkAbi.NLM_F_REPLACE or NetlinkAbi.NLM_F_EXCL
         val result = if (removed) NetworkStack.removeAddress(index, address, prefixLength)
-        else NetworkStack.addAddress(index, configured)
+        else NetworkStack.addAddress(
+            index,
+            configured,
+            replace = message.flags.toInt() and replaceMask == NetlinkAbi.NLM_F_REPLACE,
+        )
         return when (result) {
             is VfsResult.Ok -> VfsResult.Ok(
-                if (echo) addressReply(intfc, configured, removed) else null,
+                if (echo) addressReply(intfc, result.value, removed) else null,
             )
             is VfsResult.Err -> result
         }

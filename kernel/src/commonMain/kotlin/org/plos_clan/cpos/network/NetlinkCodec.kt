@@ -309,6 +309,7 @@ internal object NetlinkAbi {
     const val NLM_F_MATCH = 0x0200
     const val NLM_F_DUMP = NLM_F_ROOT or NLM_F_MATCH
     const val NLM_F_REPLACE = 0x0100
+    const val NLM_F_EXCL = 0x0200
     const val NLM_F_CAPPED = 0x0100
     const val NLM_F_ACK_TLVS = 0x0200
     const val NLA_F_NESTED = 0x8000

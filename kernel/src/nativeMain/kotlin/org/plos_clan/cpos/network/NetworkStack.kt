@@ -427,41 +427,48 @@ internal object NetworkStack : EthernetProtocol {
         return VfsResult.Ok(Unit)
     }
 
-    fun addAddress(index: Int, address: NetworkInterfaceAddress): VfsResult<Unit> {
+    fun addAddress(
+        index: Int,
+        address: NetworkInterfaceAddress,
+        replace: Boolean = false,
+    ): VfsResult<NetworkInterfaceAddress> {
         if (address.address.isAny || address.address.isLimitedBroadcast ||
             address.address.isMulticast
         ) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        val intfc = lock.withLock {
-            val selected = interfaces[index] ?: return@withLock null
+        val (intfc, existing) = lock.withLock {
+            val selected = interfaces[index] ?: return VfsResult.Err(VfsError.NO_DEVICE)
             val assigned = addresses.getOrPut(index) { mutableListOf() }
-            if (assigned.any { it.address == address.address &&
-                    it.prefixLength == address.prefixLength
-                }
-            ) return VfsResult.Err(VfsError.ALREADY_EXISTS)
-            assigned += address
-            selected
-        } ?: return VfsResult.Err(VfsError.NO_DEVICE)
-        notifyListeners { it.addressChanged(intfc, address, removed = false) }
-        if (intfc.kind == NetworkInterfaceKind.ETHERNET && intfc.running) {
+            val existing = assigned.firstOrNull {
+                it.address == address.address && it.prefixLength == address.prefixLength
+            }
+            if (existing != null && !replace) return VfsResult.Err(VfsError.ALREADY_EXISTS)
+            if (existing == null) assigned += address
+            selected to existing
+        }
+        val configured = existing ?: address
+        notifyListeners { it.addressChanged(intfc, configured, removed = false) }
+        if (existing == null && intfc.kind == NetworkInterfaceKind.ETHERNET && intfc.running) {
             sendArpAnnouncement(intfc, address.address)
         }
-        return VfsResult.Ok(Unit)
+        return VfsResult.Ok(configured)
     }
 
-    fun removeAddress(index: Int, address: Ipv4Address, prefixLength: Int? = null): VfsResult<Unit> {
-        var removed: NetworkInterfaceAddress? = null
-        val intfc = lock.withLock {
-            val selected = interfaces[index] ?: return@withLock null
+    fun removeAddress(
+        index: Int,
+        address: Ipv4Address,
+        prefixLength: Int? = null
+    ): VfsResult<NetworkInterfaceAddress> {
+        val (intfc, removed) = lock.withLock {
+            val selected = interfaces[index] ?: return VfsResult.Err(VfsError.NO_DEVICE)
             val assigned = addresses[index] ?: return VfsResult.Err(VfsError.ADDRESS_NOT_AVAILABLE)
             val position = assigned.indexOfFirst {
                 it.address == address && (prefixLength == null || it.prefixLength == prefixLength)
             }
             if (position < 0) return VfsResult.Err(VfsError.ADDRESS_NOT_AVAILABLE)
-            removed = assigned.removeAt(position)
-            selected
-        } ?: return VfsResult.Err(VfsError.NO_DEVICE)
-        notifyListeners { it.addressChanged(intfc, checkNotNull(removed), removed = true) }
-        return VfsResult.Ok(Unit)
+            selected to assigned.removeAt(position)
+        }
+        notifyListeners { it.addressChanged(intfc, removed, removed = true) }
+        return VfsResult.Ok(removed)
     }
 
     fun addRoute(route: NetworkRoute): VfsResult<Unit> {

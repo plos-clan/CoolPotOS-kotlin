@@ -78,6 +78,11 @@ rm -rf \
 find "$rootfs/usr" -type f \( -name '*.a' -o -name '*.o' -o -name '*.debug' \) -delete
 mkdir -p "$rootfs/overlay"
 install -Dm755 /usr/local/share/cpos/init "$rootfs/init"
+install -d "$rootfs/etc/NetworkManager/conf.d"
+cat > "$rootfs/etc/NetworkManager/conf.d/10-dns.conf" <<'EOF'
+[main]
+systemd-resolved=false
+EOF
 systemctl --root="$rootfs" enable NetworkManager.service dropbear.service
 
 systemd-sysusers --root="$rootfs"
