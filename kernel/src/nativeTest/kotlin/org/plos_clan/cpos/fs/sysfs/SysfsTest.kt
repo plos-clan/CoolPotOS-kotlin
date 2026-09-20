@@ -8,6 +8,9 @@ import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.network.KobjectAction
+import org.plos_clan.cpos.network.KobjectUevent
+import org.plos_clan.cpos.network.KobjectUeventPublisher
 import org.plos_clan.cpos.time.Instant
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
@@ -207,6 +210,46 @@ class SysfsTest {
         assertEquals("../../../../class/net", registry.readLink(subsystem).value().toString())
         registry.unregisterObject(handle).value()
         assertNull(registry.childOrNull(category.id, "lo"))
+    }
+
+    @Test
+    fun publishesDeviceLifecycleAndColdplugWithCanonicalIdentity() {
+        val events = mutableListOf<KobjectUevent>()
+        val registry = SysfsRegistry(KobjectUeventPublisher(events::add)) { Instant(1L, 0u) }
+        val device = device("ttyS0", 4u, 64u)
+        val handle = registry.registerDevice(
+            device,
+            SysfsObjectSpec(
+                "ttyS0",
+                SysfsParent.Virtual("tty"),
+                bindings = SysfsBindings(deviceClass = SysfsIndexBinding("tty")),
+            ),
+        ).value()
+        val attribute = assertIs<SysfsTextAttribute>(
+            assertIs<SysfsNode.Attribute>(registry.child(handle.id, "uevent")).attribute,
+        )
+        assertEquals("MAJOR=4\nMINOR=64\nDEVNAME=ttyS0\n", attribute.show().value().decodeToString())
+        attribute.store("add\n".encodeToByteArray()).value()
+        registry.unregisterDevice(device).value()
+
+        assertEquals(listOf(KobjectAction.ADD, KobjectAction.ADD, KobjectAction.REMOVE), events.map { it.action })
+        assertTrue(events.all { it.devicePath == "/devices/virtual/tty/ttyS0" && it.subsystem == "tty" })
+        assertEquals(listOf("MAJOR" to "4", "MINOR" to "64", "DEVNAME" to "ttyS0"), events[0].environment)
+        assertEquals(listOf("SYNTH_UUID" to "0") + events[0].environment, events[1].environment)
+        assertEquals(events[0].environment, events[2].environment)
+    }
+
+    @Test
+    fun removesDeviceAttributesWithoutRemovingBorrowedObject() {
+        val registry = registry()
+        val handle = registry.registerObject(SysfsObjectSpec("serial", SysfsParent.Virtual("tty"))).value()
+        val device = device("ttyS0", 4u, 64u)
+        registry.registerDevice(device, handle, SysfsBindings(deviceClass = SysfsIndexBinding("tty"))).value()
+        assertNotNull(registry.childOrNull(handle.id, "uevent"))
+        registry.unregisterDevice(device).value()
+        assertNull(registry.childOrNull(handle.id, "uevent"))
+        assertNull(registry.childOrNull(handle.id, "dev"))
+        registry.unregisterObject(handle).value()
     }
 
     private fun registry(): SysfsRegistry = SysfsRegistry { Instant(1L, 0u) }

@@ -80,6 +80,12 @@ mkdir -p "$rootfs/overlay"
 install -Dm755 /usr/local/share/cpos/init "$rootfs/init"
 systemctl --root="$rootfs" enable NetworkManager.service dropbear.service
 
+systemd-sysusers --root="$rootfs"
+systemd-tmpfiles --root="$rootfs" --create --boot --prefix=/etc --prefix=/var
+ldconfig -r "$rootfs"
+journalctl --root="$rootfs" --update-catalog
+/usr/lib/systemd/systemd-update-done --root="$rootfs"
+
 mkfs.erofs \
     -x-1 \
     -z zstd,level=3 \

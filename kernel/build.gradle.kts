@@ -481,6 +481,10 @@ private class BuildConfig(private val project: Project) {
         archive = paths.root.resolve("generated/userland/$rootfsName"),
     )
     private val qemuBridge = optionalSetting("qemuBridge", "QEMU_BRIDGE")
+    val qemuNetworkFlags = listOf(
+        "-netdev", qemuBridge?.let { "bridge,id=usbnet,br=$it" } ?: "user,id=usbnet",
+        "-device", "usb-net,id=rndis,bus=xhci.0,port=4,netdev=usbnet",
+    )
     val qemu = QemuConfig(
         cpuSet = setting("qemuCpuSet", "QEMU_CPU_SET", "0-7"),
         flags = listOf(
@@ -489,14 +493,12 @@ private class BuildConfig(private val project: Project) {
             "-no-reboot", "-smp", setting("qemuSmp", "QEMU_SMP", "4"),
             "-device", "qemu-xhci,id=xhci",
             "-device", "usb-kbd,bus=xhci.0,port=2", "-device", "usb-mouse,bus=xhci.0,port=3",
-            "-netdev", qemuBridge?.let { "bridge,id=usbnet,br=$it" } ?: "user,id=usbnet",
-            "-device", "usb-net,id=rndis,bus=xhci.0,port=4,netdev=usbnet",
             "-display", setting("qemuDisplay", "QEMU_DISPLAY", "gtk"),
             "-chardev", "stdio,id=console,mux=on,signal=off",
             "-serial", "chardev:console",
             "-drive",
             "if=pflash,format=raw,readonly=on,file=${paths.assets.resolve("ovmf-code.fd")}",
-        ) + (if (debug) listOf("-s", "-S") else emptyList()),
+        ) + qemuNetworkFlags + (if (debug) listOf("-s", "-S") else emptyList()),
     )
 
     private fun setting(prop: String, env: String, default: String): String =
@@ -1050,7 +1052,7 @@ val prepareOverlay = tasks.register<Ext4ImageTask>("prepareOverlay") {
 val benchmarkSeed = tasks.register<Sync>("stageBenchmarkOverlay") {
     dependsOn(userBenchmark.linkTaskProvider)
     from(userBenchmark.outputFile) {
-        into("upper/usr/lib/cpos")
+        into("upper/opt/cpos")
         rename { "benchmark.kexe" }
     }
     from("src/qemuBenchmark/resources") { into("upper/etc/systemd/system") }
@@ -1222,7 +1224,8 @@ for (variant in listOf("qemuTest", "qemuBenchmark")) {
             "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
             "-drive", "if=pflash,format=raw,readonly=on,file=${config.paths.assets.resolve("ovmf-code.fd")}",
             "-drive", "file=$boot,format=raw",
-        ) + storageFlags(image, storageTransport, "system", 1, readOnly = benchmark) + secondaryStorage
+        ) + storageFlags(image, storageTransport, "system", 1, readOnly = benchmark) +
+            secondaryStorage + if (benchmark) config.qemuNetworkFlags else emptyList()
         val host = kotlin.targets.getByName<KotlinJvmTarget>("jvm").compilations.getByName("qemuHost")
         dependsOn(host.compileAllTaskName)
         classpath(host.output.allOutputs, host.runtimeDependencyFiles)

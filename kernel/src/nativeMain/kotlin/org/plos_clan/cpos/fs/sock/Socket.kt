@@ -183,9 +183,14 @@ internal abstract class AbstractSocket(
         command: Int,
         args: UserMemory,
     ): Long {
-        if (command != FIONREAD) return -VfsError.NOT_SUPPORTED.errno.toLong()
+        val count = when (command) {
+            FIONREAD -> readableBytes()
+            SIOCOUTQ -> outputQueueBytes()
+            else -> return -VfsError.NOT_SUPPORTED.errno.toLong()
+        }
+        if (count < 0) return count.toLong()
         val bytes = ByteArray(Int.SIZE_BYTES)
-        LittleEndianBuffer(bytes).writeU32(0, readableBytes().coerceAtLeast(0).toUInt())
+        LittleEndianBuffer(bytes).writeU32(0, count.toUInt())
         return if (args.copyToUser(bytes)) 0L else -VfsError.FAULT.errno.toLong()
     }
 
@@ -372,6 +377,8 @@ internal abstract class AbstractSocket(
 
     protected open fun optionsChangedLocked(options: SocketOptions) {}
 
+    internal open fun outputQueueBytes(): Int = -VfsError.NOT_SUPPORTED.errno
+
     protected abstract fun readableBytes(): Int
 
     protected abstract fun pollSocket(events: Int): Int
@@ -397,6 +404,7 @@ internal abstract class AbstractSocket(
 
     companion object {
         private const val FIONREAD = 0x541B
+        private const val SIOCOUTQ = 0x5411
         private const val MIN_SOCKET_BUFFER_SIZE = 2_048
         private const val MAX_SOCKET_BUFFER_SIZE = 4 * 1024 * 1024
 

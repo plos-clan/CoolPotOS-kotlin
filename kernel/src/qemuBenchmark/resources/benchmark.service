@@ -2,11 +2,11 @@
 Description=CoolPotOS system benchmarks
 DefaultDependencies=no
 ConditionKernelCommandLine=cpos.benchmark
-After=basic.target
+After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/lib/cpos/benchmark.kexe
-StandardOutput=append:/dev/ttyS0
+ExecStart=/opt/cpos/benchmark.kexe
+StandardOutput=append:/dev/console
 StandardError=inherit
 TimeoutStartSec=infinity

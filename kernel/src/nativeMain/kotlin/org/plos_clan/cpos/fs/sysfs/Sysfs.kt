@@ -35,7 +35,7 @@ import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 
 object Sysfs : FileSystemType("sysfs", 0x62656572uL) {
-    private val registry = SysfsRegistry()
+    private val registry = SysfsRegistry(org.plos_clan.cpos.network.KobjectUeventNetlinkProtocol)
 
     override fun createBackend(options: FileSystemOptions): VfsResult<SuperBlockBackend> =
         if (options === EmptyFileSystemOptions) VfsResult.Ok(SysfsInstance(registry))

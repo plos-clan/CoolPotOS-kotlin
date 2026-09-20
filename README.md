@@ -176,7 +176,7 @@ The raw report retains all fork samples. Repetition reduces sampling and JIT
 variation, but shared CI workers can still differ substantially between runs.
 
 `qemuBenchmark` builds the production kernel and rootfs, including the usual
-init, overlay filesystem, systemd services, and QEMU devices. It adds the
+init, overlay filesystem, systemd services, and QEMU network adapter. It adds the
 `cpos.benchmark` boot argument to activate `benchmark.service` after
 `multi-user.target`. Normal boots do not run the service. Rootfs changes are
 part of the measured system; kernel and rootfs hashes are retained in reports.
@@ -280,10 +280,10 @@ explicit migration. `clean` preserves the daily image; `cleanAll` removes it.
 `rootCapacityMiB` and `overlayCapacityMiB` configure partition capacity.
 
 The rootfs build does not depend on benchmark programs. `qemuBenchmark` creates
-`kernel/build/benchmark.img` with its program and service in the writable layer;
+`kernel/build/benchmark.img` with its program under `/opt/cpos` and service in the writable layer;
 each measured boot receives a fresh sparse copy in its results directory. A dedicated
-`benchmark.target` starts measurement after `basic.target`, without login or network
-services delaying the benchmark. The
+`benchmark.target` starts measurement after `multi-user.target`, including login and
+network service startup in the boot measurement. The
 guest records results at `/overlay/results/benchmark.log` as well as on serial.
 The daily writable partition is not used by benchmark boots.
 

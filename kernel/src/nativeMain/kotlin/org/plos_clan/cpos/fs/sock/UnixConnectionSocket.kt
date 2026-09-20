@@ -1,3 +1,5 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package org.plos_clan.cpos.fs.sock
 
 import org.plos_clan.cpos.drivers.TscClock
@@ -12,6 +14,7 @@ import org.plos_clan.cpos.tasks.IoWaitQueue
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PollEvents
+import kotlin.concurrent.atomics.AtomicInt
 
 internal class UnixConnectionSocket(
     subsystem: UnixSocketSubsystem,
@@ -329,6 +332,18 @@ internal class UnixConnectionSocket(
         )
     }
 
+    override val readinessVersion: Int
+        get() = when (val current = lock.withLock { state }) {
+            is State.Connected -> current.connection.readinessVersion
+            is State.Listening -> current.listener.readinessVersion
+            else -> 0
+        }
+
+    override fun outputQueueBytes(): Int = when (val current = lock.withLock { state }) {
+        is State.Connected -> current.connection.outputQueueBytes(current.side)
+        else -> 0
+    }
+
     override fun readableBytes(): Int = when (val current = lock.withLock { state }) {
         is State.Connected -> current.connection.readableBytes(current.side)
         is State.Listening -> current.listener.pendingCount()
@@ -517,6 +532,8 @@ internal class UnixConnectionSocket(
         )
 
         private val lock = IrqSpinLock()
+        private val generation = AtomicInt(0)
+        val readinessVersion: Int get() = generation.load()
         private var pending = ArrayDeque<UnixConnectionSocket>()
         private val acceptWaiters = IoWaitQueue()
         private val connectWaiters = IoWaitQueue()
@@ -567,6 +584,7 @@ internal class UnixConnectionSocket(
                         reservations--
                         if (closed) return@withLock false
                         pending += acceptedSocket
+                        generation.fetchAndAdd(1)
                         acceptWaiters.wakeOne()
                         true
                     }
@@ -679,7 +697,9 @@ private sealed class UnixConnectionBuffer(capacity: Int) {
         private set
 
     abstract val readableBytes: Int
-    abstract val remaining: Int
+    abstract val queuedBytes: Int
+    val remaining: Int
+        get() = (capacity - queuedBytes).coerceAtLeast(0)
     abstract fun isReadable(minimum: Int): Boolean
 
     abstract fun send(
@@ -720,8 +740,8 @@ private class UnixStreamBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
 
     override val readableBytes: Int
         get() = bytes.size
-    override val remaining: Int
-        get() = (capacity - bytes.size).coerceAtLeast(0)
+    override val queuedBytes: Int
+        get() = bytes.size
     override fun isReadable(minimum: Int): Boolean = bytes.size >= minimum
 
     override fun send(
@@ -849,8 +869,8 @@ private class UnixPacketBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
 
     override val readableBytes: Int
         get() = packets.firstOrNull()?.bytes?.size ?: 0
-    override val remaining: Int
-        get() = (capacity - used).coerceAtLeast(0)
+    override val queuedBytes: Int
+        get() = used
     override fun isReadable(minimum: Int): Boolean = packets.isNotEmpty()
 
     override fun send(
@@ -956,6 +976,8 @@ private class UnixDuplexConnection(
     }
 
     private val lock = IrqSpinLock()
+    private val generation = AtomicInt(0)
+    val readinessVersion: Int get() = generation.load()
     private val addresses = arrayOf(firstAddress, secondAddress)
     private val directions = arrayOf(
         Direction(
@@ -1000,7 +1022,10 @@ private class UnixDuplexConnection(
             ancillary,
             direction.receiveTimestamp,
         )
-        if (result.isSuccess) direction.readWaiters.wakeOne()
+        if (result.isSuccess) {
+            generation.fetchAndAdd(1)
+            direction.readWaiters.wakeOne()
+        }
         result
     }
 
@@ -1029,6 +1054,7 @@ private class UnixDuplexConnection(
             returnFullLength,
         )
         if (!peek && result is VfsResult.Ok) {
+            generation.fetchAndAdd(1)
             direction.writeWaiters.wakeOne()
             if (direction.buffer.isReadable(1)) direction.readWaiters.wakeOne()
         }
@@ -1059,6 +1085,8 @@ private class UnixDuplexConnection(
         return waiter?.let { queue.await(lock, it) } ?: true
     }
 
+    fun outputQueueBytes(side: Side): Int = lock.withLock { outgoing(side).buffer.queuedBytes }
+
     fun readableBytes(side: Side): Int = lock.withLock { incoming(side).buffer.readableBytes }
 
     fun readReady(side: Side, minimum: Int): Boolean = lock.withLock {
@@ -1080,6 +1108,7 @@ private class UnixDuplexConnection(
         val direction = outgoing(side)
         direction.sendBufferSize = size
         direction.resize()
+        generation.fetchAndAdd(1)
         direction.writeWaiters.wakeAll()
     }
 
@@ -1087,6 +1116,7 @@ private class UnixDuplexConnection(
         val direction = incoming(side)
         direction.receiveBufferSize = size
         direction.resize()
+        generation.fetchAndAdd(1)
         direction.writeWaiters.wakeAll()
     }
 
@@ -1137,6 +1167,7 @@ private class UnixDuplexConnection(
                 val incoming = incoming(side)
                 if (incoming.readerOpen) {
                     incoming.readerOpen = false
+                    generation.fetchAndAdd(1)
                     ancillary = incoming.buffer.clear()
                     incoming.writeWaiters.wakeAll()
                     incoming.readWaiters.wakeAll()
@@ -1146,6 +1177,7 @@ private class UnixDuplexConnection(
                 val outgoing = outgoing(side)
                 if (outgoing.writerOpen) {
                     outgoing.writerOpen = false
+                    generation.fetchAndAdd(1)
                     outgoing.readWaiters.wakeAll()
                     outgoing.writeWaiters.wakeAll()
                 }

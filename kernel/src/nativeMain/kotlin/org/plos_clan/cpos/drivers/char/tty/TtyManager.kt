@@ -149,7 +149,7 @@ object TtyManager {
                 type = DeviceType.CHARACTER,
                 major = LinuxDeviceMajor.TTY_AUXILIARY.number,
                 minor = 1u,
-                backend = console,
+                backend = ConsoleTty(console),
                 sysfs = SysfsDevicePublication.virtual(
                     "tty",
                     "console",

@@ -876,6 +876,8 @@ internal class TcpSocket internal constructor(
         if (unregister) subsystem.unregister(this)
     }
 
+    override fun outputQueueBytes(): Int = lock.withLock { queuedSendBytesLocked() }
+
     override fun readableBytes(): Int = lock.withLock { receiveBuffer.size }
 
     override fun pollSocket(events: Int): Int = lock.withLock {

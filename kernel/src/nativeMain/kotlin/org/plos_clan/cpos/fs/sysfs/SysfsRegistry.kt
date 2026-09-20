@@ -13,6 +13,9 @@ import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.network.KobjectAction
+import org.plos_clan.cpos.network.KobjectUevent
+import org.plos_clan.cpos.network.KobjectUeventPublisher
 import org.plos_clan.cpos.time.Instant
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
@@ -244,6 +247,7 @@ internal data class SysfsDirectoryEntry(
 )
 
 internal class SysfsRegistry(
+    private val publisher: KobjectUeventPublisher = KobjectUeventPublisher {},
     private val now: () -> Instant = org.plos_clan.cpos.drivers.RealtimeClock::now,
 ) {
     private data class DeviceKey(val type: DeviceType, val number: DeviceNumber)
@@ -257,7 +261,8 @@ internal class SysfsRegistry(
     private data class DeviceBinding(
         val objectId: ULong,
         val ownsObject: Boolean,
-        val devAttributeId: ULong,
+        val attributeIds: List<ULong>,
+        val uevent: SysfsUevent?,
         val devLinkId: ULong,
         val bindingLinkIds: List<ULong>,
         val key: DeviceKey,
@@ -377,10 +382,11 @@ internal class SysfsRegistry(
     fun unregisterDevice(device: Device): VfsResult<Unit> = lock.withLock {
         val binding = deviceBindings.remove(device)
             ?: return@withLock VfsResult.Err(VfsError.NOT_FOUND)
+        binding.uevent?.publish(KobjectAction.REMOVE)
         devIndex.remove(binding.key)
         removeLinkLocked(binding.devLinkId)
         binding.bindingLinkIds.forEach(::removeLinkLocked)
-        removeNodeLocked(binding.devAttributeId)
+        binding.attributeIds.forEach(::removeNodeLocked)
 
         val objectNode = nodesById[binding.objectId] as? SysfsNode.Directory
         if (objectNode != null) {
@@ -612,6 +618,7 @@ internal class SysfsRegistry(
         val hasSubsystemBinding = bindings.deviceClass != null || bindings.bus != null
         if (deviceBindings.containsKey(device) ||
             childrenIndex.getValue(objectNode.id).containsKey(DEV_ATTRIBUTE_NAME) ||
+            childrenIndex.getValue(objectNode.id).containsKey(vfsName("uevent")) ||
             hasSubsystemBinding && childrenIndex.getValue(objectNode.id)
                 .containsKey(SUBSYSTEM_LINK_NAME)
         ) {
@@ -639,7 +646,7 @@ internal class SysfsRegistry(
         val newBus = if (bindings.bus != null && buses[bindings.bus.name] == null) 3 else 0
         val bindingCount = listOfNotNull(bindings.deviceClass, bindings.bus).size +
             if (hasSubsystemBinding) 1 else 0
-        if (!reserveIdsLocked(newClass + newBus + 2 + bindingCount)) {
+        if (!reserveIdsLocked(newClass + newBus + 3 + bindingCount)) {
             return VfsResult.Err(VfsError.NO_SPACE)
         }
 
@@ -685,15 +692,44 @@ internal class SysfsRegistry(
                 createdAt,
             )
         }
+        val subsystemLink = childrenIndex.getValue(objectNode.id)[SUBSYSTEM_LINK_NAME]
+            ?.let { nodesById[it] as? SysfsNode.Link }
+        val subsystem = subsystemLink?.let { nodesById[it.targetId]?.name?.toString() }
+        val uevent = subsystem?.let {
+            SysfsUevent(
+                KobjectUevent(
+                    KobjectAction.ADD,
+                    pathComponentsLocked(objectNode.id).joinToString("/", prefix = "/"),
+                    it,
+                    listOf(
+                        "MAJOR" to device.number.major.toString(),
+                        "MINOR" to device.number.minor.toString(),
+                        "DEVNAME" to device.name,
+                    ),
+                ),
+                publisher,
+            )
+        }
+        val attributes = mutableListOf(devAttributeNode.id)
+        if (uevent != null) {
+            val attribute = SysfsNode.Attribute(
+                allocateIdLocked(), objectNode.id, vfsName(uevent.attribute.name),
+                uevent.attribute, objectNode.uid, objectNode.gid, createdAt,
+            )
+            installNodeLocked(attribute)
+            attributes += attribute.id
+        }
         objectNode.deviceBindings++
         deviceBindings[device] = DeviceBinding(
             objectNode.id,
             ownsObject,
-            devAttributeNode.id,
+            attributes,
+            uevent,
             devLinkId,
             bindingLinks,
             key,
         )
+        uevent?.publish(KobjectAction.ADD)
         return VfsResult.Ok(Unit)
     }
 

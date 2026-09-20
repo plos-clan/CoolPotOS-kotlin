@@ -56,7 +56,9 @@ class TtySession(
     val foregroundProcessGroup: Int
         get() = stateLock.withLock { foregroundProcessGroupId }
 
-    override fun open(device: Device): VfsResult<DeviceBackend> = lifecycleLock.withLock {
+    override fun open(device: Device): VfsResult<DeviceBackend> = open(allowHangup = true)
+
+    internal fun open(allowHangup: Boolean): VfsResult<DeviceBackend> = lifecycleLock.withLock {
         when (val result = allocate()) {
             is VfsResult.Err -> result
             is VfsResult.Ok -> {
@@ -66,7 +68,7 @@ class TtySession(
                 val error = result.value.open(this)
                 if (error != 0) return@withLock VfsResult.Err(VfsError.fromErrno(-error))
                 openCount++
-                VfsResult.Ok(OpenFile(this, result.value, generation.load()))
+                VfsResult.Ok(OpenFile(this, result.value, generation.load().takeIf { allowHangup }))
             }
         }
     }
@@ -150,14 +152,14 @@ class TtySession(
     class OpenFile internal constructor(
         val session: TtySession,
         internal val backend: TtySessionBackend,
-        private val generation: Long,
+        private val generation: Long?,
         internal val isMaster: Boolean = false,
     ) : ModeAwareDeviceBackend {
         override val readinessVersion: Int
             get() = backend.readinessVersion + session.generation.load().toInt()
 
         val isHungUp: Boolean
-            get() = generation != session.generation.load()
+            get() = generation != null && generation != session.generation.load()
 
         override fun close(device: Device) = session.lifecycleLock.withLock {
             check(session.openCount > 0)
@@ -327,4 +329,8 @@ internal object ControllingTty : TtyDevice() {
 
 internal object ActiveTty : TtyDevice() {
     override fun open(device: Device): VfsResult<DeviceBackend> = TtyManager.openActiveVirtualTerminal(device)
+}
+
+internal class ConsoleTty(private val session: TtySession) : TtyDevice() {
+    override fun open(device: Device): VfsResult<DeviceBackend> = session.open(allowHangup = false)
 }

@@ -451,6 +451,9 @@ internal class NetlinkSocket internal constructor(
     private val readWaiters = IoWaitQueue()
     private var netlinkOptions = NetlinkSocketOptions()
 
+    override val supportsSocketFilter: Boolean
+        get() = true
+
     override fun bindSocket(process: Process, address: SocketAddress): VfsResult<Unit> =
         subsystem.bind(
             this,
@@ -636,7 +639,9 @@ internal class NetlinkSocket internal constructor(
         senderCredentials: UnixCredentials = NetlinkProtocol.KERNEL_CREDENTIALS,
     ): Boolean = lock.withLock {
         if (closed) return@withLock false
-        if (bytes.size > optionsLocked().receiveBufferSize - queuedBytes) {
+        val length = filterPacketLocked(bytes, 0, bytes.size)
+        if (length == 0) return@withLock true
+        if (length > optionsLocked().receiveBufferSize - queuedBytes) {
             if (!netlinkOptions.noEnobufs) {
                 storeErrorLocked(VfsError.NO_BUFFER_SPACE)
                 readWaiters.wakeOne()
@@ -644,13 +649,13 @@ internal class NetlinkSocket internal constructor(
             return@withLock false
         }
         messages += Datagram(
-            bytes,
+            if (length == bytes.size) bytes else bytes.copyOf(length),
             sourcePort,
             group,
             senderCredentials,
             captureReceiveTimestampLocked(),
         )
-        queuedBytes += bytes.size
+        queuedBytes += length
         readWaiters.wakeOne()
         true
     }
