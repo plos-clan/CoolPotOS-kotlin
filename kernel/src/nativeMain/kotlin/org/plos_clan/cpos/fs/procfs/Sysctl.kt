@@ -2,6 +2,7 @@
 
 package org.plos_clan.cpos.fs.procfs
 
+import org.plos_clan.cpos.tasks.PollSource
 import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.SuperBlock
@@ -74,11 +75,13 @@ internal object ProcSysTree {
                 id = inodeId,
                 write = { _, input -> value.update(input) },
                 pollVersion = { value.version },
+                pollChanges = value.changes,
                 render = value::render,
             )
     }
 
     private abstract class Setting : ProcFSRender {
+        open val changes: PollSource? get() = null
         open val version: Int
             get() = 0
 
@@ -101,6 +104,7 @@ internal object ProcSysTree {
     }
 
     private class UtsName(private val field: UtsNamespace.MutableField) : Setting() {
+        override val changes get() = UtsNamespaces.initial.changes
         override val version: Int
             get() = UtsNamespaces.initial.version(this.field)
 

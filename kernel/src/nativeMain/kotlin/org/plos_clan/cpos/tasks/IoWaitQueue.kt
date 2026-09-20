@@ -4,6 +4,7 @@ import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 internal class IoWaitQueue {
+    val events = PollSource()
     class Waiter internal constructor() {
         internal var minimum = 1
             private set
@@ -33,10 +34,10 @@ internal class IoWaitQueue {
 
     fun add(thread: Thread, minimum: Int = 1): Waiter {
         require(minimum >= 0)
-        return (recycled.removeFirstOrNull() ?: Waiter()).also { waiter ->
-            waiter.arm(minimum, thread)
-            waiting.addLast(waiter)
-        }
+        val waiter = recycled.removeFirstOrNull() ?: Waiter()
+        waiter.arm(minimum, thread)
+        waiting.addLast(waiter)
+        return waiter
     }
 
     private fun finish(waiter: Waiter) {
@@ -48,9 +49,10 @@ internal class IoWaitQueue {
     fun await(lock: IrqSpinLock, waiter: Waiter, deadlineNanos: ULong? = null): Boolean {
         val thread = checkNotNull(waiter.thread)
         var interrupted = false
-        while (!lock.withLock { waiter.ready } &&
-            (deadlineNanos == null || TscClock.nanoTime() < deadlineNanos)
-        ) {
+        while (true) {
+            val ready = lock.withLock { waiter.ready }
+            if (ready) break
+            if (deadlineNanos != null && TscClock.nanoTime() >= deadlineNanos) break
             if (thread.hasPendingSignal()) {
                 interrupted = true
                 break
@@ -70,21 +72,30 @@ internal class IoWaitQueue {
     }
 
     fun wakeReady(available: Int) {
+        events.signal()
         takeReady(available)?.let(Scheduler::wake)
     }
 
     fun wakeOne() {
+        events.signal()
         takeOne()?.let(Scheduler::wake)
     }
 
     fun wakeAll() {
-        while (true) Scheduler.wake(takeOne() ?: return)
+        events.signal()
+        while (true) {
+            val thread = takeOne() ?: return
+            Scheduler.wake(thread)
+        }
     }
 
     fun takeAll(): List<Thread> {
+        events.signal()
         if (waiting.isEmpty()) return emptyList()
-        return ArrayList<Thread>(waiting.size).also { result ->
-            while (waiting.isNotEmpty()) result += checkNotNull(takeOne())
+        val result = ArrayList<Thread>(waiting.size)
+        while (true) {
+            val thread = takeOne() ?: return result
+            result.add(thread)
         }
     }
 

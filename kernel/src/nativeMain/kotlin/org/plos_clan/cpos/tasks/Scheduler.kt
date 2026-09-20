@@ -61,7 +61,7 @@ class PerCpuScheduler {
 
 object Scheduler {
     internal val policy by lazy(LazyThreadSafetyMode.NONE) {
-        WeightedRoundRobinPolicy(
+        FairSchedulingPolicy(
             SMProcessor.locals.values.sortedWith(
                 compareBy<CpuLocal> { if (it.isBsp) 0 else 1 }.thenBy(CpuLocal::lapicId),
             ),
@@ -88,7 +88,11 @@ object Scheduler {
     }
 
     fun enqueueThread(thread: Thread) {
-        val target = policy.nextProcessor { bridge.fast_handoff_queue_size(it.lapicId.toULong()) }
+        val affinity = checkNotNull(thread.nativeTask.affinity())
+        val target = policy.nextProcessor(
+            eligible = { CpuAffinity.contains(affinity, it.cpuid.toInt()) },
+            load = { bridge.fast_handoff_queue_size(it.lapicId.toULong()) },
+        )
         enqueueThreadOn(thread, target.lapicId.toUInt())
     }
 
@@ -139,8 +143,11 @@ object Scheduler {
             println("Scheduler: core ${local.lapicId} has no bootstrap thread")
             return false
         }
+        val lapicId = local.lapicId.toULong()
+        val bootstrap = if (isBsp) 1u.toUByte() else 0u.toUByte()
+        val cpuId = local.cpuid.toUInt()
         val bound = thread.nativeTask.access {
-            bridge.fast_handoff_bind_current(it, local.lapicId.toULong(), if (isBsp) 1u.toUByte() else 0u.toUByte())
+            bridge.fast_handoff_bind_current(it, lapicId, bootstrap, cpuId)
         }
         if (!bound) {
             println("Scheduler: cannot bind bootstrap thread on core ${local.lapicId}")
@@ -149,7 +156,7 @@ object Scheduler {
         localScheduler.bootstrapThread = thread
 
         if (isBsp) {
-            println("Scheduler: initialized policy=RRS-fast-handoff core=${local.lapicId}")
+            println("Scheduler: initialized policy=weighted-fair core=${local.lapicId}")
         }
         return true
     }

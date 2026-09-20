@@ -2,6 +2,9 @@
 
 package org.plos_clan.cpos.network
 
+import org.plos_clan.cpos.tasks.PollSubscription
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
+import org.plos_clan.cpos.fs.vfs.Inode
 import kotlin.concurrent.atomics.AtomicReference
 import org.plos_clan.cpos.drivers.net.MacAddress
 import org.plos_clan.cpos.fs.sock.AbstractSocket
@@ -184,8 +187,11 @@ internal class PacketSocket internal constructor(
                 null
             }
             if (result != null) return result
-            val waitError = if (timeout != null) timeout.await(::receiveReady)
-            else if (readWaiters.await(lock, checkNotNull(waiter))) null else VfsError.INTERRUPTED
+            val waitError = when {
+                timeout != null -> timeout.await(readWaiters.events, ::receiveReady)
+                readWaiters.await(lock, checkNotNull(waiter)) -> null
+                else -> VfsError.INTERRUPTED
+            }
             if (waitError != null) return VfsResult.Err(waitError)
         }
     }
@@ -239,6 +245,14 @@ internal class PacketSocket internal constructor(
     }
 
     override fun readableBytes(): Int = lock.withLock { messages.firstOrNull()?.bytes?.size ?: 0 }
+
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) {
+        subscription.watch(readWaiters.events, PollEvents.NORMAL_INPUT or PollEvents.POLLRDHUP)
+    }
 
     override fun pollSocket(events: Int): Int = lock.withLock {
         var available = if (closed) 0 else PollEvents.NORMAL_OUTPUT

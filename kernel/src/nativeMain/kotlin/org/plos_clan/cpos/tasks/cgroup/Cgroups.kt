@@ -20,6 +20,24 @@ internal fun interface CgroupPlacement {
 internal object Cgroups {
     val lock = IrqSpinLock()
     var observer: ((CgroupHierarchy.Group, CgroupHierarchy.Event) -> Unit)? = null
+    private val accounting = HashMap<CgroupHierarchy.Group, CpuAccounting>()
+    private fun account(group: CgroupHierarchy.Group): CpuAccounting {
+        accounting[group]?.let { return it }
+        val parent = group.parent?.let(::account)
+        val created = CpuAccounting(parent)
+        accounting[group] = created
+        return created
+    }
+
+    fun cpuStat(group: CgroupHierarchy.Group): String = account(group).render()
+    fun remove(group: CgroupHierarchy.Group) = accounting.remove(group)?.close()
+    fun account(tasks: Collection<CgroupHierarchy.Task>) {
+        for (task in tasks) {
+            val thread = ProcessManager.findThread(task.id) ?: continue
+            account(task.group).attach(thread)
+        }
+    }
+
     val hierarchy = CgroupHierarchy { group, event -> observer?.invoke(group, event) }
 
     fun path(process: Process): ByteArray = lock.withLock {
@@ -35,8 +53,10 @@ internal object Cgroups {
 
     fun published(thread: Thread) = lock.withLock {
         val task = thread.cgroup ?: return@withLock
+        account(task.group).attach(thread)
         if (task.killed) {
-            SignalRouter.sendProcess(null, thread.process, SignalInfo(Signal.KILL, SignalInfo.KERNEL))
+            val signal = SignalInfo(Signal.KILL, SignalInfo.KERNEL)
+            SignalRouter.sendProcess(null, thread.process, signal)
         }
         if (task.freezing) thread.nativeTask.access { bridge.fast_handoff_request_user_interrupt(it) }
     }
@@ -50,7 +70,8 @@ internal object Cgroups {
             }
         }
         for (process in processes) {
-            SignalRouter.sendProcess(null, process, SignalInfo(Signal.KILL, SignalInfo.KERNEL))
+            val signal = SignalInfo(Signal.KILL, SignalInfo.KERNEL)
+            SignalRouter.sendProcess(null, process, signal)
         }
     }
 

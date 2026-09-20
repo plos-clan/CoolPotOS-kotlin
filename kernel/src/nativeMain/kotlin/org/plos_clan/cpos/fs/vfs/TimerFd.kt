@@ -2,6 +2,10 @@
 
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.tasks.PollSubscription
+import org.plos_clan.cpos.coroutines.KernelCoroutines
+import kotlinx.coroutines.DisposableHandle
+import kotlinx.coroutines.Runnable
 import org.plos_clan.cpos.drivers.RealtimeClock
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.mem.PreparedBufferDestination
@@ -12,7 +16,6 @@ import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
-import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 internal enum class TimerFdClock(val number: ULong) {
@@ -69,13 +72,48 @@ internal class TimerFd(
     private val transfer = ByteArray(VALUE_BYTES)
     private val readWaiters = IoWaitQueue()
     private val state = TimerFdState()
-    private val version = AtomicInt(0)
+
+    private inner class Alarm : Runnable {
+        var handle: DisposableHandle? = null
+        override fun run() = lock.withLock {
+            if (alarm !== this) return@withLock
+            alarm = null
+            state.advance(clock.read(TscClock.nanoTime()))
+            readWaiters.wakeAll()
+        }
+    }
+
+    private var alarm: Alarm? = null
+
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) {
+        val events = PollEvents.NORMAL_INPUT or PollEvents.POLLRDHUP
+        subscription.watch(readWaiters.events, events)
+    }
+
+    private fun arm() {
+        alarm?.handle?.dispose()
+        alarm = null
+        if (state.expirations != 0uL) return
+        val deadline = state.deadlineNanos ?: return
+        val now = TscClock.nanoTime()
+        val task = Alarm()
+        alarm = task
+        task.handle = KernelCoroutines.dispatcher.scheduleAt(
+            clock.toMonotonicDeadline(now, clock.read(now), deadline), task,
+        )
+    }
+
+    override fun release() = lock.withLock {
+        alarm?.handle?.dispose()
+        alarm = null
+    }
 
     override val ioSize: Int
         get() = VALUE_BYTES
-
-    override val readinessVersion: Int
-        get() = version.load()
 
     override val seekable: Boolean
         get() = false
@@ -92,7 +130,8 @@ internal class TimerFd(
                 setting.intervalNanos,
             )
             state.advance(clockNow)
-            version.fetchAndAdd(1)
+
+            arm()
             readWaiters.takeAll()
         }
         for (waiter in waiters) Scheduler.wake(waiter)
@@ -101,7 +140,7 @@ internal class TimerFd(
 
     fun getTime(): TimerFdSetting = lock.withLock {
         val clockNow = clock.read(TscClock.nanoTime())
-        if (state.advance(clockNow)) version.fetchAndAdd(1)
+        state.advance(clockNow)
         state.snapshot(clockNow)
     }
 
@@ -124,7 +163,7 @@ internal class TimerFd(
             val result = lock.withLock {
                 val monotonicNow = TscClock.nanoTime()
                 val clockNow = clock.read(monotonicNow)
-                val expired = state.advance(clockNow)
+                state.advance(clockNow)
                 if (state.expirations != 0uL) {
                     LittleEndianBuffer(transfer).writeU64(0, state.expirations)
                     if (destination.copyFrom(
@@ -134,12 +173,13 @@ internal class TimerFd(
                             VALUE_BYTES,
                         ) != VALUE_BYTES
                     ) {
-                        if (expired) version.fetchAndAdd(1)
+
                         return@withLock IoResult.failure(VfsError.FAULT)
                     }
 
                     state.consume()
-                    version.fetchAndAdd(1)
+                    arm()
+
                     return@withLock IoResult.success(VALUE_BYTES)
                 }
                 if (mode == IoMode.NON_BLOCKING) {
@@ -170,7 +210,7 @@ internal class TimerFd(
     override fun poll(caller: VfsOperationContext, inode: Inode, events: Int): Long =
         lock.withLock {
             val clockNow = clock.read(TscClock.nanoTime())
-            if (state.advance(clockNow)) version.fetchAndAdd(1)
+            state.advance(clockNow)
             val available = if (state.expirations == 0uL) 0 else PollEvents.NORMAL_INPUT
             (available and events).toLong()
         }

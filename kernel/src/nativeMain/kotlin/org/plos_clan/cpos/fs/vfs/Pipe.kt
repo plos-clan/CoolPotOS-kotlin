@@ -2,6 +2,7 @@
 
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.IoWaitQueue
@@ -15,7 +16,6 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.KernelMutex
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PollEvents
-import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 private class PipeInode(
@@ -57,9 +57,6 @@ private class PipeEndpoint(
         val pipeSpliceLock = KernelMutex()
     }
 
-    override val readinessVersion: Int
-        get() = state.readinessVersion
-
     override fun read(
         caller: VfsOperationContext,
         inode: Inode,
@@ -88,6 +85,14 @@ private class PipeEndpoint(
     override fun await(event: IoEvent, count: Int): Boolean {
         check(if (event == IoEvent.WRITABLE) access.canWrite else access.canRead)
         return state.await(event, count)
+    }
+
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) {
+        state.subscribe(subscription, access)
     }
 
     override fun poll(
@@ -173,10 +178,11 @@ private class PipeState(
     private val writeWaiters = IoWaitQueue()
     private val readerOpenWaiters = IoWaitQueue()
     private val writerOpenWaiters = IoWaitQueue()
-    private val version = AtomicInt(0)
 
-    val readinessVersion: Int
-        get() = version.load()
+    fun subscribe(subscription: PollSubscription, access: AccessMode) {
+        if (access.canRead) subscription.watch(readWaiters.events)
+        if (access.canWrite) subscription.watch(writeWaiters.events)
+    }
 
     fun open(access: AccessMode, nonBlocking: Boolean): VfsResult<OpenFileBackend> {
         val thread = ProcessManager.currentThread()
@@ -213,7 +219,7 @@ private class PipeState(
                 AccessMode.PATH,
                 -> return@withLock VfsError.BAD_DESCRIPTOR
             }
-            version.fetchAndAdd(1)
+
             null
         }
         if (wakeReaders) wakeAllOutsideLock(readerOpenWaiters)
@@ -223,7 +229,7 @@ private class PipeState(
         if (!checkNotNull(waitQueue).await(lock, queued)) {
             lock.withLock {
                 if (access == AccessMode.READ) readers-- else writers--
-                version.fetchAndAdd(1)
+
             }
             return VfsResult.Err(VfsError.INTERRUPTED)
         }
@@ -245,9 +251,10 @@ private class PipeState(
             }
             val transferred = buffer.read(destination, offset, count)
             if (transferred == 0) return@withLock IoResult.failure(VfsError.FAULT)
+            writeWaiters.events.signal()
             writerToWake = writeWaiters.takeReady(buffer.remaining)
             if (buffer.size != 0) readerToWake = readWaiters.takeReady(buffer.size)
-            version.fetchAndAdd(1)
+
             IoResult.success(transferred)
         }
         writerToWake?.let(Scheduler::wake)
@@ -280,8 +287,9 @@ private class PipeState(
             }
             val transferred = buffer.write(source, offset, count)
             if (transferred == 0) return@withLock IoResult.failure(VfsError.FAULT)
+            readWaiters.events.signal()
             readerToWake = readWaiters.takeReady(buffer.size)
-            version.fetchAndAdd(1)
+
             IoResult.success(transferred)
         }
         if (brokenPipe) {
@@ -326,8 +334,9 @@ private class PipeState(
                     var writerToWake: Thread? = null
                     lock.withLock {
                         buffer.discard(written.bytesTransferred)
+                        writeWaiters.events.signal()
                         writerToWake = writeWaiters.takeReady(buffer.remaining)
-                        version.fetchAndAdd(1)
+
                     }
                     writerToWake?.let(Scheduler::wake)
                 }
@@ -381,8 +390,9 @@ private class PipeState(
                     var readerToWake: Thread? = null
                     lock.withLock {
                         reservation.commit(read.bytesTransferred)
+                        readWaiters.events.signal()
                         readerToWake = readWaiters.takeReady(buffer.size)
-                        version.fetchAndAdd(1)
+
                     }
                     readerToWake?.let(Scheduler::wake)
                 }
@@ -469,17 +479,15 @@ private class PipeState(
                 readers--
                 if (readers == 0) wakeWriters = true
             }
-            version.fetchAndAdd(1)
+
         }
         if (wakeReaders) wakeAllOutsideLock(readWaiters)
         if (wakeWriters) wakeAllOutsideLock(writeWaiters)
     }
 
     private fun wakeAllOutsideLock(queue: IoWaitQueue) {
-        while (true) {
-            val thread = lock.withLock { queue.takeOne() } ?: return
-            Scheduler.wake(thread)
-        }
+        val threads = lock.withLock { queue.takeAll() }
+        threads.forEach(Scheduler::wake)
     }
 }
 

@@ -5,6 +5,7 @@
 
 package org.plos_clan.cpos.drivers
 
+import org.plos_clan.cpos.tasks.PollSubscription
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlinx.cinterop.ExperimentalForeignApi
@@ -34,6 +35,8 @@ enum class LinuxDeviceMajor(val number: UInt) {
 }
 
 interface DeviceBackend {
+    fun subscribe(device: Device, subscription: PollSubscription) {}
+
     val byteSize: ULong?
         get() = null
 
@@ -107,8 +110,6 @@ interface WaitablePositionlessDeviceBackend : PositionlessDeviceBackend {
 }
 
 interface ModeAwareDeviceBackend : PositionlessDeviceBackend {
-    val readinessVersion: Int
-        get() = 0
 
     fun read(device: Device, buffer: PreparedBufferDestination, bufferOffset: Int, size: ULong, mode: IoMode): Long
     fun write(device: Device, buffer: PreparedBufferSource, bufferOffset: Int, size: ULong, mode: IoMode): Long

@@ -2,9 +2,11 @@
 
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.tasks.PollSource
+import org.plos_clan.cpos.tasks.PollSubscription
+import org.plos_clan.cpos.utils.KernelMutex
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PollEvents
-import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 internal enum class EpollControlOperation {
@@ -16,7 +18,9 @@ internal enum class EpollControlOperation {
 internal data class EpollEvent(
     val events: UInt,
     val data: ULong,
-)
+) {
+    val ioEvents: UInt get() = events and EpollEvents.IO_EVENTS
+}
 
 internal object EpollEvents {
     const val EXCLUSIVE = 0x1000_0000u
@@ -32,71 +36,143 @@ internal object EpollEvents {
 
 internal class Epoll : AnonymousFileBackend(InodeType.EPOLL, "eventpoll"),
     PositionlessOpenFileBackend {
-    private data class RegistrationKey(
-        val descriptor: Int,
-        val file: OpenFileDescription,
-    )
+    private data class RegistrationKey(val descriptor: Int, val file: OpenFileDescription)
 
-    private class Registration(
-        val key: RegistrationKey,
-        var event: EpollEvent,
-    ) {
+    private inner class Registration(val key: RegistrationKey, val event: EpollEvent) :
+        PollSubscription(event.events and EpollEvents.EXCLUSIVE != 0u) {
+        override val events: Int = if (event.ioEvents == 0u) -1 else event.events.toInt()
         var queued = false
-        var edgeArmed = true
-        var disabled = false
-        var readyEvents = 0u
-        var observedEvents = 0u
-        var observedVersion = key.file.backend.readinessVersion
+        var generation = 0uL
+        private var enabled = true
+        private var removed = false
+
+        override fun changed(): Boolean {
+            val accepted = lock.withLock {
+                if (removed || !enabled && key.file.isOpen) return@withLock false
+                generation++
+                if (queued) return@withLock false
+                queued = true
+                ready.addLast(this)
+                true
+            }
+            if (accepted) changes.signal()
+            return accepted
+        }
+
+        override fun onClosed() = lock.withLock {
+            removed = true
+            dequeue()
+        }
+
+        private fun dequeue() {
+            if (queued) ready.remove(this)
+            queued = false
+        }
+
+        fun discard(observed: ULong) = lock.withLock {
+            if (!queued || generation != observed) return@withLock
+            check(ready.removeFirst() === this)
+            queued = false
+        }
+
+        fun sample(caller: VfsOperationContext, consume: Boolean): Long {
+            val requested = event.ioEvents or EpollEvents.ALWAYS_REPORTED
+            val file = key.file
+            if (!file.retain()) {
+                remove(this)
+                return 0
+            }
+            return try {
+                file.poll(caller, requested.toInt(), consume, this)
+            } finally {
+                file.release()
+            }
+        }
+
+        fun collect(caller: VfsOperationContext, output: MutableList<EpollEvent>): Boolean {
+            val available = sample(caller, consume = true)
+            if (available < 0) remove(this)
+            if (available <= 0) return false
+            val delivered = EpollEvent(available.toUInt(), event.data)
+            output.add(delivered)
+            if (event.events and EpollEvents.ONE_SHOT == 0u) {
+                return event.events and EpollEvents.EDGE_TRIGGERED == 0u
+            }
+            lock.withLock {
+                enabled = false
+                dequeue()
+            }
+            return false
+        }
     }
 
     private companion object {
-        val topologyLock = IrqSpinLock()
+        val topologyLock = KernelMutex()
     }
 
+    private val operations = KernelMutex()
     private val lock = IrqSpinLock()
-    private val registrations = ArrayList<Registration>()
-    private val indices = HashMap<RegistrationKey, Int>()
+    private val registrations = LinkedHashMap<RegistrationKey, Registration>()
     private val ready = ArrayDeque<Registration>()
-    private val version = AtomicInt(0)
+    private val changes = PollSource()
 
-    override val seekable: Boolean
-        get() = false
+    override val seekable: Boolean get() = false
 
-    override val readinessVersion: Int
-        get() = version.load()
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) = subscription.watch(changes)
 
-    override fun poll(caller: VfsOperationContext, inode: Inode, events: Int): Long =
-        lock.withLock {
-            refresh(caller)
-            if (ready.isNotEmpty()) {
-                (events and PollEvents.NORMAL_INPUT).toLong()
-            } else {
-                0L
-            }
+    override fun poll(
+        caller: VfsOperationContext,
+        inode: Inode,
+        events: Int,
+    ): Long = operations.withLock {
+        while (true) {
+            var generation = 0uL
+            val registration = lock.withLock {
+                val first = ready.firstOrNull() ?: return@withLock null
+                generation = first.generation
+                first
+            } ?: return@withLock 0L
+            val available = registration.sample(caller, consume = false)
+            if (available > 0) return@withLock (events and PollEvents.NORMAL_INPUT).toLong()
+            registration.discard(generation)
+            if (available < 0) remove(registration)
         }
+        0L
+    }
 
-    fun control(
-        descriptor: Int,
-        file: OpenFileDescription,
-        operation: EpollControlOperation,
-        event: EpollEvent?,
-    ): VfsResult<Unit> {
-        val key = RegistrationKey(descriptor, file)
-        if (operation != EpollControlOperation.ADD) {
-            return lock.withLock { update(key, operation, event) }
-        }
-
+    fun control(descriptor: Int, file: OpenFileDescription, operation: EpollControlOperation,
+        event: EpollEvent?): VfsResult<Unit> = topologyLock.withLock {
         val target = file.backend as? Epoll
-        return try {
-            topologyLock.withLock {
-                if (target === this) return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
-                if (target != null && target.reaches(this)) {
-                    return@withLock VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
-                }
-                lock.withLock { add(key, checkNotNull(event)) }
+        if (operation == EpollControlOperation.ADD && target != null && target.reaches(this)) {
+            return@withLock VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
+        }
+        operations.withLock operation@{
+            val key = RegistrationKey(descriptor, file)
+            val previous = registrations[key]
+            if (operation == EpollControlOperation.ADD && previous != null) {
+                return@operation VfsResult.Err(VfsError.ALREADY_EXISTS)
             }
-        } catch (_: OutOfMemoryError) {
-            VfsResult.Err(VfsError.NO_MEMORY)
+            if (operation != EpollControlOperation.ADD && previous == null) {
+                return@operation VfsResult.Err(VfsError.NOT_FOUND)
+            }
+            if (operation == EpollControlOperation.DELETE) {
+                remove(checkNotNull(previous))
+                return@operation VfsResult.Ok(Unit)
+            }
+            val replacement = checkNotNull(event)
+            val combined = (previous?.event?.events ?: 0u) or replacement.events
+            if (previous != null && combined and EpollEvents.EXCLUSIVE != 0u) {
+                return@operation VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            }
+            if (previous != null) remove(previous)
+            val registration = Registration(key, replacement)
+            registrations[key] = registration
+            registration.notify()
+            VfsResult.Ok(Unit)
         }
     }
 
@@ -104,173 +180,30 @@ internal class Epoll : AnonymousFileBackend(InodeType.EPOLL, "eventpoll"),
         caller: VfsOperationContext,
         maximum: Int,
         events: MutableList<EpollEvent>,
-    ) = lock.withLock {
+    ) = operations.withLock {
         events.clear()
-        var refreshed = false
-        while (events.size < maximum) {
-            val registration = ready.removeFirstOrNull()
-            if (registration == null) {
-                if (events.isNotEmpty() || refreshed) break
-                refresh(caller)
-                refreshed = true
-                continue
-            }
-            if (!registration.queued) continue
-
-            registration.queued = false
-            version.fetchAndAdd(1)
-            val targetVersion = registration.key.file.backend.readinessVersion
-            val result = registration.key.file.poll(
-                caller,
-                ((registration.event.events and EpollEvents.IO_EVENTS) or
-                    EpollEvents.ALWAYS_REPORTED).toInt(),
-            )
-            if (result < 0) {
-                indices[registration.key]?.let(::removeAt)
-                continue
-            }
-            val current = result.toUInt() and
-                ((registration.event.events and EpollEvents.IO_EVENTS) or
-                    EpollEvents.ALWAYS_REPORTED)
-            registration.observedVersion = targetVersion
-            registration.observedEvents = current
-            if (current == 0u) {
-                registration.readyEvents = 0u
-                registration.edgeArmed = true
-                continue
-            }
-
-            val returned = if (registration.event.events and
-                EpollEvents.EDGE_TRIGGERED != 0u
-            ) registration.readyEvents or current else current
-            events += EpollEvent(returned, registration.event.data)
-            registration.readyEvents = 0u
-            if (registration.event.events and EpollEvents.ONE_SHOT != 0u) {
-                registration.disabled = true
-            }
+        var remaining = lock.withLock { ready.size }
+        while (remaining-- > 0 && events.size < maximum) {
+            val registration = takeReady() ?: break
+            if (registration.collect(caller, events)) registration.notify()
         }
     }
 
-    override fun release() = lock.withLock {
+    private fun takeReady(): Registration? = lock.withLock {
+        val registration = ready.removeFirstOrNull() ?: return@withLock null
+        registration.queued = false
+        registration
+    }
+
+    override fun release() = operations.withLock {
+        lock.withLock { ready.clear() }
+        registrations.values.forEach { it.close() }
         registrations.clear()
-        indices.clear()
-        ready.clear()
     }
 
-    private fun add(key: RegistrationKey, event: EpollEvent): VfsResult<Unit> {
-        if (indices.containsKey(key)) return VfsResult.Err(VfsError.ALREADY_EXISTS)
-        return try {
-            indices[key] = registrations.size
-            registrations += Registration(key, event)
-            VfsResult.Ok(Unit)
-        } catch (_: OutOfMemoryError) {
-            indices.remove(key)
-            VfsResult.Err(VfsError.NO_MEMORY)
-        }
-    }
-
-    private fun update(
-        key: RegistrationKey,
-        operation: EpollControlOperation,
-        event: EpollEvent?,
-    ): VfsResult<Unit> {
-        val index = indices[key] ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val registration = registrations[index]
-        if (operation == EpollControlOperation.DELETE) {
-            removeAt(index)
-            return VfsResult.Ok(Unit)
-        }
-        val updatedEvent = checkNotNull(event)
-        if (registration.event.events and EpollEvents.EXCLUSIVE != 0u ||
-            updatedEvent.events and EpollEvents.EXCLUSIVE != 0u
-        ) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-
-        registration.event = updatedEvent
-        registration.disabled = false
-        registration.edgeArmed = true
-        registration.readyEvents = 0u
-        registration.observedEvents = 0u
-        registration.observedVersion = registration.key.file.backend.readinessVersion
-        if (registration.queued) {
-            registration.queued = false
-            ready.remove(registration)
-            version.fetchAndAdd(1)
-        }
-        return VfsResult.Ok(Unit)
-    }
-
-    private fun refresh(caller: VfsOperationContext) {
-        var index = 0
-        while (index < registrations.size) {
-            val registration = registrations[index]
-            val targetVersion = registration.key.file.backend.readinessVersion
-            val result = registration.key.file.poll(
-                caller,
-                ((registration.event.events and EpollEvents.IO_EVENTS) or
-                    EpollEvents.ALWAYS_REPORTED).toInt(),
-                consume = false,
-            )
-            if (result < 0) {
-                removeAt(index)
-                continue
-            }
-
-            val current = result.toUInt() and
-                ((registration.event.events and EpollEvents.IO_EVENTS) or
-                    EpollEvents.ALWAYS_REPORTED)
-            val edgeTriggered = registration.event.events and
-                EpollEvents.EDGE_TRIGGERED != 0u
-            if (edgeTriggered &&
-                (targetVersion != registration.observedVersion ||
-                    current and registration.observedEvents.inv() != 0u)
-            ) registration.edgeArmed = true
-            registration.observedVersion = targetVersion
-            registration.observedEvents = current
-            if (current == 0u) {
-                if (registration.queued) {
-                    registration.queued = false
-                    registration.readyEvents = 0u
-                    ready.remove(registration)
-                    version.fetchAndAdd(1)
-                }
-                if (edgeTriggered) {
-                    registration.edgeArmed = true
-                }
-            } else if (!registration.disabled) {
-                if (registration.queued) {
-                    registration.readyEvents = if (edgeTriggered) {
-                        registration.readyEvents or current
-                    } else {
-                        current
-                    }
-                } else if (!edgeTriggered || registration.edgeArmed) {
-                    registration.readyEvents = current
-                    registration.queued = true
-                    registration.edgeArmed = false
-                    ready.addLast(registration)
-                    version.fetchAndAdd(1)
-                }
-            }
-            index++
-        }
-    }
-
-    private fun removeAt(index: Int) {
-        val removed = registrations[index]
-        indices.remove(removed.key)
-        if (removed.queued) {
-            removed.queued = false
-            ready.remove(removed)
-            version.fetchAndAdd(1)
-        }
-
-        val lastIndex = registrations.lastIndex
-        if (index != lastIndex) {
-            val replacement = registrations[lastIndex]
-            registrations[index] = replacement
-            indices[replacement.key] = index
-        }
-        registrations.removeAt(lastIndex)
+    private fun remove(registration: Registration) {
+        registrations.remove(registration.key)
+        registration.close()
     }
 
     private fun reaches(target: Epoll): Boolean {
@@ -281,10 +214,9 @@ internal class Epoll : AnonymousFileBackend(InodeType.EPOLL, "eventpoll"),
             val current = pending.removeFirstOrNull() ?: return false
             if (current === target) return true
             if (!visited.add(current)) continue
-            current.lock.withLock {
-                current.registrations.forEach { registration ->
-                    (registration.key.file.backend as? Epoll)?.let(pending::addLast)
-                }
+            current.operations.withLock {
+                val targets = current.registrations.values
+                targets.mapNotNullTo(pending) { it.key.file.backend as? Epoll }
             }
         }
     }

@@ -41,6 +41,7 @@ internal class UtsNamespace(
         encode(arrayOf(sysName, nodeName, release, version, machine, domainName)),
     )
 
+    val changes = PollSource()
     private val versions = Array(MutableField.entries.size) { AtomicInt(0) }
 
     fun version(field: MutableField): Int = versions[field.ordinal].load()
@@ -71,6 +72,7 @@ internal class UtsNamespace(
             }
             if (state.compareAndSet(current, updated)) {
                 versions[field.ordinal].fetchAndAdd(1)
+                changes.signal()
                 return
             }
         }

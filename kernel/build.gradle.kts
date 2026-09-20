@@ -396,9 +396,9 @@ private class KernelConfig(
         "-target", "$arch-freestanding",
         "-std=c23", "-ffreestanding", "-nostdinc", "-fno-builtin",
     ) + FullLto.compilerArgs + listOf(
-        "-m64", "-mno-red-zone", "-mcmodel=kernel", "-fno-stack-protector",
-        "-mno-80387", "-mno-mmx", "-mno-sse", "-mno-sse2",
         "-Wall", "-Wextra", "-Wpedantic", "-Werror",
+        "-mno-80387", "-mno-mmx", "-mno-sse", "-mno-sse2",
+        "-m64", "-mno-red-zone", "-mcmodel=kernel", "-fno-stack-protector", "-funwind-tables",
     ) + listOf(
         paths.kernelC,
         paths.root,
@@ -967,10 +967,11 @@ val compileC = tasks.register("compileC") {
         config.paths.cObjects.mkdirs()
         config.kernel.sources.forEach { source ->
             val objectFile = config.paths.cObjects.resolve("${source.nameWithoutExtension}.o")
-            val command = listOf(config.tools.cc) + config.kernel.compileArgs + listOf(
-                "-c", source.absolutePath,
-                "-o", objectFile.absolutePath,
-            )
+            val command = buildList {
+                add(config.tools.cc)
+                addAll(config.kernel.compileArgs)
+                addAll(listOf("-c", source.absolutePath, "-o", objectFile.absolutePath))
+            }
             check(ProcessBuilder(command).inheritIO().start().waitFor() == 0) {
                 "Failed to compile ${source.name}"
             }

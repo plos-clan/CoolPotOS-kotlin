@@ -3,16 +3,7 @@
 
 package org.plos_clan.cpos.tasks
 
-import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.addressOf
-import kotlinx.cinterop.alignOf
-import kotlinx.cinterop.pointed
-import kotlinx.cinterop.ptr
-import kotlinx.cinterop.sizeOf
-import kotlinx.cinterop.toLong
-import kotlinx.cinterop.usePinned
-import kotlinx.cinterop.value
-import kotlinx.cinterop.ULongVar
+import kotlinx.cinterop.*
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.INVALID_FRAME
@@ -59,49 +50,87 @@ internal class NativeTask private constructor(
     val cpuTimeNanos: ULong
         get() = access { if (it == 0uL) exitedCpuTime else taskCpuTime(it) }
 
+    fun affinity(): ByteArray? = access {
+        if (it == 0uL) return@access null
+        val task = it.toPointer<bridge.fast_task_t>()!!.pointed
+        task.affinity?.readBytes(task.affinity_size.toInt()) ?: CpuAffinity.online()
+    }
+
+    fun setAffinity(mask: ByteArray): Boolean {
+        val replacement = nativeHeap.allocArray<UByteVar>(mask.size)
+        mask.forEachIndexed { index, byte -> replacement[index] = byte.toUByte() }
+        val accepted = access {
+            if (it == 0uL) return@access false
+            val previous = it.toPointer<bridge.fast_task_t>()!!.pointed.affinity
+            bridge.fast_handoff_set_affinity(it, replacement, mask.size.toULong())
+            if (previous != null) nativeHeap.free(previous)
+            true
+        }
+        if (!accepted) {
+            nativeHeap.free(replacement)
+            return false
+        }
+        while (!access { it == 0uL || bridge.fast_handoff_affinity_settled(it) }) {
+            Scheduler.yieldCurrent()
+        }
+        return true
+    }
+
     fun resetUserXstate() = access { handle ->
         val task = handle.toPointer<bridge.fast_task_t>()!!.pointed
         val frame = (task.kernel_rsp - sizeOf<bridge.kernel_entry_frame_t>().toULong())
             .toPointer<bridge.kernel_entry_frame_t>()!!.pointed
-        copyMemory(frame.xstate.ptr.toLong().toULong(), bridge.initial_xstate.ptr.toLong().toULong(), sizeOf<bridge.xstate_t>().toULong())
+        val destination = frame.xstate.ptr.toLong().toULong()
+        val initial = bridge.initial_xstate.ptr.toLong().toULong()
+        copyMemory(destination, initial, sizeOf<bridge.xstate_t>().toULong())
     }
 
-    fun initializeUser(entry: ULong, rsp: ULong, fsBase: ULong, registers: ULongArray? = null) {
-        access { handle ->
-            val task = handle.toPointer<bridge.fast_task_t>()!!.pointed
-            val frameAddress = (task.kernel_rsp - sizeOf<bridge.kernel_entry_frame_t>().toULong()) and
-                (alignOf<bridge.kernel_entry_frame_t>().toULong() - 1uL).inv()
-            val frame = frameAddress.toPointer<bridge.kernel_entry_frame_t>()!!.pointed
-            val context = (frameAddress - sizeOf<bridge.switch_frame_t>().toULong())
-                .toPointer<bridge.switch_frame_t>()!!.pointed
-            clearMemory(context.ptr.toLong().toULong(), 0,
-                sizeOf<bridge.switch_frame_t>().toULong() + sizeOf<bridge.kernel_entry_frame_t>().toULong())
-            val regs = frame.regs
-            if (registers == null) {
-                regs.rip = entry
-                regs.ds = 0x1buL
-                regs.es = 0x1buL
-                regs.cs = 0x23uL
-                regs.ss = 0x1buL
-                regs.rflags = 0x202uL
-                copyMemory(frame.xstate.ptr.toLong().toULong(), bridge.initial_xstate.ptr.toLong().toULong(), sizeOf<bridge.xstate_t>().toULong())
-            } else {
-                registers.usePinned {
-                    copyMemory(regs.ptr.toLong().toULong(), it.addressOf(0).toLong().toULong(), sizeOf<bridge.pt_regs_t>().toULong())
-                }
-                val parent = bridge.fast_handoff_current_task_handle().toPointer<bridge.fast_task_t>()!!.pointed
-                val parentFrame = (parent.kernel_rsp - sizeOf<bridge.kernel_entry_frame_t>().toULong())
-                    .toPointer<bridge.kernel_entry_frame_t>()!!.pointed
-                copyMemory(frame.xstate.ptr.toLong().toULong(), parentFrame.xstate.ptr.toLong().toULong(), sizeOf<bridge.xstate_t>().toULong())
+    fun initializeUser(
+        entry: ULong,
+        rsp: ULong,
+        fsBase: ULong,
+        registers: ULongArray? = null,
+    ) = access { handle ->
+        val task = handle.toPointer<bridge.fast_task_t>()!!.pointed
+        val frameSize = sizeOf<bridge.kernel_entry_frame_t>().toULong()
+        val frameMask = (alignOf<bridge.kernel_entry_frame_t>().toULong() - 1uL).inv()
+        val frameAddress = (task.kernel_rsp - frameSize) and frameMask
+        val frame = frameAddress.toPointer<bridge.kernel_entry_frame_t>()!!.pointed
+        val contextSize = sizeOf<bridge.switch_frame_t>().toULong()
+        val contextAddress = frameAddress - contextSize
+        val context = contextAddress.toPointer<bridge.switch_frame_t>()!!.pointed
+        clearMemory(contextAddress, 0, contextSize + frameSize)
+        val regs = frame.regs
+        var xstate = bridge.initial_xstate.ptr.toLong().toULong()
+        if (registers == null) {
+            regs.rip = entry
+            regs.ds = 0x1buL
+            regs.es = 0x1buL
+            regs.cs = 0x23uL
+            regs.ss = 0x1buL
+            regs.rflags = 0x202uL
+        } else {
+            val registerAddress = regs.ptr.toLong().toULong()
+            val registerSize = sizeOf<bridge.pt_regs_t>().toULong()
+            registers.usePinned {
+                val source = it.addressOf(0).toLong().toULong()
+                copyMemory(registerAddress, source, registerSize)
             }
-            regs.rax = 0uL
-            regs.func = 0uL
-            regs.errcode = 0uL
-            regs.rsp = rsp
-            regs.fs_base = fsBase
-            context.rip = bridge.user_task_entry.toLong().toULong()
-            task.rsp = context.ptr.toLong().toULong()
+            val parentHandle = bridge.fast_handoff_current_task_handle()
+            val parent = parentHandle.toPointer<bridge.fast_task_t>()!!.pointed
+            val parentFrameAddress = parent.kernel_rsp - frameSize
+            val parentFrame = parentFrameAddress.toPointer<bridge.kernel_entry_frame_t>()!!
+            xstate = parentFrame.pointed.xstate.ptr.toLong().toULong()
         }
+        val xstateAddress = frame.xstate.ptr.toLong().toULong()
+        copyMemory(xstateAddress, xstate, sizeOf<bridge.xstate_t>().toULong())
+        regs.rax = 0uL
+        regs.func = 0uL
+        regs.errcode = 0uL
+        regs.rsp = rsp
+        regs.fs_base = fsBase
+        context.rip = bridge.user_task_entry.toLong().toULong()
+        task.rsp = contextAddress
     }
 
     fun exit(): Nothing {
@@ -122,6 +151,7 @@ internal class NativeTask private constructor(
             handle = 0uL
             context
         }
+        context.pointed.affinity?.let { nativeHeap.free(it) }
         bridge.free(context)
         stack?.close()
         runtime?.close()
@@ -173,7 +203,9 @@ internal class NativeTask private constructor(
     companion object {
         internal fun adoptRuntime(handle: ULong): NativeTask {
             val tcb = handle.toPointer<bridge.fast_task_t>()!!.pointed.kernel_fs_base
-            return NativeTask(handle, RuntimeStack(tcb), Runtime(tcb))
+            val stack = RuntimeStack(tcb)
+            val runtime = Runtime(tcb)
+            return NativeTask(handle, stack, runtime)
         }
 
         fun allocate(id: Int, cr3: ULong, stackPages: ULong = 0uL, nice: Int = 0): NativeTask? {
@@ -182,8 +214,12 @@ internal class NativeTask private constructor(
             var handle = 0uL
             try {
                 if (stack != null) runtime = Runtime.allocate() ?: return null
+                val stackTop = stack?.top ?: 0uL
+                val fsBase = runtime?.fsBase ?: 0uL
+                val policy = Scheduler.policy
+                val weight = policy.weight(nice)
                 handle = bridge.fast_handoff_create_task(
-                    id.toUInt(), cr3, stack?.top ?: 0uL, runtime?.fsBase ?: 0uL, Scheduler.policy.quantumCycles(nice),
+                    id.toUInt(), cr3, stackTop, fsBase, policy.quantumCycles, weight,
                 )
                 if (handle == 0uL) return null
                 return NativeTask(handle, stack, runtime)

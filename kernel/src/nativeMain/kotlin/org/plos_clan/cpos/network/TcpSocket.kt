@@ -1,5 +1,8 @@
 package org.plos_clan.cpos.network
 
+import org.plos_clan.cpos.tasks.PollSubscription
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
+import org.plos_clan.cpos.fs.vfs.Inode
 import kotlinx.coroutines.delay
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.TscClock
@@ -706,7 +709,7 @@ internal class TcpSocket internal constructor(
             }
             windowUpdate?.let(subsystem::transmit)
             if (result != null) return result
-            val waitError = if (deadline != null) deadline.await {
+            val waitError = if (deadline != null) deadline.await(readWaiters.events) {
                 lock.withLock {
                     receiveBuffer.size >= (if (request.waitAll) request.count else 1) ||
                         !readOpen || state == State.RESET
@@ -879,6 +882,18 @@ internal class TcpSocket internal constructor(
     override fun outputQueueBytes(): Int = lock.withLock { queuedSendBytesLocked() }
 
     override fun readableBytes(): Int = lock.withLock { receiveBuffer.size }
+
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) {
+        subscription.watch(readWaiters.events, PollEvents.NORMAL_INPUT or PollEvents.POLLRDHUP)
+        subscription.watch(writeWaiters.events, PollEvents.NORMAL_OUTPUT)
+        subscription.watch(connectWaiters.events, PollEvents.NORMAL_OUTPUT)
+        val events = PollEvents.NORMAL_INPUT or PollEvents.POLLRDHUP
+        subscription.watch(acceptWaiters.events, events)
+    }
 
     override fun pollSocket(events: Int): Int = lock.withLock {
         var available = 0

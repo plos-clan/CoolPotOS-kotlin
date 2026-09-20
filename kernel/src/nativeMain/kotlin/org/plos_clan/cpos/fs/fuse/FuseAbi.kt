@@ -20,6 +20,7 @@ import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 
 internal object FuseAbi {
+    const val FUSE_POLL_SCHEDULE_NOTIFY = 1u
     const val VERSION = 7u
     const val MINOR_VERSION = 45u
     const val ROOT_ID = 1uL

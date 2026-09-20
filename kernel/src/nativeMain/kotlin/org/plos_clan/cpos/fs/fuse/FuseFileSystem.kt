@@ -1,5 +1,7 @@
 package org.plos_clan.cpos.fs.fuse
 
+import org.plos_clan.cpos.tasks.PollSource
+import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.fs.DeviceNode
 import org.plos_clan.cpos.fs.OpenFlags
 import org.plos_clan.cpos.fs.vfs.AccessMode
@@ -260,6 +262,25 @@ private class FuseInstance(
     private data class NodeRecord(val inode: Inode, var lookups: ULong)
 
     private val lock = IrqSpinLock()
+    class Poll(val id: ULong, val events: PollSource)
+    private val polls = HashMap<ULong, Poll>()
+    private var nextPoll = 1uL
+    fun createPoll(): Poll = lock.withLock {
+        check(nextPoll != 0uL)
+        val events = PollSource()
+        val poll = Poll(nextPoll++, events)
+        polls[poll.id] = poll
+        poll
+    }
+    fun removePoll(poll: Poll) = lock.withLock { polls.remove(poll.id) }
+    override fun wakePoll(handle: ULong) {
+        val poll = lock.withLock { polls[handle] }
+        poll?.events?.signal()
+    }
+    fun subscribe(poll: Poll, subscription: PollSubscription) {
+        subscription.watch(session.disconnection)
+        subscription.watch(poll.events)
+    }
     private val nodes = mutableMapOf<ULong, NodeRecord>()
     private var superBlock: SuperBlock? = null
 
@@ -1350,6 +1371,14 @@ private abstract class FuseHandle(
     protected val opener: VfsOperationContext,
     private val directory: Boolean,
 ) : OpenFileBackend {
+    private val poll = lazy { instance.createPoll() }
+    override val supportsEpoll: Boolean get() = !directory
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) = instance.subscribe(poll.value, subscription)
+
     protected val nodeId: ULong
         get() = fuseInode.id.value
 
@@ -1453,6 +1482,10 @@ private abstract class FuseHandle(
         }
         val request = FuseRequest(FuseOpcode.POLL, nodeId, 24).apply {
             writeU64(0, handle ?: 0uL)
+            if (poll.isInitialized()) {
+                writeU64(8, poll.value.id)
+                writeU32(16, FuseAbi.FUSE_POLL_SCHEDULE_NOTIFY)
+            }
             writeU32(20, events.toUInt())
         }
         return when (val result = instance.request(caller, request)) {
@@ -1473,6 +1506,7 @@ private abstract class FuseHandle(
     }
 
     override fun release() {
+        if (poll.isInitialized()) instance.removePoll(poll.value)
         val currentHandle = handle ?: return
         val request = FuseRequest(
             if (directory) FuseOpcode.RELEASEDIR else FuseOpcode.RELEASE,

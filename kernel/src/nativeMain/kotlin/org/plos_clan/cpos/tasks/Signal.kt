@@ -368,29 +368,24 @@ internal class PendingSignalStorage(private val quota: PendingSignalQuota) {
 }
 
 internal class PendingSignals(quota: PendingSignalQuota) {
+    val events = PollSource()
     private val lock = IrqSpinLock()
     private val storage = PendingSignalStorage(quota)
-    private val sequence = AtomicInt(0)
 
     val mask: ULong
         get() = storage.mask
 
-    val version: Int
-        get() = sequence.load()
-
     fun enqueue(info: SignalInfo): SignalEnqueueResult =
         lock.withLock {
             storage.enqueue(info).also { result ->
-                if (result == SignalEnqueueResult.ADDED) sequence.store(sequence.load() + 1)
+                if (result == SignalEnqueueResult.ADDED) events.signal()
             }
         }
 
     fun take(accepted: ULong): SignalInfo? {
         if (mask and accepted == 0uL) return null
         return lock.withLock {
-            storage.take(accepted).also {
-                if (it != null) sequence.store(sequence.load() + 1)
-            }
+            storage.take(accepted)
         }
     }
 
@@ -399,7 +394,6 @@ internal class PendingSignals(quota: PendingSignalQuota) {
         lock.withLock {
             if (storage.mask and discarded == 0uL) return@withLock
             storage.discard(discarded)
-            sequence.store(sequence.load() + 1)
         }
     }
 }

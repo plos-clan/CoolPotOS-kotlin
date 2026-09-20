@@ -2,6 +2,8 @@
 
 package org.plos_clan.cpos.drivers.char
 
+import org.plos_clan.cpos.tasks.PollSource
+import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
 import org.plos_clan.cpos.drivers.char.terminal.NativeTerminal
 import org.plos_clan.cpos.drivers.char.terminal.TerminalInput
@@ -34,11 +36,10 @@ abstract class TerminalBackend : TtySessionBackend {
     private val echoes = ByteRingBuffer(OUTPUT_CHUNK_SIZE, IrqSpinLock())
     private val transferBuffer = ByteArray(OUTPUT_CHUNK_SIZE)
     private val processedOutput = ByteArray(OUTPUT_CHUNK_SIZE * TAB_WIDTH)
-    private val version = kotlin.concurrent.atomics.AtomicInt(0)
-    final override val readinessVersion: Int
-        get() = version.load()
 
-    internal fun changed() { version.fetchAndAdd(1) }
+    private val changes = PollSource()
+    override fun subscribe(subscription: PollSubscription) = subscription.watch(changes)
+    internal fun changed() { changes.signal() }
 
     private var outputColumn = 0
     private var outputStopped = false

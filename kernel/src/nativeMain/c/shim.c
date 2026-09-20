@@ -3,14 +3,6 @@
 #include "bridge.h"
 #include "native.h"
 
-#if defined(__clang__)
-#  define NO_OPTIMIZE __attribute__((optnone, noinline))
-#elif defined(__GNUC__)
-#  define NO_OPTIMIZE __attribute__((optimize("O0"), noinline))
-#else
-#  define NO_OPTIMIZE
-#endif
-
 uint64_t kernel_runtime_fs_bases[cpu_slot_count];
 
 void set_kernel_runtime_fs_base(uint64_t pointer) {
@@ -26,10 +18,7 @@ int get_nprocs(void) {
     return (int)response->cpu_count;
 }
 
-int __fxstat(int version, int fd, void *statbuf) {
-    (void)version;
-    (void)fd;
-    (void)statbuf;
+int __fxstat(int, int, void *) {
     return -1;
 }
 
@@ -44,7 +33,7 @@ static unsigned long long magnitude_bits(union double_bits bits) {
 
 int isnan(double x) { return magnitude_bits((union double_bits){.f64 = x}) > 0x7ff0000000000000ULL; }
 int isinf(double x) { return magnitude_bits((union double_bits){.f64 = x}) == 0x7ff0000000000000ULL; }
-NO_OPTIMIZE int __unorddf2(double a, double b) {
+__attribute__((optnone, noinline)) int __unorddf2(double a, double b) {
     return isnan(a) || isnan(b);
 }
 
@@ -81,54 +70,25 @@ void wrmsr(uint32_t msr, uint64_t value) {
         "d"((uint32_t)(value >> 32)), "c"(msr) : "memory");
 }
 
-uint8_t io_in8(uint16_t port) {
-    uint8_t value;
-    __asm__ volatile("inb %1, %0" : "=a"(value) : "Nd"(port) : "memory");
-    return value;
-}
-
-uint16_t io_in16(uint16_t port) {
-    uint16_t value;
-    __asm__ volatile("inw %1, %0" : "=a"(value) : "Nd"(port) : "memory");
-    return value;
-}
-
-uint32_t io_in32(uint16_t port) {
-    uint32_t value;
-    __asm__ volatile("inl %1, %0" : "=a"(value) : "Nd"(port) : "memory");
-    return value;
-}
-
-void io_out8(uint16_t port, uint8_t value) {
-    __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port) : "memory");
-}
-
-void io_out16(uint16_t port, uint16_t value) {
-    __asm__ volatile("outw %0, %1" : : "a"(value), "Nd"(port) : "memory");
-}
-
-void io_out32(uint16_t port, uint32_t value) {
-    __asm__ volatile("outl %0, %1" : : "a"(value), "Nd"(port) : "memory");
-}
+#define DEFINE_PORT_IO(bits) \
+    uint##bits##_t io_in##bits(uint16_t port) { \
+        uint##bits##_t value; \
+        __asm__ volatile("in %1, %0" : "=a"(value) : "Nd"(port) : "memory"); \
+        return value; \
+    } \
+    void io_out##bits(uint16_t port, uint##bits##_t value) { \
+        __asm__ volatile("out %0, %1" : : "a"(value), "Nd"(port) : "memory"); \
+    }
+DEFINE_PORT_IO(8)
+DEFINE_PORT_IO(16)
+DEFINE_PORT_IO(32)
+#undef DEFINE_PORT_IO
 
 void enable_interrupt(void) { __asm__ volatile("sti" : : : "memory"); }
 void disable_interrupt(void) { __asm__ volatile("cli" : : : "memory"); }
 
 void pthread_exit(void *ret_val) __attribute__((noreturn));
 int pthread_key_create(uint32_t *key, void (*destructor)(void *));
-
-__attribute__((naked, noreturn)) void kernel_clone_thread_entry(void) {
-    __asm__ volatile(
-        "sti\n"
-        "popq %rax\n"
-        "popq %rdi\n"
-        "addq $8, %rsp\n"
-        "call *%rax\n"
-        "movq %rax, %rdi\n"
-        "call pthread_exit\n"
-        "ud2\n"
-    );
-}
 
 int __pthread_key_create(uint32_t *key, void (*destructor)(void *)) { return pthread_key_create(key, destructor); }
 
@@ -144,43 +104,20 @@ void irq_restore(uint64_t flags) {
     if (flags & (1u << 9)) __asm__ volatile("sti" : : : "memory");
 }
 
-bool rdrand64_step(uint64_t *out) {
-    uint64_t value;
-    unsigned char success;
-
-    __asm__ volatile(
-            "rdrand %0\n\t"
-            "setc %1"
-            : "=r"(value), "=qm"(success)
-            :
-            : "cc", "memory"
-            );
-
-    if (!success)
-        return false;
-
-    *out = value;
-    return true;
-}
-
-bool rdseed64_step(uint64_t *out) {
-    uint64_t value;
-    unsigned char success;
-
-    __asm__ volatile(
-            "rdseed %0\n\t"
-            "setc %1"
-            : "=r"(value), "=qm"(success)
-            :
-            : "cc", "memory"
-            );
-
-    if (!success)
-        return false;
-
-    *out = value;
-    return true;
-}
+#define DEFINE_RANDOM_STEP(instruction) \
+    bool instruction##64_step(uint64_t *out) { \
+        uint64_t value; \
+        unsigned char success; \
+        __asm__ volatile( \
+            #instruction " %0\nsetc %1" \
+            : "=r"(value), "=qm"(success) : : "cc", "memory" \
+        ); \
+        if (success) *out = value; \
+        return success; \
+    }
+DEFINE_RANDOM_STEP(rdrand)
+DEFINE_RANDOM_STEP(rdseed)
+#undef DEFINE_RANDOM_STEP
 
 void setup_syscall_cpu(uint64_t lapic_id, uint8_t is_bsp) {
     cpu_local_t *local = &locals[lapic_id % cpu_slot_count];
@@ -204,32 +141,39 @@ uint64_t get_asm_syscall_handle_address(void) {
     return (uintptr_t)&asm_syscall_handle;
 }
 
-__attribute__((naked, used)) void asm_syscall_handle(void) {
+__attribute__((naked, used))
+void fast_user_task_entry(void) {
     __asm__ volatile(
+        ".cfi_undefined %rip\n"
+        "movq %rsp, %r13\n"
+        CPOS_LOAD_USER_FS
+        "leaq 200(%r13), %rsp\n"
+        "movq 112(%r13), %rax\n"
+        "movw %ax, %ds\n"
+        "movq 120(%r13), %rax\n"
+        "movw %ax, %es\n"
+        "jmp .Luser_iret\n"
+    );
+}
+
+void (*const user_task_entry)(void) = fast_user_task_entry;
+
+__attribute__((naked, used))
+void asm_syscall_handle(void) {
+    __asm__ volatile(
+        ".cfi_undefined %rip\n"
         "cli\n"
         "cld\n"
         "swapgs\n"
-
         "movq %rsp, %gs:8\n"
         "movq %rax, %gs:16\n"
         "movq %gs:0, %rsp\n"
-
         "subq $" CPOS_ASM_STRINGIFY(KERNEL_ENTRY_FRAME_SIZE_VALUE) ", %rsp\n"
-        "movq %r15, 0(%rsp)\n"
-        "movq %r14, 8(%rsp)\n"
+        CPOS_SAVE_GENERAL
         "movq %r13, 16(%rsp)\n"
         "movq %r12, 24(%rsp)\n"
         "movq %r11, 32(%rsp)\n"
-        "movq %r10, 40(%rsp)\n"
-        "movq %r9, 48(%rsp)\n"
-        "movq %r8, 56(%rsp)\n"
-        "movq %rbx, 64(%rsp)\n"
         "movq %rcx, 72(%rsp)\n"
-        "movq %rdx, 80(%rsp)\n"
-        "movq %rsi, 88(%rsp)\n"
-        "movq %rdi, 96(%rsp)\n"
-        "movq %rbp, 104(%rsp)\n"
-
         "leaq 768(%rsp), %rdi\n"
         "xorl %eax, %eax\n"
         "movl $8, %ecx\n"
@@ -238,14 +182,12 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "xorl %edx, %edx\n"
         "xsave64 256(%rsp)\n"
         "xrstor64 initial_xstate(%rip)\n"
-
         "xorq %rax, %rax\n"
         "movw %ds, %ax\n"
         "movq %rax, 112(%rsp)\n"
         "xorq %rax, %rax\n"
         "movw %es, %ax\n"
         "movq %rax, 120(%rsp)\n"
-
         "movl $0xc0000100, %ecx\n"
         "rdmsr\n"
         "shlq $32, %rdx\n"
@@ -256,7 +198,6 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "shrq $32, %rdx\n"
         "movl $0xc0000100, %ecx\n"
         "wrmsr\n"
-
         "movq %gs:16, %rax\n"
         "movq %rax, 136(%rsp)\n"
         "movq %rax, 144(%rsp)\n"
@@ -269,23 +210,19 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "movq %gs:8, %rax\n"
         "movq %rax, 184(%rsp)\n"
         "movq $0x1b, 192(%rsp)\n"
-
+        "xorl %edi, %edi\n"
+        "call fast_handoff_account_mode\n"
         "movq %rsp, %rdi\n"
         "sti\n"
         "call syscall_handler\n"
         "cli\n"
+        "movl $1, %edi\n"
+        "call fast_handoff_account_mode\n"
         "movq %rsp, %r13\n"
-
-        "movq 128(%r13), %rax\n"
-        "movq %rax, %rdx\n"
-        "shrq $32, %rdx\n"
-        "movl $0xc0000100, %ecx\n"
-        "wrmsr\n"
-
+        CPOS_LOAD_USER_FS
         "movl $0x1b, %eax\n"
         "movw %ax, %ds\n"
         "movw %ax, %es\n"
-
         "cmpq $0x23, 168(%r13)\n"
         "jne 1f\n"
         "cmpq $0x1b, 192(%r13)\n"
@@ -297,15 +234,14 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "jae 1f\n"
         "testq $0x30100, 176(%r13)\n"
         "jnz 1f\n"
-
         "movq $1, %gs:16\n"
         "movq 160(%r13), %rcx\n"
         "movq 176(%r13), %r11\n"
         "andq $-159745, %r11\n"
         "orq $2, %r11\n"
         "jmp 2f\n"
-
         "1:\n"
+        ".Luser_iret:\n"
         "movq $0, %gs:16\n"
         "pushq 192(%r13)\n"
         "pushq 184(%r13)\n"
@@ -315,36 +251,39 @@ __attribute__((naked, used)) void asm_syscall_handle(void) {
         "pushq %rax\n"
         "pushq 168(%r13)\n"
         "pushq 160(%r13)\n"
-
         "2:\n"
         "movl $" CPOS_ASM_STRINGIFY(XSTATE_MASK_VALUE) ", %eax\n"
         "xorl %edx, %edx\n"
         "xrstor64 256(%r13)\n"
-        "movq 0(%r13), %r15\n"
-        "movq 8(%r13), %r14\n"
+        CPOS_LOAD_GENERAL
         "movq 24(%r13), %r12\n"
-        "movq 40(%r13), %r10\n"
-        "movq 48(%r13), %r9\n"
-        "movq 56(%r13), %r8\n"
-        "movq 64(%r13), %rbx\n"
-        "movq 80(%r13), %rdx\n"
-        "movq 88(%r13), %rsi\n"
-        "movq 96(%r13), %rdi\n"
-        "movq 104(%r13), %rbp\n"
         "movq 136(%r13), %rax\n"
-
         "cmpq $0, %gs:16\n"
         "je 3f\n"
         "movq 184(%r13), %rsp\n"
         "movq 16(%r13), %r13\n"
         "swapgs\n"
         "sysretq\n"
-
         "3:\n"
         "movq 32(%r13), %r11\n"
         "movq 72(%r13), %rcx\n"
         "movq 16(%r13), %r13\n"
         "swapgs\n"
         "iretq\n"
+    );
+}
+
+__attribute__((naked, used))
+void kernel_clone_thread_entry(void) {
+    __asm__ volatile(
+        ".cfi_undefined %rip\n"
+        "sti\n"
+        "popq %rax\n"
+        "popq %rdi\n"
+        "addq $8, %rsp\n"
+        "call *%rax\n"
+        "movq %rax, %rdi\n"
+        "call pthread_exit\n"
+        "ud2\n"
     );
 }

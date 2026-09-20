@@ -55,7 +55,12 @@ void fast_handoff_request_user_interrupt(uint64_t task);
 bool fast_handoff_yield(void);
 bool fast_handoff_park_current(uint64_t deadline_ns);
 bool fast_handoff_unpark(uint64_t task);
-void fast_handoff_set_quantum(uint64_t task, uint64_t cycles);
+bool fast_handoff_affinity_settled(uint64_t task);
+void fast_handoff_set_affinity(uint64_t task, uint8_t *mask, size_t size);
+void fast_handoff_set_weight(uint64_t task, uint32_t weight);
+void fast_handoff_account_mode(uint8_t user);
+void fast_handoff_set_account(uint64_t task, cpu_account_t *account);
+uint64_t fast_handoff_account_time(cpu_account_t *account, size_t index);
 uint64_t fast_handoff_queue_size(uint64_t lapic_id);
 uint64_t fast_handoff_service(void);
 void fast_handoff_wake_bsp(void);
@@ -67,12 +72,12 @@ uint64_t fast_handoff_create_task(
     uint64_t cr3,
     uint64_t kernel_rsp,
     uint64_t kernel_fs_base,
-    uint64_t quantum_cycles
+    uint64_t quantum_cycles, uint32_t weight
 );
 bool fast_handoff_bind_current(
     uint64_t task,
     uint64_t lapic_id,
-    uint8_t is_bsp
+    uint8_t is_bsp, uint32_t logical_id
 );
 bool fast_handoff_finish_bootstrap(uint64_t task);
 bool fast_handoff_enqueue(uint64_t task, uint64_t lapic_id);

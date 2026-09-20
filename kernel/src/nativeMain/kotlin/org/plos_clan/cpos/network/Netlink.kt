@@ -1,5 +1,8 @@
 package org.plos_clan.cpos.network
 
+import org.plos_clan.cpos.tasks.PollSubscription
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
+import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.sock.AbstractSocket
 import org.plos_clan.cpos.fs.sock.SocketAddress
 import org.plos_clan.cpos.fs.sock.SocketControlMessage
@@ -563,7 +566,7 @@ internal class NetlinkSocket internal constructor(
                 null
             }
             if (result != null) return result
-            val waitError = if (deadline != null) deadline.await {
+            val waitError = if (deadline != null) deadline.await(readWaiters.events) {
                 lock.withLock { messages.isNotEmpty() || hasPendingError() || closed }
             } else if (readWaiters.await(lock, checkNotNull(waiter))) null else VfsError.INTERRUPTED
             if (waitError != null) return VfsResult.Err(waitError)
@@ -661,6 +664,14 @@ internal class NetlinkSocket internal constructor(
     }
 
     override fun readableBytes(): Int = lock.withLock { messages.firstOrNull()?.bytes?.size ?: 0 }
+
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) {
+        subscription.watch(readWaiters.events, PollEvents.NORMAL_INPUT or PollEvents.POLLRDHUP)
+    }
 
     override fun pollSocket(events: Int): Int = lock.withLock {
         var available = PollEvents.NORMAL_OUTPUT

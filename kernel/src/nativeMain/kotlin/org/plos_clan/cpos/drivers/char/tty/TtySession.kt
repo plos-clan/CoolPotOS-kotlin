@@ -2,6 +2,7 @@
 
 package org.plos_clan.cpos.drivers.char.tty
 
+import org.plos_clan.cpos.tasks.PollSubscription
 import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
@@ -155,8 +156,9 @@ class TtySession(
         private val generation: Long?,
         internal val isMaster: Boolean = false,
     ) : ModeAwareDeviceBackend {
-        override val readinessVersion: Int
-            get() = backend.readinessVersion + session.generation.load().toInt()
+        override fun subscribe(device: Device, subscription: PollSubscription) {
+            backend.subscribe(subscription)
+        }
 
         val isHungUp: Boolean
             get() = generation != null && generation != session.generation.load()

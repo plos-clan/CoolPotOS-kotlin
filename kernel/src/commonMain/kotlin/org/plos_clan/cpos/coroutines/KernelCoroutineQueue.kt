@@ -1,18 +1,22 @@
 package org.plos_clan.cpos.coroutines
 
 import kotlinx.coroutines.Runnable
+import org.plos_clan.cpos.utils.IndexedHeap
 
 internal class DelayedCoroutineTask(
     val deadlineNanos: ULong,
     val sequence: ULong,
     val runnable: Runnable,
 ) {
-    var heapIndex: Int = -1
+    lateinit var entry: IndexedHeap.Entry<DelayedCoroutineTask>
 }
 
 internal class KernelCoroutineQueue {
     private val immediate = ArrayDeque<Runnable>()
-    private val delayed = mutableListOf<DelayedCoroutineTask>()
+    private val delayed = run {
+        val order = compareBy<DelayedCoroutineTask> { it.deadlineNanos }.thenBy { it.sequence }
+        IndexedHeap(order)
+    }
     private var nextSequence = 0uL
 
     fun enqueue(runnable: Runnable) {
@@ -24,7 +28,7 @@ internal class KernelCoroutineQueue {
     }
 
     fun scheduleAt(deadlineNanos: ULong, runnable: Runnable): DelayedCoroutineTask {
-        if (delayed.isEmpty()) {
+        if (delayed.size == 0) {
             nextSequence = 0uL
         } else {
             check(nextSequence != ULong.MAX_VALUE) { "delayed task sequence exhausted" }
@@ -34,29 +38,22 @@ internal class KernelCoroutineQueue {
             sequence = nextSequence++,
             runnable = runnable,
         )
-        task.heapIndex = delayed.size
-        delayed += task
-        siftUp(task.heapIndex)
+        task.entry = delayed.add(task)
         return task
     }
 
-    fun dispose(task: DelayedCoroutineTask): Boolean {
-        val index = task.heapIndex
-        if (index < 0) return false
-        heapRemove(index)
-        return true
-    }
+    fun dispose(task: DelayedCoroutineTask): Boolean = delayed.remove(task.entry)
 
     fun claimReady(nowNanos: ULong, limit: Int): List<Runnable> {
         require(limit > 0) { "limit must be positive" }
 
-        while (immediate.size < limit && delayed.isNotEmpty()) {
-            val next = delayed.first()
+        while (immediate.size < limit && delayed.size != 0) {
+            val next = checkNotNull(delayed.peek())
             if (next.deadlineNanos > nowNanos) {
                 break
             }
 
-            val ready = heapRemove(0)
+            val ready = checkNotNull(delayed.removeFirst())
             immediate.addLast(ready.runnable)
         }
 
@@ -72,71 +69,7 @@ internal class KernelCoroutineQueue {
 
     fun hasImmediateWork(): Boolean = immediate.isNotEmpty()
 
-    fun nextDeadline(): ULong? = delayed.firstOrNull()?.deadlineNanos
-
-    private fun siftUp(index: Int) {
-        var childIndex = index
-        while (childIndex > 0) {
-            val parentIndex = (childIndex - 1) / 2
-            if (!comesBefore(delayed[childIndex], delayed[parentIndex])) {
-                break
-            }
-            swap(childIndex, parentIndex)
-            childIndex = parentIndex
-        }
-    }
-
-    private fun heapRemove(index: Int): DelayedCoroutineTask {
-        val removed = delayed[index]
-        val last = delayed.removeAt(delayed.lastIndex)
-        removed.heapIndex = -1
-        if (index == delayed.size) return removed
-
-        delayed[index] = last
-        last.heapIndex = index
-        val parentIndex = (index - 1) / 2
-        if (index > 0 && comesBefore(last, delayed[parentIndex])) {
-            siftUp(index)
-        } else {
-            siftDown(index)
-        }
-        return removed
-    }
-
-    private fun siftDown(index: Int) {
-        var parentIndex = index
-        while (true) {
-            val leftIndex = parentIndex * 2 + 1
-            if (leftIndex >= delayed.size) {
-                break
-            }
-            val rightIndex = leftIndex + 1
-            val firstChildIndex = if (
-                rightIndex < delayed.size && comesBefore(delayed[rightIndex], delayed[leftIndex])
-            ) {
-                rightIndex
-            } else {
-                leftIndex
-            }
-            if (!comesBefore(delayed[firstChildIndex], delayed[parentIndex])) {
-                break
-            }
-            swap(parentIndex, firstChildIndex)
-            parentIndex = firstChildIndex
-        }
-    }
-
-    private fun swap(firstIndex: Int, secondIndex: Int) {
-        val first = delayed[firstIndex]
-        delayed[firstIndex] = delayed[secondIndex]
-        delayed[secondIndex] = first
-        delayed[firstIndex].heapIndex = firstIndex
-        first.heapIndex = secondIndex
-    }
-
-    private fun comesBefore(first: DelayedCoroutineTask, second: DelayedCoroutineTask): Boolean =
-        first.deadlineNanos < second.deadlineNanos ||
-            (first.deadlineNanos == second.deadlineNanos && first.sequence < second.sequence)
+    fun nextDeadline(): ULong? = delayed.peek()?.deadlineNanos
 
     private fun deadlineNanos(nowNanos: ULong, delayMillis: Long): ULong {
         if (delayMillis <= 0) {

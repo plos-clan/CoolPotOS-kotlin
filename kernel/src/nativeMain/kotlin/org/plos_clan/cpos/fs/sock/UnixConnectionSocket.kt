@@ -2,6 +2,10 @@
 
 package org.plos_clan.cpos.fs.sock
 
+import org.plos_clan.cpos.tasks.PollSource
+import org.plos_clan.cpos.tasks.PollSubscription
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
+import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.vfs.ByteCircularBuffer
 import org.plos_clan.cpos.fs.vfs.IoEvent
@@ -12,9 +16,9 @@ import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.IoWaitQueue
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PollEvents
-import kotlin.concurrent.atomics.AtomicInt
 
 internal class UnixConnectionSocket(
     subsystem: UnixSocketSubsystem,
@@ -37,7 +41,12 @@ internal class UnixConnectionSocket(
         val options: SocketOptions,
     )
 
+    private val changes = PollSource()
     private var state: State = State.Initial
+        set(value) {
+            field = value
+            changes.signal()
+        }
 
     init {
         require(type.connectionOriented)
@@ -332,13 +341,6 @@ internal class UnixConnectionSocket(
         )
     }
 
-    override val readinessVersion: Int
-        get() = when (val current = lock.withLock { state }) {
-            is State.Connected -> current.connection.readinessVersion
-            is State.Listening -> current.listener.readinessVersion
-            else -> 0
-        }
-
     override fun outputQueueBytes(): Int = when (val current = lock.withLock { state }) {
         is State.Connected -> current.connection.outputQueueBytes(current.side)
         else -> 0
@@ -348,6 +350,19 @@ internal class UnixConnectionSocket(
         is State.Connected -> current.connection.readableBytes(current.side)
         is State.Listening -> current.listener.pendingCount()
         else -> 0
+    }
+
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) {
+        subscription.watch(changes)
+        when (val current = lock.withLock { state }) {
+            is State.Listening -> current.listener.subscribe(subscription)
+            is State.Connected -> current.connection.subscribe(current.side, subscription)
+            else -> Unit
+        }
     }
 
     override fun pollSocket(events: Int): Int {
@@ -461,7 +476,7 @@ internal class UnixConnectionSocket(
             return if (endpoint.connection.await(endpoint.side, event, count)) null
             else VfsError.INTERRUPTED
         }
-        return deadline.await {
+        return deadline.await(endpoint.connection.events(endpoint.side, event)) {
             when (event) {
                 IoEvent.READABLE -> endpoint.connection.readReady(endpoint.side, count)
                 IoEvent.WRITABLE -> endpoint.connection.writeReady(endpoint.side, count)
@@ -532,8 +547,7 @@ internal class UnixConnectionSocket(
         )
 
         private val lock = IrqSpinLock()
-        private val generation = AtomicInt(0)
-        val readinessVersion: Int get() = generation.load()
+
         private var pending = ArrayDeque<UnixConnectionSocket>()
         private val acceptWaiters = IoWaitQueue()
         private val connectWaiters = IoWaitQueue()
@@ -584,7 +598,7 @@ internal class UnixConnectionSocket(
                         reservations--
                         if (closed) return@withLock false
                         pending += acceptedSocket
-                        generation.fetchAndAdd(1)
+
                         acceptWaiters.wakeOne()
                         true
                     }
@@ -597,7 +611,7 @@ internal class UnixConnectionSocket(
                     )
                 }
                 if (deadline != null) {
-                    val waitError = deadline.await(::canConnect)
+                    val waitError = deadline.await(connectWaiters.events, ::canConnect)
                     if (waitError != null) return VfsResult.Err(waitError)
                     continue
                 }
@@ -648,6 +662,11 @@ internal class UnixConnectionSocket(
 
         private fun canConnect(): Boolean = lock.withLock {
             closed || pending.size + reservations < capacity
+        }
+
+        fun subscribe(subscription: PollSubscription) {
+            val events = PollEvents.NORMAL_INPUT or PollEvents.POLLRDHUP
+            subscription.watch(acceptWaiters.events, events)
         }
 
         fun poll(events: Int): Int = lock.withLock {
@@ -976,8 +995,7 @@ private class UnixDuplexConnection(
     }
 
     private val lock = IrqSpinLock()
-    private val generation = AtomicInt(0)
-    val readinessVersion: Int get() = generation.load()
+
     private val addresses = arrayOf(firstAddress, secondAddress)
     private val directions = arrayOf(
         Direction(
@@ -1023,7 +1041,7 @@ private class UnixDuplexConnection(
             direction.receiveTimestamp,
         )
         if (result.isSuccess) {
-            generation.fetchAndAdd(1)
+
             direction.readWaiters.wakeOne()
         }
         result
@@ -1054,11 +1072,20 @@ private class UnixDuplexConnection(
             returnFullLength,
         )
         if (!peek && result is VfsResult.Ok) {
-            generation.fetchAndAdd(1)
+
             direction.writeWaiters.wakeOne()
-            if (direction.buffer.isReadable(1)) direction.readWaiters.wakeOne()
+            if (direction.buffer.isReadable(1)) {
+                val reader = direction.readWaiters.takeOne()
+                reader?.let(Scheduler::wake)
+            }
         }
         result
+    }
+
+    fun events(side: Side, event: IoEvent): PollSource {
+        val queue = if (event == IoEvent.READABLE) incoming(side).readWaiters
+        else outgoing(side).writeWaiters
+        return queue.events
     }
 
     fun await(side: Side, event: IoEvent, count: Int): Boolean {
@@ -1108,7 +1135,7 @@ private class UnixDuplexConnection(
         val direction = outgoing(side)
         direction.sendBufferSize = size
         direction.resize()
-        generation.fetchAndAdd(1)
+
         direction.writeWaiters.wakeAll()
     }
 
@@ -1116,7 +1143,7 @@ private class UnixDuplexConnection(
         val direction = incoming(side)
         direction.receiveBufferSize = size
         direction.resize()
-        generation.fetchAndAdd(1)
+
         direction.writeWaiters.wakeAll()
     }
 
@@ -1138,6 +1165,14 @@ private class UnixDuplexConnection(
         incoming.receiveTimestamp = options.receiveTimestamp
         incoming.resize()
         incoming.writeWaiters.wakeAll()
+    }
+
+    fun subscribe(side: Side, subscription: PollSubscription) {
+        val reader = incoming(side).readWaiters.events
+        val writer = outgoing(side).writeWaiters.events
+        val events = PollEvents.NORMAL_INPUT or PollEvents.POLLRDHUP
+        subscription.watch(reader, events)
+        subscription.watch(writer, PollEvents.NORMAL_OUTPUT)
     }
 
     fun poll(side: Side, events: Int, receiveLowWatermark: Int): Int = lock.withLock {
@@ -1167,7 +1202,7 @@ private class UnixDuplexConnection(
                 val incoming = incoming(side)
                 if (incoming.readerOpen) {
                     incoming.readerOpen = false
-                    generation.fetchAndAdd(1)
+
                     ancillary = incoming.buffer.clear()
                     incoming.writeWaiters.wakeAll()
                     incoming.readWaiters.wakeAll()
@@ -1177,7 +1212,7 @@ private class UnixDuplexConnection(
                 val outgoing = outgoing(side)
                 if (outgoing.writerOpen) {
                     outgoing.writerOpen = false
-                    generation.fetchAndAdd(1)
+
                     outgoing.readWaiters.wakeAll()
                     outgoing.writeWaiters.wakeAll()
                 }

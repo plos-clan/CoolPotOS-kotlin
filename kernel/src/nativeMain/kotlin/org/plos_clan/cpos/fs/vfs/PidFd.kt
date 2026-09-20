@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
@@ -10,14 +11,20 @@ import org.plos_clan.cpos.utils.PollEvents
 internal class PidFd(
     override val target: PidHandle,
 ) : AnonymousFileBackend(InodeType.PIDFD, "pidfd"), PositionlessOpenFileBackend, PidHandle.Provider {
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) {
+        val changes = target.thread.process.stateChanges
+        subscription.watch(changes)
+    }
+
     override val fileSystemMagic: ULong
         get() = PID_FS_MAGIC
 
     override val seekable: Boolean
         get() = false
-
-    override val readinessVersion: Int
-        get() = target.state.ordinal
 
     override fun read(
         caller: VfsOperationContext,

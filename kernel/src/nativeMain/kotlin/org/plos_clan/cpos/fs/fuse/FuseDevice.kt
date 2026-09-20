@@ -1,5 +1,7 @@
 package org.plos_clan.cpos.fs.fuse
 
+import org.plos_clan.cpos.tasks.PollSource
+import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceBackend
 import org.plos_clan.cpos.drivers.DeviceIoEvent
@@ -65,6 +67,7 @@ internal object FuseDevice : PositionlessDeviceBackend {
 }
 
 internal interface FuseNotificationSink {
+    fun wakePoll(handle: ULong)
     fun invalidateInode(nodeId: ULong, offset: Long, length: Long)
     fun invalidateEntry(parentId: ULong, name: VfsName, childId: ULong? = null)
 }
@@ -125,6 +128,7 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
     )
 
     private val lock = IrqSpinLock()
+    val disconnection = PollSource()
     private val outbound = ArrayDeque<OutboundRequest>()
     private val pending = mutableMapOf<ULong, PendingRequest>()
     private val forgotten = linkedMapOf<ULong, ULong>()
@@ -348,6 +352,11 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
     override fun ioctl(device: Device, command: Int, args: UserMemory): Long =
         -Errno.ENOTTY.toLong()
 
+    override fun subscribe(device: Device, subscription: PollSubscription) {
+        subscription.watch(readWaiters.events, PollEvents.NORMAL_INPUT or PollEvents.POLLRDHUP)
+        subscription.watch(stateWaiters.events)
+    }
+
     override fun poll(device: Device, events: Int): Long = lock.withLock {
         val available = when {
             state == State.NEW || state == State.DISCONNECTED -> PollEvents.POLLERR
@@ -567,7 +576,11 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
                 sink.invalidateEntry(reply.readU64(0), name, reply.readU64(8))
                 0
             }
-            FuseNotifyCode.POLL -> if (reply.bodySize == ULong.SIZE_BYTES) 0 else Errno.EINVAL
+            FuseNotifyCode.POLL -> {
+                if (reply.bodySize != ULong.SIZE_BYTES) return Errno.EINVAL
+                sink.wakePoll(reply.readU64(0))
+                0
+            }
             else -> Errno.EOPNOTSUPP
         }
     }
@@ -659,6 +672,7 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
     private fun disconnectLocked(error: VfsError, aborted: Boolean = false) {
         if (state == State.DISCONNECTED) return
         state = State.DISCONNECTED
+        disconnection.signal()
         disconnectionError = error
         deviceDisconnectionErrno = if (aborted &&
             negotiation?.features?.and(FuseFeature.ABORT_ERROR.mask) != 0uL

@@ -10,8 +10,24 @@
 #define CPOS_ASM_STRINGIFY_IMPL(value) #value
 #define CPOS_ASM_STRINGIFY(value) CPOS_ASM_STRINGIFY_IMPL(value)
 
+#define CPOS_GENERAL_REGISTERS(X) \
+    X(r15, 0) X(r14, 8) X(r10, 40) X(r9, 48) X(r8, 56) \
+    X(rbx, 64) X(rdx, 80) X(rsi, 88) X(rdi, 96) X(rbp, 104)
+#define CPOS_SAVE_REGISTER(name, offset) "movq %" #name ", " #offset "(%rsp)\n"
+#define CPOS_LOAD_REGISTER(name, offset) "movq " #offset "(%r13), %" #name "\n"
+#define CPOS_SAVE_GENERAL CPOS_GENERAL_REGISTERS(CPOS_SAVE_REGISTER)
+#define CPOS_LOAD_GENERAL CPOS_GENERAL_REGISTERS(CPOS_LOAD_REGISTER)
+
+#define CPOS_LOAD_USER_FS \
+    "movq 128(%r13), %rax\n" \
+    "movq %rax, %rdx\n" \
+    "shrq $32, %rdx\n" \
+    "movl $0xc0000100, %ecx\n" \
+    "wrmsr\n"
+
 enum {
     cpu_slot_count = 256,
+    cpu_account_stride = 64 / sizeof(uint64_t),
     ia32_fs_base_msr = 0xc0000100u,
     ia32_gs_base_msr = 0xc0000101u,
     ia32_kernel_gs_base_msr = 0xc0000102u,
@@ -29,31 +45,12 @@ enum {
     xstate_size = XSTATE_SIZE_VALUE,
 };
 typedef struct pt_regs {
-    uint64_t r15;
-    uint64_t r14;
-    uint64_t r13;
-    uint64_t r12;
-    uint64_t r11;
-    uint64_t r10;
-    uint64_t r9;
-    uint64_t r8;
-    uint64_t rbx;
-    uint64_t rcx;
-    uint64_t rdx;
-    uint64_t rsi;
-    uint64_t rdi;
-    uint64_t rbp;
-    uint64_t ds;
-    uint64_t es;
-    uint64_t fs_base;
-    uint64_t rax;
-    uint64_t func;
-    uint64_t errcode;
-    uint64_t rip;
-    uint64_t cs;
-    uint64_t rflags;
-    uint64_t rsp;
-    uint64_t ss;
+    uint64_t r15, r14, r13, r12;
+    uint64_t r11, r10, r9, r8;
+    uint64_t rbx, rcx, rdx, rsi, rdi, rbp;
+    uint64_t ds, es, fs_base, rax;
+    uint64_t func, errcode;
+    uint64_t rip, cs, rflags, rsp, ss;
 } __attribute__((packed)) pt_regs_t;
 _Static_assert(sizeof(pt_regs_t) == 200, "invalid register frame layout");
 
@@ -70,20 +67,16 @@ typedef struct xstate_legacy {
     uint8_t registers[384];
     uint8_t reserved1[96];
 } __attribute__((packed)) xstate_legacy_t;
-_Static_assert(
-    sizeof(xstate_legacy_t) == xstate_legacy_size,
-    "invalid XSAVE legacy area size"
-);
+_Static_assert(sizeof(xstate_legacy_t) == xstate_legacy_size,
+    "invalid XSAVE legacy area size");
 
 typedef struct xstate_header {
     uint64_t state_bv;
     uint64_t compacted_bv;
     uint64_t reserved[6];
 } xstate_header_t;
-_Static_assert(
-    sizeof(xstate_header_t) == xstate_header_size,
-    "invalid XSAVE header size"
-);
+_Static_assert(sizeof(xstate_header_t) == xstate_header_size,
+    "invalid XSAVE header size");
 
 typedef struct xstate {
     xstate_legacy_t legacy;
@@ -91,41 +84,36 @@ typedef struct xstate {
     uint8_t ymm_high[xstate_ymm_size];
 } __attribute__((aligned(64))) xstate_t;
 _Static_assert(sizeof(xstate_t) == xstate_size, "invalid XSAVE area size");
-_Static_assert(
-    offsetof(xstate_t, header) == xstate_header_offset,
-    "invalid XSAVE header offset"
-);
-_Static_assert(
-    offsetof(xstate_t, ymm_high) == xstate_ymm_offset,
-    "invalid XSAVE YMM offset"
-);
+_Static_assert(offsetof(xstate_t, header) == xstate_header_offset,
+    "invalid XSAVE header offset");
+_Static_assert(offsetof(xstate_t, ymm_high) == xstate_ymm_offset,
+    "invalid XSAVE YMM offset");
 
 typedef struct kernel_entry_frame {
     pt_regs_t regs;
     void *hardware_frame;
     xstate_t xstate;
 } __attribute__((aligned(64))) kernel_entry_frame_t;
-_Static_assert(
-    offsetof(kernel_entry_frame_t, xstate) == 256,
-    "invalid XSAVE area offset"
-);
-_Static_assert(
-    sizeof(kernel_entry_frame_t) == KERNEL_ENTRY_FRAME_SIZE_VALUE,
-    "invalid kernel entry frame size"
-);
+_Static_assert(offsetof(kernel_entry_frame_t, xstate) == 256,
+    "invalid XSAVE area offset");
+_Static_assert(sizeof(kernel_entry_frame_t) == KERNEL_ENTRY_FRAME_SIZE_VALUE,
+    "invalid kernel entry frame size");
 
 typedef struct fast_task fast_task_t;
 typedef struct fast_cpu fast_cpu_t;
-typedef struct fast_sleep fast_sleep_t;
+typedef struct fast_node {
+    struct fast_node *next, *previous, *child;
+    uint64_t key;
+    fast_task_t *task;
+} fast_node_t;
+typedef struct cpu_account {
+    struct cpu_account *parent;
+    uint64_t time[] __attribute__((aligned(64)));
+} cpu_account_t;
 
 typedef struct {
-    uint64_t r15;
-    uint64_t r14;
-    uint64_t r13;
-    uint64_t r12;
-    uint64_t rbx;
-    uint64_t rbp;
-    uint64_t rip;
+    uint64_t r15, r14, r13, r12;
+    uint64_t rbx, rbp, rip;
 } switch_frame_t;
 _Static_assert(sizeof(switch_frame_t) == 56, "invalid switch frame layout");
 
@@ -134,13 +122,15 @@ struct fast_task {
     uint64_t cr3;
     uint64_t kernel_rsp;
     uint64_t kernel_fs_base;
-    union {
-        fast_task_t *next;
-        fast_sleep_t *sleep;
-    };
+    fast_task_t *next;
+    fast_node_t run, sleep;
     fast_cpu_t *cpu;
     uint64_t quantum_cycles;
-    uint32_t id;
+    uint32_t id, weight;
+    uint8_t on_cpu, sleeping, user_mode;
+    uint8_t *affinity;
+    size_t affinity_size;
+    cpu_account_t *account;
     uint8_t state;
     uint8_t queued;
     uint8_t wake_pending;
@@ -151,10 +141,6 @@ struct fast_task {
         uint64_t sequence;
     } clock;
 };
-_Static_assert(
-    offsetof(fast_task_t, clock) == 64,
-    "scheduler metadata must fit in one cache line"
-);
 
 extern const xstate_t initial_xstate;
 extern void (*const user_task_entry)(void);

@@ -2,8 +2,9 @@
 
 package org.plos_clan.cpos.fs.procfs
 
+import org.plos_clan.cpos.tasks.PollSource
+import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.drivers.RealtimeClock
-
 import KERNEL_NAME
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.vfs.CacheValidity
@@ -170,8 +171,12 @@ internal class ProcfsInstance : SuperBlockBackend {
         mode: UInt = if (write == null) FILE_MODE else WRITABLE_FILE_MODE,
         positionedWrite: Boolean = true,
         pollVersion: (() -> Int)? = null,
+        pollChanges: PollSource? = null,
         render: () -> ByteArray?,
-    ): Inode = file(superBlock, id, owner, mode, ProcTextFile(render, write, positionedWrite, pollVersion))
+    ): Inode {
+        val backend = ProcTextFile(render, write, positionedWrite, pollVersion, pollChanges)
+        return file(superBlock, id, owner, mode, backend)
+    }
 
     internal fun file(
         superBlock: SuperBlock,
@@ -361,6 +366,7 @@ private class ProcTextFile(
     private val write: ((VfsOperationContext, ByteArray) -> VfsResult<Unit>)?,
     private val positionedWrite: Boolean,
     private val pollVersion: (() -> Int)?,
+    private val pollChanges: PollSource?,
 ) : RegularFileBackend() {
 
     override fun resize(
@@ -385,7 +391,9 @@ private class ProcTextFile(
         }
         val content = render() ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val handle = ProcTextHandle(content, render, write, positionedWrite)
-        return VfsResult.Ok(pollVersion?.let { ProcPollHandle(it, handle) } ?: handle)
+        val version = pollVersion ?: return VfsResult.Ok(handle)
+        val pollHandle = ProcPollHandle(version, handle, changes = pollChanges)
+        return VfsResult.Ok(pollHandle)
     }
 }
 
@@ -393,13 +401,22 @@ internal class ProcPollHandle(
     private val version: () -> Int,
     backend: OpenFileBackend,
     private val defaultEvents: Int = PollEvents.DEFAULT_FILE_EVENTS,
+    private val changes: PollSource? = null,
 ) : OpenFileBackend by backend {
     private val observed = AtomicInt(readinessVersion)
+
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) {
+        changes?.let(subscription::watch)
+    }
 
     override val supportsEpoll: Boolean
         get() = true
 
-    override val readinessVersion: Int
+    private val readinessVersion: Int
         get() = version()
 
     override fun poll(caller: VfsOperationContext, inode: Inode, events: Int): Long =

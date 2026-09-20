@@ -1,5 +1,7 @@
 package org.plos_clan.cpos.drivers.input
 
+import org.plos_clan.cpos.tasks.PollSource
+import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceBackend
 import org.plos_clan.cpos.drivers.DeviceIoEvent
@@ -227,6 +229,10 @@ internal class EvdevDevice(
             var ready = false
         }
 
+        private val changes = PollSource()
+        override fun subscribe(device: Device, subscription: PollSubscription) =
+            subscription.watch(changes)
+
         private val lock = IrqSpinLock()
         private val queue = arrayOfNulls<InputEvent>(QUEUE_EVENTS)
         private val waiters = ArrayDeque<Waiter>()
@@ -358,6 +364,7 @@ internal class EvdevDevice(
         fun revoke() = lock.withLock {
             if (revoked) return@withLock
             revoked = true
+            changes.signal()
             clearQueue()
             wakeReaders()
         }
@@ -369,6 +376,7 @@ internal class EvdevDevice(
         }
 
         private fun commitFrame() {
+            changes.signal()
             committed = size
             wakeReaders()
         }

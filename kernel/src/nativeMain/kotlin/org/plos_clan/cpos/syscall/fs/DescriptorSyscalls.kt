@@ -2,7 +2,8 @@
 
 package org.plos_clan.cpos.syscall.fs
 
-import bridge.wait_for_interrupt
+import org.plos_clan.cpos.tasks.PollSubscription
+import org.plos_clan.cpos.tasks.PollWait
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.FileDescriptorFlags
@@ -38,7 +39,6 @@ import org.plos_clan.cpos.syscall.fs.FsConstants.POLL_FD_SIZE
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.ProcessResource
-import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.Signal
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
@@ -302,10 +302,12 @@ private fun waitForPoll(
     val userFds = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI])
     val descriptors = userFds.copyFromUser(count * POLL_FD_SIZE)
         ?: return errno(Errno.EFAULT)
+    val waiter = PollWait(thread)
     val previousMask = temporaryMask?.let { thread.signals.replaceMask(it) }
     try {
         while (true) {
-            val ready = scanPollDescriptors(process, caller, descriptors, count)
+            waiter.prepare()
+            val ready = scanPollDescriptors(process, caller, descriptors, count, waiter)
             if (ready != 0 || timeout.immediate || timeout.expired()) {
                 return if (userFds.copyToUser(descriptors)) ready.toLong()
                 else errno(Errno.EFAULT)
@@ -317,10 +319,10 @@ private fun waitForPoll(
                     return errno(Errno.EINTR)
                 }
             }
-            Scheduler.yieldCurrent()
-            wait_for_interrupt()
+            waiter.await(timeout.deadline)
         }
     } finally {
+        waiter.close()
         if (previousMask != null && !regs.signalFrameInstalled) {
             thread.signals.mask = previousMask
         }
@@ -361,10 +363,12 @@ internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
     val readyWrite = ByteArray(setSize)
     val readyExcept = ByteArray(setSize)
     val caller = process.vfsOperationContext
+    val waiter = PollWait(thread)
     val previousMask = signalMask?.let { thread.signals.replaceMask(it) }
     try {
         val deadline = timeout?.deadlineFrom(TscClock.nanoTime())
         while (true) {
+            waiter.prepare()
             requestedRead.copyInto(readyRead)
             requestedWrite.copyInto(readyWrite)
             requestedExcept.copyInto(readyExcept)
@@ -375,6 +379,7 @@ internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
                 readyRead,
                 readyWrite,
                 readyExcept,
+                waiter,
             )
             if (ready < 0) return errno(-ready)
             val expired = deadline != null && TscClock.nanoTime() >= deadline
@@ -392,10 +397,10 @@ internal fun pselect6(regs: PtraceRegisters, process: Process): Long {
                     return errno(Errno.EINTR)
                 }
             }
-            Scheduler.yieldCurrent()
-            wait_for_interrupt()
+            waiter.await(deadline)
         }
     } finally {
+        waiter.close()
         if (previousMask != null && !regs.signalFrameInstalled) {
             thread.signals.mask = previousMask
         }
@@ -456,6 +461,7 @@ private fun scanSelectDescriptors(
     read: ByteArray,
     write: ByteArray,
     except: ByteArray,
+    subscription: PollSubscription,
 ): Int {
     var ready = 0
     for (fd in 0 until nfds) {
@@ -465,7 +471,7 @@ private fun scanSelectDescriptors(
         if (requested == 0) continue
         val file = process.fdTable.acquire(fd) ?: return -Errno.EBADF
         val events = try {
-            file.poll(caller, requested).toInt()
+            file.poll(caller, requested, subscription = subscription).toInt()
         } finally {
             file.release()
         }
@@ -498,6 +504,7 @@ private fun scanPollDescriptors(
     caller: VfsOperationContext,
     descriptors: ByteArray,
     count: Int,
+    subscription: PollSubscription,
 ): Int {
     var ready = 0
     val input = LittleEndianBuffer(descriptors)
@@ -513,7 +520,7 @@ private fun scanPollDescriptors(
                     PollEvents.POLLNVAL
                 } else {
                     try {
-                        val result = file.poll(caller, requested)
+                        val result = file.poll(caller, requested, subscription = subscription)
                         if (result < 0) {
                             PollEvents.POLLERR
                         } else {

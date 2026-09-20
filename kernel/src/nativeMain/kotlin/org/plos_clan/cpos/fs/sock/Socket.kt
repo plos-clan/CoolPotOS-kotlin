@@ -2,7 +2,8 @@
 
 package org.plos_clan.cpos.fs.sock
 
-import bridge.wait_for_interrupt
+import org.plos_clan.cpos.tasks.PollSource
+import org.plos_clan.cpos.tasks.PollWait
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.vfs.AccessMode
@@ -22,7 +23,6 @@ import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
-import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.Signal
 import org.plos_clan.cpos.tasks.SignalInfo
 import org.plos_clan.cpos.tasks.SignalRouter
@@ -80,15 +80,19 @@ internal class SocketDeadline private constructor(
         return if (now >= expirationNanos) 0uL else expirationNanos - now
     }
 
-    fun await(ready: () -> Boolean): VfsError? {
+    fun await(source: PollSource, ready: () -> Boolean): VfsError? {
         val thread = ProcessManager.currentThread() ?: return VfsError.NOT_FOUND
-        while (!ready()) {
-            if (thread.hasPendingSignal()) return VfsError.INTERRUPTED
-            if (expired()) return VfsError.WOULD_BLOCK
-            Scheduler.yieldCurrent()
-            wait_for_interrupt()
-        }
-        return null
+        val waiter = PollWait(thread)
+        waiter.watch(source)
+        try {
+            while (true) {
+                waiter.prepare()
+                if (ready()) return null
+                if (thread.hasPendingSignal()) return VfsError.INTERRUPTED
+                if (expired()) return VfsError.WOULD_BLOCK
+                waiter.await(expirationNanos)
+            }
+        } finally { waiter.close() }
     }
 
     companion object {

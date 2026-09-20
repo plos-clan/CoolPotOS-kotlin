@@ -2,6 +2,7 @@
 
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.tasks.PollSubscription
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import org.plos_clan.cpos.mem.PageCache
@@ -562,8 +563,11 @@ interface OpenFileBackend {
     val fileSystemMagic: ULong?
         get() = null
 
-    val readinessVersion: Int
-        get() = 0
+    fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) {}
 
     val minimumReadSize: Int
         get() = 0

@@ -1,10 +1,14 @@
 package org.plos_clan.cpos.fs.sock
 
+import org.plos_clan.cpos.tasks.PollSubscription
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
+import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.tasks.IoWaitQueue
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.PollEvents
 
 internal class UnixDatagramSocket(
@@ -187,7 +191,7 @@ internal class UnixDatagramSocket(
                         writeWaiters.wakeReady(
                             optionsLocked().receiveBufferSize - queuedBytes,
                         )
-                        if (messages.isNotEmpty()) readWaiters.wakeOne()
+                        if (messages.isNotEmpty()) readWaiters.takeOne()?.let(Scheduler::wake)
                         message.ancillary
                     }
                     return@withLock VfsResult.Ok(
@@ -214,7 +218,7 @@ internal class UnixDatagramSocket(
             }
             if (received != null) return received
             if (deadline != null) {
-                val waitError = deadline.await(::receiveReady)
+                val waitError = deadline.await(readWaiters.events, ::receiveReady)
                 if (waitError != null) return VfsResult.Err(waitError)
                 continue
             }
@@ -225,6 +229,15 @@ internal class UnixDatagramSocket(
     }
 
     override fun readableBytes(): Int = lock.withLock { messages.firstOrNull()?.bytes?.size ?: 0 }
+
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) {
+        subscription.watch(readWaiters.events, PollEvents.NORMAL_INPUT or PollEvents.POLLRDHUP)
+        subscription.watch(writeWaiters.events, PollEvents.NORMAL_OUTPUT)
+    }
 
     override fun pollSocket(events: Int): Int {
         var peerSocket: UnixDatagramSocket? = null
@@ -321,7 +334,7 @@ internal class UnixDatagramSocket(
             }
             if (result != null) return result
             if (deadline != null) {
-                val waitError = deadline.await {
+                val waitError = deadline.await(writeWaiters.events) {
                     !message.sourceSocket.isSendOpen() || enqueueReady(message)
                 }
                 if (waitError != null) return VfsResult.Err(waitError)

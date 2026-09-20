@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.utils
 
+import kotlin.test.BeforeTest
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -8,8 +9,13 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class CmdlineTest {
+    private var original = ""
+
+    @BeforeTest
+    fun save() { original = Cmdline.raw }
+
     @AfterTest
-    fun reset() = Cmdline.parse("")
+    fun reset() = Cmdline.parse(original)
 
     @Test
     fun parsesFlagsValuesAndDuplicateArguments() {

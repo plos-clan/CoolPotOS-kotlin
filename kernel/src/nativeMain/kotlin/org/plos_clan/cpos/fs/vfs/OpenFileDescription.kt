@@ -2,6 +2,8 @@
 
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.tasks.PollSource
+import org.plos_clan.cpos.tasks.PollSubscription
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import org.plos_clan.cpos.fs.FileDescriptorFlags
@@ -37,6 +39,7 @@ class OpenFileDescription private constructor(
     internal val backend: OpenFileBackend,
 ) {
     private val references = AtomicInt(1)
+    private val closed = PollSource()
     private val positionLock = KernelMutex()
     private val position = FilePosition()
     private val positionlessBackend = backend as? PositionlessOpenFileBackend
@@ -110,6 +113,8 @@ class OpenFileDescription private constructor(
             return VfsResult.Ok(file)
         }
     }
+
+    internal val isOpen: Boolean get() = references.load() > 0
 
     val offset: Long
         get() = positionLock.withLock { position.value }
@@ -327,6 +332,7 @@ class OpenFileDescription private constructor(
         if (previous <= 0) {
             references.fetchAndAdd(1)
         } else if (previous == 1) {
+            closed.signal()
             if (access != AccessMode.PATH) {
                 path.notify(
                     inode,
@@ -563,10 +569,17 @@ class OpenFileDescription private constructor(
         }
     }
 
-    fun poll(caller: VfsOperationContext, events: Int, consume: Boolean = true): Long =
-        if (references.load() == 0) -VfsError.BAD_DESCRIPTOR.errno.toLong()
+    fun poll(caller: VfsOperationContext, events: Int, consume: Boolean = true,
+        subscription: PollSubscription? = null): Long {
+        if (subscription != null) {
+            subscription.watch(closed)
+            backend.subscribe(caller, inode, subscription)
+        }
+        return if (references.load() == 0) -VfsError.BAD_DESCRIPTOR.errno.toLong()
         else if (consume) backend.poll(caller, inode, events)
         else backend.pollReadiness(caller, inode, events)
+
+    }
 
     fun seek(caller: VfsOperationContext, offset: Long, origin: SeekOrigin): VfsResult<Long> {
         if (references.load() == 0) {

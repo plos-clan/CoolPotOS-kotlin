@@ -2,6 +2,8 @@
 
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.tasks.PollSource
+import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.ProcessManager
@@ -12,7 +14,6 @@ import org.plos_clan.cpos.tasks.SignalPayload
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
-import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 internal class SignalFd(initialMask: ULong) :
@@ -21,20 +22,28 @@ internal class SignalFd(initialMask: ULong) :
     NoopSeekOpenFileBackend {
     private val lock = IrqSpinLock()
     private val transfer = ByteArray(SignalFdSigInfoAbi.SIZE)
-    private val version = AtomicInt(0)
     private var mask = initialMask and Signal.BLOCKABLE_MASK
+
+    private val changes = PollSource()
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) {
+        subscription.watch(changes)
+        val thread = ProcessManager.currentThread() ?: return
+        subscription.watch(thread.signals.pending.events)
+        subscription.watch(thread.process.signals.pending.events)
+    }
 
     override val minimumReadSize: Int
         get() = SignalFdSigInfoAbi.SIZE
 
-    override val readinessVersion: Int
-        get() = version.load() +
-            (ProcessManager.currentThread()?.pendingSignalVersion ?: 0)
-
     fun updateMask(replacement: ULong) {
         lock.withLock {
             mask = replacement and Signal.BLOCKABLE_MASK
-            version.store(version.load() + 1)
+
+            changes.signal()
         }
     }
 

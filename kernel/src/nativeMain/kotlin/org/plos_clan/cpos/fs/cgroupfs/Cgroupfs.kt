@@ -1,5 +1,7 @@
 package org.plos_clan.cpos.fs.cgroupfs
 
+import org.plos_clan.cpos.tasks.PollSource
+import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.fs.vfs.*
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
@@ -105,6 +107,7 @@ private enum class ControlFile(fileName: String, val mode: UInt = 0x124u, val co
     MAX_DEPTH("cgroup.max.depth", 0x1a4u),
     MAX_DESCENDANTS("cgroup.max.descendants", 0x1a4u),
     STAT("cgroup.stat"),
+    CPU_STAT("cpu.stat"),
     FREEZE("cgroup.freeze", 0x1a4u),
     KILL("cgroup.kill", 0x80u),
     PIDS_MAX("pids.max", 0x1a4u, Controller.PIDS),
@@ -147,7 +150,10 @@ private class CgroupfsInstance(override val mountOptions: List<String>) : SuperB
                 CgroupHierarchy.Event.PIDS_MAX_LOCAL -> ControlFile.PIDS_EVENTS_LOCAL
             }
             val directory = directories[group]?.backend as? CgroupDirectory
-            directory?.files?.get(file)?.notify(FileSystemEvent.MODIFIED)
+            directory?.files?.get(file)?.let { inode ->
+                (inode.backend as CgroupControl).changes.signal()
+                inode.notify(FileSystemEvent.MODIFIED)
+            }
         }
         return directory(superBlock, Cgroups.hierarchy.root)
     }
@@ -173,6 +179,7 @@ private class CgroupfsInstance(override val mountOptions: List<String>) : SuperB
     fun remove(group: CgroupHierarchy.Group) {
         val inode = directories.remove(group) ?: return
         (inode.backend as CgroupDirectory).files.values.forEach { file ->
+            (file.backend as CgroupControl).changes.signal()
             file.updateMetadata { it.copy(linkCount = 0u) }
         }
         inode.updateMetadata { it.copy(linkCount = 0u) }
@@ -262,6 +269,7 @@ private class CgroupDirectory(
         when (val result = Cgroups.hierarchy.remove(child.group)) {
             is VfsResult.Err -> result
             is VfsResult.Ok -> {
+                Cgroups.remove(child.group)
                 fileSystem.remove(child.group)
                 directory.updateMetadata(InodeTimestampEvent.CONTENT_CHANGED) { it.copy(linkCount = it.linkCount - 1u) }
                 result
@@ -323,6 +331,8 @@ private class CgroupControl(val directory: CgroupDirectory, val file: ControlFil
     RegularFileBackend(), MutableInodeBackend {
     val group: CgroupHierarchy.Group get() = directory.group
 
+    val changes = PollSource()
+
     override fun resize(caller: VfsOperationContext, inode: Inode, size: ULong): VfsResult<Unit> =
         if (file.writable && size == 0uL) VfsResult.Ok(Unit) else VfsResult.Err(VfsError.INVALID_ARGUMENT)
 
@@ -344,6 +354,7 @@ private class CgroupControl(val directory: CgroupDirectory, val file: ControlFil
             ControlFile.CONTROLLERS -> group.controllers.joinToString(" ", postfix = "\n") { it.fileName }
             ControlFile.SUBTREE_CONTROL -> group.subtreeControl.joinToString(" ", postfix = "\n") { it.fileName }
             ControlFile.EVENTS -> "populated ${if (group.taskCount != 0L) 1 else 0}\nfrozen ${if (group.frozen) 1 else 0}\n"
+            ControlFile.CPU_STAT -> Cgroups.cpuStat(group)
             ControlFile.STAT -> "nr_descendants ${group.descendants}\nnr_dying_descendants 0\n"
             ControlFile.FREEZE -> if (group.freeze) "1\n" else "0\n"
             ControlFile.PIDS_CURRENT -> "${group.taskCount}\n"
@@ -378,7 +389,10 @@ private class CgroupControl(val directory: CgroupDirectory, val file: ControlFil
                 val access = directory.migrationAccess(credentials, inode, selected.map { it.group })
                 if (access is VfsResult.Err) return access
                 val result = Cgroups.hierarchy.move(group, selected, thread)
-                if (result is VfsResult.Ok) Cgroups.wake(selected)
+                if (result is VfsResult.Ok) {
+                    Cgroups.account(selected)
+                    Cgroups.wake(selected)
+                }
                 return result
             }
             ControlFile.TYPE -> return if (text == "threaded") Cgroups.hierarchy.enableThreaded(group)
@@ -403,7 +417,8 @@ private class CgroupControl(val directory: CgroupDirectory, val file: ControlFil
             }
             ControlFile.FREEZE -> {
                 if (text != "0" && text != "1") return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-                Cgroups.wake(Cgroups.hierarchy.freeze(group, text == "1"))
+                val tasks = Cgroups.hierarchy.freeze(group, text == "1")
+                Cgroups.wake(tasks)
             }
             ControlFile.KILL -> {
                 if (text != "1") return VfsResult.Err(VfsError.INVALID_ARGUMENT)
@@ -416,11 +431,21 @@ private class CgroupControl(val directory: CgroupDirectory, val file: ControlFil
     }
 }
 
-private class CgroupHandle(private val control: CgroupControl, private val opener: VfsOperationContext) : OpenFileBackend {
+private class CgroupHandle(
+    private val control: CgroupControl,
+    private val opener: VfsOperationContext,
+) : OpenFileBackend {
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) = subscription.watch(control.changes)
+
     override val supportsEpoll: Boolean get() = true
     private var content: ByteArray? = null
     private var observed = readinessVersion
-    override val readinessVersion: Int get() = Cgroups.lock.withLock { control.file.version(control.group) }
+    private val readinessVersion: Int
+        get() = Cgroups.lock.withLock { control.file.version(control.group) }
 
     override fun read(
         caller: VfsOperationContext, inode: Inode, destination: PreparedBufferDestination,
@@ -431,7 +456,9 @@ private class CgroupHandle(private val control: CgroupControl, private val opene
         if (content == null || position.value == 0L) {
             val result = Cgroups.lock.withLock {
                 if (!live(inode)) return@withLock VfsResult.Err(VfsError.NO_DEVICE)
-                control.show().also { if (it is VfsResult.Ok) observed = control.file.version(control.group) }
+                val result = control.show()
+                if (result is VfsResult.Ok) observed = control.file.version(control.group)
+                result
             }
             content = when (result) {
                 is VfsResult.Ok -> result.value
@@ -441,7 +468,8 @@ private class CgroupHandle(private val control: CgroupControl, private val opene
         val bytes = checkNotNull(content)
         if (position.value >= bytes.size) return IoResult.success(0)
         val start = position.value.toInt()
-        val copied = destination.copyFrom(destinationOffset, bytes, start, minOf(count, bytes.size - start))
+        val available = minOf(count, bytes.size - start)
+        val copied = destination.copyFrom(destinationOffset, bytes, start, available)
         if (copied == 0) return IoResult.failure(VfsError.FAULT)
         position.value += copied
         return IoResult.success(copied)
@@ -470,7 +498,8 @@ private class CgroupHandle(private val control: CgroupControl, private val opene
 
     override fun poll(caller: VfsOperationContext, inode: Inode, events: Int): Long = Cgroups.lock.withLock {
         var ready = PollEvents.DEFAULT_FILE_EVENTS
-        if (!live(inode) || observed != control.file.version(control.group)) ready = ready or PollEvents.POLLPRI or PollEvents.POLLERR
+        val changed = !live(inode) || observed != control.file.version(control.group)
+        if (changed) ready = ready or PollEvents.POLLPRI or PollEvents.POLLERR
         (ready and (events or PollEvents.UNCONDITIONALLY_REPORTED)).toLong()
     }
 

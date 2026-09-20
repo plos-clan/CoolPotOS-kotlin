@@ -2,6 +2,7 @@
 
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.tasks.PollSource
 import org.plos_clan.cpos.utils.IrqSpinLock
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicLong
@@ -147,6 +148,7 @@ class MountNamespace internal constructor(val root: Mount) {
     private val lock = IrqSpinLock()
     private val mounts = mutableMapOf<VfsPath, Mount>()
     private val references = AtomicInt(0)
+    internal val events = PollSource()
     private val changes = AtomicInt(0)
 
     internal val version: Int
@@ -195,6 +197,7 @@ class MountNamespace internal constructor(val root: Mount) {
             attachment = target,
         )
         changes.fetchAndAdd(1)
+        events.signal()
         VfsResult.Ok(Unit)
     }
 
@@ -211,6 +214,7 @@ class MountNamespace internal constructor(val root: Mount) {
         }
         mounts[target] = mount
         changes.fetchAndAdd(1)
+        events.signal()
         VfsResult.Ok(Unit)
     }
 
@@ -236,6 +240,7 @@ class MountNamespace internal constructor(val root: Mount) {
             attachment = target,
         )
         changes.fetchAndAdd(1)
+        events.signal()
         VfsResult.Ok(Unit)
     }
 
@@ -245,6 +250,7 @@ class MountNamespace internal constructor(val root: Mount) {
             if (!mount.tryBeginUnmount()) return@withLock false
             mounts.remove(target)
             changes.fetchAndAdd(1)
+        events.signal()
             true
         }
         if (!detached) return VfsResult.Err(VfsError.BUSY)
@@ -269,6 +275,7 @@ class MountNamespace internal constructor(val root: Mount) {
             mounts.remove(source)
             mounts[target] = mount
             changes.fetchAndAdd(1)
+        events.signal()
             VfsResult.Ok(attachment)
         }
         return when (previous) {
@@ -293,6 +300,7 @@ class MountNamespace internal constructor(val root: Mount) {
                 candidate.setAttributes(attributes)
             }
             changes.fetchAndAdd(1)
+        events.signal()
         }
     }
 
@@ -307,7 +315,8 @@ class MountNamespace internal constructor(val root: Mount) {
                     add(candidate)
                     iterator.remove()
                 }
-            }.also { changes.fetchAndAdd(1) }
+            }.also { changes.fetchAndAdd(1)
+        events.signal() }
         } ?: return VfsResult.Err(VfsError.BUSY)
         mount.detachFromParent()
         mount.release()

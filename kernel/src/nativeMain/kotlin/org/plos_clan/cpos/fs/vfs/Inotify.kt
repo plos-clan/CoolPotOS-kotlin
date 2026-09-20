@@ -2,6 +2,7 @@
 
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
@@ -11,7 +12,6 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.KernelMutex
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
-import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 internal object InotifyMask {
@@ -118,13 +118,9 @@ internal class Inotify(
     private val watchesByInode = mutableMapOf<Inode, Watch>()
     private val events = ArrayDeque<Event>()
     private val readWaiters = IoWaitQueue()
-    private val version = AtomicInt(0)
     private var nextWatchDescriptor = 1
     private var queuedBytes = 0
     private var overflowQueued = false
-
-    override val readinessVersion: Int
-        get() = version.load()
 
     override val seekable: Boolean
         get() = false
@@ -251,6 +247,14 @@ internal class Inotify(
         return if (args.copyToUser(bytes)) 0L else -VfsError.FAULT.errno.toLong()
     }
 
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) {
+        subscription.watch(readWaiters.events, PollEvents.NORMAL_INPUT or PollEvents.POLLRDHUP)
+    }
+
     override fun poll(caller: VfsOperationContext, inode: Inode, events: Int): Long = lock.withLock {
         if (this.events.isEmpty()) 0L else (events and PollEvents.NORMAL_INPUT).toLong()
     }
@@ -339,7 +343,7 @@ internal class Inotify(
                 queuedBytes -= event.size
                 if (event.mask == InotifyMask.QUEUE_OVERFLOW) overflowQueued = false
             }
-            version.fetchAndAdd(1)
+
         }
         return IoResult.success(batch.size)
     }
@@ -351,14 +355,14 @@ internal class Inotify(
                 events.addLast(OVERFLOW_EVENT)
                 queuedBytes += OVERFLOW_EVENT.size
                 overflowQueued = true
-                version.fetchAndAdd(1)
+
                 readWaiters.wakeOne()
             }
             return
         }
         events.addLast(event)
         queuedBytes += event.size
-        version.fetchAndAdd(1)
+
         readWaiters.wakeOne()
     }
 

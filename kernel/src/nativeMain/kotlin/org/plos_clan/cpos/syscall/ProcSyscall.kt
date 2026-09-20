@@ -531,37 +531,6 @@ internal fun prlimit64(regs: PtraceRegisters, process: Process): Long {
     return 0L
 }
 
-internal fun schedGetAffinity(regs: PtraceRegisters, process: Process): Long {
-    val pid = regs[PtraceRegisters.IDX_RDI].toInt()
-    val cpusetsize = regs[PtraceRegisters.IDX_RSI]
-    val maskAddress = regs[PtraceRegisters.IDX_RDX]
-    if (maskAddress == 0uL) return errno(Errno.EFAULT)
-    if (cpusetsize == 0uL || cpusetsize > Int.MAX_VALUE.toULong()) {
-        return errno(Errno.EINVAL)
-    }
-
-    val thread: Thread? =
-        if (pid == 0) ProcessManager.currentThread() else ProcessManager.snapshotProcesses()
-            .firstNotNullOfOrNull { process ->
-                if (process.id == pid) return@firstNotNullOfOrNull process.threads.first()
-                for (thread in process.threads)
-                    if (thread.id == pid) return@firstNotNullOfOrNull thread
-                null
-            }
-    if (thread == null) return errno(Errno.ESRCH)
-    val affinity = if (thread.affinityMask == 0UL) defaultAffinityMask() else thread.affinityMask
-    val mask = UserMemory(process.addressSpace, maskAddress)
-    val size = cpusetsize.toInt()
-    if (mask.fill(0, size, 0) != size) return errno(Errno.EFAULT)
-
-    val copySize = minOf(size, ULong.SIZE_BYTES)
-    val affinityBytes = ByteArray(ULong.SIZE_BYTES) { index ->
-        (affinity shr (index * Byte.SIZE_BITS)).toByte()
-    }
-    if (!mask.copyToUser(affinityBytes, size = copySize)) return errno(Errno.EFAULT)
-    return copySize.toLong()
-}
-
 private fun copyIds(
     process: Process,
     realAddress: ULong,
@@ -581,13 +550,6 @@ private fun copyIds(
     } else {
         errno(Errno.EFAULT)
     }
-}
-
-private fun defaultAffinityMask(): ULong {
-    val count = SMProcessor.cpu_count
-    if (count == 0UL) return 1UL
-    if (count >= 64UL) return ULong.MAX_VALUE
-    return (1UL shl count.toInt()) - 1UL
 }
 
 internal fun getTid(regs: PtraceRegisters, process: Process): Long {
@@ -817,12 +779,15 @@ internal fun getCPU(regs: PtraceRegisters, process: Process): Long {
     if (cpup != 0UL) {
         val userCpup = UserMemory(process.addressSpace, cpup)
         val local = SMProcessor.currentLocal()
-        if (!userCpup.copyToUser(local.cpuid.toByteArray())) return errno(Errno.EFAULT)
+        val bytes = ByteArray(Int.SIZE_BYTES)
+        LittleEndianBuffer(bytes).writeU32(0, local.cpuid.toUInt())
+        if (!userCpup.copyToUser(bytes)) return errno(Errno.EFAULT)
     }
 
     if (nodep != 0UL) {
         val userNodep = UserMemory(process.addressSpace, nodep)
-        if (!userNodep.copyToUser(0L.toByteArray())) return errno(Errno.EFAULT)
+        val bytes = ByteArray(Int.SIZE_BYTES)
+        if (!userNodep.copyToUser(bytes)) return errno(Errno.EFAULT)
     }
 
     return errno(Errno.EOK)

@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.drivers.char.tty
 
+import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.fs.vfs.IoMode
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
@@ -38,8 +39,7 @@ enum class TtyEvent(val packetFlag: Int, val oppositeFlag: Int = 0) {
 }
 
 interface TtySessionBackend {
-    val readinessVersion: Int
-        get() = 0
+    fun subscribe(subscription: PollSubscription) {}
 
     fun start(session: TtySession): Boolean = true
     fun open(session: TtySession): Int = 0

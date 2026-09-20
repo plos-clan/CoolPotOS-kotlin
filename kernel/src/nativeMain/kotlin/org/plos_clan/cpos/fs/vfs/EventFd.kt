@@ -2,14 +2,15 @@
 
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.tasks.IoWaitQueue
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
-import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 internal class EventFd(
@@ -27,14 +28,10 @@ internal class EventFd(
     private val transfer = ByteArray(VALUE_BYTES)
     private val readWaiters = IoWaitQueue()
     private val writeWaiters = IoWaitQueue()
-    private val version = AtomicInt(0)
     private var value = initialValue.toULong()
 
     override val ioSize: Int
         get() = VALUE_BYTES
-
-    override val readinessVersion: Int
-        get() = version.load()
 
     override fun read(
         caller: VfsOperationContext,
@@ -66,9 +63,9 @@ internal class EventFd(
                     return@withLock IoResult.failure(VfsError.FAULT)
                 }
                 value -= resultValue
-                version.fetchAndAdd(1)
+
                 writeWaiters.wakeAll()
-                if (semaphore && value != 0uL) readWaiters.wakeOne()
+                if (semaphore && value != 0uL) readWaiters.takeOne()?.let(Scheduler::wake)
                 IoResult.success(VALUE_BYTES)
             }
             if (result != null) return result
@@ -101,10 +98,8 @@ internal class EventFd(
             var waiter: IoWaitQueue.Waiter? = null
             val result = lock.withLock {
                 if (increment <= MAX_VALUE - value) {
-                    val wasEmpty = value == 0uL
                     value += increment
-                    version.fetchAndAdd(1)
-                    if (wasEmpty && value != 0uL) readWaiters.wakeOne()
+                    readWaiters.wakeOne()
                     return@withLock IoResult.success(VALUE_BYTES)
                 }
                 if (mode == IoMode.NON_BLOCKING) {
@@ -118,6 +113,15 @@ internal class EventFd(
                 return IoResult.failure(VfsError.INTERRUPTED)
             }
         }
+    }
+
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) {
+        subscription.watch(readWaiters.events, PollEvents.NORMAL_INPUT or PollEvents.POLLRDHUP)
+        subscription.watch(writeWaiters.events, PollEvents.NORMAL_OUTPUT)
     }
 
     override fun poll(caller: VfsOperationContext, inode: Inode, events: Int): Long = lock.withLock {

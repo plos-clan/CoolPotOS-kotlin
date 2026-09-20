@@ -251,12 +251,12 @@ class Thread internal constructor(
     internal val nativeTask: NativeTask,
     internal val signals: ThreadSignalState = process.signals.newThread(),
     var name: String = "",
-    val affinityMask: ULong = 0UL,
     val capabilities: CapabilityState = CapabilityState(),
     internal val cgroup: CgroupHierarchy.Task? = null,
     internal val pidFileIdentity: AnonymousFileIdentity,
     nice: Int = 0,
 ) {
+    internal val waitResource = AtomicReference<AutoCloseable?>(null)
     private val parent = parentThread?.let(::WeakReference)
     internal val parentThread: Thread?
         get() = parent?.get()
@@ -276,7 +276,10 @@ class Thread internal constructor(
 
     internal fun setPriority(requested: Int, limit: ULong, privileged: Boolean): Boolean = nativeTask.access { handle ->
         if (!priority.set(requested, limit, privileged)) return@access false
-        if (handle != 0uL) bridge.fast_handoff_set_quantum(handle, Scheduler.policy.quantumCycles(priority.value))
+        if (handle != 0uL) {
+            val weight = Scheduler.policy.weight(priority.value)
+            bridge.fast_handoff_set_weight(handle, weight)
+        }
         true
     }
 
@@ -319,9 +322,6 @@ class Thread internal constructor(
 
     internal val pendingSignalMask: ULong
         get() = signals.pending.mask or process.signals.pending.mask
-
-    internal val pendingSignalVersion: Int
-        get() = signals.pending.version + process.signals.pending.version
 
     internal fun takePendingSignal(accepted: ULong): SignalInfo? =
         signals.pending.take(accepted) ?: process.signals.pending.take(accepted)
@@ -438,6 +438,7 @@ class Process internal constructor(
         get() = lifecycle.load().state
     val resourceLimits = ProcessLimits()
     internal val oomScoreAdjustment = OomScoreAdjustment()
+    internal val stateChanges = PollSource()
     internal val signals = ProcessSignalState(
         uid = { credentials.userIds.real },
         limit = { resourceLimits.get(ProcessResource.PENDING_SIGNALS).soft },
@@ -450,7 +451,11 @@ class Process internal constructor(
     internal fun transitionState(expected: ProcessState, replacement: ProcessState): Boolean {
         var observed = lifecycle.load()
         while (observed.state == expected) {
-            if (lifecycle.compareAndSet(observed, observed.copy(state = replacement))) return true
+            if (lifecycle.compareAndSet(observed, observed.copy(state = replacement))) {
+                val exited = replacement == ProcessState.ZOMBIE || replacement == ProcessState.DEAD
+                if (exited) stateChanges.signal()
+                return true
+            }
             observed = lifecycle.load()
         }
         return false
@@ -514,7 +519,10 @@ class Process internal constructor(
                 exitedCpuTimeNanos = observed.exitedCpuTimeNanos + cpuTime,
                 waitStatus = if (beginExit) waitStatus else observed.waitStatus,
             )
-            if (lifecycle.compareAndSet(observed, replacement)) return remaining == 0
+            if (lifecycle.compareAndSet(observed, replacement)) {
+                stateChanges.signal()
+                return remaining == 0
+            }
         }
     }
 
@@ -697,6 +705,10 @@ object ProcessManager {
             nativeTask = NativeTask.allocate(
                 cgroup.id, process.addressSpace.pageDirectory.pml4PhysicalAddress, kernelStackPages, nice,
             ) ?: return VfsResult.Err(VfsError.NO_MEMORY)
+            if (creator != null) {
+                val affinity = checkNotNull(creator.nativeTask.affinity())
+                nativeTask.setAffinity(affinity)
+            }
             val thread = newThread(
                 process = process,
                 parentThread = parentThread,
@@ -788,6 +800,7 @@ object ProcessManager {
     }
 
     internal fun finishThreadExit(thread: Thread, waitStatus: Int) {
+        thread.waitResource.exchange(null)?.close()
         thread.nativeTask.close()
         Keys.exit(thread)
         Cgroups.exit(thread)

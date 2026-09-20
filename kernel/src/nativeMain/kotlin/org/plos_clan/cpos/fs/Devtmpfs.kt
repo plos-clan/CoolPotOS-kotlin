@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.fs
 
+import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceBackend
 import org.plos_clan.cpos.drivers.DeviceIoEvent
@@ -165,8 +166,6 @@ internal sealed class DeviceOpenFile(
         private val terminal: ModeAwareDeviceBackend,
         override val peerDentry: Dentry?,
     ) : DeviceOpenFile(device, terminal), ModeAwareOpenFileBackend {
-        override val readinessVersion: Int
-            get() = terminal.readinessVersion
 
         override val supportsEpoll = true
         override val seekable = false
@@ -197,6 +196,14 @@ internal sealed class DeviceOpenFile(
         args: UserMemory,
     ): Long =
         backend.ioctl(device, command, args)
+
+    override fun subscribe(
+        caller: VfsOperationContext,
+        inode: Inode,
+        subscription: PollSubscription,
+    ) {
+        backend.subscribe(device, subscription)
+    }
 
     override fun poll(
         caller: VfsOperationContext,

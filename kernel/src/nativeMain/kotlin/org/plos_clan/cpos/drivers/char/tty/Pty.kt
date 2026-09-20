@@ -2,6 +2,7 @@
 
 package org.plos_clan.cpos.drivers.char.tty
 
+import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.ModeAwareDeviceBackend
 import org.plos_clan.cpos.drivers.char.TerminalBackend
@@ -96,8 +97,10 @@ internal class Pty(
     }
 
     inner class Master : ModeAwareDeviceBackend {
-        override val readinessVersion: Int
-            get() = this@Pty.readinessVersion
+        override fun subscribe(device: Device, subscription: PollSubscription) {
+            this@Pty.subscribe(subscription)
+            subscription.watch(readers.events)
+        }
 
         private val control = session.masterFile()
 

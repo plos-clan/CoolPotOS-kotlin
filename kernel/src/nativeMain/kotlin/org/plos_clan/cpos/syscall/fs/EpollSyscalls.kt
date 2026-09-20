@@ -2,7 +2,7 @@
 
 package org.plos_clan.cpos.syscall.fs
 
-import bridge.wait_for_interrupt
+import org.plos_clan.cpos.tasks.PollWait
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.FileDescriptorFlags
@@ -20,7 +20,6 @@ import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.syscall.TimeSpec
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
-import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.Signal
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
@@ -187,10 +186,13 @@ internal object EpollSyscalls {
                     return errno(Errno.EFAULT)
                 }
         }
+        val waiter = PollWait(thread, file::release)
+        epoll.subscribe(process.vfsOperationContext, file.inode, waiter)
         val previousMask = signalMask?.let { thread.signals.replaceMask(it) }
         try {
             val events = ArrayList<EpollEvent>()
             while (true) {
+                waiter.prepare()
                 epoll.collect(process.vfsOperationContext, maximumValue.toInt(), events)
                 if (events.isNotEmpty()) {
                     val bytes = ByteArray(events.size * EVENT_SIZE)
@@ -214,16 +216,15 @@ internal object EpollSyscalls {
                         return errno(Errno.EINTR)
                     }
                 }
-                Scheduler.yieldCurrent()
-                wait_for_interrupt()
+                waiter.await(timeout.deadline)
             }
         } catch (_: OutOfMemoryError) {
             return errno(Errno.ENOMEM)
         } finally {
+            waiter.close()
             if (previousMask != null && !regs.signalFrameInstalled) {
                 thread.signals.mask = previousMask
             }
-            file.release()
         }
     }
 

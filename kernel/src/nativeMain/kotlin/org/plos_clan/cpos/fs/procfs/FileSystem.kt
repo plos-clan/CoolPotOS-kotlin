@@ -44,7 +44,11 @@ internal class MountsFile(
             val handle = object : ProcTextHandle(render(context), { render(context) }, null, true) {
                 override fun release() = context.release()
             }
-            VfsResult.Ok(ProcPollHandle({ context.namespace.version }, handle, PollEvents.NORMAL_INPUT))
+            val namespace = context.namespace
+            val pollHandle = ProcPollHandle(
+                { namespace.version }, handle, PollEvents.NORMAL_INPUT, namespace.events,
+            )
+            VfsResult.Ok(pollHandle)
         } catch (failure: Throwable) {
             context.release()
             throw failure
