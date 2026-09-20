@@ -48,12 +48,12 @@ class Mouse(
         }
 
         if (layout.axisX == null && layout.buttons.isEmpty()) {
-            println("Mouse: No mouse fields found")
+            println("USB: Mouse: No mouse fields found")
         }
     }
 
     override suspend fun disconnect() {
-        println("Mouse: disconnected")
+        println("USB: Mouse: disconnected")
         hid.free()
     }
 
@@ -63,7 +63,7 @@ class Mouse(
         }
 
         if (event.status != TransferStatus.COMPLETED && event.status != TransferStatus.SHORT_PACKET) {
-            println("Mouse: transfer failed (${event.status.ordinal})")
+            println("USB: Mouse: transfer failed (${event.status.ordinal})")
             return
         }
 
@@ -71,24 +71,20 @@ class Mouse(
 
         layout.axisX?.let { field ->
             val dx = field.valueSigned(data, 0u)
-            //println("Mouse (X): $dx")
         }
 
         layout.axisY?.let { field ->
             val dy = field.valueSigned(data, 0u)
-            //println("Mouse (Y): $dy")
         }
 
         layout.axisWheel?.let { field ->
             val wheel = field.valueSigned(data, 0u)
-            //println("Mouse (Wheel): $wheel")
         }
 
         for (field in layout.buttons) {
             for (i in 0 until field.reportCount.toInt()) {
                 if (field.value(data, i.toUInt()) != 0u) {
                     val buttonId = (field.usageMin + i.toUInt()) and 0xffffu
-                    //println("Mouse (Btn): $buttonId")
                 }
             }
         }
@@ -112,12 +108,12 @@ suspend fun probeMouse(iface: UsbInterface): UsbDriver? {
     }
 
     val endpoint = iface.findEndpoint(EP_TYPE_INT, true) ?: run {
-        println("Mouse: No Interrupt IN endpoint")
+        println("USB: Mouse: No Interrupt IN endpoint")
         return null
     }
 
     val mouse = Mouse.create(iface, endpoint.desc.endpointAddress) ?: return null
-    println("HID Mouse (Slot ${iface.device.slotId})")
+    println("USB: HID Mouse (Slot ${iface.device.slotId})")
 
     return mouse
 }

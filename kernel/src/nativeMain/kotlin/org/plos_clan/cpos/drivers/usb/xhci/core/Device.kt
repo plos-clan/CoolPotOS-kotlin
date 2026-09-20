@@ -24,7 +24,7 @@ import org.plos_clan.cpos.mem.MmioRegion
 import platform.posix.memcpy
 
 suspend fun Xhci.addressDevice(portId: Int, slotId: UByte, speedId: UInt): Unit? {
-    println("Addressing device on slot $slotId...")
+    println("xHCI: Addressing device on slot $slotId...")
 
     val slot = Slot(id = slotId, active = true, portId = portId, speed = speedId)
     slots[slotId.toInt()] = slot
@@ -65,7 +65,7 @@ suspend fun Xhci.addressDevice(portId: Int, slotId: UByte, speedId: UInt): Unit?
         val (code, _) = sendCommand(command)
 
         if (code != 1u) {
-            println("Address Device failed code: $code")
+            println("xHCI: Address Device failed code: $code")
             return null
         }
     } finally {
@@ -138,7 +138,7 @@ suspend fun Xhci.configureEndpoints(
                 val (code, _) = sendCommand(command)
 
                 if (code != 1u) {
-                    println("Configure endpoint failed: $code")
+                    println("xHCI: Configure endpoint failed: $code")
                     return@withLock null
                 }
                 eventLock.withLock {
@@ -192,7 +192,7 @@ suspend fun Xhci.updateEp0Mps(slotId: UByte, mps: UInt): Unit? {
         val (code, _) = sendCommand(command)
 
         if (code != 1u) {
-            println("Evaluate Context failed: $code")
+            println("xHCI: Evaluate Context failed: $code")
             return null
         }
         slots[slotId.toInt()].endpoints[1]?.packetSize = mps
@@ -311,7 +311,7 @@ internal fun Xhci.setupOneEndpoint(
 
 suspend fun Xhci.cleanupSlot(slotId: UByte) =
     withContext(NonCancellable) {
-        println("Cleaning up resources for slot $slotId")
+        println("xHCI: Cleaning up resources for slot $slotId")
 
         val slot = slots[slotId.toInt()]
         slot.mutex.withLock {
@@ -341,6 +341,6 @@ suspend fun Xhci.cleanupSlot(slotId: UByte) =
             slot.outContext?.free()
             slot.outContext = null
 
-            println("Slot $slotId cleanup complete")
+            println("xHCI: Slot $slotId cleanup complete")
         }
     }

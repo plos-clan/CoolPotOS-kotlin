@@ -73,9 +73,9 @@ class Xhci(baseAddress: MmioAddress, private val disableDma: () -> Unit) {
         val (code, _) = sendCommand(command)
 
         if (code == 1u) {
-            println("xHCI command ring verified")
+            println("xHCI: command ring verified")
         } else {
-            println("No op failed with code: $code")
+            println("xHCI: No op failed with code: $code")
             return null
         }
         return Unit
@@ -85,7 +85,7 @@ class Xhci(baseAddress: MmioAddress, private val disableDma: () -> Unit) {
         val (code, slotId) = sendCommand(Trb.newEnableSlot())
 
         if (code != 1u) {
-            println("Failed to enable slot: $code")
+            println("xHCI: Failed to enable slot: $code")
             return null
         }
 
@@ -155,7 +155,7 @@ class Xhci(baseAddress: MmioAddress, private val disableDma: () -> Unit) {
             try {
                 transfer.complete(result)
             } catch (failure: Throwable) {
-                println("USB completion failed: $failure")
+                println("xHCI: USB completion failed: $failure")
             }
         }
     }
@@ -178,7 +178,7 @@ class Xhci(baseAddress: MmioAddress, private val disableDma: () -> Unit) {
                 commandSpace.trySend(Unit)
             }
             else -> {
-                println("Ignored event type ${event.type}")
+                println("xHCI: Ignored event type ${event.type}")
             }
         }
     }

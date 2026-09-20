@@ -50,12 +50,12 @@ class Keyboard(
         }
 
         if (layout.modifiers.isEmpty() && layout.arrays.isEmpty()) {
-            println("KBD: No keyboard fields found")
+            println("USB: KBD: No keyboard fields found")
         }
     }
 
     override suspend fun disconnect() {
-        println("KBD: disconnected")
+        println("USB: KBD: disconnected")
         InputManager.unregisterKeyboard(hid)
         hid.free()
     }
@@ -68,7 +68,7 @@ class Keyboard(
             if (event.status != TransferStatus.COMPLETED &&
                 event.status != TransferStatus.SHORT_PACKET
             ) {
-                println("KBD: Transfer failed (${event.status.ordinal})")
+                println("USB: KBD: Transfer failed (${event.status.ordinal})")
                 return
             }
             val buffer = hid.buffer ?: return
@@ -164,12 +164,12 @@ suspend fun probeKbd(iface: UsbInterface): UsbDriver? {
     }
 
     val endpoint = iface.findEndpoint(EP_TYPE_INT, true) ?: run {
-        println("KBD: No Interrupt IN endpoint")
+        println("USB: KBD: No Interrupt IN endpoint")
         return null
     }
 
     val keyboard = Keyboard.create(iface, endpoint.desc.endpointAddress) ?: return null
-    println("HID Keyboard (Slot ${iface.device.slotId})")
+    println("USB: HID Keyboard (Slot ${iface.device.slotId})")
 
     return keyboard
 }

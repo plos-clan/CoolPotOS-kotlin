@@ -66,7 +66,7 @@ internal class RndisControlChannel private constructor(
         val response = exchange(RndisCommand.Query(requestId(), oid.value, information))
             as? RndisResponse.Query
         if (response?.status == RndisStatus.SUCCESS) return response.information
-        println("RNDIS: query ${oid.name} failed")
+        println("USB: RNDIS: query ${oid.name} failed")
         return null
     }
 
@@ -75,7 +75,7 @@ internal class RndisControlChannel private constructor(
         if (information.size == UInt.SIZE_BYTES) {
             return LittleEndianBuffer(information).readU32(0)
         }
-        println("RNDIS: query ${oid.name} returned ${information.size} bytes")
+        println("USB: RNDIS: query ${oid.name} returned ${information.size} bytes")
         return null
     }
 
@@ -162,7 +162,7 @@ internal class RndisControlChannel private constructor(
             val event = notificationCompletion.recv()
             if (notificationState != NotificationState.RUNNING) return
             if (!isResponseAvailable(event)) {
-                println("RNDIS: invalid response notification (${event.status})")
+                println("USB: RNDIS: invalid response notification (${event.status})")
                 return
             }
             drainUnsolicitedResponses()
@@ -183,11 +183,11 @@ internal class RndisControlChannel private constructor(
                 when (val parsed = receiveEncapsulated()) {
                     RndisParseResult.Empty -> return
                     is RndisParseResult.Invalid -> {
-                        println("RNDIS: ${parsed.reason}")
+                        println("USB: RNDIS: ${parsed.reason}")
                         return
                     }
                     is RndisParseResult.Valid -> if (!handleUnsolicited(parsed.response)) {
-                        println("RNDIS: unexpected ${parsed.response.type}")
+                        println("USB: RNDIS: unexpected ${parsed.response.type}")
                     }
                 }
             }
@@ -210,7 +210,7 @@ internal class RndisControlChannel private constructor(
                     is PollResult.Complete -> return result.response
                 }
             }
-            println("RNDIS: ${command.type} response timed out")
+            println("USB: RNDIS: ${command.type} response timed out")
             return null
         } finally {
             lock.release()
@@ -221,7 +221,7 @@ internal class RndisControlChannel private constructor(
         when (val parsed = receiveEncapsulated()) {
             RndisParseResult.Empty -> PollResult.Retry
             is RndisParseResult.Invalid -> {
-                println("RNDIS: ${parsed.reason}")
+                println("USB: RNDIS: ${parsed.reason}")
                 PollResult.Failed
             }
             is RndisParseResult.Valid -> when {
@@ -236,13 +236,13 @@ internal class RndisControlChannel private constructor(
             when (response.status) {
                 RndisStatus.MEDIA_CONNECT -> mediaConnected = true
                 RndisStatus.MEDIA_DISCONNECT -> mediaConnected = false
-                else -> println("RNDIS: status 0x${response.status.toString(16)}")
+                else -> println("USB: RNDIS: status 0x${response.status.toString(16)}")
             }
             true
         }
         is RndisResponse.DeviceKeepAlive -> {
             if (!sendEncapsulated(RndisCommand.KeepAliveComplete(response.requestId).encode())) {
-                println("RNDIS: failed to answer device keep-alive")
+                println("USB: RNDIS: failed to answer device keep-alive")
             }
             true
         }

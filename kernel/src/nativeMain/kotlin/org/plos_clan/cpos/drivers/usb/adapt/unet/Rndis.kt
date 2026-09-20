@@ -73,7 +73,7 @@ class RndisDevice private constructor(
             initialized,
             receiveBuffer.byteLength.toUInt(),
         ) ?: run {
-            println("RNDIS: invalid initialize completion")
+            println("USB: RNDIS: invalid initialize completion")
             return false
         }
         state = State.INITIALIZED
@@ -85,7 +85,7 @@ class RndisDevice private constructor(
             maximumTotal,
             transmitBuffer.byteLength,
         ) ?: run {
-            println("RNDIS: device cannot carry an Ethernet frame")
+            println("USB: RNDIS: device cannot carry an Ethernet frame")
             return false
         }
 
@@ -93,7 +93,7 @@ class RndisDevice private constructor(
             ?: control.query(RndisOid.PERMANENT_ADDRESS)
             ?: return false
         macAddress = MacAddress.from(address)?.takeIf(MacAddress::isUnicast) ?: run {
-            println("RNDIS: invalid Ethernet address")
+            println("USB: RNDIS: invalid Ethernet address")
             return false
         }
 
@@ -109,7 +109,7 @@ class RndisDevice private constructor(
         launchReceiveLoop()
         launchKeepAliveLoop()
         println(
-            "RNDIS: $macAddress, frame $maximumFrameSize, " +
+            "USB: RNDIS: $macAddress, frame $maximumFrameSize, " +
                 "link ${linkSpeedBitsPerSecond / 1_000_000uL} Mbit/s",
         )
         return true
@@ -179,7 +179,7 @@ class RndisDevice private constructor(
         receiveBuffer.free()
         transmitBuffer.free()
         state = State.DISCONNECTED
-        println("RNDIS: disconnected")
+        println("USB: RNDIS: disconnected")
     }
 
     override fun handleCompletion(event: CompletionEvent) {
@@ -203,14 +203,14 @@ class RndisDevice private constructor(
                             length = transfer.transferSize,
                         ),
                     ) ?: run {
-                        println("RNDIS: failed to submit receive transfer")
+                        println("USB: RNDIS: failed to submit receive transfer")
                         return@launch
                     }
 
                     val event = receiveCompletion.recv()
                     if (state != State.RUNNING) return@launch
                     if (!event.status.successful) {
-                        println("RNDIS: receive transfer failed (${event.status})")
+                        println("USB: RNDIS: receive transfer failed (${event.status})")
                         continue
                     }
 
@@ -221,7 +221,7 @@ class RndisDevice private constructor(
                             received,
                             maximumFrameSize,
                         ) { frame, length -> receive(frame, length) }
-                    ) println("RNDIS: malformed packet message")
+                    ) println("USB: RNDIS: malformed packet message")
                 }
             } finally {
                 receiveActive = false
@@ -235,7 +235,7 @@ class RndisDevice private constructor(
             while (state == State.RUNNING) {
                 delay(KEEP_ALIVE_INTERVAL_MILLIS) // 该语句不应该被优化
                 if (state == State.RUNNING && !control.keepAlive()) {
-                    println("RNDIS: keep-alive failed")
+                    println("USB: RNDIS: keep-alive failed")
                 }
             }
         }
@@ -275,19 +275,19 @@ suspend fun probeRndis(intfc: UsbInterface): UsbDriver? {
     if (!matchesWireless && !matchesCdc) return null
 
     val dataInterface = intfc.findAssociatedInterface(CLASS_DATA) ?: run {
-        println("RNDIS: control interface ${descriptor.interfaceNumber} has no CDC data interface")
+        println("USB: RNDIS: control interface ${descriptor.interfaceNumber} has no CDC data interface")
         return null
     }
     val notification = intfc.findEndpoint(EP_TYPE_INT, true) ?: run {
-        println("RNDIS: no response notification endpoint")
+        println("USB: RNDIS: no response notification endpoint")
         return null
     }
     val bulkIn = dataInterface.findEndpoint(EP_TYPE_BULK, true) ?: run {
-        println("RNDIS: no bulk IN endpoint")
+        println("USB: RNDIS: no bulk IN endpoint")
         return null
     }
     val bulkOut = dataInterface.findEndpoint(EP_TYPE_BULK, false) ?: run {
-        println("RNDIS: no bulk OUT endpoint")
+        println("USB: RNDIS: no bulk OUT endpoint")
         return null
     }
 

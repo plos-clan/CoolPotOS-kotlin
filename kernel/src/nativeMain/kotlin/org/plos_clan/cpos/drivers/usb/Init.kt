@@ -7,7 +7,7 @@ import org.plos_clan.cpos.drivers.usb.xhci.Xhci
 
 object Usb {
     fun initialize() {
-        println("Initializing USB subsystem...")
+        println("USB: Initializing USB subsystem...")
         ClassDrivers.initialize()
 
         for (device in Pcie.enumeratedDevices) {
@@ -17,11 +17,11 @@ object Usb {
 
             when (device.progIf) {
                 0x30u.toUByte() -> {
-                    println("Found xHCI controller")
+                    println("USB: Found xHCI controller")
                     Xhci.initialize(device)
                 }
                 else -> {
-                    println("Unknown USB interface: ${device.progIf.toString(16)}")
+                    println("USB: Unknown USB interface: ${device.progIf.toString(16)}")
                 }
             }
         }

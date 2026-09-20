@@ -29,7 +29,7 @@ object Xhci {
         try {
             initController(baseAddress, device)
         } catch (_: DmaMemory.AllocationFailure) {
-            println("Failed to allocate xHCI DMA memory")
+            println("xHCI: Failed to allocate xHCI DMA memory")
         }
     }
 
@@ -43,12 +43,12 @@ object Xhci {
         printInfo(xhci)
 
         if (!xhci.takeOwnership()) {
-            println("xHCI BIOS handoff failed")
+            println("xHCI: BIOS handoff failed")
             return
         }
 
         if (!xhci.resetController()) {
-            println("xHCI initialization failed")
+            println("xHCI: initialization failed")
             return
         }
 
@@ -62,18 +62,18 @@ object Xhci {
         val interrupt =
             device.interrupt
                 ?: run {
-                    println("xHCI controller has no interrupt")
+                    println("xHCI: controller has no interrupt")
                     return
                 }
 
         interrupt.register(xhci::handleIrq, device.bars, 0u)
             ?: run {
-                println("Failed to register xHCI interrupt")
+                println("xHCI: Failed to register xHCI interrupt")
                 return
             }
 
         xhci.operational.start()
-        println("xHCI Initialized successfully")
+        println("xHCI: Initialized successfully")
 
         controllers.add(xhci)
         KernelCoroutines.launch("xhci-events") {
@@ -91,11 +91,11 @@ object Xhci {
 
         val major = (version.toUInt() shr 8).toString(16)
         val minor = (version.toUInt() and 0xffu).toString(16)
-        println("xHCI Version: $major.$minor")
-        println("Max Slots: $maxSlots, Max Ports: $maxPorts")
+        println("xHCI: Version: $major.$minor")
+        println("xHCI: Max Slots: $maxSlots, Max Ports: $maxPorts")
 
         if (xhci.capability.supports64BitAddressing) {
-            println("Controller supports 64-bit address")
+            println("xHCI: Controller supports 64-bit address")
         }
     }
 }

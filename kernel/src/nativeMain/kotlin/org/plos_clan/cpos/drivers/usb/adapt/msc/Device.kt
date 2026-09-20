@@ -52,7 +52,7 @@ class MassStorage private constructor(private val transport: StorageTransport) :
                         val device = BlockDevices.register(disk) ?: continue
                         driver.disks.add(device)
                         println(
-                            "USB storage: ${device.name}, ${disk.model}, ${disk.geometry.byteSize} bytes"
+                            "USB: storage: ${device.name}, ${disk.model}, ${disk.geometry.byteSize} bytes"
                         )
                     }
                     if (transport.connected && driver.disks.isNotEmpty()) {

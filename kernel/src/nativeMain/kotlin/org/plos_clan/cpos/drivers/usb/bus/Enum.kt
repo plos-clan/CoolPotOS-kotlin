@@ -108,7 +108,7 @@ suspend fun UsbDevice.enumerate(): Unit? {
             SetupPacket(REQ_DIR_OUT, REQ_SET_CONFIGURATION, value = configuration.value.toUShort())
         if (!transfer(UsbTransfer(0u, setup = setup), 5_000).successful) return null
         matchDrivers()
-        println("Device enumeration complete (slot $slotId)")
+        println("USB: Device enumeration complete (slot $slotId)")
         return Unit
     } finally {
         header.free()

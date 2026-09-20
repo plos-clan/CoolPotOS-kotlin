@@ -2,7 +2,7 @@ package org.plos_clan.cpos.drivers.usb.bus
 
 internal suspend fun UsbDevice.matchDrivers() {
     if (usbDrivers.isEmpty()) {
-        println("No USB drivers registered")
+        println("USB: No USB drivers registered")
         return
     }
 
@@ -15,7 +15,7 @@ internal suspend fun UsbDevice.matchDrivers() {
             val driver = probeFn(iface)
             if (driver != null) {
                 iface.driver = driver
-                println("Interface bound to driver successfully")
+                println("USB: Interface bound to driver successfully")
                 break
             }
         }

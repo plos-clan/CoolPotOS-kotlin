@@ -51,7 +51,7 @@ class HidDevice(
                 bufferPhysicalAddress = buffer.physicalAddress,
                 length = maxReportSize.toUInt(),
             ),
-        ) ?: println("HID: Submit transfer failed")
+        ) ?: println("USB: HID: Submit transfer failed")
     }
 
     private suspend fun setProtocol(protocol: UShort) {
@@ -64,7 +64,7 @@ class HidDevice(
                     index = iface.desc.interfaceNumber.toUShort(),
                 ),
             ),
-        ) ?: println("HID: Set protocol failed (ignored)")
+        ) ?: println("USB: HID: Set protocol failed (ignored)")
     }
 
     private suspend fun setIdle(duration: UShort) {
@@ -77,7 +77,7 @@ class HidDevice(
                     index = iface.desc.interfaceNumber.toUShort(),
                 ),
             ),
-        ) ?: println("HID: Set idle failed (ignored)")
+        ) ?: println("USB: HID: Set idle failed (ignored)")
     }
 
     private suspend fun fetchReportDescriptor(): Unit? {
@@ -95,7 +95,7 @@ class HidDevice(
                 bufferPhysicalAddress = buffer.physicalAddress,
             ),
         ) ?: run {
-            println("HID: Failed to fetch report descriptor")
+            println("USB: HID: Failed to fetch report descriptor")
             return null
         }
         return Unit
@@ -105,7 +105,7 @@ class HidDevice(
         suspend fun create(iface: UsbInterface, endpointAddress: UByte): HidDevice? {
             val descLength = iface.extraData.hidReportDescriptorLength
             if (descLength == 0u.toUShort()) {
-                println("HID: report descriptor length is 0")
+                println("USB: HID: report descriptor length is 0")
                 return null
             }
 

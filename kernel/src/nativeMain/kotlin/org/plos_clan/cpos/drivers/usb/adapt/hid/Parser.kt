@@ -153,7 +153,7 @@ class HidParser(
             val itemTag = (header.toUInt() shr 4) and 0x0fu
 
             if (offset.toUInt() + dataLength.toUInt() > length.toUInt()) {
-                println("HID: Truncated at offset $offset")
+                println("USB: HID: Truncated at offset $offset")
                 break
             }
 
@@ -191,7 +191,7 @@ class HidParser(
                 if (globalStack.isNotEmpty()) {
                     global = globalStack.removeLast()
                 } else {
-                    println("HID: Global stack pop underflow")
+                    println("USB: HID: Global stack pop underflow")
                 }
             }
             else -> offset = (offset + length).toUShort()

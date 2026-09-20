@@ -50,15 +50,15 @@ fun Xhci.takeOwnership(): Boolean {
     val legacy = capability.legacySupport() ?: return true
 
     if (legacy.isBiosOwned) {
-        println("Requesting xHCI ownership from BIOS")
+        println("xHCI: Requesting xHCI ownership from BIOS")
         legacy.requestOsOwnership()
 
         if (!waitBiosRelease(legacy)) {
-            println("xHCI BIOS handoff timed out")
+            println("xHCI: BIOS handoff timed out")
             return false
         }
 
-        println("xHCI BIOS ownership released")
+        println("xHCI: BIOS ownership released")
     }
 
     legacy.sanitizeSmi()
@@ -67,11 +67,11 @@ fun Xhci.takeOwnership(): Boolean {
 
 fun Xhci.resetController(): Boolean {
     if (operational.isRunning) {
-        println("Controller is running, stopping")
+        println("xHCI: Controller is running, stopping")
         operational.stop()
 
         if (!waitHalted()) {
-            println("Failed to stop controller")
+            println("xHCI: Failed to stop controller")
             return false
         }
     }
@@ -79,15 +79,15 @@ fun Xhci.resetController(): Boolean {
     operational.reset()
 
     if (!waitResetComplete()) {
-        println("Reset timeout")
+        println("xHCI: Reset timeout")
         return false
     }
 
     if (!waitReady()) {
-        println("Controller stuck in not ready state")
+        println("xHCI: Controller stuck in not ready state")
         return false
     }
 
-    println("xHCI controller reset complete")
+    println("xHCI: controller reset complete")
     return true
 }

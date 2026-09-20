@@ -29,7 +29,7 @@ internal suspend fun waitPortReset(port: Port): Boolean {
         return port.isEnabled
     }
 
-    println("Port ${port.id} reset timeout")
+    println("xHCI: Port ${port.id} reset timeout")
     return false
 }
 
@@ -52,7 +52,6 @@ internal suspend fun Xhci.handlePort(port: Port) {
     if (port.isConnected) {
         attachDevice(port)
     } else {
-        println("Port ${port.id} disconnected")
         val slotId = portToSlot[port.id]
 
         if (slotId != 0u.toUByte()) {
@@ -63,26 +62,26 @@ internal suspend fun Xhci.handlePort(port: Port) {
 }
 
 internal suspend fun Xhci.attachDevice(port: Port) {
-    println("Port ${port.id} connected, resetting...")
+    println("xHCI: Port ${port.id} connected, resetting...")
 
     if (!port.reset() || !waitPortReset(port)) {
-        println("Port ${port.id} reset failed")
+        println("xHCI: Port ${port.id} reset failed")
         return
     }
 
     val slotId =
         enableSlot()
             ?: run {
-                println("Failed to enable slot for port ${port.id}")
+                println("xHCI: Failed to enable slot for port ${port.id}")
                 return
             }
 
-    println("Device assigned to slot $slotId")
+    println("xHCI: Device assigned to slot $slotId")
 
     try {
         setupSlotDevice(port, slotId)
             ?: run {
-                println("Device init failed for slot $slotId")
+                println("xHCI: Device init failed for slot $slotId")
                 cleanupSlot(slotId)
             }
     } catch (_: DmaMemory.AllocationFailure) {
@@ -92,7 +91,7 @@ internal suspend fun Xhci.attachDevice(port: Port) {
 
 internal suspend fun Xhci.setupSlotDevice(port: Port, slotId: UByte): Unit? {
     val speedId = port.speedId
-    println("Port ${port.id} enabled (speed: $speedId)")
+    println("xHCI: Port ${port.id} enabled (speed: $speedId)")
 
     addressDevice(port.id, slotId, speedId) ?: return null
 
@@ -107,7 +106,7 @@ internal suspend fun Xhci.setupSlotDevice(port: Port, slotId: UByte): Unit? {
 
     device.enumerate()
         ?: run {
-            println("Enumeration failed for slot $slotId")
+            println("xHCI: Enumeration failed for slot $slotId")
             return null
         }
 
