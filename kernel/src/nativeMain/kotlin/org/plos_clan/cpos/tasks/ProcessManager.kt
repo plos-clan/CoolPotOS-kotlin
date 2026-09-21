@@ -225,6 +225,7 @@ internal class ChildWaitQueue {
     }
 
     fun awaitChange(thread: Thread, observedSequence: ULong): Boolean {
+        val wakeSequence = Scheduler.preparePark()
         val registered = lock.withLock {
             if (sequence != observedSequence) false
             else {
@@ -237,7 +238,7 @@ internal class ChildWaitQueue {
             lock.withLock { waiters.remove(thread) }
             return false
         }
-        val parked = Scheduler.parkCurrent()
+        val parked = Scheduler.parkCurrent(wakeSequence)
         lock.withLock { waiters.remove(thread) }
         return parked
     }
@@ -365,8 +366,10 @@ private class VforkCompletion(parent: Thread) {
     private val waiter = AtomicReference<Thread?>(parent)
 
     fun await() {
-        while (waiter.load() != null) {
-            check(Scheduler.parkCurrent()) { "Cannot suspend a vfork parent" }
+        while (true) {
+            val sequence = Scheduler.preparePark()
+            if (waiter.load() == null) return
+            check(Scheduler.parkCurrent(sequence)) { "Cannot suspend a vfork parent" }
         }
     }
 

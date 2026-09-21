@@ -429,7 +429,7 @@ static enum fast_schedule_result fast_handoff_schedule(
     fast_cpu_t *cpu,
     xstate_t *interrupted_xstate,
     enum fast_schedule_request request,
-    uint64_t deadline
+    uint64_t deadline, uint64_t sequence
 ) {
     const uint64_t flags = irq_save();
     if (!__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) ||
@@ -492,8 +492,8 @@ static enum fast_schedule_result fast_handoff_schedule(
         irq_restore(flags);
         return schedule_rejected;
     }
-    if (parking && (previous->wake_pending || (deadline && deadline <= now))) {
-        previous->wake_pending = false;
+    const bool awakened = previous->wake_sequence != sequence;
+    if (parking && (awakened || (deadline && deadline <= now))) {
         select_next = false;
     } else if (parking) {
         task_state_store(previous, task_blocked);
@@ -574,7 +574,7 @@ static enum fast_schedule_result fast_handoff_schedule(
 
 static enum fast_schedule_result fast_handoff_schedule_current(
     enum fast_schedule_request request,
-    uint64_t deadline
+    uint64_t deadline, uint64_t sequence
 ) {
     xstate_t xstate;
     const uint64_t flags = irq_save();
@@ -584,7 +584,7 @@ static enum fast_schedule_result fast_handoff_schedule_current(
         return schedule_rejected;
     }
     const enum fast_schedule_result result =
-        fast_handoff_schedule(cpu, &xstate, request, deadline);
+        fast_handoff_schedule(cpu, &xstate, request, deadline, sequence);
     if (result == schedule_switched) restore_xstate(&xstate);
     irq_restore(flags);
     return result;
@@ -620,21 +620,23 @@ bool fast_handoff_configure_timer(uint8_t vector) {
     set_timer_deadline(cpu, 0);
     return true;
 }
-
 bool fast_handoff_yield(void) {
-    return fast_handoff_schedule_current(schedule_reschedule, 0) == schedule_switched;
+    return fast_handoff_schedule_current(schedule_reschedule, 0, 0) == schedule_switched;
+}
+uint64_t fast_handoff_prepare_park(void) {
+    fast_task_t *task = task_from_handle(fast_handoff_current_task_handle());
+    return task ? __atomic_load_n(&task->wake_sequence, __ATOMIC_ACQUIRE) : 0;
 }
 
-bool fast_handoff_park_current(uint64_t deadline_ns) {
+bool fast_handoff_park_current(uint64_t deadline_ns, uint64_t sequence) {
     const uint64_t deadline = runtime_clock_deadline(deadline_ns);
     if (deadline_ns && !deadline) return false;
-    return fast_handoff_schedule_current(schedule_park, deadline) != schedule_rejected;
+    return fast_handoff_schedule_current(schedule_park, deadline, sequence) != schedule_rejected;
 }
 
 bool fast_handoff_unpark(uint64_t handle) {
     fast_task_t *task = task_from_handle(handle);
     if (!task) return false;
-
     const uint64_t flags = irq_save();
     fast_cpu_t *cpu = lock_task(task);
     if (!cpu) {
@@ -643,12 +645,11 @@ bool fast_handoff_unpark(uint64_t handle) {
     }
     const enum fast_task_state state = task_state_load(task);
     const bool success = state != task_zombie;
+    if (success) __atomic_add_fetch(&task->wake_sequence, 1, __ATOMIC_RELEASE);
     if (state == task_blocked) {
         sleep_remove_locked(task);
         task_state_store(task, task_ready);
         queue_push(cpu, task);
-    } else if (success) {
-        task->wake_pending = true;
     }
     unlock_cpu(cpu);
     if (state == task_blocked) wake_cpu(cpu);
@@ -683,7 +684,7 @@ void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence, bool
     cpu->worker_pending = !may_sleep || wake_sequence != observed;
     cpu->worker_deadline = runtime_clock_deadline(deadline_ns);
     unlock_cpu(cpu);
-    fast_handoff_schedule_current(schedule_reschedule, 0);
+    fast_handoff_schedule_current(schedule_reschedule, 0, 0);
     lock_cpu(cpu);
     const uint64_t latest = __atomic_load_n(&cpu->wake_sequence, __ATOMIC_ACQUIRE);
     const bool idle = !cpu->head && !cpu->worker_pending;
@@ -777,7 +778,6 @@ _Noreturn void fast_handoff_exit_current(void) {
     task_state_store(task, task_zombie);
     queue_remove(cpu, task);
     sleep_remove_locked(task);
-    task->wake_pending = false;
     unlock_cpu(cpu);
     if (task->id == UINT32_MAX) publish_runtime(&exited_runtime, task);
     fast_handoff_yield();
@@ -895,7 +895,6 @@ uint8_t fast_handoff_task_state(uint64_t handle) {
 void fast_handoff_set_task_state(uint64_t handle, uint8_t state) {
     fast_task_t *task = task_from_handle(handle);
     if (!task || state > task_zombie) return;
-
     const uint64_t flags = irq_save();
     fast_cpu_t *cpu = lock_task(task);
     if (!cpu) {
@@ -907,7 +906,6 @@ void fast_handoff_set_task_state(uint64_t handle, uint8_t state) {
     if (previous == task_blocked && state != task_blocked)
         sleep_remove_locked(task);
     task_state_store(task, (enum fast_task_state)state);
-    if (state == task_zombie) task->wake_pending = false;
     if (state == task_zombie || state == task_blocked) queue_remove(cpu, task);
     unlock_cpu(cpu);
     irq_restore(flags);
@@ -966,7 +964,7 @@ __attribute__((used)) bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
     if (enabled && cpu->state != cpu_offline) {
         xstate_t *interrupted = deliver ? NULL : xstate;
         const enum fast_schedule_result result =
-            fast_handoff_schedule(cpu, interrupted, schedule_tick, 0);
+            fast_handoff_schedule(cpu, interrupted, schedule_tick, 0, 0);
         restore = result == schedule_switched;
     } else update_scheduler_timer(cpu);
     restore |= deliver;

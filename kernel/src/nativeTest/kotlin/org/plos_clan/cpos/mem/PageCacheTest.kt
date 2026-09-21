@@ -8,12 +8,14 @@ import kotlin.test.assertTrue
 class PageCacheTest {
     private class Source(override val identity: Any = Any()) : PageCacheSource {
         var reads = 0
+        val lengths = mutableListOf<Int>()
         var value: Byte = 1
         var duringRead: (() -> Unit)? = null
         override val readAheadSize = 3 * PAGE_SIZE_BYTES.toInt()
 
         override fun read(offset: ULong, destination: ByteArray): Int {
             reads++
+            lengths.add(destination.size)
             destination.fill(value)
             duringRead?.invoke()
             return destination.size
@@ -30,11 +32,60 @@ class PageCacheTest {
     }
 
     @Test
+    fun reusedScratchStartsZeroedForSparseSources() {
+        val source = object : PageCacheSource {
+            override fun read(offset: ULong, destination: ByteArray): Int {
+                assertTrue(destination.all { it == 0.toByte() })
+                destination[0] = 7
+                return destination.size
+            }
+        }
+        val scratch = ByteArray(PAGE_SIZE_BYTES.toInt()) { 42 }
+        try {
+            val result = PageCache.acquire(source, 0uL, scratch)
+            assertTrue(result.isSuccess)
+            PageCache.release(result.frame)
+            assertEquals(7.toByte(), scratch[0])
+        } finally {
+            PageCache.invalidate(source.identity)
+        }
+    }
+
+    @Test
+    fun readAheadGrowsForSequentialMissesAndResetsForRandomAccess() {
+        val source = Source()
+        val page = PAGE_SIZE_BYTES.toInt()
+        try {
+            for (index in listOf(0, 1, 2, 3, 4, 5, 20, 40)) {
+                assertEquals(1.toByte(), source.byte(index.toULong() * PAGE_SIZE_BYTES))
+            }
+            assertEquals(listOf(page, 2 * page, 3 * page, page, page), source.lengths)
+        } finally {
+            PageCache.invalidate(source.identity)
+        }
+    }
+
+    @Test
+    fun readAheadStopsAtCachedPages() {
+        val source = Source()
+        val page = PAGE_SIZE_BYTES.toInt()
+        try {
+            assertEquals(1.toByte(), source.byte(2uL * PAGE_SIZE_BYTES))
+            assertEquals(1.toByte(), source.byte(0uL))
+            assertEquals(1.toByte(), source.byte(PAGE_SIZE_BYTES))
+            assertEquals(listOf(page, page, page), source.lengths)
+        } finally {
+            PageCache.invalidate(source.identity)
+        }
+    }
+
+    @Test
     fun invalidationPreservesOtherSourcesAndNonOverlappingPages() {
         val source = Source()
         val other = Source()
         try {
             assertEquals(1.toByte(), source.byte(0uL))
+            assertEquals(1.toByte(), source.byte(PAGE_SIZE_BYTES))
             assertEquals(1.toByte(), source.byte(4uL * PAGE_SIZE_BYTES))
             assertEquals(1.toByte(), other.byte(0uL))
             source.value = 2
@@ -43,7 +94,7 @@ class PageCacheTest {
             assertEquals(1.toByte(), source.byte(2uL * PAGE_SIZE_BYTES))
             assertEquals(2.toByte(), source.byte(PAGE_SIZE_BYTES))
             assertEquals(1.toByte(), other.byte(0uL))
-            assertEquals(3, source.reads)
+            assertEquals(4, source.reads)
             assertEquals(1, other.reads)
         } finally {
             PageCache.invalidate(source.identity)
@@ -55,13 +106,14 @@ class PageCacheTest {
     fun invalidationRejectsInFlightReadAheadAndAllowsReload() {
         val source = Source()
         try {
-            source.duringRead = { PageCache.invalidate(source.identity) }
             assertEquals(1.toByte(), source.byte(0uL))
+            source.duringRead = { PageCache.invalidate(source.identity) }
+            assertEquals(1.toByte(), source.byte(PAGE_SIZE_BYTES))
             source.duringRead = null
             source.value = 2
-            assertEquals(2.toByte(), source.byte(PAGE_SIZE_BYTES))
+            assertEquals(2.toByte(), source.byte(2uL * PAGE_SIZE_BYTES))
             assertEquals(2.toByte(), source.byte(0uL))
-            assertEquals(3, source.reads)
+            assertEquals(4, source.reads)
         } finally {
             PageCache.invalidate(source.identity)
         }

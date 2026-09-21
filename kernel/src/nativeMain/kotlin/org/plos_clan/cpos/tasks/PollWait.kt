@@ -25,7 +25,8 @@ internal class PollWait(
     fun prepare() = pending.store(false)
 
     fun await(deadline: ULong?) {
+        val sequence = Scheduler.preparePark()
         if (pending.load() || thread.hasPendingSignal()) return
-        if (deadline == null) Scheduler.parkCurrent() else Scheduler.parkCurrentUntil(deadline)
+        if (deadline == null) Scheduler.parkCurrent(sequence) else Scheduler.parkCurrentUntil(deadline, sequence)
     }
 }

@@ -178,6 +178,7 @@ object Futex {
         if (validationError != 0) return error(validationError)
 
         while (true) {
+            val sequence = Scheduler.preparePark()
             val expired = expiresAt != null && TscClock.nanoTime() >= expiresAt
             val interrupted = thread.hasPendingSignal()
             var result: Long? = null
@@ -196,8 +197,8 @@ object Futex {
             }
             result?.let { return it }
 
-            val parked = if (expiresAt == null) Scheduler.parkCurrent()
-            else Scheduler.parkCurrentUntil(expiresAt)
+            val parked = if (expiresAt == null) Scheduler.parkCurrent(sequence)
+            else Scheduler.parkCurrentUntil(expiresAt, sequence)
             if (parked) continue
 
             val woken = lock.withLock {

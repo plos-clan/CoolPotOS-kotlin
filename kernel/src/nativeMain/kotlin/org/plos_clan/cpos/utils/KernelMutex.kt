@@ -62,9 +62,10 @@ class KernelMutex {
         }
 
         while (true) {
+            val sequence = Scheduler.preparePark()
             val acquired = stateLock.withLock { waiter.acquired }
             if (acquired) return
-            if (!Scheduler.parkCurrent()) Scheduler.yieldCurrent()
+            if (!Scheduler.parkCurrent(sequence)) Scheduler.yieldCurrent()
         }
     }
 

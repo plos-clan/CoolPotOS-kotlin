@@ -46,6 +46,8 @@ private class CachedPage(
 private class CachedSource {
     val pages = mutableMapOf<PageCacheKey, CachedPage>()
     val loads = mutableSetOf<PageLoad>()
+    var readAheadEnd = 0uL
+    var readAheadPages = 0
 
     fun invalidate(identity: Any, offset: ULong, end: ULong?): List<CachedPage> {
         for (load in loads) {
@@ -143,19 +145,15 @@ internal object PageCache : FrameReclaimer {
                 is PageLookup.Cached -> lookup.page
                 is PageLookup.Missing -> {
                     val buffer = scratch ?: try {
-                        ByteArray(maxOf(PAGE_SIZE_BYTES.toInt(), source.readAheadSize)).also {
+                        ByteArray(PAGE_SIZE_BYTES.toInt()).also {
                             scratch = it
                         }
                     } catch (_: OutOfMemoryError) {
-                        try {
-                            ByteArray(PAGE_SIZE_BYTES.toInt()).also { scratch = it }
-                        } catch (_: OutOfMemoryError) {
-                            cancel(lookup.load)
-                            return if (copied == 0) {
-                                PageCacheReadResult.failed(PageCacheFailure.OUT_OF_MEMORY)
-                            } else {
-                                PageCacheReadResult.completed(copied)
-                            }
+                        cancel(lookup.load)
+                        return if (copied == 0) {
+                            PageCacheReadResult.failed(PageCacheFailure.OUT_OF_MEMORY)
+                        } else {
+                            PageCacheReadResult.completed(copied)
                         }
                     }
                     val loaded = load(source, lookup.load, buffer)
@@ -265,17 +263,19 @@ internal object PageCache : FrameReclaimer {
             return PageCacheAcquireResult.failed(PageCacheFailure.IO_ERROR)
         }
 
-        val requestedSize = maxOf(PAGE_SIZE_BYTES.toInt(), source.readAheadSize)
-        val buffer = if (scratch.size >= requestedSize) {
+        var readAhead = reserveReadAhead(load, source.readAheadSize)
+        val requestedSize = (readAhead.size + 1) * PAGE_SIZE_BYTES.toInt()
+        val buffer = if (scratch.size == requestedSize) {
             scratch
         } else {
             try {
                 ByteArray(requestedSize)
             } catch (_: OutOfMemoryError) {
+                readAhead.forEach(::cancel)
+                readAhead = emptyList()
                 scratch
             }
         }
-        val readAhead = reserveReadAhead(load.key, buffer.size)
         buffer.fill(0)
         val count = try {
             source.read(load.key.offset, buffer)
@@ -319,19 +319,28 @@ internal object PageCache : FrameReclaimer {
         return PageCacheAcquireResult.acquired(page.frame, page.validBytes)
     }
 
-    private fun reserveReadAhead(key: PageCacheKey, size: Int): List<PageLoad> = lock.withLock {
-        val source = sources.getValue(key.identity)
-        val availablePages = (ULong.MAX_VALUE - key.offset) / PAGE_SIZE_BYTES
-        val requestedPages = (size / PAGE_SIZE_BYTES.toInt() - 1).toULong()
-        val pageCount = minOf(requestedPages, availablePages).toInt()
-        val pending = ArrayList<PageLoad>(pageCount)
+    private fun reserveReadAhead(load: PageLoad, maximumBytes: Int): List<PageLoad> = lock.withLock {
+        val key = load.key
+        val source = load.source
+        val maximumPages = maxOf(1, maximumBytes / PAGE_SIZE_BYTES.toInt())
+        val sequential = source.readAheadEnd != 0uL && key.offset == source.readAheadEnd
+        val requestedPages = if (sequential) {
+            minOf(source.readAheadPages.toLong() * 2, maximumPages.toLong()).toInt()
+        } else 1
+        val pending = ArrayList<PageLoad>(requestedPages - 1)
         var offset = key.offset
-        repeat(pageCount) {
-            offset += PAGE_SIZE_BYTES
-            val load = PageLoad(key.copy(offset = offset), source)
-            source.loads.add(load)
-            pending.add(load)
+        for (index in 1 until requestedPages) {
+            if (offset > ULong.MAX_VALUE - PAGE_SIZE_BYTES) break
+            val nextKey = key.copy(offset = offset + PAGE_SIZE_BYTES)
+            if (source.pages.containsKey(nextKey)) break
+            if (source.loads.any { it.key == nextKey }) break
+            offset = nextKey.offset
+            val next = PageLoad(nextKey, source)
+            source.loads.add(next)
+            pending.add(next)
         }
+        source.readAheadPages = pending.size + 1
+        source.readAheadEnd = offset + PAGE_SIZE_BYTES
         pending
     }
 

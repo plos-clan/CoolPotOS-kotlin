@@ -347,8 +347,10 @@ internal class EvdevDevice(
                 }
             }
             if (!queued) return true
-            while (!lock.withLock { waiter.ready }) {
-                if (thread.hasPendingSignal() || !Scheduler.parkCurrent()) {
+            while (true) {
+                val sequence = Scheduler.preparePark()
+                if (lock.withLock { waiter.ready }) break
+                if (thread.hasPendingSignal() || !Scheduler.parkCurrent(sequence)) {
                     lock.withLock { waiters.remove(waiter) }
                     return false
                 }

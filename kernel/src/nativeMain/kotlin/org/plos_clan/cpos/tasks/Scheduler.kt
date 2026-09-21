@@ -108,14 +108,16 @@ object Scheduler {
         return accepted
     }
 
-    fun parkCurrent(): Boolean {
+    fun preparePark(): ULong = bridge.fast_handoff_prepare_park()
+
+    fun parkCurrent(sequence: ULong): Boolean {
         if (Cgroups.awaitThaw(ProcessManager.currentThread())) return true
-        return bridge.fast_handoff_park_current(0uL)
+        return bridge.fast_handoff_park_current(0uL, sequence)
     }
 
-    fun parkCurrentUntil(deadlineNanos: ULong): Boolean {
+    fun parkCurrentUntil(deadlineNanos: ULong, sequence: ULong): Boolean {
         if (Cgroups.awaitThaw(ProcessManager.currentThread())) return true
-        return deadlineNanos != 0uL && bridge.fast_handoff_park_current(deadlineNanos)
+        return deadlineNanos != 0uL && bridge.fast_handoff_park_current(deadlineNanos, sequence)
     }
 
     fun yieldCurrent(): Boolean = bridge.fast_handoff_yield()

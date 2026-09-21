@@ -447,32 +447,13 @@ private fun copyStatFs(
     return if (destination.copyToUser(status)) 0L else errno(Errno.EFAULT)
 }
 
-internal fun access(regs: PtraceRegisters, process: Process): Long {
-    val mode = regs[PtraceRegisters.IDX_RSI]
-    if (mode > 0x7uL) {
-        return errno(Errno.EINVAL)
-    }
-    val pathname = copyPath(process, regs[PtraceRegisters.IDX_RDI])
-        ?: return errno(Errno.EFAULT)
-    val context = process.context ?: return errno(Errno.ENOENT)
-    val caller = process.accessContext(effective = false)
-    val path = when (
-        val result = FileSystemManager.vfs.resolve(
-            caller,
-            context = context,
-            pathname = VfsPathname.fromBytes(pathname),
-        )
-    ) {
-        is VfsResult.Ok -> result.value
-        is VfsResult.Err -> return errno(result.error.errno)
-    }
-    val inode = path.inode ?: return errno(Errno.ENOENT)
-    val requested = AccessPermissions.fromBits(mode.toUInt()) ?: return errno(Errno.EINVAL)
-    return when (val result = FileSystemManager.vfs.access(caller, inode, requested)) {
-        is VfsResult.Ok -> 0L
-        is VfsResult.Err -> errno(result.error.errno)
-    }
-}
+internal fun access(regs: PtraceRegisters, process: Process): Long = accessAt(
+    process = process,
+    dirFd = AT_FDCWD,
+    pathnameAddress = regs[PtraceRegisters.IDX_RDI],
+    mode = regs[PtraceRegisters.IDX_RSI],
+    flags = 0uL,
+)
 
 internal fun faccessAt(regs: PtraceRegisters, process: Process): Long = accessAt(
     process = process,
@@ -513,9 +494,8 @@ private fun accessAt(
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
-    val inode = target.inode ?: return errno(Errno.ENOENT)
     val requested = AccessPermissions.fromBits(mode.toUInt()) ?: return errno(Errno.EINVAL)
-    return when (val result = FileSystemManager.vfs.access(caller, inode, requested)) {
+    return when (val result = FileSystemManager.vfs.access(caller, target, requested)) {
         is VfsResult.Ok -> 0L
         is VfsResult.Err -> errno(result.error.errno)
     }

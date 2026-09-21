@@ -184,6 +184,7 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
         } ?: return VfsResult.Err(lock.withLock { disconnectionError })
 
         while (true) {
+            val sequence = Scheduler.preparePark()
             val result = lock.withLock {
                 queued.result?.let { return@withLock it }
                 if (thread.hasPendingSignal() && !queued.interrupted) {
@@ -199,7 +200,7 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
                 null
             }
             if (result != null) return result
-            if (!Scheduler.parkCurrent()) Scheduler.yieldCurrent()
+            if (!Scheduler.parkCurrent(sequence)) Scheduler.yieldCurrent()
         }
     }
 
@@ -316,12 +317,10 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
             return -Errno.EFAULT.toLong()
         }
 
-        var wake: Thread? = null
         lock.withLock {
             message.pending?.also {
                 it.state = PendingState.SENT
                 if (it.interrupted) queueInterruptLocked(it)
-                wake = it.thread
             }
             if (message.disconnectAfterRead) {
                 disconnectLocked(VfsError.NOT_CONNECTED)
@@ -329,7 +328,6 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
                 readWaiters.wakeOne()
             }
         }
-        wake?.let(Scheduler::wake)
         return bytes.size.toLong()
     }
 

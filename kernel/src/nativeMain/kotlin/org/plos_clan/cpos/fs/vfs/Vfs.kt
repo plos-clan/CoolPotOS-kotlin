@@ -409,9 +409,25 @@ class Vfs(maxSymlinkDepth: Int = 40) {
 
     fun access(
         caller: VfsOperationContext,
-        inode: Inode,
+        path: VfsPath,
         requested: AccessPermissions,
-    ): VfsResult<Unit> = inode.backend.access(caller, inode, requested)
+    ): VfsResult<Unit> {
+        val inode = path.inode ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val result = inode.backend.access(caller, inode, requested)
+        if (result is VfsResult.Err) return result
+        val flags = path.mount.flags
+        val stored = inode.type == InodeType.REGULAR || inode.type == InodeType.DIRECTORY ||
+            inode.type == InodeType.SYMLINK
+        if (stored && AccessPermission.WRITE in requested && MountFlag.READ_ONLY in flags) {
+            return VfsResult.Err(VfsError.READ_ONLY)
+        }
+        if (AccessPermission.EXECUTE in requested && inode.type == InodeType.REGULAR &&
+            MountFlag.NO_EXEC in flags
+        ) {
+            return VfsResult.Err(VfsError.PERMISSION_DENIED)
+        }
+        return result
+    }
 
     fun allocate(
         caller: VfsOperationContext,

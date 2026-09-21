@@ -261,6 +261,7 @@ private object ClockSleep {
         if (!TscClock.isReady) return errno(Errno.EIO)
         val relativeDeadline = requested.deadlineFrom(TscClock.nanoTime())
         while (true) {
+            val sequence = Scheduler.preparePark()
             val now = TscClock.nanoTime()
             val remaining = if (absolute) {
                 val current = clock.read().durationNanos
@@ -276,7 +277,7 @@ private object ClockSleep {
                 return errno(Errno.EINTR)
             }
             val deadline = TimeSpec.fromDurationNanos(remaining).deadlineFrom(now)
-            if (!Scheduler.parkCurrentUntil(deadline)) return errno(Errno.ESRCH)
+            if (!Scheduler.parkCurrentUntil(deadline, sequence)) return errno(Errno.ESRCH)
         }
     }
 }

@@ -50,6 +50,7 @@ internal class IoWaitQueue {
         val thread = checkNotNull(waiter.thread)
         var interrupted = false
         while (true) {
+            val sequence = Scheduler.preparePark()
             val ready = lock.withLock { waiter.ready }
             if (ready) break
             if (deadlineNanos != null && TscClock.nanoTime() >= deadlineNanos) break
@@ -58,9 +59,9 @@ internal class IoWaitQueue {
                 break
             }
             val parked = if (deadlineNanos == null) {
-                Scheduler.parkCurrent()
+                Scheduler.parkCurrent(sequence)
             } else {
-                Scheduler.parkCurrentUntil(deadlineNanos)
+                Scheduler.parkCurrentUntil(deadlineNanos, sequence)
             }
             if (!parked) {
                 interrupted = true

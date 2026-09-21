@@ -133,7 +133,7 @@ struct fast_task {
     cpu_account_t *account;
     uint8_t state;
     uint8_t queued;
-    uint8_t wake_pending;
+    uint64_t wake_sequence;
     uint8_t user_interrupt_pending;
     struct {
         uint64_t elapsed;

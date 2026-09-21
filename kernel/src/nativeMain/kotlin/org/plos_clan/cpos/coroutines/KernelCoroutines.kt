@@ -62,11 +62,12 @@ object KernelCoroutines {
             Scheduler.wake(thread)
         }
         while (true) {
+            val sequence = Scheduler.preparePark()
             val completed = lock.withLock { result }
             if (completed != null) return completed.getOrThrow()
             if (thread === ProcessManager.getBootstrapThread()) {
                 runUntil { lock.withLock { result != null } }
-            } else if (!Scheduler.parkCurrent()) Scheduler.yieldCurrent()
+            } else if (!Scheduler.parkCurrent(sequence)) Scheduler.yieldCurrent()
         }
     }
 

@@ -67,6 +67,7 @@ internal class SignalFd(initialMask: ULong) :
             val limit = count / SignalFdSigInfoAbi.SIZE * SignalFdSigInfoAbi.SIZE
             var transferred = 0
             while (transferred < limit) {
+                val sequence = Scheduler.preparePark()
                 val info = lock.withLock { thread.takePendingSignal(mask) }
                 if (info == null) {
                     if (transferred != 0) return IoResult.success(transferred)
@@ -74,7 +75,7 @@ internal class SignalFd(initialMask: ULong) :
                     if (thread.hasPendingSignal()) {
                         return IoResult.failure(VfsError.INTERRUPTED)
                     }
-                    if (!Scheduler.parkCurrent()) Scheduler.yieldCurrent()
+                    if (!Scheduler.parkCurrent(sequence)) Scheduler.yieldCurrent()
                     continue
                 }
 

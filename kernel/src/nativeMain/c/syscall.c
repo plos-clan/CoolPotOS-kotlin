@@ -217,7 +217,6 @@ static long futex_wait(
         const long error = futex_deadline(time, &deadline);
         if (error) return error;
     }
-
     struct futex_bucket *bucket = futex_bucket_for(pointer);
     struct futex_waiter waiter = {
         .address = pointer,
@@ -239,6 +238,7 @@ static long futex_wait(
     irq_restore(interrupt_flags);
 
     for (;;) {
+        const uint64_t sequence = fast_handoff_prepare_park();
         interrupt_flags = irq_save();
         spin_lock(&bucket->lock);
         const enum futex_waiter_state state = __atomic_load_n(
@@ -259,7 +259,8 @@ static long futex_wait(
         spin_unlock(&bucket->lock);
         irq_restore(interrupt_flags);
 
-        const bool parked = state == futex_waiting && waiter.task && fast_handoff_park_current(deadline);
+        const bool waiting = state == futex_waiting && waiter.task;
+        const bool parked = waiting && fast_handoff_park_current(deadline, sequence);
         if (!parked && !fast_handoff_yield()) cpu_relax();
     }
 }

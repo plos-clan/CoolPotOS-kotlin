@@ -23,8 +23,10 @@ class KernelReadWriteLock {
             } else Waiter(thread, exclusive).also(waiters::addLast)
         }
         if (waiter != null) {
-            while (!lock.withLock { waiter.acquired }) {
-                if (!Scheduler.parkCurrent()) Scheduler.yieldCurrent()
+            while (true) {
+                val sequence = Scheduler.preparePark()
+                if (lock.withLock { waiter.acquired }) break
+                if (!Scheduler.parkCurrent(sequence)) Scheduler.yieldCurrent()
             }
         }
         return try {

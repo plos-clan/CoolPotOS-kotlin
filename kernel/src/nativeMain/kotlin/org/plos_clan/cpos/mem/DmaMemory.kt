@@ -6,24 +6,26 @@ import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.UByteVar
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 
-class DmaMemory private constructor(private val region: MmioRegion, override val size: Int) :
+class DmaMemory private constructor(override val physicalAddress: ULong, override val size: Int) :
     NativeMemory(), DmaBuffer {
-    override val physicalAddress: ULong
-        get() = region.physicalAddress
-
     override val virtualAddress: ULong
-        get() = region.virtualAddress
+        get() = Hhdm.toVirtual(physicalAddress)
 
     override val pointer: CPointer<UByteVar>
-        get() = region.view()
+        get() = checkNotNull(Hhdm.toVirtualPointer(physicalAddress))
 
-    override fun close() = region.free()
+    override fun close() {
+        val pages = (size.toULong() + PAGE_SIZE_BYTES - 1uL) / PAGE_SIZE_BYTES
+        check(BuddyFrameAllocator.free(physicalAddress, pages))
+    }
 
     companion object {
         fun allocate(size: Int): DmaMemory? {
             require(size > 0)
             val pages = (size.toULong() + PAGE_SIZE_BYTES - 1uL) / PAGE_SIZE_BYTES
-            return MmioRegion.allocate(pages)?.let { DmaMemory(it, size) }
+            val physical = BuddyFrameAllocator.allocate(pages)
+            if (physical == INVALID_FRAME) return null
+            return DmaMemory(physical, size).also { it.fill(0, size) }
         }
     }
 }

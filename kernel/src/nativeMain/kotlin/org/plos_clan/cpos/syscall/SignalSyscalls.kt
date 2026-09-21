@@ -361,6 +361,7 @@ internal object SignalSyscalls {
         thread.signals.beginWait(accepted)
         try {
             while (true) {
+                val sequence = Scheduler.preparePark()
                 val info = thread.takePendingSignal(accepted)
                 if (info != null) {
                     if (infoAddress != 0uL &&
@@ -376,8 +377,8 @@ internal object SignalSyscalls {
                     return errno(Errno.EAGAIN)
                 }
                 if (thread.hasPendingSignal()) return errno(Errno.EINTR)
-                val parked = if (deadline == null) Scheduler.parkCurrent()
-                else Scheduler.parkCurrentUntil(deadline)
+                val parked = if (deadline == null) Scheduler.parkCurrent(sequence)
+                else Scheduler.parkCurrentUntil(deadline, sequence)
                 if (!parked) Scheduler.yieldCurrent()
             }
         } finally {
@@ -558,11 +559,12 @@ internal object SignalSyscalls {
         val previous = thread.signals.replaceMask(requestedMask)
         try {
             while (true) {
+                val sequence = Scheduler.preparePark()
                 regs[PtraceRegisters.IDX_RAX] = errno(Errno.EINTR).toULong()
                 if (SignalDelivery.deliverPending(regs, thread, previous)) {
                     return errno(Errno.EINTR)
                 }
-                Scheduler.parkCurrent()
+                Scheduler.parkCurrent(sequence)
             }
         } finally {
             if (!regs.signalFrameInstalled) thread.signals.mask = previous

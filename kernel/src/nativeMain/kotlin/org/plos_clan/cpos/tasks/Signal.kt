@@ -525,8 +525,10 @@ internal class ProcessSignalState(uid: () -> Int, limit: () -> ULong) {
             previousState != ProcessState.STOPPED
         }
         if (notifyParent) ProcessManager.markStopped(process, signal)
-        while (process.state == ProcessState.STOPPED) {
-            if (!Scheduler.parkCurrent()) Scheduler.yieldCurrent()
+        while (true) {
+            val sequence = Scheduler.preparePark()
+            if (process.state != ProcessState.STOPPED) break
+            if (!Scheduler.parkCurrent(sequence)) Scheduler.yieldCurrent()
         }
     }
 

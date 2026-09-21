@@ -92,6 +92,7 @@ internal object Cgroups {
         if (!task.freezing && !task.frozen) return false
         var waited = false
         while (true) {
+            val sequence = Scheduler.preparePark()
             val frozen = lock.withLock {
                 val freeze = task.freezing && !task.killed &&
                     thread.pendingSignalMask and Signal.KILL.bit == 0uL &&
@@ -101,7 +102,7 @@ internal object Cgroups {
             }
             if (!frozen) return waited
             waited = true
-            if (!bridge.fast_handoff_park_current(0uL)) bridge.fast_handoff_yield()
+            if (!bridge.fast_handoff_park_current(0uL, sequence)) bridge.fast_handoff_yield()
         }
     }
 }
