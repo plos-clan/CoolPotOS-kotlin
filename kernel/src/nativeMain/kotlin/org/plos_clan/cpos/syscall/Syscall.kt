@@ -34,6 +34,7 @@ import org.plos_clan.cpos.syscall.fs.fchmodAt
 import org.plos_clan.cpos.syscall.fs.fchmodAt2
 import org.plos_clan.cpos.syscall.fs.fchown
 import org.plos_clan.cpos.syscall.fs.fchownAt
+import org.plos_clan.cpos.syscall.fs.flock
 import org.plos_clan.cpos.syscall.fs.fcntl
 import org.plos_clan.cpos.syscall.fs.fdatasync
 import org.plos_clan.cpos.syscall.fs.fgetxattr
@@ -181,7 +182,8 @@ private enum class LinuxSyscall(
     WAIT4(61, ::wait4, restartable = true),
     KILL(62, SignalSyscalls::kill),
     UNAME(63, UtsSyscalls::uname),
-    FCNTL(72, ::fcntl),
+    FCNTL(72, ::fcntl, restartable = true),
+    FLOCK(73, ::flock, restartable = true),
     FSYNC(74, ::fsync),
     FDATASYNC(75, ::fdatasync),
     TRUNCATE(76, ::truncate),

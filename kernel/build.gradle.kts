@@ -268,7 +268,7 @@ private class BuildPaths(project: Project) {
     val linkerScript = assets.resolve("linker.ld")
     val bridgeDef = kernelC.resolve("bridge.def")
     val userlandScript = assets.resolve("userland.sh")
-    val initScript = assets.resolve("init")
+    val bootUnits = assets.resolve("systemd")
     val mlibcPatch = assets.resolve("mlibc.patch")
     val mlibcSyscallHeader = mlibc.resolve("sysdeps/template/include/sys/syscall.h")
     val cObjects = root.resolve("c-objects")
@@ -770,7 +770,7 @@ val prepareUserland = tasks.register<Exec>("prepareUserland") {
     inputs.property("image", config.userland.image)
     inputs.property("platform", config.userland.platform)
     inputs.file(config.userland.script).withPathSensitivity(PathSensitivity.NONE)
-    inputs.file(config.paths.initScript).withPathSensitivity(PathSensitivity.NONE)
+    inputs.dir(config.paths.bootUnits).withPathSensitivity(PathSensitivity.RELATIVE)
     outputs.file(config.userland.archive)
 
     commandLine(
@@ -779,7 +779,7 @@ val prepareUserland = tasks.register<Exec>("prepareUserland") {
         "--platform", config.userland.platform,
         "--volume", "${config.userland.archive.parentFile.absolutePath}:/output:rw,Z",
         "--volume", "${config.userland.script.absolutePath}:/usr/local/bin/cpos-userland:ro,Z",
-        "--volume", "${config.paths.initScript.absolutePath}:/usr/local/share/cpos/init:ro,Z",
+        "--volume", "${config.paths.bootUnits.absolutePath}:/usr/local/share/cpos/systemd:ro,Z",
         config.userland.image,
         "/usr/local/bin/cpos-userland",
         config.userland.name,
@@ -1097,8 +1097,12 @@ val bootConfigs = listOf("main", "qemuTest", "qemuBenchmark").associateWith { va
         val commandLine = buildList {
             add("console=$console")
             add("root=PARTUUID=$rootPartition")
-            add("overlay=PARTUUID=${if (variant == "qemuBenchmark") benchmarkPartition else overlayPartition}")
-            if (!test) add("rdinit=/init")
+            if (!test) {
+                val partition = if (variant == "qemuBenchmark") benchmarkPartition else overlayPartition
+                val escaped = partition.replace("-", "\\x2d")
+                val instance = "dev-disk-by\\x2dpartuuid-$escaped"
+                add("rd.systemd.unit=switch-root@$instance.service")
+            }
             if (test) add("verify.storage=PARTUUID=$scratchPartition")
             addAll(arguments)
         }.joinToString(" ")

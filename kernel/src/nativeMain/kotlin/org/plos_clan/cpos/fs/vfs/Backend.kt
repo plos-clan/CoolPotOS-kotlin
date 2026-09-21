@@ -117,6 +117,7 @@ class SuperBlock internal constructor(
 ) {
     private val references = AtomicInt(1)
     private val attributeState = AtomicInt(0)
+    internal val fileLocks = FileLocks()
     private val observerLock = IrqSpinLock()
     private var observedInodes: MutableSet<Inode>? = mutableSetOf()
 

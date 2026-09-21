@@ -876,27 +876,19 @@ object ProcessManager {
         process.signals.pending.discard(ULong.MAX_VALUE)
         if (process.id == process.sessionId) process.controllingTerminal?.hangup()
         process.releaseOwnedResources()
-        val parent = processLock.withLock {
-            check(process.transitionState(ProcessState.EXITING, ProcessState.ZOMBIE))
-            processes.firstOrNull { it.id == process.parentId }
-        }
-        process.completeVfork()
-        val target = parent ?: return
+        val target = processLock.withLock { processes.firstOrNull { it.id == process.parentId } }
         val event = ChildWaitEvent(process, ChildEventKind.EXITED, waitStatus)
         val signal = process.terminationSignal
-        if (signal == null) {
-            target.childEvents.publish(event)
-            return
-        }
-        val childAction = if (signal == Signal.CHILD) {
-            target.signals.action(Signal.CHILD)
-        } else {
-            null
-        }
+        val childAction = if (signal == Signal.CHILD) target?.signals?.action(Signal.CHILD) else null
         val autoReap = childAction?.let { action ->
             action.isIgnored || action.has(SignalActionFlag.NO_CHILD_WAIT)
         } == true
-        if (!autoReap) target.childEvents.publish(event)
+        processLock.withLock {
+            check(process.transitionState(ProcessState.EXITING, ProcessState.ZOMBIE))
+            if (!autoReap) target?.childEvents?.publish(event)
+        }
+        process.completeVfork()
+        if (target == null || signal == null) return
         if (childAction?.isIgnored != true) {
             SignalRouter.sendProcess(
                 sender = null,

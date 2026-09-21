@@ -83,7 +83,6 @@ object Fuse : FileSystemType("fuse", FuseAbi.SUPER_MAGIC) {
         existing: List<FileSystemParameter>,
         parameter: FileSystemParameter,
     ): VfsResult<Unit> {
-        if (existing.any { it.key == parameter.key }) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         val valid = when (parameter.key) {
             "fd" -> parameter is FileSystemFileParameter && parameter.type == FileSystemFileParameter.Type.DESCRIPTOR ||
                 parameter.stringValue()?.toIntOrNull()?.let { it >= 0 } == true
@@ -104,13 +103,10 @@ object Fuse : FileSystemType("fuse", FuseAbi.SUPER_MAGIC) {
     override fun createMountedBackend(
         configuration: FileSystemConfiguration,
     ): VfsResult<SuperBlockBackend> {
-        configuration.parameters.forEachIndexed { index, parameter ->
-            if (validateParameter(configuration.parameters.subList(0, index), parameter)
-                is VfsResult.Err
-            ) {
-                return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-            }
+        val invalid = configuration.parameters.any {
+            validateParameter(emptyList(), it) is VfsResult.Err
         }
+        if (invalid) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         val parsed = when (val result = FuseMountConfiguration.parse(configuration)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
@@ -165,9 +161,10 @@ private data class FuseMountConfiguration(
         fun parse(configuration: FileSystemConfiguration): VfsResult<FuseMountConfiguration> {
             val values = mutableMapOf<String, FileSystemParameter>()
             for (parameter in configuration.parameters) {
-                if (parameter.key.isEmpty() || values.put(parameter.key, parameter) != null) {
+                if (parameter.key.isEmpty()) {
                     return VfsResult.Err(VfsError.INVALID_ARGUMENT)
                 }
+                values[parameter.key] = parameter
             }
 
             val device = when (val parameter = values.remove("fd")) {

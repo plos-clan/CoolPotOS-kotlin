@@ -9,6 +9,7 @@ import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.FileDescriptorTable
 import org.plos_clan.cpos.fs.OpenFlags
+import org.plos_clan.cpos.fs.vfs.FileLockMode
 import org.plos_clan.cpos.fs.vfs.AccessMode
 import org.plos_clan.cpos.fs.vfs.AnonymousFileBackend
 import org.plos_clan.cpos.fs.vfs.SeekOrigin
@@ -128,6 +129,29 @@ internal fun closeRange(regs: PtraceRegisters, process: Process): Long {
     return 0L
 }
 
+internal fun flock(regs: PtraceRegisters, process: Process): Long {
+    val descriptor = fileDescriptor(regs[PtraceRegisters.IDX_RDI]) ?: return errno(Errno.EBADF)
+    val operation = regs[PtraceRegisters.IDX_RSI].toUInt()
+    val command = operation and 4u.inv()
+    if (command != 1u && command != 2u && command != 8u) return errno(Errno.EINVAL)
+    val file = process.fdTable.acquire(descriptor) ?: return errno(Errno.EBADF)
+    return try {
+        if (file.access == AccessMode.PATH) return errno(Errno.EBADF)
+        val locks = file.inode.superBlock.fileLocks
+        val mode = when (command) {
+            1u -> FileLockMode.SHARED
+            2u -> FileLockMode.EXCLUSIVE
+            else -> null
+        }
+        when (val result = locks.acquire(file, mode, operation and 4u != 0u)) {
+            is VfsResult.Ok -> 0L
+            is VfsResult.Err -> errno(result.error.errno)
+        }
+    } finally {
+        file.release()
+    }
+}
+
 internal fun fcntl(regs: PtraceRegisters, process: Process): Long {
     val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EBADF)
@@ -137,6 +161,7 @@ internal fun fcntl(regs: PtraceRegisters, process: Process): Long {
     }
     val argument = regs[PtraceRegisters.IDX_RDX]
     return when (command.toInt()) {
+        36, 37, 38 -> RecordLock.execute(process, fd, command.toInt(), argument)
         F_DUPFD,
         F_DUPFD_CLOEXEC,
         -> {

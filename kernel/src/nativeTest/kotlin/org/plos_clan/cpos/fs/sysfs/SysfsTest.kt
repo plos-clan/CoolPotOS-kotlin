@@ -252,6 +252,40 @@ class SysfsTest {
         registry.unregisterObject(handle).value()
     }
 
+    @Test
+    fun publishesDeviceMetadataAndPartitionAncestry() {
+        val events = mutableListOf<KobjectUevent>()
+        val publisher = KobjectUeventPublisher(events::add)
+        val registry = SysfsRegistry(publisher) { Instant(1L, 0u) }
+        val bindings = SysfsBindings(deviceClass = SysfsIndexBinding("block"))
+        val diskNumber = assertNotNull(DeviceNumber.create(259u, 0u))
+        val partitionNumber = assertNotNull(DeviceNumber.create(259u, 1u))
+        val disk = Device("sda", DeviceType.BLOCK, diskNumber, TestBackend)
+        val backend = object : DeviceBackend by TestBackend {
+            override val ueventEnvironment = listOf("DEVTYPE" to "partition", "PARTN" to "1")
+        }
+        val partition = Device("sda1", DeviceType.BLOCK, partitionNumber, backend)
+        val diskBindings = bindings.copy(block = true)
+        val diskSpec = SysfsObjectSpec("sda", SysfsParent.Virtual("block"), bindings = diskBindings)
+        val diskHandle = registry.registerDevice(disk, diskSpec).value()
+        val link = assertIs<SysfsNode.Link>(registry.child(SysfsRegistry.BLOCK_ID, "sda"))
+        assertEquals(diskHandle.id, link.targetId)
+        val parent = SysfsParent.DeviceObject(disk)
+        val partitionSpec = SysfsObjectSpec("sda1", parent, bindings = bindings)
+        val handle = registry.registerDevice(partition, partitionSpec).value()
+        assertEquals(handle.id, registry.child(diskHandle.id, "sda1").id)
+        val node = assertIs<SysfsNode.Attribute>(registry.child(handle.id, "uevent"))
+        val attribute = assertIs<SysfsTextAttribute>(node.attribute)
+        val text = attribute.show().value().decodeToString()
+        assertTrue("DEVTYPE=partition\nPARTN=1\n" in text)
+        attribute.store("add\n".encodeToByteArray()).value()
+        val event = events.last()
+        assertEquals("/devices/virtual/block/sda/sda1", event.devicePath)
+        assertTrue(event.environment.containsAll(backend.ueventEnvironment))
+        registry.unregisterDevice(partition).value()
+        registry.unregisterDevice(disk).value()
+    }
+
     private fun registry(): SysfsRegistry = SysfsRegistry { Instant(1L, 0u) }
 
     private fun SysfsRegistry.child(directoryId: ULong, name: String): SysfsNode =

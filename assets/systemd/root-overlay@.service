@@ -1,0 +1,16 @@
+[Unit]
+Description=Writable root filesystem
+DefaultDependencies=no
+IgnoreOnIsolate=yes
+SurviveFinalKillSignal=yes
+Requires=run-lower.mount root-store@%i.service
+After=run-lower.mount root-store@%i.service
+
+[Service]
+Type=forking
+ExecStart=/usr/bin/fuse-overlayfs \
+    -o lowerdir=/run/lower,upperdir=/run/overlay/upper,workdir=/run/overlay/work \
+    /sysroot
+ExecStartPost=/usr/bin/mountpoint -q /sysroot
+ExecStartPost=/usr/bin/mkdir -p /sysroot/dev /sysroot/proc /sysroot/sys /sysroot/run
+ExecStartPost=/usr/bin/rm -f /sysroot/etc/initrd-release

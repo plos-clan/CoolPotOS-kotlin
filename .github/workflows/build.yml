@@ -48,7 +48,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: kernel/build/generated/userland/
-          key: rootfs-v1-${{ hashFiles('assets/userland.sh', 'assets/init', 'kernel/build.gradle.kts') }}
+          key: rootfs-v1-${{ hashFiles('assets/userland.sh', 'assets/systemd/**', 'kernel/build.gradle.kts') }}
 
       - name: Install latest stable LLVM and Clang
         if: inputs.platform != 'jvm'

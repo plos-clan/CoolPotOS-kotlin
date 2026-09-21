@@ -1178,20 +1178,17 @@ private class UnixDuplexConnection(
     fun poll(side: Side, events: Int, receiveLowWatermark: Int): Int = lock.withLock {
         val incoming = incoming(side)
         val outgoing = outgoing(side)
+        val receiveShutdown = !incoming.writerOpen || !incoming.readerOpen
+        val sendShutdown = !outgoing.writerOpen || !outgoing.readerOpen
         var available = 0
-        if (incoming.buffer.isReadable(receiveLowWatermark) || !incoming.writerOpen ||
-            !incoming.readerOpen
-        ) {
+        if (incoming.buffer.isReadable(receiveLowWatermark) || receiveShutdown) {
             available = available or PollEvents.NORMAL_INPUT
         }
-        if (!incoming.writerOpen) available = available or PollEvents.POLLRDHUP
-        if (outgoing.writerOpen && outgoing.readerOpen && outgoing.buffer.remaining != 0) {
+        if (receiveShutdown) available = available or PollEvents.POLLRDHUP
+        if (sendShutdown || outgoing.buffer.remaining != 0) {
             available = available or PollEvents.NORMAL_OUTPUT
         }
-        if (!outgoing.readerOpen) available = available or PollEvents.POLLERR
-        if (!incoming.writerOpen && !outgoing.readerOpen) {
-            available = available or PollEvents.POLLHUP
-        }
+        if (receiveShutdown && sendShutdown) available = available or PollEvents.POLLHUP
         available and (events or PollEvents.UNCONDITIONALLY_REPORTED)
     }
 

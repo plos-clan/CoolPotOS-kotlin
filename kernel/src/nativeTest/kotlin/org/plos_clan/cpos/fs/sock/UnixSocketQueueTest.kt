@@ -108,6 +108,37 @@ class UnixSocketQueueTest {
         }
     }
 
+    @Test
+    fun halfClosedJournalStreamReportsInputWithoutSpuriousErrors() {
+        val vfs = Vfs()
+        assertIs<VfsResult.Ok<Unit>>(vfs.register(Sysfs))
+        val context = assertIs<VfsResult.Ok<FileSystemContext>>(vfs.createContext(Sysfs.name)).value
+        val caller = VfsOperationContext.KERNEL
+        val files = assertIs<VfsResult.Ok<Pair<OpenFileDescription, OpenFileDescription>>>(
+            vfs.createUnixSocketPair(caller, context, SocketType.STREAM, credentials, true),
+        ).value
+        val sender = files.first.backend as UnixSocket
+        val receiver = files.second.backend as UnixSocket
+        val bytes = byteArrayOf(42)
+        val buffer = ByteArrayBuffer(bytes)
+        val source = checkNotNull(buffer.prepareRead(0, bytes.size))
+        val request = UnixSendRequest(source, 0, bytes.size, credentials)
+        try {
+            assertIs<VfsResult.Ok<Unit>>(sender.shutdown(SocketShutdownMode.READ))
+            assertIs<VfsResult.Ok<Unit>>(receiver.shutdown(SocketShutdownMode.WRITE))
+            assertEquals(0L, files.second.poll(caller, PollEvents.POLLIN))
+            assertEquals(1, sender.send(request).bytesTransferred)
+            assertEquals(PollEvents.POLLIN.toLong(), files.second.poll(caller, PollEvents.POLLIN))
+            assertIs<VfsResult.Ok<Unit>>(sender.shutdown(SocketShutdownMode.WRITE))
+            val closed = PollEvents.POLLIN or PollEvents.POLLHUP
+            assertEquals(closed.toLong(), files.second.poll(caller, PollEvents.POLLIN))
+        } finally {
+            files.first.release()
+            files.second.release()
+            context.release()
+        }
+    }
+
     private fun pair(type: SocketType): Pair<UnixSocket, UnixSocket> {
         val paths = VfsPathResolver(40)
         val subsystem = UnixSocketSubsystem(paths, VfsNodeOperations(paths), AnonymousFileFactory())

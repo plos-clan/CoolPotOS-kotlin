@@ -1,0 +1,13 @@
+[Unit]
+Description=Switch to the writable root filesystem
+DefaultDependencies=no
+AssertPathExists=/etc/initrd-release
+Requires=basic.target root-overlay@%i.service
+After=basic.target root-overlay@%i.service
+OnFailure=emergency.target
+OnFailureJobMode=replace-irreversibly
+AllowIsolate=yes
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --no-block switch-root /sysroot

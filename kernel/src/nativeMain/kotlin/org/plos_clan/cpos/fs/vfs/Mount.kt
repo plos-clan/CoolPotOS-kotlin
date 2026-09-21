@@ -218,7 +218,11 @@ class MountNamespace internal constructor(val root: Mount) {
         VfsResult.Ok(Unit)
     }
 
-    internal fun bind(source: VfsPath, target: VfsPath): VfsResult<Unit> = lock.withLock {
+    internal fun bind(
+        source: VfsPath,
+        target: VfsPath,
+        recursive: Boolean = false,
+    ): VfsResult<Unit> = lock.withLock {
         if (!contains(source.mount) || !contains(target.mount)) {
             return@withLock VfsResult.Err(VfsError.NOT_FOUND)
         }
@@ -226,19 +230,31 @@ class MountNamespace internal constructor(val root: Mount) {
         if (source.mount.propagation == MountPropagation.UNBINDABLE) {
             return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
-        if (!source.mount.superBlock.retain()) {
-            return@withLock VfsResult.Err(VfsError.NOT_FOUND)
+        val children = if (recursive) mounts.entries.groupBy { it.key.mount } else emptyMap()
+        val pending = ArrayDeque<Pair<VfsPath, VfsPath>>()
+        val copies = linkedMapOf<VfsPath, Mount>()
+        pending.add(source to target)
+        while (pending.isNotEmpty()) {
+            val (original, destination) = pending.removeFirst()
+            val mount = original.mount
+            if (!mount.superBlock.retain()) {
+                copies.values.toList().asReversed().forEach(Mount::release)
+                return@withLock VfsResult.Err(VfsError.NOT_FOUND)
+            }
+            val copy = Mount(
+                mount.superBlock, mount.fileSystemName, mount.source,
+                original.dentry, mount.flags, mount.propagation, destination,
+            )
+            copies[destination] = copy
+            for ((attachment, child) in children[mount].orEmpty()) {
+                if (child.propagation == MountPropagation.UNBINDABLE) continue
+                if (!attachment.dentry.isDescendantOf(original.dentry)) continue
+                val childSource = VfsPath(child, child.root)
+                val childTarget = VfsPath(copy, attachment.dentry)
+                pending.add(childSource to childTarget)
+            }
         }
-
-        mounts[target] = Mount(
-            superBlock = source.mount.superBlock,
-            fileSystemName = source.mount.fileSystemName,
-            source = source.mount.source,
-            root = source.dentry,
-            flags = source.mount.flags,
-            propagation = source.mount.propagation,
-            attachment = target,
-        )
+        mounts.putAll(copies)
         changes.fetchAndAdd(1)
         events.signal()
         VfsResult.Ok(Unit)
@@ -250,7 +266,7 @@ class MountNamespace internal constructor(val root: Mount) {
             if (!mount.tryBeginUnmount()) return@withLock false
             mounts.remove(target)
             changes.fetchAndAdd(1)
-        events.signal()
+            events.signal()
             true
         }
         if (!detached) return VfsResult.Err(VfsError.BUSY)
@@ -275,7 +291,7 @@ class MountNamespace internal constructor(val root: Mount) {
             mounts.remove(source)
             mounts[target] = mount
             changes.fetchAndAdd(1)
-        events.signal()
+            events.signal()
             VfsResult.Ok(attachment)
         }
         return when (previous) {
@@ -300,7 +316,7 @@ class MountNamespace internal constructor(val root: Mount) {
                 candidate.setAttributes(attributes)
             }
             changes.fetchAndAdd(1)
-        events.signal()
+            events.signal()
         }
     }
 
@@ -315,8 +331,10 @@ class MountNamespace internal constructor(val root: Mount) {
                     add(candidate)
                     iterator.remove()
                 }
-            }.also { changes.fetchAndAdd(1)
-        events.signal() }
+            }.also {
+                changes.fetchAndAdd(1)
+                events.signal()
+            }
         } ?: return VfsResult.Err(VfsError.BUSY)
         mount.detachFromParent()
         mount.release()

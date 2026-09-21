@@ -14,6 +14,11 @@ import org.plos_clan.cpos.drivers.DeviceManager
 import org.plos_clan.cpos.drivers.DeviceRegistration
 import org.plos_clan.cpos.drivers.DeviceType
 import org.plos_clan.cpos.fs.sysfs.SysfsDevicePublication
+import org.plos_clan.cpos.fs.sysfs.SysfsBindings
+import org.plos_clan.cpos.fs.sysfs.SysfsIndexBinding
+import org.plos_clan.cpos.fs.sysfs.SysfsObjectSpec
+import org.plos_clan.cpos.fs.sysfs.SysfsParent
+import org.plos_clan.cpos.fs.sysfs.SysfsTextAttribute
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
@@ -25,6 +30,13 @@ import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
 
 class BlockDeviceBackend(val volume: BlockVolume) : DeviceBackend {
+    override val ueventEnvironment: List<Pair<String, String>>
+        get() = buildList {
+            val partition = volume.partition
+            add("DEVTYPE" to if (partition == null) "disk" else "partition")
+            if (partition != null) add("PARTN" to partition.number.toString())
+        }
+
     override val byteSize: ULong
         get() = volume.size
 
@@ -113,11 +125,17 @@ object BlockDevices {
     suspend fun register(block: BlockDevice): Device? {
         val partitions = Gpt(block).read().orEmpty()
         if (!block.connected) return null
-        val name = "disk${sequence.fetchAndAdd(1)}"
+        var index = sequence.fetchAndAdd(1)
+        val suffix = StringBuilder()
+        do {
+            suffix.append('a' + index % 26)
+            index = index / 26 - 1
+        } while (index >= 0)
+        val name = "sd${suffix.reverse()}"
         val cache = BufferCache(block)
         val disk = publish(name, BlockVolume(cache)) ?: return null
         for (partition in partitions) {
-            if (publish("${name}p${partition.number}", BlockVolume(cache, partition)) == null) {
+            if (publish("$name${partition.number}", BlockVolume(cache, partition), disk) == null) {
                 unregister(disk)
                 return null
             }
@@ -172,14 +190,25 @@ object BlockDevices {
         removed.asReversed().forEach(DeviceManager::unregister)
     }
 
-    private fun publish(name: String, volume: BlockVolume): Device? {
+    private fun publish(name: String, volume: BlockVolume, parent: Device? = null): Device? {
+        val partition = volume.partition
+        val size = SysfsTextAttribute.constant("size", "${volume.size / 512uL}\n")
+        val readOnly = SysfsTextAttribute.constant("ro", if (volume.readOnly) "1\n" else "0\n")
+        val attributes = mutableListOf(size, readOnly)
+        if (partition != null) {
+            val number = SysfsTextAttribute.constant("partition", "${partition.number}\n")
+            val start = SysfsTextAttribute.constant("start", "${volume.offset / 512uL}\n")
+            attributes += number
+            attributes += start
+        }
+        val binding = SysfsIndexBinding("block")
+        val bindings = SysfsBindings(deviceClass = binding, block = parent == null)
+        val location = parent?.let { SysfsParent.DeviceObject(it) } ?: SysfsParent.Virtual("block")
+        val specification = SysfsObjectSpec(name, location, attributes = attributes, bindings = bindings)
+        val publication = SysfsDevicePublication.NewObject(specification)
+        val backend = BlockDeviceBackend(volume)
         val registration = DeviceRegistration(
-            name,
-            DeviceType.BLOCK,
-            259u,
-            backend = BlockDeviceBackend(volume),
-            sysfs = SysfsDevicePublication.virtual("block", name),
-            aliases = volume.partition?.let { listOf("disk/by-partuuid/${it.id}") }.orEmpty(),
+            name, DeviceType.BLOCK, 259u, backend = backend, sysfs = publication,
         )
         val device = DeviceManager.register(registration) ?: return null
         lock.withLock {

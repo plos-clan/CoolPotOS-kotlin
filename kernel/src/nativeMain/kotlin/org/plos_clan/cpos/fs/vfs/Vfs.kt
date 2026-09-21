@@ -195,7 +195,8 @@ class Vfs(maxSymlinkDepth: Int = 40) {
         context: FileSystemContext,
         source: VfsPathname,
         target: VfsPathname,
-    ): VfsResult<Unit> = mounts.bind(caller, context, source, target)
+        recursive: Boolean = false,
+    ): VfsResult<Unit> = mounts.bind(caller, context, source, target, recursive)
 
     internal fun setMountAttributes(
         context: FileSystemContext,

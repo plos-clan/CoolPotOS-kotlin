@@ -158,21 +158,11 @@ internal object NewMountSyscalls {
                 propagation.countOneBits() <= 1
 
         val decodedPropagation: MountPropagation?
-            get() = when (propagation) {
-                PRIVATE -> MountPropagation.PRIVATE
-                SHARED -> MountPropagation.SHARED
-                SLAVE -> MountPropagation.SLAVE
-                UNBINDABLE -> MountPropagation.UNBINDABLE
-                else -> null
-            }
+            get() = MountPropagation.fromBits(propagation)
 
         companion object {
             const val SIZE = 32
-            private const val UNBINDABLE = 0x020000uL
-            private const val PRIVATE = 0x040000uL
-            private const val SLAVE = 0x080000uL
-            private const val SHARED = 0x100000uL
-            private const val PROPAGATION_MASK = 0x1e0000uL
+            private const val PROPAGATION_MASK = FsConstants.MS_PROPAGATION
 
             fun decode(bytes: ByteArray): MountAttributeArguments {
                 val input = LittleEndianBuffer(bytes)

@@ -1,0 +1,15 @@
+[Unit]
+Description=Persistent root storage on %f
+DefaultDependencies=no
+IgnoreOnIsolate=yes
+SurviveFinalKillSignal=yes
+Requires=systemd-fsck@%i.service
+After=systemd-fsck@%i.service
+
+[Service]
+Type=forking
+RuntimeDirectory=overlay
+RuntimeDirectoryPreserve=yes
+ExecStart=/usr/bin/fuse2fs -o rw,allow_other %f /run/overlay
+ExecStartPost=/usr/bin/mountpoint -q /run/overlay
+ExecStartPost=/usr/bin/mkdir -p /run/overlay/upper /run/overlay/work /run/overlay/results

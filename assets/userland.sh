@@ -9,6 +9,7 @@ packages=(
     cachyos-keyring
     cachyos-mirrorlist
     cachyos-v3-mirrorlist
+    e2fsprogs
     fuse2fs
     fuse-overlayfs
     python
@@ -76,8 +77,10 @@ rm -rf \
     "$rootfs/usr/share/"{licenses,locale,man,pixmaps,readline}
 
 find "$rootfs/usr" -type f \( -name '*.a' -o -name '*.o' -o -name '*.debug' \) -delete
-mkdir -p "$rootfs/overlay"
-install -Dm755 /usr/local/share/cpos/init "$rootfs/init"
+mkdir -p "$rootfs/sysroot"
+ln -s run/overlay "$rootfs/overlay"
+ln -s os-release "$rootfs/etc/initrd-release"
+install -Dm644 /usr/local/share/cpos/systemd/* -t "$rootfs/usr/lib/systemd/system"
 install -d "$rootfs/etc/NetworkManager/conf.d"
 cat > "$rootfs/etc/NetworkManager/conf.d/10-dns.conf" <<'EOF'
 [main]

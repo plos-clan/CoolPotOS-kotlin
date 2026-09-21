@@ -35,6 +35,9 @@ enum class LinuxDeviceMajor(val number: UInt) {
 }
 
 interface DeviceBackend {
+    val ueventEnvironment: List<Pair<String, String>>
+        get() = emptyList()
+
     fun subscribe(device: Device, subscription: PollSubscription) {}
 
     val byteSize: ULong?

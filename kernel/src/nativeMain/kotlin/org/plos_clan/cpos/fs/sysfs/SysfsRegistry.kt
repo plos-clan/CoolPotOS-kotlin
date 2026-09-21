@@ -31,6 +31,7 @@ value class SysfsBusHandle internal constructor(val id: ULong)
 sealed interface SysfsParent {
     data object Devices : SysfsParent
     data class Object(val handle: SysfsObjectHandle) : SysfsParent
+    data class DeviceObject(val device: Device) : SysfsParent
     data class Virtual(val category: String) : SysfsParent
 }
 
@@ -104,6 +105,7 @@ data class SysfsIndexBinding(
 data class SysfsBindings(
     val deviceClass: SysfsIndexBinding? = null,
     val bus: SysfsIndexBinding? = null,
+    val block: Boolean = false,
 )
 
 data class SysfsObjectSpec(
@@ -297,6 +299,7 @@ internal class SysfsRegistry(
         installFixedDirectory(FIRMWARE_ID, ROOT_ID, "firmware", mutableChildren = true, createdAt)
         installFixedDirectory(DEV_CHAR_ID, DEV_ID, "char", mutableChildren = true, createdAt)
         installFixedDirectory(DEV_BLOCK_ID, DEV_ID, "block", mutableChildren = true, createdAt)
+        installFixedDirectory(BLOCK_ID, ROOT_ID, "block", mutableChildren = true, createdAt)
         installFixedDirectory(VIRTUAL_ID, DEVICES_ID, "virtual", mutableChildren = true, createdAt)
         installFixedDirectory(FS_ID, ROOT_ID, "fs", mutableChildren = true, createdAt)
         installFixedDirectory(CGROUP_ID, FS_ID, "cgroup", mutableChildren = false, createdAt)
@@ -529,6 +532,8 @@ internal class SysfsRegistry(
             SysfsParent.Devices -> DEVICES_ID
             is SysfsParent.Object -> liveObjectLocked(parent.handle)?.id
                 ?: return VfsResult.Err(VfsError.NOT_FOUND)
+            is SysfsParent.DeviceObject -> deviceBindings[parent.device]?.objectId
+                ?: return VfsResult.Err(VfsError.NOT_FOUND)
             is SysfsParent.Virtual -> virtualDirectories[parent.category]
         }
         val virtualCategory = (spec.parent as? SysfsParent.Virtual)?.category
@@ -540,6 +545,9 @@ internal class SysfsRegistry(
         if (existingParentId == null && virtualCategory != null &&
             childrenIndex.getValue(VIRTUAL_ID).containsKey(vfsName(virtualCategory))
         ) {
+            return VfsResult.Err(VfsError.ALREADY_EXISTS)
+        }
+        if (spec.bindings.block && childrenIndex.getValue(BLOCK_ID).containsKey(prepared.name)) {
             return VfsResult.Err(VfsError.ALREADY_EXISTS)
         }
         val classBinding = spec.bindings.deviceClass
@@ -561,7 +569,8 @@ internal class SysfsRegistry(
         val linkCount = listOfNotNull(classBinding, busBinding).size +
             if (classBinding != null || busBinding != null) 1 else 0
         if (!reserveIdsLocked(
-                newVirtual + newClass + newBus + 1 + prepared.attributes.size + linkCount
+                newVirtual + newClass + newBus + 1 + prepared.attributes.size + linkCount +
+                    if (spec.bindings.block) 1 else 0
             )
         ) {
             return VfsResult.Err(VfsError.NO_SPACE)
@@ -592,6 +601,7 @@ internal class SysfsRegistry(
                 ),
             )
         }
+        if (spec.bindings.block) addLinkLocked(BLOCK_ID, spec.name, objectNode.id, createdAt)
         val classDirectoryId = classBinding?.let { binding ->
             val directoryId = classes[binding.name] ?: createClassLocked(binding.name)
             addLinkLocked(directoryId, binding.entryName ?: spec.name, objectNode.id, createdAt)
@@ -624,6 +634,9 @@ internal class SysfsRegistry(
         ) {
             return VfsResult.Err(VfsError.ALREADY_EXISTS)
         }
+        if (bindings.block && childrenIndex.getValue(BLOCK_ID).containsKey(objectNode.name)) {
+            return VfsResult.Err(VfsError.ALREADY_EXISTS)
+        }
         val key = DeviceKey(device.type, device.number)
         val devDirectoryId = if (device.type == DeviceType.BLOCK) DEV_BLOCK_ID else DEV_CHAR_ID
         val devName = deviceNumberName(device)
@@ -646,7 +659,7 @@ internal class SysfsRegistry(
         val newBus = if (bindings.bus != null && buses[bindings.bus.name] == null) 3 else 0
         val bindingCount = listOfNotNull(bindings.deviceClass, bindings.bus).size +
             if (hasSubsystemBinding) 1 else 0
-        if (!reserveIdsLocked(newClass + newBus + 3 + bindingCount)) {
+        if (!reserveIdsLocked(newClass + newBus + 3 + bindingCount + if (bindings.block) 1 else 0)) {
             return VfsResult.Err(VfsError.NO_SPACE)
         }
 
@@ -664,6 +677,9 @@ internal class SysfsRegistry(
         val devLinkId = addLinkLocked(devDirectoryId, devName, objectNode.id, createdAt)
         devIndex[key] = devLinkId
         val bindingLinks = ArrayList<ULong>(bindingCount)
+        if (bindings.block) {
+            bindingLinks += addLinkLocked(BLOCK_ID, objectName, objectNode.id, createdAt)
+        }
         val classDirectoryId = bindings.deviceClass?.let { binding ->
             val directoryId = classes[binding.name] ?: createClassLocked(binding.name)
             bindingLinks += addLinkLocked(
@@ -705,7 +721,7 @@ internal class SysfsRegistry(
                         "MAJOR" to device.number.major.toString(),
                         "MINOR" to device.number.minor.toString(),
                         "DEVNAME" to device.name,
-                    ),
+                    ) + device.backend.ueventEnvironment,
                 ),
                 publisher,
             )
@@ -1000,6 +1016,7 @@ internal class SysfsRegistry(
         const val VIRTUAL_ID = 10uL
         private const val FS_ID = 11uL
         private const val CGROUP_ID = 12uL
+        const val BLOCK_ID = 13uL
         private const val FIRST_DYNAMIC_ID = 16uL
     }
 }

@@ -1,0 +1,10 @@
+[Unit]
+Description=Read-only root filesystem
+DefaultDependencies=no
+IgnoreOnIsolate=yes
+
+[Mount]
+What=/
+Where=/run/lower
+Type=none
+Options=bind

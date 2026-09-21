@@ -131,6 +131,7 @@ internal class VfsMountManager(
         context: FileSystemContext,
         source: VfsPathname,
         target: VfsPathname,
+        recursive: Boolean,
     ): VfsResult<Unit> {
         val sourcePath = when (val result = paths.resolve(caller, context, source)) {
             is VfsResult.Ok -> result.value
@@ -140,7 +141,6 @@ internal class VfsMountManager(
             caller,
             context,
             target,
-            followFinalMount = false,
         )) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
@@ -150,7 +150,7 @@ internal class VfsMountManager(
         if ((sourceType == InodeType.DIRECTORY) != (targetType == InodeType.DIRECTORY)) {
             return VfsResult.Err(VfsError.NOT_DIRECTORY)
         }
-        return context.namespace.bind(sourcePath, targetPath)
+        return context.namespace.bind(sourcePath, targetPath, recursive)
     }
 
     fun setAttributes(

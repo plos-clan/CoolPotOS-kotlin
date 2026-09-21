@@ -338,6 +338,15 @@ class Dentry internal constructor(
     val parent: Dentry?
         get() = lock.withLock { currentParent }
 
+    internal fun isDescendantOf(ancestor: Dentry): Boolean {
+        var current: Dentry? = this
+        while (current != null) {
+            if (current === ancestor) return true
+            current = current.parent
+        }
+        return false
+    }
+
     fun inode(): Inode? = lock.withLock { currentInode }
 
     val isUnlinked: Boolean

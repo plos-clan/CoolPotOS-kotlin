@@ -332,6 +332,7 @@ class OpenFileDescription private constructor(
         if (previous <= 0) {
             references.fetchAndAdd(1)
         } else if (previous == 1) {
+            inode.superBlock.fileLocks.release(this)
             closed.signal()
             if (access != AccessMode.PATH) {
                 path.notify(

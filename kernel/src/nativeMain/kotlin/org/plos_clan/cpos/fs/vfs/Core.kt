@@ -124,11 +124,15 @@ value class MountFlags private constructor(private val bits: UInt) {
     }
 }
 
-internal enum class MountPropagation {
-    PRIVATE,
-    SHARED,
-    SLAVE,
-    UNBINDABLE,
+internal enum class MountPropagation(val bits: ULong) {
+    PRIVATE(0x040000uL),
+    SHARED(0x100000uL),
+    SLAVE(0x080000uL),
+    UNBINDABLE(0x020000uL);
+
+    companion object {
+        fun fromBits(bits: ULong): MountPropagation? = entries.firstOrNull { it.bits == bits }
+    }
 }
 
 internal open class MountFlagUpdate(

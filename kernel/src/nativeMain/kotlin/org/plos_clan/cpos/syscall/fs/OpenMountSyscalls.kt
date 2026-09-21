@@ -14,6 +14,8 @@ import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.FileSystemConfiguration
 import org.plos_clan.cpos.fs.vfs.FileSystemParameters
 import org.plos_clan.cpos.fs.vfs.InodeType
+import org.plos_clan.cpos.fs.vfs.MountAttributeUpdate
+import org.plos_clan.cpos.fs.vfs.MountPropagation
 import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.fs.vfs.MountFlags
 import org.plos_clan.cpos.fs.vfs.MountResources
@@ -32,6 +34,8 @@ import org.plos_clan.cpos.syscall.fs.FsConstants.AT_FDCWD
 import org.plos_clan.cpos.syscall.fs.FsConstants.FALLOC_FL_KEEP_SIZE
 import org.plos_clan.cpos.syscall.fs.FsConstants.MS_BIND
 import org.plos_clan.cpos.syscall.fs.FsConstants.MS_MOVE
+import org.plos_clan.cpos.syscall.fs.FsConstants.MS_REC
+import org.plos_clan.cpos.syscall.fs.FsConstants.MS_PROPAGATION
 import org.plos_clan.cpos.syscall.fs.FsConstants.MS_SILENT
 import org.plos_clan.cpos.syscall.fs.FsConstants.O_CLOEXEC
 import org.plos_clan.cpos.syscall.fs.FsConstants.O_NONBLOCK
@@ -298,6 +302,26 @@ internal fun mount(regs: PtraceRegisters, process: Process): Long {
         copyPath(process, sourceAddress) ?: return errno(Errno.EFAULT)
     }
     val context = process.context ?: return errno(Errno.ENOENT)
+    if (rawFlags and MS_PROPAGATION != 0uL) {
+        val propagation = MountPropagation.fromBits(rawFlags and MS_PROPAGATION)
+            ?: return errno(Errno.EINVAL)
+        val allowed = MS_PROPAGATION or MS_REC or MS_SILENT
+        if (rawFlags and allowed.inv() != 0uL) return errno(Errno.EINVAL)
+        val pathname = VfsPathname.fromBytes(target)
+        val path = when (val result = FileSystemManager.vfs.resolve(
+            process.vfsOperationContext, context, pathname,
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return errno(result.error.errno)
+        }
+        val attributes = MountAttributeUpdate(MountFlags.NONE, MountFlags.NONE, propagation)
+        return when (val result = FileSystemManager.vfs.setMountAttributes(
+            context, path, attributes, rawFlags and MS_REC != 0uL,
+        )) {
+            is VfsResult.Ok -> 0L
+            is VfsResult.Err -> errno(result.error.errno)
+        }
+    }
     if (rawFlags and MS_MOVE != 0uL) {
         if (rawFlags and (MS_MOVE or MS_SILENT).inv() != 0uL) {
             return errno(Errno.EINVAL)
@@ -315,7 +339,7 @@ internal fun mount(regs: PtraceRegisters, process: Process): Long {
         }
     }
     if (rawFlags and MS_BIND != 0uL) {
-        if (rawFlags and (MS_BIND or MS_SILENT).inv() != 0uL) {
+        if (rawFlags and (MS_BIND or MS_REC or MS_SILENT).inv() != 0uL) {
             return errno(Errno.EINVAL)
         }
         val bindSource = source?.takeIf(ByteArray::isNotEmpty)
@@ -325,6 +349,7 @@ internal fun mount(regs: PtraceRegisters, process: Process): Long {
             context = context,
             source = VfsPathname.fromBytes(bindSource),
             target = VfsPathname.fromBytes(target),
+            recursive = rawFlags and MS_REC != 0uL,
         )) {
             is VfsResult.Ok -> 0L
             is VfsResult.Err -> errno(result.error.errno)

@@ -100,14 +100,16 @@ You need to install:
 - `qemu-system-x86_64` (for emulation)
 - Git and Gradle (included with Kotlin/Native)
 
-`prepareUserland` builds the CachyOS root filesystem and installs `assets/init`
-as `/init`, which starts systemd inside the writable overlay root. Gradle tracks
-`assets/init` and `assets/userland.sh`; changes to either rebuild the EROFS archive.
+`prepareUserland` builds the CachyOS root filesystem with the units in
+`assets/systemd`. The kernel starts `/sbin/init` directly from disk; systemd checks
+the persistent filesystem, mounts the overlay, and switches into the writable root.
+No initramfs or initrd is used. Gradle tracks the units and `assets/userland.sh`;
+changes to either rebuild the EROFS archive.
 Run `./gradlew buildImage` to also update the bootable disk image before testing it.
 
 CI shares the generated EROFS archive between QEMU tests and benchmarks using
 [`actions/cache`](https://github.com/actions/cache). The cache key covers
-`assets/init`, `assets/userland.sh`, and `kernel/build.gradle.kts`. A matching cache
+`assets/systemd/**`, `assets/userland.sh`, and `kernel/build.gradle.kts`. A matching cache
 skips Podman installation and rootfs generation. Cache misses use the normal
 Gradle task dependencies, and successful jobs automatically save new archives.
 Concurrent cache misses can still build separately. Delete the repository's
@@ -175,8 +177,8 @@ and 1000. Warmup and measurement iterations each last one second by default.
 The raw report retains all fork samples. Repetition reduces sampling and JIT
 variation, but shared CI workers can still differ substantially between runs.
 
-`qemuBenchmark` builds the production kernel and rootfs, including the usual
-init, overlay filesystem, systemd services, and QEMU network adapter. It adds the
+`qemuBenchmark` builds the production kernel and rootfs, including systemd early
+boot, the overlay filesystem, systemd services, and QEMU network adapter. It adds the
 `cpos.benchmark` boot argument to activate `benchmark.service` after
 `multi-user.target`. Normal boots do not run the service. Rootfs changes are
 part of the measured system; kernel and rootfs hashes are retained in reports.
@@ -264,8 +266,9 @@ than polling in the bootstrap loop.
 
 `./gradlew buildImage` creates `kernel/build/CoolPotOS.img`, a sparse raw GPT disk
 with FAT32 ESP, read-only EROFS root, and an ext4 persistent partition. The guest
-mounts the persistent filesystem through fuse2fs at `/overlay`, then combines
-`/overlay/upper` with EROFS through fuse-overlayfs. Partition selection uses
+uses `systemd-fsck@.service` before mounting the persistent filesystem through
+fuse2fs at `/run/overlay`, then combines its upper directory with EROFS through
+fuse-overlayfs. `/overlay` links to `/run/overlay`. Partition selection uses
 PARTUUID; drivers share the same partition and buffer-cache implementation.
 
 `./gradlew run -PstorageTransport=bot` attaches the system disk through USB BOT.
