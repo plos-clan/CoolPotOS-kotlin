@@ -445,15 +445,19 @@ class Dentry internal constructor(
 
     internal fun notifyParent(subject: Inode, event: FileSystemEvent, cookie: UInt) {
         var eventName: VfsName? = null
+        var eventUnlinked = false
         val eventParent = lock.withLock {
-            currentParent?.also { eventName = currentName }
-        } ?: return
+            val parent = currentParent ?: return
+            eventName = currentName
+            eventUnlinked = unlinked || currentInode?.sameIdentity(subject) != true
+            parent
+        }
         eventParent.inode()?.notify(
             event = event,
             name = checkNotNull(eventName),
             cookie = cookie,
             subject = subject,
-            unlinked = isUnlinked || inode()?.sameIdentity(subject) != true,
+            unlinked = eventUnlinked,
         )
     }
 
