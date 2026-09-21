@@ -4,6 +4,7 @@ import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.fs.vfs.MountFlagUpdate
 import org.plos_clan.cpos.fs.vfs.MountFlags
 import org.plos_clan.cpos.syscall.fs.NewMountSyscalls.MountAttributeCodec
+import org.plos_clan.cpos.syscall.fs.LinuxMountChange
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
@@ -11,6 +12,18 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class MountAttributeCodecTest {
+    @Test
+    fun bindRemountReplacesRestrictionsAndPreservesUnspecifiedAtime() {
+        val initial = MountFlags.of(MountFlag.NO_EXEC, MountFlag.NO_ATIME)
+        val update = assertNotNull(LinuxMountChange.decode(0x1021uL))
+        val flags = update.applyTo(initial)
+        assertTrue(MountFlag.READ_ONLY in flags)
+        assertTrue(MountFlag.NO_ATIME in flags)
+        assertFalse(MountFlag.NO_EXEC in flags)
+        assertNull(LinuxMountChange.decode(0x5021uL))
+        assertNull(LinuxMountChange.decode(0x21uL))
+    }
+
     @Test
     fun decodesInitialMountAttributes() {
         val flags = assertNotNull(MountAttributeCodec.initial(0x200087uL))

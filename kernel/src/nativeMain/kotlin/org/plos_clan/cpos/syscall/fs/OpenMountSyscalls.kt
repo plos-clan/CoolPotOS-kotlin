@@ -34,6 +34,7 @@ import org.plos_clan.cpos.syscall.fs.FsConstants.AT_FDCWD
 import org.plos_clan.cpos.syscall.fs.FsConstants.FALLOC_FL_KEEP_SIZE
 import org.plos_clan.cpos.syscall.fs.FsConstants.MS_BIND
 import org.plos_clan.cpos.syscall.fs.FsConstants.MS_MOVE
+import org.plos_clan.cpos.syscall.fs.FsConstants.MS_REMOUNT
 import org.plos_clan.cpos.syscall.fs.FsConstants.MS_REC
 import org.plos_clan.cpos.syscall.fs.FsConstants.MS_PROPAGATION
 import org.plos_clan.cpos.syscall.fs.FsConstants.MS_SILENT
@@ -70,6 +71,32 @@ private value class LinuxUnmountFlags private constructor(private val bits: UInt
 
         fun fromBits(bits: ULong): LinuxUnmountFlags? =
             bits.takeIf { it <= UInt.MAX_VALUE.toULong() }?.let { LinuxUnmountFlags(it.toUInt()) }
+    }
+}
+
+internal object LinuxMountChange {
+    private val mutableFlags = MountFlags.of(
+        MountFlag.READ_ONLY, MountFlag.NO_SUID, MountFlag.NO_DEVICE, MountFlag.NO_EXEC,
+        MountFlag.NO_ATIME, MountFlag.NO_DIRECTORY_ATIME, MountFlag.RELATIVE_ATIME,
+        MountFlag.STRICT_ATIME, MountFlag.NO_SYMLINK_FOLLOW,
+    )
+
+    fun decode(bits: ULong): MountAttributeUpdate? {
+        if (bits and MS_REMOUNT == 0uL) {
+            val propagation = MountPropagation.fromBits(bits and MS_PROPAGATION) ?: return null
+            val allowed = MS_PROPAGATION or MS_REC or MS_SILENT
+            if (bits and allowed.inv() != 0uL) return null
+            return MountAttributeUpdate(MountFlags.NONE, MountFlags.NONE, propagation)
+        }
+        if (bits and MS_BIND == 0uL) return null
+        val allowed = MS_REMOUNT or MS_BIND or MS_SILENT or mutableFlags.storage.toUInt().toULong()
+        if (bits and allowed.inv() != 0uL) return null
+        val flags = MountFlags.fromBits(bits and mutableFlags.storage.toUInt().toULong()) ?: return null
+        val atime = MountFlags.of(MountFlag.NO_ATIME, MountFlag.RELATIVE_ATIME, MountFlag.STRICT_ATIME)
+        val clear = if (flags.storage and atime.storage == 0) {
+            MountFlags.fromStorage(mutableFlags.storage and atime.storage.inv())
+        } else mutableFlags
+        return MountAttributeUpdate(flags, clear)
     }
 }
 
@@ -302,11 +329,8 @@ internal fun mount(regs: PtraceRegisters, process: Process): Long {
         copyPath(process, sourceAddress) ?: return errno(Errno.EFAULT)
     }
     val context = process.context ?: return errno(Errno.ENOENT)
-    if (rawFlags and MS_PROPAGATION != 0uL) {
-        val propagation = MountPropagation.fromBits(rawFlags and MS_PROPAGATION)
-            ?: return errno(Errno.EINVAL)
-        val allowed = MS_PROPAGATION or MS_REC or MS_SILENT
-        if (rawFlags and allowed.inv() != 0uL) return errno(Errno.EINVAL)
+    if (rawFlags and (MS_PROPAGATION or MS_REMOUNT) != 0uL) {
+        val attributes = LinuxMountChange.decode(rawFlags) ?: return errno(Errno.EINVAL)
         val pathname = VfsPathname.fromBytes(target)
         val path = when (val result = FileSystemManager.vfs.resolve(
             process.vfsOperationContext, context, pathname,
@@ -314,7 +338,6 @@ internal fun mount(regs: PtraceRegisters, process: Process): Long {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return errno(result.error.errno)
         }
-        val attributes = MountAttributeUpdate(MountFlags.NONE, MountFlags.NONE, propagation)
         return when (val result = FileSystemManager.vfs.setMountAttributes(
             context, path, attributes, rawFlags and MS_REC != 0uL,
         )) {

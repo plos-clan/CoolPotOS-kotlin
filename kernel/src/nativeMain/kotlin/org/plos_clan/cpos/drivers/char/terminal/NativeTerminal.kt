@@ -4,7 +4,12 @@ package org.plos_clan.cpos.drivers.char.terminal
 
 import bridge.TerminalDisplay
 import bridge.TerminalPalette
+import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.COpaquePointer
+import kotlinx.cinterop.CPointer
+import kotlinx.cinterop.UByteVar
+import kotlinx.cinterop.readBytes
+import kotlin.native.concurrent.ThreadLocal
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.alloc
@@ -22,6 +27,17 @@ import platform.posix.memset
 private val terminalMalloc = staticCFunction { size: ULong -> bridge.malloc(size) }
 private val terminalFree = staticCFunction { pointer: COpaquePointer? -> bridge.free(pointer) }
 
+@ThreadLocal
+private object TerminalReplies {
+    var bytes: ByteArray? = null
+
+    fun receive(data: CPointer<UByteVar>?, size: ULong) {
+        if (data == null || size == 0uL || size > Int.MAX_VALUE.toULong()) return
+        val reply = data.reinterpret<ByteVar>().readBytes(size.toInt())
+        bytes = bytes?.plus(reply) ?: reply
+    }
+}
+
 internal class NativeTerminal private constructor(
     private val handle: COpaquePointer,
     private val framebuffer: COpaquePointer,
@@ -33,8 +49,8 @@ internal class NativeTerminal private constructor(
     private val lock = IrqSpinLock()
     private var dirty = false
 
-    fun process(data: ByteArray, offset: Int, length: Int) {
-        if (length == 0) return
+    fun process(data: ByteArray, offset: Int, length: Int): ByteArray? {
+        if (length == 0) return null
         val invalidated = lock.withLock {
             data.usePinned { bytes ->
                 bridge.terminal_process(
@@ -47,7 +63,10 @@ internal class NativeTerminal private constructor(
             dirty = true
             wasClean
         }
+        val replies = TerminalReplies.bytes
+        TerminalReplies.bytes = null
         if (invalidated) invalidate()
+        return replies
     }
 
     fun dimensions(): Dimensions = lock.withLock {
@@ -130,6 +149,10 @@ internal class NativeTerminal private constructor(
                 return@memScoped null
             }
 
+            val writer = staticCFunction { data: CPointer<UByteVar>?, size: ULong ->
+                TerminalReplies.receive(data, size)
+            }
+            bridge.terminal_set_pty_writer(handle, writer)
             bridge.terminal_set_auto_flush(handle, false)
             val palette = alloc<TerminalPalette> {
                 background = BACKGROUND_COLOR

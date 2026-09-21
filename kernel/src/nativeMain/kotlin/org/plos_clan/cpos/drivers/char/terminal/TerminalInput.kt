@@ -57,6 +57,12 @@ internal class TerminalInput(private val terminal: TerminalBackend) {
     private val readLock = KernelMutex()
     private var literal = false
 
+    fun respond(data: ByteArray) = lock.withLock {
+        if (buffer.write(data, 0, data.size) == 0) return@withLock
+        terminal.changed()
+        readWaiters.wakeAll()
+    }
+
     fun available(session: TtySession): Int = lock.withLock {
         if (session.termios.cLflag and ICANON != 0) buffer.available else buffer.size
     }

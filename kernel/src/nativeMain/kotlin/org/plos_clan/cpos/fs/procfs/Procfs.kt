@@ -389,8 +389,7 @@ private class ProcTextFile(
         if (options.access.canWrite && write == null) {
             return VfsResult.Err(VfsError.PERMISSION_DENIED)
         }
-        val content = render() ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        val handle = ProcTextHandle(content, render, write, positionedWrite)
+        val handle = ProcTextHandle(render, write, positionedWrite)
         val version = pollVersion ?: return VfsResult.Ok(handle)
         val pollHandle = ProcPollHandle(version, handle, changes = pollChanges)
         return VfsResult.Ok(pollHandle)
@@ -436,11 +435,12 @@ internal class ProcPollHandle(
 }
 
 internal open class ProcTextHandle(
-    private var content: ByteArray,
     private val refresh: () -> ByteArray?,
     private val write: ((VfsOperationContext, ByteArray) -> VfsResult<Unit>)?,
     private val positionedWrite: Boolean,
 ) : OpenFileBackend {
+    private var content: ByteArray? = null
+
     override fun read(
         caller: VfsOperationContext,
         inode: Inode,
@@ -449,10 +449,11 @@ internal open class ProcTextHandle(
         count: Int,
         position: FilePosition,
     ): IoResult {
-        if (position.value == 0L && count != 0) {
-            content = refresh() ?: return IoResult.failure(VfsError.NOT_FOUND)
-        }
-        if (position.value < 0 || position.value >= content.size || count == 0) {
+        if (count == 0) return IoResult.success(0)
+        val content = this.content?.takeUnless { position.value == 0L }
+            ?: refresh()?.also { this.content = it }
+            ?: return IoResult.failure(VfsError.NOT_FOUND)
+        if (position.value < 0 || position.value >= content.size) {
             return IoResult.success(0)
         }
         val start = position.value.toInt()

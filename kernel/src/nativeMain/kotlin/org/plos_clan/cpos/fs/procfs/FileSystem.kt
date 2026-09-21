@@ -41,7 +41,7 @@ internal class MountsFile(
         if (options.access.canWrite) return VfsResult.Err(VfsError.PERMISSION_DENIED)
         val context = process.context?.forkAtRoot() ?: return VfsResult.Err(VfsError.NOT_FOUND)
         return try {
-            val handle = object : ProcTextHandle(render(context), { render(context) }, null, true) {
+            val handle = object : ProcTextHandle({ render(context) }, null, true) {
                 override fun release() = context.release()
             }
             val namespace = context.namespace

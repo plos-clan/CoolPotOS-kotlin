@@ -225,10 +225,8 @@ internal object PageCache : FrameReclaimer {
         var bufferFrames = 0uL
         lock.withLock {
             cachedFrames = clock.size.toULong()
-            for (page in clock) {
-                if (page.key.kind == PageCacheKind.BLOCK) bufferFrames++
-                if (UserFrameReferences.isExclusive(page.frame)) reclaimableFrames++
-            }
+            bufferFrames = clock.count { it.key.kind == PageCacheKind.BLOCK }.toULong()
+            reclaimableFrames = UserFrameReferences.countExclusive(clock) { it.frame }.toULong()
         }
         return PageCacheStatistics(
             cachedBytes = (cachedFrames - bufferFrames) * PAGE_SIZE_BYTES,

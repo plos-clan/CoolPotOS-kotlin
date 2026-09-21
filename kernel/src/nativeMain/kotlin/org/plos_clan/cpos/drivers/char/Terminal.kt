@@ -409,7 +409,8 @@ internal class FrameBufferTerminal private constructor(
     private val terminal: NativeTerminal,
 ) : VirtualTerminal() {
     override fun writeOutput(data: ByteArray, offset: Int, count: Int) {
-        if (displayMode == ConsoleDisplayMode.TEXT) terminal.process(data, offset, count)
+        if (displayMode != ConsoleDisplayMode.TEXT) return
+        terminal.process(data, offset, count)?.let(input::respond)
     }
 
     override fun windowSize(): WinSize {

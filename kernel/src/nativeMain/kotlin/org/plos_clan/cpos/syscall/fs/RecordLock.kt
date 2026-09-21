@@ -21,7 +21,9 @@ internal object RecordLock {
             val bytes = memory.copyFromUser(32) ?: return errno(Errno.EFAULT)
             val input = LittleEndianBuffer(bytes)
             val type = input.readU16(0).toInt()
-            if (type !in 0..2 || input.readU32(24) != 0u) return errno(Errno.EINVAL)
+            val ofd = command >= 36
+            val owner = if (ofd) null else process.id
+            if (type !in 0..2 || ofd && input.readU32(24) != 0u) return errno(Errno.EINVAL)
             val mode = when (type) {
                 0 -> FileLockMode.SHARED
                 1 -> FileLockMode.EXCLUSIVE
@@ -54,10 +56,10 @@ internal object RecordLock {
             }
             if (start < 0 || end < start) return errno(Errno.EINVAL)
             val range = FileLockRange(start, end)
-            if (command == 36) {
+            if (command == 5 || command == 36) {
                 if (mode == null) return errno(Errno.EINVAL)
                 val requested = FileLock(mode, range)
-                val conflict = file.inode.superBlock.fileLocks.query(file, requested)
+                val conflict = file.inode.superBlock.fileLocks.query(file, requested, owner)
                 input.writeU16(0, when (conflict?.mode) {
                     FileLockMode.SHARED -> 0u
                     FileLockMode.EXCLUSIVE -> 1u
@@ -70,7 +72,7 @@ internal object RecordLock {
                 mode == FileLockMode.EXCLUSIVE && !file.access.canWrite
             ) return errno(Errno.EBADF)
             val result = file.inode.superBlock.fileLocks.acquire(
-                file, mode, command == 37, FileLockDomain.OFD, range,
+                file, mode, command == 6 || command == 37, FileLockDomain.RECORD, range, owner,
             )
             when (result) {
                 is VfsResult.Ok -> 0L
@@ -87,6 +89,6 @@ internal object RecordLock {
         output.writeU16(2, 0u)
         output.writeU64(8, range.start.toULong())
         output.writeU64(16, length.toULong())
-        output.writeU32(24, UInt.MAX_VALUE)
+        output.writeU32(24, conflict.processId.toUInt())
     }
 }

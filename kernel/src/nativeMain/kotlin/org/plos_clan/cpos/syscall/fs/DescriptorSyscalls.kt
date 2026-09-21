@@ -161,7 +161,7 @@ internal fun fcntl(regs: PtraceRegisters, process: Process): Long {
     }
     val argument = regs[PtraceRegisters.IDX_RDX]
     return when (command.toInt()) {
-        36, 37, 38 -> RecordLock.execute(process, fd, command.toInt(), argument)
+        5, 6, 7, 36, 37, 38 -> RecordLock.execute(process, fd, command.toInt(), argument)
         F_DUPFD,
         F_DUPFD_CLOEXEC,
         -> {

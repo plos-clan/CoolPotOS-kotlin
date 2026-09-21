@@ -96,6 +96,10 @@ internal object UserFrameReferences {
         referenceCount(frame) <= 1
     }
 
+    fun <T> countExclusive(values: Iterable<T>, frame: (T) -> ULong): Int = lock.withLock {
+        values.count { referenceCount(frame(it)) <= 1 }
+    }
+
     fun copyOnWrite(frame: ULong): ULong? {
         if (isExclusive(frame)) return frame
         val replacement = BuddyFrameAllocator.allocate(1uL)

@@ -65,7 +65,7 @@ class FileLocksTest {
     @Test
     fun ofdRangesSplitMergeAndRemainIndependentOfFlock() {
         val files = Files()
-        val domain = FileLockDomain.OFD
+        val domain = FileLockDomain.RECORD
         val whole = FileLockRange(0, 99)
         val middle = FileLockRange(20, 79)
         try {
@@ -98,7 +98,7 @@ class FileLocksTest {
     @Test
     fun failedOfdUpgradePreservesTheExistingSharedRange() {
         val files = Files()
-        val domain = FileLockDomain.OFD
+        val domain = FileLockDomain.RECORD
         val range = FileLockRange(10, Long.MAX_VALUE)
         try {
             assertIs<VfsResult.Ok<Unit>>(files.locks.acquire(
@@ -113,6 +113,31 @@ class FileLocksTest {
             val shared = FileLock(FileLockMode.SHARED, range)
             val requested = FileLock(FileLockMode.EXCLUSIVE, range)
             assertEquals(shared, files.locks.query(files.second, requested))
+        } finally {
+            files.close()
+        }
+    }
+
+    @Test
+    fun processLocksShareOwnershipAndConflictWithOpenDescriptionLocks() {
+        val files = Files()
+        val range = FileLockRange(10, 99)
+        val request = FileLock(FileLockMode.EXCLUSIVE, range)
+        try {
+            val acquired = files.locks.acquire(
+                files.first, FileLockMode.EXCLUSIVE, true, FileLockDomain.RECORD, range, 42,
+            )
+            assertIs<VfsResult.Ok<Unit>>(acquired)
+            assertNull(files.locks.query(files.second, request, 42))
+            assertEquals(request.copy(processId = 42), files.locks.query(files.second, request, 43))
+            val conflict = files.locks.acquire(
+                files.second, FileLockMode.SHARED, true, FileLockDomain.RECORD, range,
+            )
+            assertEquals(VfsResult.Err(VfsError.WOULD_BLOCK), conflict)
+            files.locks.release(files.second, 43)
+            assertEquals(request.copy(processId = 42), files.locks.query(files.first, request))
+            files.locks.release(files.second, 42)
+            assertNull(files.locks.query(files.first, request))
         } finally {
             files.close()
         }

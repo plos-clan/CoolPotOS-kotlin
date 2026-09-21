@@ -135,7 +135,7 @@ internal data class Header(
         private const val FEATURE_INCOMPAT = 0x0000_0023uL
         private const val ZSTD_ALGORITHM = 1 shl 3
         private const val ZSTD_CONFIG_SIZE = 6
-        private const val ZSTD_WINDOW_LOG = 10
+        private const val ZSTD_MAX_WINDOW_LOG = 21
 
         fun read(image: Image): Header? {
             val offset = SUPER_OFFSET.toULong()
@@ -154,7 +154,7 @@ internal data class Header(
             val config = offset + SUPER_SIZE.toULong()
             if (!image.contains(config, 2 + ZSTD_CONFIG_SIZE) ||
                 image.u16(config) != ZSTD_CONFIG_SIZE ||
-                image.u8(config + 2uL) != 0 || image.u8(config + 3uL) != ZSTD_WINDOW_LOG
+                image.u8(config + 2uL) != 0 || image.u8(config + 3uL) > ZSTD_MAX_WINDOW_LOG
             ) return null
             val packedNid = image.u64(offset + 96uL)
             if (packedNid == 0uL) return null

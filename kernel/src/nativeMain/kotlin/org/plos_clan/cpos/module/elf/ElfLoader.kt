@@ -267,20 +267,12 @@ object ElfLoader {
     }
 
     private fun openExecutable(process: Process, path: String): VfsResult<OpenFileDescription> {
-        val file = when (
-            val result = FileSystemManager.vfs.openForExecution(
-                caller = process.vfsOperationContext,
-                context = process.getFSContext(),
-                pathname = VfsPathname.fromString(path),
-            )
-        ) {
-            is VfsResult.Ok -> result.value
-            is VfsResult.Err -> {
-                println("ELF: cannot open $path: ${result.error}")
-                return result
-            }
-        }
-        return VfsResult.Ok(file)
+        val pathname = VfsPathname.fromString(path)
+        return FileSystemManager.vfs.openForExecution(
+            caller = process.vfsOperationContext,
+            context = process.getFSContext(),
+            pathname = pathname,
+        )
     }
 
     private fun parseScriptInterpreter(

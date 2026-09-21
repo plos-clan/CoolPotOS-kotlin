@@ -10,6 +10,7 @@ packages=(
     cachyos-mirrorlist
     cachyos-v3-mirrorlist
     e2fsprogs
+    ethtool
     fuse2fs
     fuse-overlayfs
     python
@@ -97,7 +98,7 @@ journalctl --root="$rootfs" --update-catalog
 mkfs.erofs \
     -x-1 \
     -z zstd,level=3 \
-    -C 1048576 \
+    -C 65536 \
     -Eall-fragments,dedupe \
     "$partial" "$rootfs/"
 mv "$partial" "$archive"

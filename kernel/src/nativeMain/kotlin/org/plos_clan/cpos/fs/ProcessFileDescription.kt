@@ -241,6 +241,7 @@ class FileDescriptorTable {
     private fun OpenFileDescription.closeDescriptor(
         caller: VfsOperationContext,
     ): VfsResult<Unit> {
+        inode.superBlock.fileLocks.release(this, caller.processId.toInt())
         val result = flush(caller)
         release()
         return result

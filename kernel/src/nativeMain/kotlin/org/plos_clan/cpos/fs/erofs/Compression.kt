@@ -7,6 +7,7 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.KernelMutex
 import org.plos_clan.cpos.utils.alignUp
 
 internal class CompactIndex private constructor(
@@ -222,25 +223,43 @@ internal data class Extent(
 }
 
 internal class ExtentCache(private val capacity: Int) {
+    private class Entry {
+        val loading = KernelMutex()
+        var result: Result<ByteArray?>? = null
+    }
+
     private val lock = IrqSpinLock()
-    private val entries = mutableMapOf<ULong, ByteArray>()
-    private val order = ArrayDeque<ULong>()
+    private val entries = linkedMapOf<ULong, Entry>()
     private var used = 0
 
     fun getOrLoad(key: ULong, load: () -> ByteArray?): ByteArray? {
-        lock.withLock { entries[key] }?.let { return it }
-        val loaded = load() ?: return null
-        if (loaded.size > capacity) return loaded
-        return lock.withLock {
-            entries[key]?.let { return@withLock it }
-            while (used > capacity - loaded.size && order.isNotEmpty()) {
-                val evicted = entries.remove(order.removeFirst()) ?: continue
-                used -= evicted.size
-            }
-            entries[key] = loaded
-            order.addLast(key)
-            used += loaded.size
-            loaded
+        val entry = lock.withLock {
+            val existing = entries.remove(key) ?: Entry()
+            entries[key] = existing
+            existing.result?.let { return it.getOrThrow() }
+            existing
+        }
+        return entry.loading.withLock {
+            entry.result?.let { return@withLock it.getOrThrow() }
+            val result = runCatching(load)
+            publish(key, entry, result)
+            result.getOrThrow()
         }
     }
+
+    private fun publish(key: ULong, entry: Entry, result: Result<ByteArray?>) = lock.withLock {
+        entry.result = result
+        entries.remove(key)
+        val loaded = result.getOrNull() ?: return@withLock
+        if (loaded.size > capacity) return@withLock
+        val iterator = entries.iterator()
+        while (used > capacity - loaded.size && iterator.hasNext()) {
+            val evicted = iterator.next().value.result?.getOrNull() ?: continue
+            used -= evicted.size
+            iterator.remove()
+        }
+        entries[key] = entry
+        used += loaded.size
+    }
+
 }

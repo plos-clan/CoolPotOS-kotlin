@@ -6,7 +6,7 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 
 internal enum class FileLockMode { SHARED, EXCLUSIVE }
 
-internal enum class FileLockDomain { FLOCK, OFD }
+internal enum class FileLockDomain { FLOCK, RECORD }
 
 internal data class FileLockRange(val start: Long, val end: Long) {
     fun overlaps(other: FileLockRange): Boolean = start <= other.end && other.start <= end
@@ -16,39 +16,43 @@ internal data class FileLockRange(val start: Long, val end: Long) {
     }
 }
 
-internal data class FileLock(val mode: FileLockMode, val range: FileLockRange)
+internal data class FileLock(
+    val mode: FileLockMode,
+    val range: FileLockRange,
+    val processId: Int = -1,
+)
 
 internal class FileLocks {
     private class Entry {
-        val owners = mutableMapOf<OpenFileDescription, List<FileLock>>()
+        val owners = mutableMapOf<Any, List<FileLock>>()
         val waiters = IoWaitQueue()
         var pending = 0
 
-        fun conflict(file: OpenFileDescription, requested: FileLock): FileLock? = owners.asSequence()
-            .filter { it.key !== file }
+        fun conflict(owner: Any, requested: FileLock): FileLock? = owners.asSequence()
+            .filter { it.key != owner }
             .flatMap { it.value }
             .firstOrNull {
                 val exclusive = requested.mode == FileLockMode.EXCLUSIVE || it.mode == FileLockMode.EXCLUSIVE
                 exclusive && it.range.overlaps(requested.range)
             }
 
-        fun replace(file: OpenFileDescription, range: FileLockRange, mode: FileLockMode?) {
+        fun replace(owner: Any, range: FileLockRange, mode: FileLockMode?) {
             val retained = mutableListOf<FileLock>()
-            for (held in owners[file].orEmpty()) {
+            for (held in owners[owner].orEmpty()) {
                 if (!held.range.overlaps(range)) {
                     retained += held
                     continue
                 }
                 if (held.range.start < range.start) {
                     val left = FileLockRange(held.range.start, range.start - 1)
-                    retained += FileLock(held.mode, left)
+                    retained += held.copy(range = left)
                 }
                 if (held.range.end > range.end) {
                     val right = FileLockRange(range.end + 1, held.range.end)
-                    retained += FileLock(held.mode, right)
+                    retained += held.copy(range = right)
                 }
             }
-            if (mode != null) retained += FileLock(mode, range)
+            if (mode != null) retained += FileLock(mode, range, owner as? Int ?: -1)
             retained.sortBy { it.range.start }
             val merged = mutableListOf<FileLock>()
             for (held in retained) {
@@ -60,17 +64,22 @@ internal class FileLocks {
                     continue
                 }
                 val combined = FileLockRange(previous.range.start, maxOf(previous.range.end, held.range.end))
-                merged[merged.lastIndex] = FileLock(held.mode, combined)
+                merged[merged.lastIndex] = held.copy(range = combined)
             }
-            if (merged.isEmpty()) owners.remove(file) else owners[file] = merged
+            if (merged.isEmpty()) owners.remove(owner) else owners[owner] = merged
         }
     }
 
     private val lock = IrqSpinLock()
     private val tables = Array(FileLockDomain.entries.size) { mutableMapOf<InodeId, Entry>() }
 
-    fun query(file: OpenFileDescription, requested: FileLock): FileLock? = lock.withLock {
-        tables[FileLockDomain.OFD.ordinal][file.inode.id]?.conflict(file, requested)
+    fun query(
+        file: OpenFileDescription,
+        requested: FileLock,
+        processId: Int? = null,
+    ): FileLock? = lock.withLock {
+        val owner = processId ?: file
+        tables[FileLockDomain.RECORD.ordinal][file.inode.id]?.conflict(owner, requested)
     }
 
     fun acquire(
@@ -79,21 +88,23 @@ internal class FileLocks {
         nonBlocking: Boolean,
         domain: FileLockDomain = FileLockDomain.FLOCK,
         range: FileLockRange = FileLockRange.ALL,
+        processId: Int? = null,
     ): VfsResult<Unit> {
+        val owner = processId ?: file
         val id = file.inode.id
         val table = tables[domain.ordinal]
         val requested = mode?.let { FileLock(it, range) }
         if (domain == FileLockDomain.FLOCK) lock.withLock {
             val entry = table[id] ?: return@withLock
-            if (entry.owners[file]?.singleOrNull() == requested) return VfsResult.Ok(Unit)
-            if (entry.owners.remove(file) != null) entry.waiters.wakeAll()
+            if (entry.owners[owner]?.singleOrNull() == requested) return VfsResult.Ok(Unit)
+            if (entry.owners.remove(owner) != null) entry.waiters.wakeAll()
         }
         while (true) {
             var waiter: IoWaitQueue.Waiter? = null
             val entry = lock.withLock {
                 val entry = table.getOrPut(id, ::Entry)
-                if (requested == null || entry.conflict(file, requested) == null) {
-                    entry.replace(file, range, mode)
+                if (requested == null || entry.conflict(owner, requested) == null) {
+                    entry.replace(owner, range, mode)
                     entry.waiters.wakeAll()
                     if (entry.owners.isEmpty() && entry.pending == 0) table.remove(id)
                     return VfsResult.Ok(Unit)
@@ -114,11 +125,12 @@ internal class FileLocks {
         }
     }
 
-    fun release(file: OpenFileDescription) = lock.withLock {
+    fun release(file: OpenFileDescription, processId: Int? = null) = lock.withLock {
+        val owner = processId ?: file
         val id = file.inode.id
         for (table in tables) {
             val entry = table[id] ?: continue
-            if (entry.owners.remove(file) != null) entry.waiters.wakeAll()
+            if (entry.owners.remove(owner) != null) entry.waiters.wakeAll()
             if (entry.owners.isEmpty() && entry.pending == 0) table.remove(id)
         }
     }
