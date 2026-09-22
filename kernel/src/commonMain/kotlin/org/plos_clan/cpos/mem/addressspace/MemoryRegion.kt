@@ -20,6 +20,12 @@ enum class MemoryRegionType(val userMutable: Boolean = true) {
     MMIO,
 }
 
+enum class MemoryLock {
+    NONE,
+    EAGER,
+    ON_FAULT,
+}
+
 data class MemoryRegion(
     var start: ULong,
     var end: ULong,
@@ -29,6 +35,7 @@ data class MemoryRegion(
     val type: MemoryRegionType = MemoryRegionType.ANONYMOUS,
     var offset: ULong = 0uL,
     val shared: Boolean = false,
+    var memoryLock: MemoryLock = MemoryLock.NONE,
     internal val backing: MemoryRegionBacking? = null,
     internal val sharedIdentity: Any? = null,
     internal val identity: Any = Any(),
@@ -53,6 +60,7 @@ enum class PageFaultResult {
     ACCESS_DENIED,
     OUT_OF_MEMORY,
     IO_ERROR,
+    INTERRUPTED,
     MAPPING_FAILED,
 }
 
@@ -69,6 +77,8 @@ data class MemoryMapRequest(
     val name: String? = null,
     val backing: MemoryRegionBacking? = null,
     val populate: Boolean = false,
+    val memoryLock: MemoryLock = MemoryLock.NONE,
+    val lockedMemoryLimit: ULong = ULong.MAX_VALUE,
 )
 
 @OptIn(ExperimentalAtomicApi::class)

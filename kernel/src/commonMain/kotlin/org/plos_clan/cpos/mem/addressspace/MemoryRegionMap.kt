@@ -22,6 +22,18 @@ internal class MemoryRegionMap(
     val used: ULong
         get() = entries.fold(0uL) { total, region -> total + region.length }
 
+    fun lockedBytesOutside(start: ULong = 0uL, end: ULong = 0uL): ULong {
+        var bytes = 0uL
+        for (region in entries) {
+            if (region.memoryLock == MemoryLock.NONE) continue
+            val overlapStart = maxOf(start, region.start)
+            val overlapEnd = minOf(end, region.end)
+            val overlap = overlapEnd - minOf(overlapStart, overlapEnd)
+            bytes += region.length - overlap
+        }
+        return bytes
+    }
+
     fun snapshot(): List<MemoryRegion> = List(entries.size) { entries[it].copy() }
 
     fun sharedRegions(): List<MemoryRegion> = entries.filter(MemoryRegion::shared)
@@ -36,7 +48,7 @@ internal class MemoryRegionMap(
             }
             retained += backing
         }
-        target.entries += entries.map(MemoryRegion::copy)
+        target.entries += entries.map { it.copy(memoryLock = MemoryLock.NONE) }
     }
 
     fun removeAll(): List<MemoryRegionBacking> {
@@ -183,6 +195,7 @@ internal class MemoryRegionMap(
     private fun canMerge(left: MemoryRegion, right: MemoryRegion): Boolean =
         left.end == right.start &&
             left.access == right.access &&
+            left.memoryLock == right.memoryLock &&
             left.maximumAccess == right.maximumAccess &&
             left.name == right.name &&
             left.type == right.type &&

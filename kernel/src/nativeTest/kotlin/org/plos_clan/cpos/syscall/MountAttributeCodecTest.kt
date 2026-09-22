@@ -21,7 +21,7 @@ class MountAttributeCodecTest {
         assertTrue(MountFlag.NO_ATIME in flags)
         assertFalse(MountFlag.NO_EXEC in flags)
         assertNull(LinuxMountChange.decode(0x5021uL))
-        assertNull(LinuxMountChange.decode(0x21uL))
+        assertNotNull(LinuxMountChange.decode(0x21uL))
     }
 
     @Test

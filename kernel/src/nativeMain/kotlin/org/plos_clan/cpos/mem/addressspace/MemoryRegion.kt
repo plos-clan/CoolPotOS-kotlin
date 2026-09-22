@@ -1,6 +1,11 @@
 package org.plos_clan.cpos.mem.addressspace
 
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsOperationContext
+import org.plos_clan.cpos.mem.ByteArrayBuffer
+import org.plos_clan.cpos.mem.PageCacheSource
+import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.mem.PageCache
 import org.plos_clan.cpos.mem.PageCacheAcquireResult
 
@@ -17,6 +22,23 @@ abstract class FileRegionBacking(
 ) : CachedRegionBacking() {
     init {
         check(file.retain())
+    }
+
+    protected fun readFile(
+        offset: ULong,
+        destination: ByteArray,
+        start: Int = 0,
+        count: Int = destination.size - start,
+    ): Int {
+        val caller = ProcessManager.currentProcess()?.vfsOperationContext
+            ?: VfsOperationContext.KERNEL
+        val buffer = ByteArrayBuffer(destination)
+        val result = file.readAt(caller, offset, buffer, start, count)
+        return when {
+            result.isSuccess -> result.bytesTransferred
+            result.error == VfsError.INTERRUPTED -> PageCacheSource.READ_INTERRUPTED
+            else -> PageCacheSource.READ_ERROR
+        }
     }
 
     override fun close() = file.release()

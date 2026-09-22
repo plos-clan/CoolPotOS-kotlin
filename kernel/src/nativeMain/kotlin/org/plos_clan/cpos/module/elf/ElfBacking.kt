@@ -1,13 +1,9 @@
 package org.plos_clan.cpos.module.elf
 
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
-import org.plos_clan.cpos.fs.vfs.VfsOperationContext
-import org.plos_clan.cpos.mem.ByteArrayBuffer
+import org.plos_clan.cpos.mem.PageCacheSource
 import org.plos_clan.cpos.mem.addressspace.FileRegionBacking
 import org.plos_clan.cpos.module.elf.ElfLayout.checkedAdd
-import org.plos_clan.cpos.tasks.ProcessManager
-
-private const val EIO = 5
 
 class ElfBacking(
     file: OpenFileDescription,
@@ -19,23 +15,20 @@ class ElfBacking(
     )
 
     override fun read(offset: ULong, destination: ByteArray): Int {
-        val end = checkedAdd(offset, destination.size.toULong()) ?: return -EIO
+        val end = checkedAdd(offset, destination.size.toULong())
+            ?: return PageCacheSource.READ_ERROR
         for (segment in segments) {
-            val fileEnd = checkedAdd(segment.start, segment.header.fileSize) ?: return -EIO
+            val fileEnd = checkedAdd(segment.start, segment.header.fileSize)
+                ?: return PageCacheSource.READ_ERROR
             val start = maxOf(offset, segment.start)
             val segmentEnd = minOf(end, fileEnd)
             if (start >= segmentEnd) continue
             val count = (segmentEnd - start).toInt()
-            val caller = ProcessManager.currentProcess()?.vfsOperationContext
-                ?: VfsOperationContext.KERNEL
-            val result = file.readAt(
-                caller = caller,
-                fileOffset = segment.header.fileOffset + (start - segment.start),
-                destination = ByteArrayBuffer(destination),
-                offset = (start - offset).toInt(),
-                count = count,
-            )
-            if (!result.isSuccess || result.bytesTransferred != count) return -EIO
+            val fileOffset = segment.header.fileOffset + (start - segment.start)
+            val bufferOffset = (start - offset).toInt()
+            val read = readFile(fileOffset, destination, bufferOffset, count)
+            if (read < 0) return read
+            if (read != count) return PageCacheSource.READ_ERROR
         }
         return destination.size
     }

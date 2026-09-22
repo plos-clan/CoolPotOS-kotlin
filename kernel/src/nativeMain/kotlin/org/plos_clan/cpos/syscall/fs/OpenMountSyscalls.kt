@@ -88,7 +88,6 @@ internal object LinuxMountChange {
             if (bits and allowed.inv() != 0uL) return null
             return MountAttributeUpdate(MountFlags.NONE, MountFlags.NONE, propagation)
         }
-        if (bits and MS_BIND == 0uL) return null
         val allowed = MS_REMOUNT or MS_BIND or MS_SILENT or mutableFlags.storage.toUInt().toULong()
         if (bits and allowed.inv() != 0uL) return null
         val flags = MountFlags.fromBits(bits and mutableFlags.storage.toUInt().toULong()) ?: return null
@@ -332,15 +331,24 @@ internal fun mount(regs: PtraceRegisters, process: Process): Long {
     if (rawFlags and (MS_PROPAGATION or MS_REMOUNT) != 0uL) {
         val attributes = LinuxMountChange.decode(rawFlags) ?: return errno(Errno.EINVAL)
         val pathname = VfsPathname.fromBytes(target)
-        val path = when (val result = FileSystemManager.vfs.resolve(
-            process.vfsOperationContext, context, pathname,
-        )) {
-            is VfsResult.Ok -> result.value
-            is VfsResult.Err -> return errno(result.error.errno)
+        val caller = process.vfsOperationContext
+        val resolved = FileSystemManager.vfs.resolve(caller, context, pathname)
+        val path = when (resolved) {
+            is VfsResult.Ok -> resolved.value
+            is VfsResult.Err -> return errno(resolved.error.errno)
         }
-        return when (val result = FileSystemManager.vfs.setMountAttributes(
-            context, path, attributes, rawFlags and MS_REC != 0uL,
-        )) {
+        val recursive = rawFlags and MS_REC != 0uL
+        val remount = rawFlags and MS_REMOUNT != 0uL && rawFlags and MS_BIND == 0uL
+        val result = if (remount) {
+            val dataAddress = regs[PtraceRegisters.IDX_R8]
+            val data = if (dataAddress == 0uL) null else copyPath(process, dataAddress)
+                ?: return errno(Errno.EFAULT)
+            if (data != null && data.isNotEmpty()) return errno(Errno.EOPNOTSUPP)
+            FileSystemManager.vfs.remount(caller, context, path, attributes)
+        } else {
+            FileSystemManager.vfs.setMountAttributes(context, path, attributes, recursive)
+        }
+        return when (result) {
             is VfsResult.Ok -> 0L
             is VfsResult.Err -> errno(result.error.errno)
         }

@@ -49,4 +49,33 @@ class MountAccessTest {
             context.release()
         }
     }
+
+    @Test
+    fun filesystemRemountSharesReadOnlyStateAcrossBindMounts() {
+        val vfs = Vfs()
+        val caller = VfsOperationContext.KERNEL
+        assertIs<VfsResult.Ok<Unit>>(vfs.register(Tmpfs))
+        val context = assertIs<VfsResult.Ok<FileSystemContext>>(vfs.createContext(Tmpfs.name)).value
+        try {
+            val rootName = VfsPathname.fromString("/")
+            val viewName = VfsPathname.fromString("/view")
+            val mode = FileMode(0x1edu)
+            val directory = NodeCreation(NodeKind.Directory, mode)
+            assertIs<VfsResult.Ok<*>>(vfs.createNode(caller, context, viewName, directory))
+            assertIs<VfsResult.Ok<Unit>>(vfs.bindMount(caller, context, rootName, viewName))
+            val root = assertIs<VfsResult.Ok<VfsPath>>(vfs.resolve(caller, context, rootName)).value
+            val view = assertIs<VfsResult.Ok<VfsPath>>(vfs.resolve(caller, context, viewName)).value
+            val readOnly = MountFlags.of(MountFlag.READ_ONLY)
+            val lock = MountAttributeUpdate(readOnly, MountFlags.NONE)
+            assertIs<VfsResult.Ok<Unit>>(vfs.remount(caller, context, root, lock))
+            val denied = VfsResult.Err(VfsError.READ_ONLY)
+            val write = AccessPermissions.WRITE
+            assertEquals(denied, vfs.access(caller, view, write))
+            val unlock = MountAttributeUpdate(MountFlags.NONE, readOnly)
+            assertIs<VfsResult.Ok<Unit>>(vfs.remount(caller, context, root, unlock))
+            assertIs<VfsResult.Ok<Unit>>(vfs.access(caller, view, write))
+        } finally {
+            context.release()
+        }
+    }
 }

@@ -266,9 +266,10 @@ than polling in the bootstrap loop.
 
 `./gradlew buildImage` creates `kernel/build/CoolPotOS.img`, a sparse raw GPT disk
 with FAT32 ESP, read-only EROFS root, and an ext4 persistent partition. The guest
-uses `systemd-fsck@.service` before mounting the persistent filesystem through
-fuse2fs at `/run/overlay`, then combines its upper directory with EROFS through
-fuse-overlayfs. `/overlay` links to `/run/overlay`. Partition selection uses
+runs `systemd-fsck` as the storage service's startup prerequisite before mounting
+the persistent filesystem through fuse2fs at `/run/overlay`, then combines its
+upper directory with EROFS through fuse-overlayfs.
+`/overlay` links to `/run/overlay`. Partition selection uses
 PARTUUID; drivers share the same partition and buffer-cache implementation.
 
 `./gradlew run -PstorageTransport=bot` attaches the system disk through USB BOT.

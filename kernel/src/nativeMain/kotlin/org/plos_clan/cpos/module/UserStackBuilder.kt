@@ -5,6 +5,7 @@ package org.plos_clan.cpos.module
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.addressspace.AddressSpace
+import org.plos_clan.cpos.mem.addressspace.ProcessArguments
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_WRITABLE
 import org.plos_clan.cpos.mem.addressspace.MemoryRegion
@@ -158,6 +159,14 @@ object UserStackBuilder {
             rollback(addressSpace, stackStart, stackSize)
             return null
         }
+        val environmentStart = environmentAddresses.firstOrNull() ?: execfnAddress
+        val argumentStart = argumentAddresses.firstOrNull() ?: environmentStart
+        addressSpace.arguments = ProcessArguments(
+            start = argumentStart,
+            end = environmentStart,
+            environmentStart = environmentStart,
+            environmentEnd = execfnAddress,
+        )
         return UserStackResult(
             stackPointer = stackPointer,
             stackStart = stackStart,

@@ -18,6 +18,7 @@ enum class CapEnum(val id: Int) {
     NET_BIND_SERVICE(10),
     NET_ADMIN(12),
     NET_RAW(13),
+    IPC_LOCK(14),
     SYS_PTRACE(19),
     SYS_ADMIN(21),
     SYS_NICE(23),

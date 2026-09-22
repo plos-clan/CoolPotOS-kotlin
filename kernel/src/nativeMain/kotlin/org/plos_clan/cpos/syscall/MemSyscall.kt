@@ -10,6 +10,7 @@ import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.MountFlag
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_ACCESS_MASK
+import org.plos_clan.cpos.mem.addressspace.MemoryLock
 import org.plos_clan.cpos.mem.addressspace.MemoryMapRequest
 import org.plos_clan.cpos.mem.addressspace.MemoryMapResult
 import org.plos_clan.cpos.mem.addressspace.MemoryRegionType
@@ -113,6 +114,11 @@ internal fun mmap(regs: PtraceRegisters, process: Process): Long {
 
     val shared = mapType != MAP_PRIVATE
     val fixed = (flags and (MAP_FIXED or MAP_FIXED_NOREPLACE)) != 0uL
+    val memoryLock = if (flags and MAP_LOCKED == 0uL) MemoryLock.NONE else MemoryLock.EAGER
+    val lockedMemoryLimit = MemoryLockSyscalls.limit(process)
+    val lockDenied = memoryLock != MemoryLock.NONE && lockedMemoryLimit == 0uL
+    if (lockDenied) return errno(Errno.EPERM)
+    val populate = flags and MAP_POPULATE != 0uL && flags and MAP_NONBLOCK == 0uL
     val noReplace = (flags and MAP_FIXED_NOREPLACE) != 0uL
     val access = protection and SUPPORTED_PROT
     if (fixed && !hint.isPageAligned()) {
@@ -128,7 +134,9 @@ internal fun mmap(regs: PtraceRegisters, process: Process): Long {
             noReplace = noReplace,
             shared = shared,
             type = MemoryRegionType.ANONYMOUS,
-            populate = (flags and (MAP_POPULATE or MAP_LOCKED)) != 0uL,
+            populate = populate,
+            memoryLock = memoryLock,
+            lockedMemoryLimit = lockedMemoryLimit,
         )
         return mmapResult(process.addressSpace.map(request))
     }
@@ -178,7 +186,9 @@ internal fun mmap(regs: PtraceRegisters, process: Process): Long {
                 type = MemoryRegionType.FILE,
                 offset = offset,
                 backing = backing,
-                populate = (flags and (MAP_POPULATE or MAP_LOCKED)) != 0uL,
+                populate = populate,
+                memoryLock = memoryLock,
+                lockedMemoryLimit = lockedMemoryLimit,
             )
             val result = process.addressSpace.map(request)
             if (result is MemoryMapResult.Ok) file.recordAccess(process.vfsOperationContext)

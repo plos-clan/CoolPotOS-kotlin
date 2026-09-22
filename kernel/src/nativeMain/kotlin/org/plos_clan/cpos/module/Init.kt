@@ -79,7 +79,7 @@ object Init {
         }
         process.credentials.commitExec(image.execution)
         process.dumpable = !image.execution.privileged
-        process.installExecutable(image.executablePath, image.arguments)
+        process.installExecutable(image.executablePath)
 
         initializeStdio(process)
 

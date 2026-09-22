@@ -3,11 +3,13 @@ Description=Persistent root storage on %f
 DefaultDependencies=no
 IgnoreOnIsolate=yes
 SurviveFinalKillSignal=yes
-Requires=systemd-fsck@%i.service
-After=systemd-fsck@%i.service
+BindsTo=%i.device
+After=%i.device
 
 [Service]
 Type=forking
+Slice=system.slice
+ExecStartPre=/usr/lib/systemd/systemd-fsck %f
 RuntimeDirectory=overlay
 RuntimeDirectoryPreserve=yes
 ExecStart=/usr/bin/fuse2fs -o rw,allow_other %f /run/overlay

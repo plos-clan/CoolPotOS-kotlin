@@ -170,6 +170,30 @@ internal class VfsMountManager(
         }
     }
 
+    fun remount(
+        caller: VfsOperationContext,
+        context: FileSystemContext,
+        target: VfsPath,
+        attributes: MountAttributeUpdate,
+    ): VfsResult<Unit> {
+        val mount = target.mount
+        if (target.dentry !== mount.root) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        if (!mount.retain()) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        return try {
+            val superBlock = mount.superBlock
+            val synchronized = superBlock.backend.sync(caller)
+            if (synchronized is VfsResult.Err) return synchronized
+            val flags = attributes.applyTo(mount.flags)
+            val readOnly = MountFlag.READ_ONLY in flags
+            val update = MountFlagUpdate.NONE.with(MountFlag.READ_ONLY, readOnly)
+            superBlock.setAttributes(update)
+            context.namespace.setAttributes(mount, attributes, recursive = false)
+            VfsResult.Ok(Unit)
+        } finally {
+            mount.release()
+        }
+    }
+
     private fun findFileSystem(name: String): FileSystemType? {
         lock.withLock { fileSystems[name] }?.let { return it }
         val candidates = lock.withLock { fileSystems.values.toList() }

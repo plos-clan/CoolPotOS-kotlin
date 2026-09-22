@@ -25,7 +25,8 @@ import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.hasBit
 
 val Process.comm: String
-    get() = name.substringAfterLast('/').ifEmpty { name }.take(MAX_COMM_LENGTH)
+    get() = threads.firstOrNull { it.id == id }?.name?.take(MAX_COMM_LENGTH)
+        ?: name.substringAfterLast('/').take(MAX_COMM_LENGTH)
 
 val Process.isRunnable: Boolean
     get() = state.canReceiveSignals && threads.any {
@@ -45,11 +46,20 @@ internal enum class ProcessFile(val fileName: String) {
     OOM_SCORE_ADJUSTMENT("oom_score_adj"),
     ;
 
-    fun create(fileSystem: ProcfsInstance, superBlock: SuperBlock, target: PidHandle): Inode {
+    fun create(
+        fileSystem: ProcfsInstance,
+        superBlock: SuperBlock,
+        target: PidHandle,
+    ): Inode {
         val process = target.thread.process
         val id = ProcInode.process(process.id, ordinal.toUInt() + 1u)
+        if (this == COMMAND_LINE) {
+            val backend = CommandLineFile(process)
+            return fileSystem.file(superBlock, id, process, backend = backend)
+        }
         if (this == MOUNTS || this == MOUNT_INFO) {
-            return fileSystem.file(superBlock, id, process, backend = MountsFile(process, this == MOUNT_INFO))
+            val backend = MountsFile(process, this == MOUNT_INFO)
+            return fileSystem.file(superBlock, id, process, backend = backend)
         }
         val write = if (this == OOM_SCORE_ADJUSTMENT) {
             { caller: VfsOperationContext, input: ByteArray -> update(process, caller, input) }
@@ -68,7 +78,7 @@ internal enum class ProcessFile(val fileName: String) {
     }
 
     private fun render(process: Process): ByteArray = when (this) {
-        COMMAND_LINE -> process.commandLine.copyOf()
+        COMMAND_LINE -> error("Command lines require access to process memory")
         COMMAND_NAME -> "${process.comm}\n".encodeToByteArray()
         MEMORY -> {
             val pages = process.addressSpace.used / PAGE_SIZE_BYTES
@@ -107,6 +117,7 @@ fun Process.stat(): String {
     val terminal = TtyManager.processTerminal(this)
     val membership = this.membership
     val nice = threads.firstOrNull()?.priority?.value ?: 0
+    val arguments = addressSpace.arguments
     val fields = buildList {
         add(stateCode().toString())
         add(parentId.toString())
@@ -123,7 +134,12 @@ fun Process.stat(): String {
         add(addressSpace.used.toString())
         add("0")
         add(resourceLimits.get(ProcessResource.RSS).soft.toString())
-        repeat(27) { add("0") }
+        repeat(22) { add("0") }
+        add(arguments.start.toString())
+        add(arguments.end.toString())
+        add(arguments.environmentStart.toString())
+        add(arguments.environmentEnd.toString())
+        add(exitStatus.toString())
     }
     return "$id ($comm) ${fields.joinToString(" ")}\n"
 }
@@ -142,6 +158,7 @@ fun Process.status(): String {
     return buildString {
         append("Name:\t").append(comm).append('\n')
         append("State:\t").append(stateCode).append(" (").append(stateName).append(")\n")
+        append("VmLck:\t").append(addressSpace.lockedMemory / 1024uL).append(" kB\n")
         append("Tgid:\t").append(id).append('\n')
         append("Pid:\t").append(id).append('\n')
         append("PPid:\t").append(parentId).append('\n')

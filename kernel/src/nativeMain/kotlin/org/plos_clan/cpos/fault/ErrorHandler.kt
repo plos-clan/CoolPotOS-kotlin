@@ -191,8 +191,13 @@ fun pageFault(
         if (resolution == PageFaultResult.RESOLVED) {
             return
         }
-        println("PageFault: demand paging failed: $resolution")
     }
+    if (cameFromUser && resolution == PageFaultResult.INTERRUPTED) {
+        val thread = ProcessManager.currentThread() ?: return
+        if (thread.hasPendingSignal()) SignalGateway.redirectPending(interruptFrame, thread)
+        return
+    }
+    if (canResolve) println("PageFault: demand paging failed: $resolution")
     val info = if (resolution == PageFaultResult.IO_ERROR) {
         SignalInfo(
             signal = Signal.BUS,

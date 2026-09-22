@@ -251,7 +251,7 @@ class Thread internal constructor(
     parentThread: Thread? = null,
     internal val nativeTask: NativeTask,
     internal val signals: ThreadSignalState = process.signals.newThread(),
-    var name: String = "",
+    var name: String = process.name,
     val capabilities: CapabilityState = CapabilityState(),
     internal val cgroup: CgroupHierarchy.Task? = null,
     internal val pidFileIdentity: AnonymousFileIdentity,
@@ -387,9 +387,9 @@ class Process internal constructor(
     val credentials: Credentials = Credentials(),
     var fileCreationMask: UInt = 0x12u,
     var dumpable: Boolean = true,
-    val parentId: Int = 0,
+    parentId: Int = 0,
     val startTimeTicks: ULong,
-    internal val terminationSignal: Signal? = Signal.CHILD,
+    terminationSignal: Signal? = Signal.CHILD,
     vforkParent: Thread? = null,
 ) {
     private data class Lifecycle(
@@ -409,6 +409,22 @@ class Process internal constructor(
             fileCreationMask = fileCreationMask,
             privileged = credentials.userIds.effective == 0,
         )
+
+    private val parentIdentity = AtomicInt(parentId)
+    var parentId: Int
+        get() = parentIdentity.load()
+        internal set(value) = parentIdentity.store(value)
+    private val subreaper = AtomicInt(0)
+    internal var childSubreaper: Boolean
+        get() = subreaper.load() != 0
+        set(value) = subreaper.store(if (value) 1 else 0)
+    internal var terminationSignal = terminationSignal
+        private set
+
+    internal fun reparent(parent: Process) {
+        parentId = parent.id
+        terminationSignal = Signal.CHILD
+    }
 
     private val vforkCompletion = vforkParent?.let(::VforkCompletion)
     var name = name
@@ -435,8 +451,6 @@ class Process internal constructor(
         get() = lifecycle.load().threads
     internal val cpuTimeNanos: ULong
         get() = lifecycle.load().let { it.exitedCpuTimeNanos + it.threads.sumOf(Thread::cpuTimeNanos) }
-    var commandLine: ByteArray = name.encodeToByteArray() + byteArrayOf(0)
-        internal set
     internal val state: ProcessState
         get() = lifecycle.load().state
     val resourceLimits = ProcessLimits()
@@ -529,13 +543,8 @@ class Process internal constructor(
         }
     }
 
-    internal val requestedExitStatus: Int
-        get() = lifecycle.load().let { lifecycle ->
-            check(lifecycle.state == ProcessState.EXITING && lifecycle.liveThreads == 0) {
-                "process $id is not ready for reaping"
-            }
-            lifecycle.waitStatus
-        }
+    internal val exitStatus: Int
+        get() = lifecycle.load().waitStatus
 
     internal fun releaseOwnedResources() {
         val fileSystemContext = context
@@ -567,13 +576,12 @@ class Process internal constructor(
         signals.inherit(parent.signals)
         resourceLimits.inherit(parent.resourceLimits)
         oomScoreAdjustment.inherit(parent.oomScoreAdjustment)
-        commandLine = parent.commandLine.copyOf()
     }
 
-    internal fun installExecutable(path: String, arguments: List<String>) {
+    internal fun installExecutable(path: String) {
         name = path.substringAfterLast('/').ifEmpty { path }
-        commandLine = arguments.joinToString(separator = "\u0000", postfix = "\u0000")
-            .encodeToByteArray()
+        val current = ProcessManager.currentThread() ?: return
+        if (current.process === this) current.name = name
     }
 
     internal fun awaitVfork() = vforkCompletion?.await()
@@ -586,7 +594,7 @@ private var currentThreadContext: Thread? = null
 
 object ProcessManager {
     private val nextTaskId = AtomicInt(2)
-    private val processes = mutableListOf<Process>()
+    private val processes = mutableMapOf<Int, Process>()
     private val processLock = IrqSpinLock()
     private val threadTable = mutableMapOf<Int, Thread>()
     private val parentDeathSubscribers = mutableMapOf<Thread, MutableSet<Thread>>()
@@ -721,6 +729,7 @@ object ProcessManager {
                 pidHandle = pidHandle,
                 nice = nice,
             ) {
+                if (creator != null && !creator.process.isKernelProcess) it.name = creator.name
                 if (registers == null) it.initializeUserContext(entryPoint, stackPointer, fsBase)
                 else it.initializeUserContext(registers, stackPointer, fsBase)
             }
@@ -737,7 +746,7 @@ object ProcessManager {
 
     fun discardUserProcess(process: Process): Boolean {
         if (process.isKernelProcess || process.threads.isNotEmpty()) return false
-        val removed = processLock.withLock { processes.remove(process) }
+        val removed = processLock.withLock { processes.remove(process.id) === process }
         if (!removed) return false
 
         if (process.id == process.sessionId) process.controllingTerminal?.hangup()
@@ -765,7 +774,7 @@ object ProcessManager {
     }
 
     fun findProcess(pid: Int): Process? {
-        return processLock.withLock { processes.firstOrNull { it.id == pid } }
+        return processLock.withLock { processes[pid] }
     }
 
     fun findThread(tid: Int): Thread? = threadTableLock.withLock { threadTable[tid] }
@@ -831,18 +840,18 @@ object ProcessManager {
     }
 
     fun snapshotProcesses(): List<Process> = processLock.withLock {
-        processes.filterNot(Process::isKernelProcess).sortedBy(Process::id)
+        processes.values.filterNot(Process::isKernelProcess).sortedBy(Process::id)
     }
 
     fun processesInGroup(groupId: Int): List<Process> = processLock.withLock {
-        processes.filter { !it.isKernelProcess && it.processGroupId == groupId }
+        processes.values.filter { !it.isKernelProcess && it.processGroupId == groupId }
     }
 
     fun childrenOf(parentId: Int): List<Process> =
-        processLock.withLock { processes.filter { it.parentId == parentId } }
+        processLock.withLock { processes.values.filter { it.parentId == parentId } }
 
     internal fun createSession(process: Process): Boolean = processLock.withLock {
-        if (processes.any { it.processGroupId == process.id }) {
+        if (processes.values.any { it.processGroupId == process.id }) {
             return@withLock false
         }
         process.establishSession()
@@ -854,7 +863,7 @@ object ProcessManager {
         pid: Int,
         requestedGroup: Int,
     ): ProcessGroupResult = processLock.withLock {
-        val target = if (pid == 0) caller else processes.firstOrNull { it.id == pid }
+        val target = if (pid == 0) caller else processes[pid]
             ?: return@withLock ProcessGroupResult.NO_SUCH_PROCESS
         if (target !== caller && target.parentId != caller.id) {
             return@withLock ProcessGroupResult.NO_SUCH_PROCESS
@@ -864,7 +873,7 @@ object ProcessManager {
         }
 
         val group = requestedGroup.takeUnless { it == 0 } ?: target.id
-        val groupExists = group == target.id || processes.any {
+        val groupExists = group == target.id || processes.values.any {
             it.sessionId == target.sessionId && it.processGroupId == group
         }
         if (!groupExists) return@withLock ProcessGroupResult.NOT_PERMITTED
@@ -873,33 +882,66 @@ object ProcessManager {
         ProcessGroupResult.SUCCESS
     }
 
+    private class ExitNotification(
+        val parent: Process,
+        val event: ChildWaitEvent,
+        val signal: Signal?,
+        val autoReap: Boolean,
+    ) {
+        fun deliver() {
+            if (signal != null) {
+                val info = event.signalInfo(signal)
+                SignalRouter.sendProcess(null, parent, info)
+            }
+            if (autoReap) reapChild(parent.id, event.child)
+        }
+    }
+
     private fun finishExited(process: Process) {
-        val waitStatus = process.requestedExitStatus
         process.alarm.replace(0u)
         process.signals.pending.discard(ULong.MAX_VALUE)
         if (process.id == process.sessionId) process.controllingTerminal?.hangup()
         process.releaseOwnedResources()
-        val target = processLock.withLock { processes.firstOrNull { it.id == process.parentId } }
-        val event = ChildWaitEvent(process, ChildEventKind.EXITED, waitStatus)
-        val signal = process.terminationSignal
-        val childAction = if (signal == Signal.CHILD) target?.signals?.action(Signal.CHILD) else null
-        val autoReap = childAction?.let { action ->
-            action.isIgnored || action.has(SignalActionFlag.NO_CHILD_WAIT)
-        } == true
-        processLock.withLock {
+        val notifications = processLock.withLock {
+            val reaper = findReaper(process)
+            val pending = ArrayList<ExitNotification>()
+            for (child in processes.values) {
+                if (child.parentId != process.id || reaper == null) continue
+                process.childEvents.discard(child)
+                child.reparent(reaper)
+                if (child.state != ProcessState.ZOMBIE) continue
+                val notification = prepareExitNotification(child) ?: continue
+                pending += notification
+            }
             check(process.transitionState(ProcessState.EXITING, ProcessState.ZOMBIE))
-            if (!autoReap) target?.childEvents?.publish(event)
+            prepareExitNotification(process)?.let(pending::add)
+            pending
         }
         process.completeVfork()
-        if (target == null || signal == null) return
-        if (childAction?.isIgnored != true) {
-            SignalRouter.sendProcess(
-                sender = null,
-                target = target,
-                info = event.signalInfo(signal),
-            )
+        notifications.forEach(ExitNotification::deliver)
+    }
+
+    private fun findReaper(process: Process): Process? {
+        var ancestorId = process.parentId
+        while (ancestorId != 0) {
+            val ancestor = processes[ancestorId] ?: break
+            if (ancestor.childSubreaper && ancestor.state.canReceiveSignals) return ancestor
+            ancestorId = ancestor.parentId
         }
-        if (autoReap) reapChild(target.id, process)
+        return processes[1]?.takeIf { it !== process && it.state.canReceiveSignals }
+    }
+
+    private fun prepareExitNotification(process: Process): ExitNotification? {
+        val parent = processes[process.parentId] ?: return null
+        val event = ChildWaitEvent(process, ChildEventKind.EXITED, process.exitStatus)
+        val signal = process.terminationSignal
+        val action = if (signal == Signal.CHILD) parent.signals.action(Signal.CHILD) else null
+        val ignored = action?.isIgnored == true
+        val noChildWait = action?.has(SignalActionFlag.NO_CHILD_WAIT) == true
+        val autoReap = ignored || noChildWait
+        if (!autoReap) parent.childEvents.publish(event)
+        val notification = signal.takeUnless { ignored }
+        return ExitNotification(parent, event, notification, autoReap)
     }
 
     internal fun markStopped(process: Process, signal: Signal) = publishChildState(
@@ -917,11 +959,12 @@ object ProcessManager {
     fun reapChild(parentId: Int, child: Process): Boolean {
         var parent: Process? = null
         val reaped = processLock.withLock {
-            val removable = child.parentId == parentId &&
-                    child.state == ProcessState.ZOMBIE && processes.remove(child)
-            if (!removable) return@withLock false
+            val waitable = child.parentId == parentId && child.state == ProcessState.ZOMBIE
+            if (!waitable) return@withLock false
+            val removed = processes.remove(child.id)
+            if (removed !== child) return@withLock false
             check(child.transitionState(ProcessState.ZOMBIE, ProcessState.DEAD))
-            parent = processes.firstOrNull { it.id == parentId }
+            parent = processes[parentId]
             true
         }
         if (reaped) {
@@ -940,7 +983,7 @@ object ProcessManager {
         waitStatus: Int,
     ) {
         val parent = processLock.withLock {
-            processes.firstOrNull { it.id == process.parentId }
+            processes[process.parentId]
         } ?: return
         val event = ChildWaitEvent(process, kind, waitStatus)
         parent.childEvents.publish(event)
@@ -975,7 +1018,10 @@ object ProcessManager {
         vforkParent = vforkParent,
     ).also { created ->
         inherit?.let(created::inherit)
-        processLock.withLock { processes += created }
+        processLock.withLock {
+            val previous = processes.put(created.id, created)
+            check(previous == null)
+        }
     }
 
     private fun newThread(

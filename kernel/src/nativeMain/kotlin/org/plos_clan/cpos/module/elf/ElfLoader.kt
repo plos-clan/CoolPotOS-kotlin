@@ -72,7 +72,6 @@ data class UserProcessImage(
     val entryPoint: ULong,
     val stackPointer: ULong,
     val executablePath: String,
-    val arguments: List<String>,
     val execution: Credentials.Execution,
 )
 
@@ -199,7 +198,6 @@ object ElfLoader {
                     entryPoint = interpreter?.entryPoint ?: executable.entryPoint,
                     stackPointer = stack.stackPointer,
                     executablePath = resolved.path,
-                    arguments = resolved.arguments,
                     execution = execution,
                 ),
             )

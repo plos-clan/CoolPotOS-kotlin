@@ -8,6 +8,7 @@ After=run-lower.mount root-store@%i.service
 
 [Service]
 Type=forking
+Slice=system.slice
 ExecStart=/usr/bin/fuse-overlayfs \
     -o lowerdir=/run/lower,upperdir=/run/overlay/upper,workdir=/run/overlay/work \
     /sysroot

@@ -8,6 +8,7 @@ import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.fs.vfs.PidFd
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.mem.addressspace.ProcessArguments
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.module.elf.ElfLoader
 import org.plos_clan.cpos.syscall.Syscall.copyWordToUser
@@ -63,6 +64,9 @@ private const val PR_CAPBSET_READ = 23UL
 private const val PR_CAPBSET_DROP = 24UL
 private const val PR_GET_SECUREBITS = 27UL
 private const val PR_SET_SECUREBITS = 28UL
+private const val PR_SET_MM = 35uL
+private const val PR_SET_CHILD_SUBREAPER = 36uL
+private const val PR_GET_CHILD_SUBREAPER = 37uL
 private const val PR_SET_NO_NEW_PRIVS = 38UL
 private const val PR_GET_NO_NEW_PRIVS = 39UL
 private const val PR_CAP_AMBIENT = 47UL
@@ -393,6 +397,30 @@ internal fun prctl(regs: PtraceRegisters, process: Process): Long {
             else errno(Errno.EFAULT)
         }
 
+        PR_SET_MM -> {
+            if (regs[PtraceRegisters.IDX_R10] != 0uL || regs[PtraceRegisters.IDX_R8] != 0uL) {
+                return errno(Errno.EINVAL)
+            }
+            if (!capabilities.hasEffective(CapEnum.SYS_RESOURCE)) return errno(Errno.EPERM)
+            val boundaries = ProcessArguments.Boundary.entries
+            val boundary = boundaries.firstOrNull { it.option == argument }
+                ?: return errno(Errno.EINVAL)
+            process.addressSpace.relocateArguments(boundary, third).toLong()
+        }
+
+        PR_SET_CHILD_SUBREAPER -> {
+            process.childSubreaper = argument != 0uL
+            0L
+        }
+
+        PR_GET_CHILD_SUBREAPER -> {
+            val output = ByteArray(Int.SIZE_BYTES)
+            val buffer = LittleEndianBuffer(output)
+            buffer.writeU32(0, if (process.childSubreaper) 1u else 0u)
+            val memory = UserMemory(process.addressSpace, argument)
+            if (memory.copyToUser(output)) 0L else errno(Errno.EFAULT)
+        }
+
         PR_GET_DUMPABLE -> if (process.dumpable) 1L else 0L
 
         PR_SET_DUMPABLE -> when {
@@ -599,7 +627,7 @@ internal fun execve(regs: PtraceRegisters, process: Process): Long {
     }
     thread.commitExecution(image.execution)
     process.dumpable = !image.execution.privileged
-    process.installExecutable(image.executablePath, image.arguments)
+    process.installExecutable(image.executablePath)
     process.fdTable.closeOnExec(process.vfsOperationContext)
     process.signals.resetForExec()
     thread.signals.replaceStack(SignalStack.DISABLED)

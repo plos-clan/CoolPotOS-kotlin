@@ -26,7 +26,9 @@ import kotlin.concurrent.atomics.ExperimentalAtomicApi
 private const val MMIO_VIRTUAL_BASE = 0xffff_ff00_0000_0000uL
 private const val MMIO_VIRTUAL_END = 0xffff_ff80_0000_0000uL
 
+private const val EINTR = 4
 private const val EIO = 5
+private const val EAGAIN = 11
 private const val ENOMEM = 12
 private const val EACCES = 13
 private const val EFAULT = 14
@@ -38,12 +40,18 @@ class AddressSpace internal constructor(
     private val end: ULong,
     private val user: Boolean,
 ) : MemoryRegionOwner {
+    private var futureMemoryLock = MemoryLock.NONE
     private val references = AtomicInt(1)
     private val limit = if (user) USER_VIRTUAL_ADDRESS_LIMIT else end
 
     private val regions = MemoryRegionMap(start, end, limit, PAGE_SIZE_BYTES, this)
     private val lock = IrqSpinLock()
     private var executable: OpenFileDescription? = null
+    private var argumentLayout = ProcessArguments.EMPTY
+    internal var arguments: ProcessArguments
+        get() = lock.withLock { argumentLayout }
+        set(value) = lock.withLock { argumentLayout = value }
+
     private val reusableFaultScratch = AtomicReference<ByteArray?>(null)
 
     private sealed interface FaultPlan {
@@ -102,6 +110,9 @@ class AddressSpace internal constructor(
     val used: ULong
         get() = lock.withLock { regions.used }
 
+    val lockedMemory: ULong
+        get() = lock.withLock { regions.lockedBytesOutside() }
+
     fun snapshotRegions(): List<MemoryRegion> = lock.withLock(regions::snapshot)
 
     internal fun acquireExecutable(): OpenFileDescription? = lock.withLock {
@@ -123,16 +134,37 @@ class AddressSpace internal constructor(
         AddressSpace(directory, start, end, user).also { child ->
             child.lock.withLock { regions.copyRetainedInto(child.regions) }
             child.executable = executable?.also { check(it.retain()) }
+            child.argumentLayout = argumentLayout
         }
     }
 
     internal fun share(): AddressSpace {
+        check(retain()) { "Cannot share a released address space" }
+        return this
+    }
+
+    internal fun retain(): Boolean {
         var observed = references.load()
         while (observed in 1 until Int.MAX_VALUE) {
-            if (references.compareAndSet(observed, observed + 1)) return this
+            val retained = references.compareAndSet(observed, observed + 1)
+            if (retained) return true
             observed = references.load()
         }
-        error("Cannot share a released address space")
+        return false
+    }
+
+    internal fun relocateArguments(
+        boundary: ProcessArguments.Boundary,
+        address: ULong,
+    ): Int = lock.withLock {
+        if (address < PAGE_SIZE_BYTES || address >= limit) return@withLock -EINVAL
+        val replacement = argumentLayout.relocate(boundary, address)
+        val invalidArguments = replacement.start > replacement.end
+        val invalidEnvironment = replacement.environmentStart > replacement.environmentEnd
+        if (invalidArguments || invalidEnvironment) return@withLock -EINVAL
+        if (regions.intersection(address, limit) == null) return@withLock -EFAULT
+        argumentLayout = replacement
+        0
     }
 
     fun clear() {
@@ -199,53 +231,51 @@ class AddressSpace internal constructor(
             return MemoryMapResult.Err(ENOMEM)
         }
 
+        val hint = request.hint
+        val validHint = hint.isPageAligned() && regions.validMmapRange(hint, alignedLength)
+        if (request.fixed && !validHint) return MemoryMapResult.Err(ENOMEM)
+
         var replacedBackings = emptyList<MemoryRegionBacking>()
         val selection = lock.withLock {
-            val selected = if (request.fixed) {
-                if (!request.hint.isPageAligned() ||
-                    !regions.validMmapRange(request.hint, alignedLength)
-                ) {
-                    return@withLock null
-                }
-                if (regions.intersection(request.hint, request.hint + alignedLength) != null) {
-                    if (request.noReplace) {
-                        return@withLock Pair(ULong.MAX_VALUE, null)
-                    }
-                    replacedBackings = unmapRangeLocked(
-                        request.hint,
-                        request.hint + alignedLength,
-                    )
-                }
-                request.hint
-            } else {
-                regions.findUnmappedArea(request.hint, alignedLength)
-                    ?: return@withLock null
+            val requestedLock = request.memoryLock
+            val memoryLock = requestedLock.takeUnless { it == MemoryLock.NONE } ?: futureMemoryLock
+            val selected = if (request.fixed) hint else {
+                regions.findUnmappedArea(hint, alignedLength) ?: return@withLock null
             }
+            val selectedEnd = selected + alignedLength
+            val overlap = regions.intersection(selected, selectedEnd)
+            val conflicts = request.fixed && request.noReplace && overlap != null
+            if (conflicts) return@withLock Pair(ULong.MAX_VALUE, null)
 
+            val locksMemory = memoryLock != MemoryLock.NONE
+            val locked = if (locksMemory) regions.lockedBytesOutside(selected, selectedEnd) else 0uL
+            val maximum = request.lockedMemoryLimit
+            val available = maximum - minOf(locked, maximum)
+            if (locksMemory && alignedLength > available) return MemoryMapResult.Err(EAGAIN)
+            if (request.fixed) replacedBackings = unmapRangeLocked(selected, selectedEnd)
+
+            val sharedIdentity = when {
+                !request.shared -> null
+                request.backing != null -> request.backing.sharedMemoryIdentity
+                else -> Any()
+            }
             val region = MemoryRegion(
                 start = selected,
-                end = selected + alignedLength,
+                end = selectedEnd,
                 access = request.access,
                 maximumAccess = request.maximumAccess,
                 name = request.name,
                 type = request.type,
                 offset = request.offset,
                 shared = request.shared,
+                memoryLock = memoryLock,
                 backing = request.backing,
-                sharedIdentity = if (request.shared) {
-                    request.backing?.sharedMemoryIdentity ?: Any()
-                } else {
-                    null
-                },
+                sharedIdentity = sharedIdentity,
             )
-            if (request.backing?.retain(this) == false) {
-                null
-            } else if (!regions.insertOwned(region)) {
-                request.backing?.release(this)
-                null
-            } else {
-                Pair(selected, region)
-            }
+            if (request.backing?.retain(this) == false) return@withLock null
+            if (regions.insertOwned(region)) return@withLock Pair(selected, region)
+            request.backing?.release(this)
+            null
         }
         replacedBackings.forEach { it.release(this) }
         selection ?: return MemoryMapResult.Err(ENOMEM)
@@ -256,33 +286,89 @@ class AddressSpace internal constructor(
         val start = selection.first
         val region = requireNotNull(selection.second)
 
-        if (!request.populate || request.access == 0uL) {
-            lock.withLock { regions.mergeAround(region) }
-            return MemoryMapResult.Ok(start)
+        val populate = request.populate || region.memoryLock == MemoryLock.EAGER
+        val failure = if (populate) populate(region) else 0
+        if (failure != 0) {
+            rollbackMapping(region, region.start, region.end)
+            return MemoryMapResult.Err(failure)
         }
-
-        var address = start
-        var failureErrno = ENOMEM
-        while (address < start + alignedLength) {
-            when (faultIn(address, write = false)) {
-                PageFaultResult.RESOLVED -> Unit
-                PageFaultResult.OUT_OF_MEMORY -> break
-                PageFaultResult.IO_ERROR -> {
-                    failureErrno = EIO
-                    break
-                }
-                else -> break
-            }
-            address += PAGE_SIZE_BYTES
-        }
-
-        if (address != start + alignedLength) {
-            rollbackMapping(region, start, address)
-            return MemoryMapResult.Err(failureErrno)
-        }
-
         lock.withLock { regions.mergeAround(region) }
         return MemoryMapResult.Ok(start)
+    }
+
+    private fun populate(region: MemoryRegion): Int {
+        if (region.access == 0uL || region.type == MemoryRegionType.MMIO) return 0
+        val writable = region.access and MEMORY_REGION_WRITABLE != 0uL
+        var address = region.start
+        while (address < region.end) {
+            val result = faultIn(address, writable)
+            when (result) {
+                PageFaultResult.RESOLVED -> address += PAGE_SIZE_BYTES
+                PageFaultResult.IO_ERROR -> return EIO
+                PageFaultResult.INTERRUPTED -> return EINTR
+                else -> return ENOMEM
+            }
+        }
+        return 0
+    }
+
+    internal fun lockMemory(
+        address: ULong,
+        length: ULong,
+        mode: MemoryLock,
+        maximum: ULong,
+    ): Int {
+        if (length == 0uL) return 0
+        if (!validRange(address, length)) return -ENOMEM
+        val start = address.alignDown(PAGE_SIZE_BYTES)
+        val end = (address + length).alignUp(PAGE_SIZE_BYTES) ?: return -ENOMEM
+        val selected = lock.withLock {
+            if (!regions.fullyCovers(start, end)) return -ENOMEM
+            val locked = regions.lockedBytesOutside()
+            val retained = regions.lockedBytesOutside(start, end)
+            val additions = end - start - (locked - retained)
+            val available = maximum - minOf(locked, maximum)
+            if (mode != MemoryLock.NONE && additions > available) return -ENOMEM
+            regions.splitAt(start)
+            regions.splitAt(end)
+            val affected = regions.intersecting(start, end)
+            val snapshot = affected.map { region ->
+                region.memoryLock = mode
+                region.copy()
+            }
+            affected.forEach(regions::mergeAround)
+            snapshot
+        }
+        if (mode != MemoryLock.EAGER) return 0
+        for (region in selected) {
+            val failure = populate(region)
+            if (failure != 0) return -failure
+        }
+        return 0
+    }
+
+    internal fun lockAllMemory(
+        mode: MemoryLock,
+        current: Boolean,
+        future: Boolean,
+        maximum: ULong,
+    ): Int {
+        val selected = lock.withLock {
+            val exceedsLimit = current && mode != MemoryLock.NONE && regions.used > maximum
+            if (exceedsLimit) return -ENOMEM
+            futureMemoryLock = if (future) mode else MemoryLock.NONE
+            if (!current) return 0
+            for (region in regions) {
+                region.memoryLock = mode
+            }
+            regions.snapshot()
+        }
+        if (mode != MemoryLock.EAGER) return 0
+        for (region in selected) {
+            val failure = populate(region)
+            if (failure != 0) return -failure
+        }
+        return 0
     }
 
     fun faultIn(
@@ -396,14 +482,12 @@ class AddressSpace internal constructor(
                 reusableFaultScratch.compareAndSet(null, scratch)
             }
             if (!cached.isSuccess) {
-                return PagePreparation.Failed(
-                    when (cached.failure) {
-                        PageCacheFailure.OUT_OF_MEMORY -> PageFaultResult.OUT_OF_MEMORY
-                        PageCacheFailure.IO_ERROR,
-                        PageCacheFailure.INTERRUPTED,
-                        -> PageFaultResult.IO_ERROR
-                    },
-                )
+                val failure = when (cached.failure) {
+                    PageCacheFailure.OUT_OF_MEMORY -> PageFaultResult.OUT_OF_MEMORY
+                    PageCacheFailure.IO_ERROR -> PageFaultResult.IO_ERROR
+                    PageCacheFailure.INTERRUPTED -> PageFaultResult.INTERRUPTED
+                }
+                return PagePreparation.Failed(failure)
             }
             return PagePreparation.Ready(PreparedPage(cached.frame, PageOrigin.CACHE))
         }
