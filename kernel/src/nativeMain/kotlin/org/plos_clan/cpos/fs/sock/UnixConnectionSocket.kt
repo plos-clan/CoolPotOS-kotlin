@@ -751,7 +751,7 @@ private class UnixStreamBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
         val ancillary: UnixAncillaryData,
     )
 
-    private val bytes = ByteCircularBuffer(minOf(capacity, INITIAL_CAPACITY))
+    private val bytes = ByteCircularBuffer(capacity)
     private val controls = ArrayDeque<ControlMarker>()
     private var timestamps: SocketTimestampQueue? = null
     private var readSequence = 0uL
@@ -772,14 +772,7 @@ private class UnixStreamBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
     ): IoResult {
         if (count == 0) return IoResult.success(0)
         val writable = minOf(count, remaining)
-        if (writable != 0) {
-            val required = bytes.size + writable
-            if (required > bytes.capacity) {
-                val doubled = if (bytes.capacity > Int.MAX_VALUE / 2) Int.MAX_VALUE
-                else bytes.capacity * 2
-                bytes.ensureCapacity(minOf(capacity, maxOf(required, doubled)))
-            }
-        }
+        bytes.ensureCapacity(capacity)
         val transferred = bytes.write(source, offset, writable)
         if (transferred == 0) return IoResult.failure(VfsError.WOULD_BLOCK)
         val receivedAtNanos = if (receiveTimestamp) TscClock.nanoTime() else null
@@ -846,9 +839,6 @@ private class UnixStreamBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {
         return discarded
     }
 
-    private companion object {
-        const val INITIAL_CAPACITY = 4_096
-    }
 }
 
 private class UnixPacketBuffer(capacity: Int) : UnixConnectionBuffer(capacity) {

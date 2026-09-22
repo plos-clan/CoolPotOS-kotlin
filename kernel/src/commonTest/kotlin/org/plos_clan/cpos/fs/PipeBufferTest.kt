@@ -9,6 +9,49 @@ import kotlin.test.assertNotNull
 
 class PipeBufferTest {
     @Test
+    fun largeCapacitySupportsSmallTransfers() {
+        val buffer = ByteCircularBuffer(Int.MAX_VALUE)
+        val input = byteArrayOf(1, 2, 3)
+        val output = ByteArray(input.size)
+        val sourceBuffer = ByteArrayBuffer(input)
+        val destinationBuffer = ByteArrayBuffer(output)
+        val source = assertNotNull(sourceBuffer.prepareRead(0, input.size))
+        val destination = assertNotNull(destinationBuffer.prepareWrite(0, output.size))
+
+        repeat(8) {
+            assertEquals(input.size, buffer.write(source, 0, input.size))
+            assertEquals(input.size, buffer.read(destination, 0, output.size))
+            assertContentEquals(input, output)
+            assertEquals(Int.MAX_VALUE, buffer.remaining)
+        }
+    }
+
+    @Test
+    fun reservationGrowthPreservesWrappedDataAndPartialCommits() {
+        val buffer = ByteCircularBuffer(12)
+        val input = byteArrayOf(1, 2, 3, 4, 5)
+        val sourceBuffer = ByteArrayBuffer(input)
+        val source = assertNotNull(sourceBuffer.prepareRead(0, input.size))
+        assertEquals(3, buffer.write(source, 0, 3))
+        assertEquals(2, buffer.discard(2))
+        assertEquals(2, buffer.write(source, 3, 2))
+
+        val reservation = buffer.reserveWrite(7)
+        val appended = byteArrayOf(6, 7, 8, 9, 10, 11, 12)
+        assertEquals(7, reservation.destination.copyFrom(0, appended, 0, 7))
+        assertEquals(3, buffer.size)
+        assertEquals(1, buffer.discard(1))
+        reservation.commit(3)
+
+        val output = ByteArray(5)
+        val destinationBuffer = ByteArrayBuffer(output)
+        val destination = assertNotNull(destinationBuffer.prepareWrite(0, output.size))
+        assertEquals(5, buffer.read(destination, 0, output.size))
+        assertContentEquals(byteArrayOf(4, 5, 6, 7, 8), output)
+        assertEquals(12, buffer.remaining)
+    }
+
+    @Test
     fun preservesDataAcrossCapacityAndWrapAround() {
         val input = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8)
         val output = ByteArray(input.size)

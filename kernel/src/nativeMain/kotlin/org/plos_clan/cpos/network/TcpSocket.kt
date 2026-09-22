@@ -295,7 +295,19 @@ internal class TcpSocket internal constructor(
         CLOSE_WAIT,
         LAST_ACK,
         TIME_WAIT,
-        RESET,
+        RESET;
+
+        val configurable: Boolean
+            get() = this == IDLE || this == BOUND || this == LISTEN
+
+        val connected: Boolean
+            get() = when (this) {
+                ESTABLISHED, FIN_WAIT_1, FIN_WAIT_2, CLOSING, CLOSE_WAIT -> true
+                else -> false
+            }
+
+        val writable: Boolean
+            get() = this == ESTABLISHED || this == CLOSE_WAIT
     }
 
     private class Outstanding(
@@ -391,6 +403,7 @@ internal class TcpSocket internal constructor(
     private var sndWl1 = 0u
     private var sndWl2 = 0u
     private var rcvNxt = 0u
+    private var rcvAdv = 0u
     private var peerMss = DEFAULT_MSS
     private var localMss = DEFAULT_MSS
     private var peerWindowScale = 0
@@ -588,7 +601,7 @@ internal class TcpSocket internal constructor(
     override fun shutdownSocket(mode: SocketShutdownMode): VfsResult<Unit> {
         var transmissions = emptyList<TcpTransmission>()
         val result = lock.withLock {
-            if (state !in CONNECTED_STATES) return@withLock VfsResult.Err(VfsError.NOT_CONNECTED)
+            if (!state.connected) return@withLock VfsResult.Err(VfsError.NOT_CONNECTED)
             if (mode.reads) {
                 readOpen = false
                 receiveBuffer.clear()
@@ -615,7 +628,7 @@ internal class TcpSocket internal constructor(
             var waiter: IoWaitQueue.Waiter? = null
             var transmissions = emptyList<TcpTransmission>()
             val result = lock.withLock {
-                if (state !in SEND_STATES || !writeOpen) {
+                if (!state.writable || !writeOpen) {
                     return@withLock IoResult.failure(
                         if (state == State.RESET) takeErrorLocked() ?: VfsError.CONNECTION_RESET
                         else VfsError.BROKEN_PIPE,
@@ -678,7 +691,7 @@ internal class TcpSocket internal constructor(
                         consume = !request.peek,
                     )
                     if (!request.peek && receiveBuffer.size == 0) receiveTimestamps = null
-                    if (!request.peek && copied != 0 && remote != null) {
+                    if (!request.peek && copied != 0 && receiveWindowExpandedLocked()) {
                         windowUpdate = acknowledgmentLocked()
                     }
                     return@withLock VfsResult.Ok(
@@ -698,7 +711,7 @@ internal class TcpSocket internal constructor(
                     ),
                 )
                 takeErrorLocked()?.let { return@withLock VfsResult.Err(it) }
-                if (state !in RECEIVE_STATES) return@withLock VfsResult.Err(VfsError.NOT_CONNECTED)
+                if (!state.connected) return@withLock VfsResult.Err(VfsError.NOT_CONNECTED)
                 if (request.nonBlocking) return@withLock VfsResult.Err(VfsError.WOULD_BLOCK)
                 if (deadline == null) {
                     val thread = ProcessManager.currentThread()
@@ -741,7 +754,7 @@ internal class TcpSocket internal constructor(
                     VfsResult.Err(VfsError.INVALID_ARGUMENT)
                 } else {
                     lock.withLock {
-                        if (state !in setOf(State.IDLE, State.BOUND, State.LISTEN)) {
+                        if (!state.configurable) {
                             return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
                         }
                         requestedMss = requested
@@ -901,7 +914,7 @@ internal class TcpSocket internal constructor(
             if (accepted.isNotEmpty()) available = available or PollEvents.NORMAL_INPUT
         } else {
             if (receiveBuffer.size != 0 || !readOpen) available = available or PollEvents.NORMAL_INPUT
-            if (state in SEND_STATES && writeOpen &&
+            if (state.writable && writeOpen &&
                 queuedSendBytesLocked() < optionsLocked().sendBufferSize
             ) available = available or PollEvents.NORMAL_OUTPUT
         }
@@ -920,7 +933,7 @@ internal class TcpSocket internal constructor(
     }
 
     override fun optionsChangedLocked(options: SocketOptions) {
-        if (state in setOf(State.IDLE, State.BOUND, State.LISTEN)) {
+        if (state.configurable) {
             localWindowScale = windowScale(options.receiveBufferSize)
         }
     }
@@ -944,7 +957,7 @@ internal class TcpSocket internal constructor(
         }
         val abortive = optionsLocked().linger.let { it.enabled && it.seconds == 0 } ||
             receiveBuffer.size != 0
-        if (abortive && remote != null && state in CONNECTED_STATES) {
+        if (abortive && remote != null && state.connected) {
             val reset = TcpTransmission(
                 local,
                 checkNotNull(remote),
@@ -1022,7 +1035,7 @@ internal class TcpSocket internal constructor(
         segment: TcpSegment,
     ): SegmentActions {
         if (state == State.SYN_SENT) return processSynSentLocked(packet, segment)
-        if (state !in setOf(State.IDLE, State.BOUND, State.LISTEN, State.RESET) &&
+        if (!state.configurable && state != State.RESET &&
             !segmentAcceptableLocked(segment)
         ) {
             return SegmentActions(
@@ -1077,7 +1090,7 @@ internal class TcpSocket internal constructor(
         if (!TcpSequence.between(segment.acknowledgmentNumber, sndUna, sndNxt)) {
             return SegmentActions(listOf(acknowledgmentLocked()))
         }
-        val acknowledgments = acknowledgeLocked(segment)
+        acknowledgeLocked(segment)
         if (state == State.SYN_RECEIVED) {
             if (segment.acknowledgmentNumber != sndNxt) {
                 state = State.RESET
@@ -1088,7 +1101,7 @@ internal class TcpSocket internal constructor(
             state = State.ESTABLISHED
             connectWaiters.wakeAll()
             return SegmentActions(
-                transmissions = acknowledgments + flushLocked(),
+                transmissions = flushLocked(),
                 accepted = parent != null,
             )
         }
@@ -1098,7 +1111,6 @@ internal class TcpSocket internal constructor(
         }
         val stateActions = advanceClosingStateLocked()
         val transmissions = ArrayList<TcpTransmission>()
-        transmissions += acknowledgments
         if (sendAck) transmissions += acknowledgmentLocked()
         transmissions += flushLocked()
         transmissions += queueFinLocked()
@@ -1155,7 +1167,7 @@ internal class TcpSocket internal constructor(
         }
     }
 
-    private fun acknowledgeLocked(segment: TcpSegment): List<TcpTransmission> {
+    private fun acknowledgeLocked(segment: TcpSegment) {
         val acknowledgment = segment.acknowledgmentNumber
         val previous = sndUna
         if (TcpSequence.after(acknowledgment, sndUna)) {
@@ -1187,7 +1199,6 @@ internal class TcpSocket internal constructor(
             sndWl1 = segment.sequenceNumber
             sndWl2 = segment.acknowledgmentNumber
         }
-        return emptyList()
     }
 
     private fun segmentAcceptableLocked(segment: TcpSegment): Boolean {
@@ -1223,21 +1234,18 @@ internal class TcpSocket internal constructor(
             payloadLength -= discarded
             if (duplicate > discarded) fin = false
         }
-        val payload = if (payloadLength == 0) ByteArray(0) else packet.bytes.copyOfRange(
-            payloadOffset,
-            payloadOffset + payloadLength,
-        )
         if (sequence != rcvNxt) {
             val receiveWindow = receiveWindowLocked()
             if (TcpSequence.after(sequence, rcvNxt + receiveWindow.toUInt()) ||
-                payload.size > receiveWindow ||
+                payloadLength > receiveWindow ||
                 outOfOrder.any { existing ->
-                    val end = sequence + payload.size.toUInt() + if (fin) 1u else 0u
+                    val end = sequence + payloadLength.toUInt() + if (fin) 1u else 0u
                     val existingEnd = existing.sequence + existing.payload.size.toUInt() +
                         if (existing.fin) 1u else 0u
                     TcpSequence.before(sequence, existingEnd) && TcpSequence.before(existing.sequence, end)
                 }
             ) return true
+            val payload = packet.bytes.copyOfRange(payloadOffset, payloadOffset + payloadLength)
             outOfOrder += OutOfOrder(sequence, payload, fin, receivedAtNanos)
             outOfOrder.sortWith { first, second ->
                 when {
@@ -1248,7 +1256,10 @@ internal class TcpSocket internal constructor(
             }
             return true
         }
-        if (!appendReceivedLocked(payload, fin, receivedAtNanos)) return true
+        val appended = appendReceivedLocked(
+            packet.bytes, fin, receivedAtNanos, payloadOffset, payloadLength,
+        )
+        if (!appended) return true
         while (true) {
             val next = outOfOrder.firstOrNull { it.sequence == rcvNxt } ?: break
             outOfOrder.remove(next)
@@ -1261,23 +1272,26 @@ internal class TcpSocket internal constructor(
         payload: ByteArray,
         fin: Boolean,
         receivedAtNanos: ULong?,
+        offset: Int = 0,
+        length: Int = payload.size,
     ): Boolean {
-        if (payload.size > optionsLocked().receiveBufferSize - receiveBuffer.size) return false
-        if (payload.isNotEmpty() && readOpen) {
-            val source = ByteArrayBuffer(payload).prepareRead(0, payload.size) ?: return false
-            if (receiveBuffer.write(source, 0, payload.size) != payload.size) return false
+        if (length > optionsLocked().receiveBufferSize - receiveBuffer.size) return false
+        if (length != 0 && readOpen) {
+            val buffer = ByteArrayBuffer(payload)
+            val source = buffer.prepareRead(offset, length) ?: return false
+            if (receiveBuffer.write(source, offset, length) != length) return false
             val timestamps = receiveTimestamps
             if (timestamps != null) {
-                timestamps.append(payload.size, receivedAtNanos)
+                timestamps.append(length, receivedAtNanos)
             } else if (receivedAtNanos != null) {
-                receiveTimestamps = SocketTimestampQueue(receiveBuffer.size - payload.size).also {
-                    it.append(payload.size, receivedAtNanos)
+                receiveTimestamps = SocketTimestampQueue(receiveBuffer.size - length).also {
+                    it.append(length, receivedAtNanos)
                 }
             }
-            rcvNxt += payload.size.toUInt()
+            rcvNxt += length.toUInt()
             readWaiters.wakeReady(receiveBuffer.size)
-        } else if (payload.isNotEmpty()) {
-            rcvNxt += payload.size.toUInt()
+        } else if (length != 0) {
+            rcvNxt += length.toUInt()
         }
         if (fin) {
             rcvNxt++
@@ -1295,7 +1309,7 @@ internal class TcpSocket internal constructor(
 
     private fun flushLocked(): List<TcpTransmission> {
         val destination = remote ?: return emptyList()
-        if (state !in SEND_STATES && state != State.SYN_RECEIVED || sendBuffer.size == 0) {
+        if (!state.writable && state != State.SYN_RECEIVED || sendBuffer.size == 0) {
             return emptyList()
         }
         val flight = TcpSequence.distance(sndUna, sndNxt).toInt()
@@ -1337,7 +1351,7 @@ internal class TcpSocket internal constructor(
 
     private fun queueFinLocked(): List<TcpTransmission> {
         val destination = remote ?: return emptyList()
-        if (writeOpen || finQueued || sendBuffer.size != 0 || state !in SEND_STATES) {
+        if (writeOpen || finQueued || sendBuffer.size != 0 || !state.writable) {
             return emptyList()
         }
         val segment = Outstanding(
@@ -1457,9 +1471,20 @@ internal class TcpSocket internal constructor(
             outOfOrder.sumOf { it.payload.size + if (it.fin) 1 else 0 }
         ).coerceAtLeast(0)
 
-    private fun advertisedWindowLocked(): UShort =
-        (receiveWindowLocked() shr localWindowScale)
+    private fun receiveWindowExpandedLocked(): Boolean {
+        val previous = TcpSequence.distance(rcvNxt, rcvAdv).toInt().coerceAtLeast(0)
+        val available = receiveWindowLocked()
+        val threshold = minOf(localMss, optionsLocked().receiveBufferSize / 2).coerceAtLeast(1)
+        val reopened = previous == 0 && available shr localWindowScale != 0
+        return reopened || available - previous >= threshold
+    }
+
+    private fun advertisedWindowLocked(): UShort {
+        val window = (receiveWindowLocked() shr localWindowScale)
             .coerceAtMost(UShort.MAX_VALUE.toInt()).toUShort()
+        rcvAdv = rcvNxt + (window.toUInt() shl localWindowScale)
+        return window
+    }
 
     companion object {
         private const val DEFAULT_BUFFER_SIZE = 212_992
@@ -1480,22 +1505,6 @@ internal class TcpSocket internal constructor(
         private const val IPPROTO_TCP = 6
         private const val TCP_NODELAY = 1
         private const val TCP_MAXSEG = 2
-
-        private val CONNECTED_STATES = setOf(
-            State.ESTABLISHED,
-            State.FIN_WAIT_1,
-            State.FIN_WAIT_2,
-            State.CLOSING,
-            State.CLOSE_WAIT,
-        )
-        private val SEND_STATES = setOf(State.ESTABLISHED, State.CLOSE_WAIT)
-        private val RECEIVE_STATES = setOf(
-            State.ESTABLISHED,
-            State.FIN_WAIT_1,
-            State.FIN_WAIT_2,
-            State.CLOSING,
-            State.CLOSE_WAIT,
-        )
 
         private fun randomSequence(): UInt =
             NetworkOrderBuffer(KernelRandom.bytes(UInt.SIZE_BYTES)).readU32(0)
