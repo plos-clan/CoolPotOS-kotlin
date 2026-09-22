@@ -40,6 +40,7 @@ import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.fs.vfs.WaitableOpenFileBackend
+import org.plos_clan.cpos.mem.BufferFaultPolicy
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
@@ -142,6 +143,9 @@ internal sealed class DeviceOpenFile(
     protected val device: Device,
     protected val backend: DeviceBackend,
 ) : OpenFileBackend, MountResourceProvider {
+    override val readFaultPolicy: BufferFaultPolicy
+        get() = backend.readFaultPolicy
+
     override val byteSize: ULong?
         get() = backend.byteSize
 

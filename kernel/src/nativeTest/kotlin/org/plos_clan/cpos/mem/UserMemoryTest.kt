@@ -65,6 +65,23 @@ class UserMemoryTest {
     }
 
     @Test
+    fun deferredPreparationChecksAddressesWithoutFaultingUnusedPages() {
+        Fixture(writable = false).use { fixture ->
+            val policy = BufferFaultPolicy.ON_ACCESS
+            val size = 3 * PAGE_SIZE_BYTES.toInt()
+            assertNotNull(fixture.memory.prepareWrite(0, size, policy))
+            assertNull(fixture.space.pageDirectory.userPageFrame(USER_MMAP_START))
+            assertNull(fixture.memory.prepareWrite(-1, size, policy))
+            assertNull(fixture.memory.prepareWrite(0, -1, policy))
+            val boundary = UserMemory(fixture.space, USER_VIRTUAL_ADDRESS_LIMIT - 1uL)
+            assertNotNull(boundary.prepareWrite(0, 1, policy))
+            assertNull(boundary.prepareWrite(0, 2, policy))
+            val kernel = UserMemory(fixture.space, USER_VIRTUAL_ADDRESS_LIMIT)
+            assertNull(kernel.prepareWrite(0, 1, policy))
+        }
+    }
+
+    @Test
     fun copyingIntoForkedPagesPreservesTheParent() {
         Fixture().use { fixture ->
             val original = ByteArray(64) { it.toByte() }

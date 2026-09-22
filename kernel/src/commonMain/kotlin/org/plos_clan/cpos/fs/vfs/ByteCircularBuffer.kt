@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.fs.vfs
 
+import org.plos_clan.cpos.mem.BufferFaultPolicy
 import org.plos_clan.cpos.mem.BufferDestination
 import org.plos_clan.cpos.mem.BufferSource
 import org.plos_clan.cpos.mem.PreparedBufferDestination
@@ -127,7 +128,11 @@ internal class ByteCircularBuffer(capacity: Int) : BufferSource {
     ) : BufferDestination {
         val destination = PreparedBufferDestination(this)
 
-        override fun prepareWrite(offset: Int, count: Int): PreparedBufferDestination? =
+        override fun prepareWrite(
+            offset: Int,
+            count: Int,
+            faultPolicy: BufferFaultPolicy,
+        ): PreparedBufferDestination? =
             if (validRange(offset, count)) destination else null
 
         override fun copyFrom(

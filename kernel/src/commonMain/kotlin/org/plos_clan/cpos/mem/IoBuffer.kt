@@ -16,7 +16,11 @@ interface BufferSource {
 }
 
 interface BufferDestination {
-    fun prepareWrite(offset: Int, count: Int): PreparedBufferDestination?
+    fun prepareWrite(
+        offset: Int,
+        count: Int,
+        faultPolicy: BufferFaultPolicy = BufferFaultPolicy.PREFAULT,
+    ): PreparedBufferDestination?
 
     fun copyFrom(
         destinationOffset: Int,
@@ -31,6 +35,11 @@ interface BufferDestination {
 }
 
 interface IoBuffer : BufferSource, BufferDestination
+
+enum class BufferFaultPolicy {
+    PREFAULT,
+    ON_ACCESS,
+}
 
 @JvmInline
 value class PreparedBufferSource internal constructor(
@@ -74,7 +83,11 @@ class ByteArrayBuffer(private val bytes: ByteArray) : IoBuffer {
     override fun prepareRead(offset: Int, count: Int): PreparedBufferSource? =
         if (validRange(offset, count)) PreparedBufferSource(this) else null
 
-    override fun prepareWrite(offset: Int, count: Int): PreparedBufferDestination? =
+    override fun prepareWrite(
+        offset: Int,
+        count: Int,
+        faultPolicy: BufferFaultPolicy,
+    ): PreparedBufferDestination? =
         if (validRange(offset, count)) PreparedBufferDestination(this) else null
 
     override fun copyTo(

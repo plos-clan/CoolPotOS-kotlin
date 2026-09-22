@@ -151,8 +151,17 @@ class UserMemory internal constructor(
     override fun prepareRead(offset: Int, count: Int): PreparedBufferSource? =
         if (prepare(offset, count, false)) PreparedBufferSource(this) else null
 
-    override fun prepareWrite(offset: Int, count: Int): PreparedBufferDestination? =
-        if (prepare(offset, count, true)) PreparedBufferDestination(this) else null
+    override fun prepareWrite(
+        offset: Int,
+        count: Int,
+        faultPolicy: BufferFaultPolicy,
+    ): PreparedBufferDestination? {
+        val ready = when (faultPolicy) {
+            BufferFaultPolicy.PREFAULT -> prepare(offset, count, true)
+            BufferFaultPolicy.ON_ACCESS -> validUserRange(offset, count)
+        }
+        return if (ready) PreparedBufferDestination(this) else null
+    }
 
     fun readUIntLE(): UInt? {
         if (!validUserRange(UInt.SIZE_BYTES)) return null

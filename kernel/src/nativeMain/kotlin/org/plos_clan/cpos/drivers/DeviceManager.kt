@@ -16,6 +16,7 @@ import org.plos_clan.cpos.fs.vfs.IoMode
 import org.plos_clan.cpos.fs.vfs.OpenOptions
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.mem.BufferFaultPolicy
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
@@ -35,6 +36,9 @@ enum class LinuxDeviceMajor(val number: UInt) {
 }
 
 interface DeviceBackend {
+    val readFaultPolicy: BufferFaultPolicy
+        get() = BufferFaultPolicy.PREFAULT
+
     val ueventEnvironment: List<Pair<String, String>>
         get() = emptyList()
 

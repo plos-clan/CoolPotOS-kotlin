@@ -8,6 +8,7 @@ import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import org.plos_clan.cpos.mem.PageCache
 import org.plos_clan.cpos.mem.PageCacheFailure
 import org.plos_clan.cpos.mem.PageCacheSource
+import org.plos_clan.cpos.mem.BufferFaultPolicy
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
@@ -552,6 +553,9 @@ interface FileContent {
 }
 
 interface OpenFileBackend {
+    val readFaultPolicy: BufferFaultPolicy
+        get() = BufferFaultPolicy.PREFAULT
+
     val byteSize: ULong?
         get() = null
 

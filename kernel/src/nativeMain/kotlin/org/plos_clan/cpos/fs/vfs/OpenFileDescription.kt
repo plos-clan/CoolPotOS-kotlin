@@ -355,7 +355,7 @@ class OpenFileDescription private constructor(
     ): IoResult {
         readError(offset, count)?.let { return IoResult.failure(it) }
         val transferCount = fixedSizeIoBackend?.ioSize ?: count
-        val prepared = destination.prepareWrite(offset, transferCount)
+        val prepared = destination.prepareWrite(offset, transferCount, backend.readFaultPolicy)
             ?: return IoResult.failure(VfsError.FAULT)
         return readBackend(caller, prepared, offset, transferCount, position)
     }
@@ -383,7 +383,7 @@ class OpenFileDescription private constructor(
         if (positionlessBackend != null) return IoResult.failure(VfsError.ILLEGAL_SEEK)
         readError(offset, count)?.let { return IoResult.failure(it) }
         val transferCount = fixedSizeIoBackend?.ioSize ?: count
-        val prepared = destination.prepareWrite(offset, transferCount)
+        val prepared = destination.prepareWrite(offset, transferCount, backend.readFaultPolicy)
             ?: return IoResult.failure(VfsError.FAULT)
         return readBackend(caller, prepared, offset, transferCount, FilePosition(fileOffset.toLong()))
     }

@@ -264,12 +264,12 @@ static void wake_cpu(fast_cpu_t *cpu) {
     __atomic_store_n(&cpu->reschedule, true, __ATOMIC_RELEASE);
     const enum fast_cpu_state state = __atomic_load_n(&cpu->state, __ATOMIC_ACQUIRE);
     if (state == cpu_offline) return;
-    bool notify = cpu != current_cpu() || state == cpu_bootstrapping;
-    if (!notify) {
-        const fast_task_t *current = __atomic_load_n(&cpu->current, __ATOMIC_ACQUIRE);
-        notify = current == cpu->idle;
-    }
-    if (notify) lapic_send_reschedule(cpu->lapic_id);
+    const fast_task_t *running = __atomic_load_n(&cpu->current, __ATOMIC_ACQUIRE);
+    const bool local = cpu == current_cpu() && state == cpu_online;
+    if (!local || running == cpu->idle) lapic_send_reschedule(cpu->lapic_id);
+    const uint64_t queued = __atomic_load_n(&cpu->queue_size, __ATOMIC_ACQUIRE);
+    const fast_task_t *runtime = __atomic_load_n(&runtime_tasks, __ATOMIC_ACQUIRE);
+    if (!queued && !runtime) return;
     fast_cpu_t *idle = __atomic_load_n(&online_cpus, __ATOMIC_ACQUIRE);
     for (; idle; idle = idle->next) {
         if (idle == cpu || idle->state != cpu_online) continue;

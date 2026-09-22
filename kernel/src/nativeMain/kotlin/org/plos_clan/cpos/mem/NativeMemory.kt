@@ -37,7 +37,11 @@ abstract class NativeMemorySource : NativeBuffer() {
 }
 
 abstract class NativeMemory : NativeMemorySource(), IoBuffer {
-    override fun prepareWrite(offset: Int, count: Int): PreparedBufferDestination? =
+    override fun prepareWrite(
+        offset: Int,
+        count: Int,
+        faultPolicy: BufferFaultPolicy,
+    ): PreparedBufferDestination? =
         if (validRange(offset, count)) PreparedBufferDestination(this) else null
 
     override fun copyFrom(destinationOffset: Int, source: ByteArray, sourceOffset: Int, count: Int): Int {

@@ -17,6 +17,7 @@ import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.mem.BufferFaultPolicy
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
@@ -73,6 +74,9 @@ internal interface FuseNotificationSink {
 }
 
 internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
+    override val readFaultPolicy: BufferFaultPolicy
+        get() = BufferFaultPolicy.ON_ACCESS
+
     private companion object {
         const val REQUESTS_PER_FORGET_BATCH = 8
     }

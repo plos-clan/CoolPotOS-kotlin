@@ -16,8 +16,12 @@ internal class UserIoVector private constructor(
     override fun prepareRead(offset: Int, count: Int): PreparedBufferSource? =
         if (prepare(offset, count, writable = false)) PreparedBufferSource(this) else null
 
-    override fun prepareWrite(offset: Int, count: Int): PreparedBufferDestination? =
-        if (prepare(offset, count, writable = true)) PreparedBufferDestination(this) else null
+    override fun prepareWrite(
+        offset: Int,
+        count: Int,
+        faultPolicy: BufferFaultPolicy,
+    ): PreparedBufferDestination? =
+        if (prepare(offset, count, true, faultPolicy)) PreparedBufferDestination(this) else null
 
     override fun copyTo(
         sourceOffset: Int,
@@ -69,10 +73,15 @@ internal class UserIoVector private constructor(
             segment.memory.fill(segmentOffset, chunk, value)
         }
 
-    private fun prepare(offset: Int, count: Int, writable: Boolean): Boolean =
+    private fun prepare(
+        offset: Int,
+        count: Int,
+        writable: Boolean,
+        faultPolicy: BufferFaultPolicy = BufferFaultPolicy.PREFAULT,
+    ): Boolean =
         transfer(offset, count) { segment, segmentOffset, _, chunk ->
             val prepared = if (writable) {
-                segment.memory.prepareWrite(segmentOffset, chunk)
+                segment.memory.prepareWrite(segmentOffset, chunk, faultPolicy)
             } else {
                 segment.memory.prepareRead(segmentOffset, chunk)
             }
