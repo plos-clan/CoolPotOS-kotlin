@@ -9,6 +9,8 @@ import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.get
 import kotlinx.cinterop.plus
 import kotlinx.cinterop.usePinned
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.mem.page.UserFrameReferences
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
@@ -156,15 +158,22 @@ class UserMemory internal constructor(
         return value
     }
 
-    fun copyCStringFromUser(maxLength: Int): ByteArray? {
+    fun copyCStringFromUser(
+        maxLength: Int,
+        tooLong: VfsError = VfsError.NAME_TOO_LONG,
+    ): VfsResult<ByteArray> {
         if (maxLength <= 0 || address >= USER_VIRTUAL_ADDRESS_LIMIT) {
-            return null
+            return VfsResult.Err(VfsError.FAULT)
         }
-        val result = ByteArray(maxLength)
+        var result = ByteArray(minOf(maxLength, PAGE_SIZE_BYTES.toInt()))
         var copied = 0
         var currentAddress = address
-        while (copied < maxLength && currentAddress < USER_VIRTUAL_ADDRESS_LIMIT) {
-            val physicalAddress = addressSpace.acquireUserFrame(currentAddress, false) ?: return null
+        while (copied < maxLength) {
+            if (currentAddress >= USER_VIRTUAL_ADDRESS_LIMIT) {
+                return VfsResult.Err(VfsError.FAULT)
+            }
+            val physicalAddress = addressSpace.acquireUserFrame(currentAddress, false)
+                ?: return VfsResult.Err(VfsError.FAULT)
             val source = checkNotNull(physicalAddress.toVirtualPointer<UByteVar>())
             val pageOffset = currentAddress - currentAddress.alignDown(PAGE_SIZE_BYTES)
             val chunkLength = minOf(
@@ -173,9 +182,14 @@ class UserMemory internal constructor(
             )
 
             try {
+                val required = copied + chunkLength
+                if (required > result.size) {
+                    val capacity = maxOf(required, minOf(maxLength, result.size * 2))
+                    result = result.copyOf(capacity)
+                }
                 repeat(chunkLength) { index ->
                     val byte = source[index].toByte()
-                    if (byte == 0.toByte()) return result.copyOf(copied + index)
+                    if (byte == 0.toByte()) return VfsResult.Ok(result.copyOf(copied + index))
                     result[copied + index] = byte
                 }
             } finally {
@@ -184,7 +198,7 @@ class UserMemory internal constructor(
             copied += chunkLength
             currentAddress += chunkLength.toULong()
         }
-        return null
+        return VfsResult.Err(tooLong)
     }
 
     fun copyNativeStructArrayToUser(

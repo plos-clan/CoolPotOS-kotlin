@@ -3,6 +3,8 @@
 package org.plos_clan.cpos.syscall
 
 import org.plos_clan.cpos.fault.SignalInterrupt
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.CapEnum
 import org.plos_clan.cpos.tasks.Process
@@ -117,9 +119,11 @@ internal object KeySyscalls {
 
         fun string(address: ULong, limit: Int = 4096, error: Int = Errno.EINVAL): String {
             val memory = UserMemory(process.addressSpace, address)
-            val bytes = memory.copyCStringFromUser(limit) ?: throw KeyFailure(
-                if (memory.prepareRead(0, limit) == null) Errno.EFAULT else error,
-            )
+            val result = memory.copyCStringFromUser(limit, VfsError.fromErrno(error))
+            val bytes = when (result) {
+                is VfsResult.Ok -> result.value
+                is VfsResult.Err -> throw KeyFailure(result.error.errno)
+            }
             return CharArray(bytes.size) { bytes[it].toInt().and(0xff).toChar() }.concatToString()
         }
 

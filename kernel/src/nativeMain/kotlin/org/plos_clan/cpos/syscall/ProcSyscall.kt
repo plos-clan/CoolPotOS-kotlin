@@ -10,6 +10,7 @@ import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.addressspace.ProcessArguments
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
+import org.plos_clan.cpos.module.ExecArguments
 import org.plos_clan.cpos.module.elf.ElfLoader
 import org.plos_clan.cpos.syscall.Syscall.copyWordToUser
 import org.plos_clan.cpos.syscall.Syscall.errno
@@ -610,16 +611,21 @@ internal fun execve(regs: PtraceRegisters, process: Process): Long {
     val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
     val path = Syscall.copyPath(process, regs[PtraceRegisters.IDX_RDI])
         ?: return errno(Errno.EFAULT)
-    val arguments = readStringVector(process, regs[PtraceRegisters.IDX_RSI])
-        ?: return errno(Errno.EFAULT)
-    val environment = readStringVector(process, regs[PtraceRegisters.IDX_RDX])
-        ?: return errno(Errno.EFAULT)
+    val arguments = when (val result = ExecArguments.read(
+        process,
+        regs[PtraceRegisters.IDX_RSI],
+        regs[PtraceRegisters.IDX_RDX],
+        path.size + 1,
+    )) {
+        is VfsResult.Ok -> result.value
+        is VfsResult.Err -> return errno(result.error.errno)
+    }
     val executablePath = path.decodeToString()
     val image = when (val result = ElfLoader.loadProcess(
         path = executablePath,
         process = process,
-        arguments = arguments,
-        environment = environment,
+        arguments = arguments.values,
+        environment = arguments.environment,
         suppressFilePrivileges = thread.capabilities.noNewPrivileges,
     )) {
         is VfsResult.Ok -> result.value
@@ -896,22 +902,4 @@ internal fun capSet(regs: PtraceRegisters, process: Process): Long {
     }
 
     return CapManager.capabilityApply(array, task)
-}
-
-private fun readStringVector(process: Process, address: ULong): List<String>? {
-    if (address == 0uL || address >= USER_VIRTUAL_ADDRESS_LIMIT) return null
-    val values = mutableListOf<String>()
-    repeat(256) { index ->
-        val pointerBytes = UserMemory(
-            process.addressSpace,
-            address + index.toULong() * ULong.SIZE_BYTES.toULong(),
-        )
-            .copyFromUser(ULong.SIZE_BYTES) ?: return null
-        val pointer = LittleEndianBuffer(pointerBytes).readU64(0)
-        if (pointer == 0uL) return values
-        val value = UserMemory(process.addressSpace, pointer).copyCStringFromUser(4096)
-            ?: return null
-        values += value.decodeToString()
-    }
-    return null
 }

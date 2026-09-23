@@ -2,6 +2,8 @@
 
 package org.plos_clan.cpos.syscall.fs
 
+import org.plos_clan.cpos.fs.FileDescriptorFlags
+import org.plos_clan.cpos.fs.vfs.AccessMode
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
@@ -13,19 +15,23 @@ import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
 
+private const val FIONCLEX = 0x5450
+private const val FIOCLEX = 0x5451
+
 internal fun ioctl(regs: PtraceRegisters, process: Process): Long {
-    val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
-        ?: return errno(Errno.EBADF)
+    val fd = fileDescriptor(regs[PtraceRegisters.IDX_RDI]) ?: return errno(Errno.EBADF)
+    val command = regs[PtraceRegisters.IDX_RSI].toInt()
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
     return try {
-        file.ioctl(
-            caller = process.vfsOperationContext,
-            command = regs[PtraceRegisters.IDX_RSI].toInt(),
-            args = UserMemory(
-                process.addressSpace,
-                regs[PtraceRegisters.IDX_RDX],
-            ),
-        )
+        if (file.access == AccessMode.PATH) return errno(Errno.EBADF)
+        if (command == FIOCLEX || command == FIONCLEX) {
+            val mask = FileDescriptorFlags.FD_CLOEXEC
+            val flags = if (command == FIOCLEX) mask else 0uL
+            val updated = process.fdTable.setDescriptorFlags(fd, flags, mask)
+            return if (updated) 0L else errno(Errno.EBADF)
+        }
+        val args = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDX])
+        file.ioctl(process.vfsOperationContext, command, args)
     } finally {
         file.release()
     }

@@ -18,7 +18,9 @@ import kotlin.test.assertTrue
 class NetlinkFilterTest {
     @Test
     fun filtersBeforeQueueAccountingAndPreservesSender() {
-        val socket = KobjectUeventNetlinkProtocol.createSocket(SocketType.RAW)
+        val network = NetworkStack()
+        val protocol = network.netlink.uevent
+        val socket = protocol.createSocket(SocketType.RAW)
         val bytes = ByteArray(32)
         val destination = checkNotNull(ByteArrayBuffer(bytes).prepareWrite(0, bytes.size))
         val request = SocketReceiveRequest(destination, 0, bytes.size, nonBlocking = true)
@@ -45,7 +47,9 @@ class NetlinkFilterTest {
 
     @Test
     fun replacementDoesNotRefilterQueuedMessages() {
-        val socket = RouteNetlinkProtocol.createSocket(SocketType.DATAGRAM)
+        val network = NetworkStack()
+        val protocol = RouteNetlinkProtocol(network)
+        val socket = protocol.createSocket(SocketType.DATAGRAM)
         val bytes = ByteArray(4)
         val destination = checkNotNull(ByteArrayBuffer(bytes).prepareWrite(0, bytes.size))
         val request = SocketReceiveRequest(destination, 0, bytes.size, nonBlocking = true)

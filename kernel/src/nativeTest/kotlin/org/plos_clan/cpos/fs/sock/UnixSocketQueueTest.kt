@@ -74,10 +74,13 @@ class UnixSocketQueueTest {
         val vfs = Vfs()
         assertIs<VfsResult.Ok<Unit>>(vfs.register(Sysfs))
         val context = assertIs<VfsResult.Ok<FileSystemContext>>(vfs.createContext(Sysfs.name)).value
+        val namespace = UnixSocketNamespace()
         val caller = VfsOperationContext.KERNEL
-        val files = assertIs<VfsResult.Ok<Pair<OpenFileDescription, OpenFileDescription>>>(
-            vfs.createUnixSocketPair(caller, context, SocketType.STREAM, credentials, true),
-        ).value
+        val pair = vfs.createUnixSocketPair(
+            caller, context, SocketType.STREAM, credentials, true, namespace,
+        )
+        val files =
+            assertIs<VfsResult.Ok<Pair<OpenFileDescription, OpenFileDescription>>>(pair).value
         val sender = files.first.backend as UnixSocket
         val receiver = files.second.backend as UnixSocket
         val epoll = Epoll()
@@ -113,10 +116,13 @@ class UnixSocketQueueTest {
         val vfs = Vfs()
         assertIs<VfsResult.Ok<Unit>>(vfs.register(Sysfs))
         val context = assertIs<VfsResult.Ok<FileSystemContext>>(vfs.createContext(Sysfs.name)).value
+        val namespace = UnixSocketNamespace()
         val caller = VfsOperationContext.KERNEL
-        val files = assertIs<VfsResult.Ok<Pair<OpenFileDescription, OpenFileDescription>>>(
-            vfs.createUnixSocketPair(caller, context, SocketType.STREAM, credentials, true),
-        ).value
+        val pair = vfs.createUnixSocketPair(
+            caller, context, SocketType.STREAM, credentials, true, namespace,
+        )
+        val files =
+            assertIs<VfsResult.Ok<Pair<OpenFileDescription, OpenFileDescription>>>(pair).value
         val sender = files.first.backend as UnixSocket
         val receiver = files.second.backend as UnixSocket
         val bytes = byteArrayOf(42)
@@ -142,8 +148,9 @@ class UnixSocketQueueTest {
     private fun pair(type: SocketType): Pair<UnixSocket, UnixSocket> {
         val paths = VfsPathResolver(40)
         val subsystem = UnixSocketSubsystem(paths, VfsNodeOperations(paths), AnonymousFileFactory())
-        val sender = subsystem.newSocket(type, credentials)
-        val receiver = subsystem.newSocket(type, credentials)
+        val namespace = UnixSocketNamespace()
+        val sender = subsystem.newSocket(type, credentials, namespace)
+        val receiver = subsystem.newSocket(type, credentials, namespace)
         assertIs<VfsResult.Ok<Unit>>(sender.pairWith(receiver, credentials))
         return sender to receiver
     }

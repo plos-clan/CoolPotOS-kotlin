@@ -582,11 +582,6 @@ internal object NewMountSyscalls {
         tooLong: VfsError,
     ): VfsResult<ByteArray> {
         val memory = UserMemory(process.addressSpace, address)
-        memory.copyCStringFromUser(limit)?.let { return VfsResult.Ok(it) }
-        return if (memory.copyFromUser(limit) == null) {
-            VfsResult.Err(VfsError.FAULT)
-        } else {
-            VfsResult.Err(tooLong)
-        }
+        return memory.copyCStringFromUser(limit, tooLong)
     }
 }

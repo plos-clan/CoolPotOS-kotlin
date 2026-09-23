@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.block
 
+import org.plos_clan.cpos.mem.OutOfMemoryError
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.IoBuffer
 

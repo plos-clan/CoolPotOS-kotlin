@@ -1,6 +1,7 @@
 @file:OptIn(
     kotlinx.cinterop.ExperimentalForeignApi::class,
     kotlin.concurrent.atomics.ExperimentalAtomicApi::class,
+    kotlin.experimental.ExperimentalNativeApi::class,
 )
 
 package org.plos_clan.cpos.network
@@ -19,6 +20,8 @@ import org.plos_clan.cpos.drivers.net.MacAddress
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlin.native.ref.WeakReference
+import org.plos_clan.cpos.fs.sock.UnixSocketNamespace
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicInt
 
@@ -106,7 +109,7 @@ internal class NetworkInterface internal constructor(
     override val kind: NetworkInterfaceKind,
     private val device: EthernetDevice?,
 ) : NetworkInterfaceView {
-    private val administrativeState = AtomicBoolean(kind == NetworkInterfaceKind.LOOPBACK)
+    private val administrativeState = AtomicBoolean(false)
     private val configuredMtu = AtomicInt(
         if (device == null) LOOPBACK_MTU
         else minOf(DEFAULT_ETHERNET_MTU, device.maximumFrameSize.toInt() - EthernetHeader.SIZE),
@@ -223,7 +226,7 @@ internal class NetworkInterface internal constructor(
     }
 }
 
-internal object NetworkStack : EthernetProtocol {
+internal class NetworkStack : EthernetProtocol {
     private data class NeighborKey(val interfaceIndex: Int, val address: Ipv4Address)
 
     private data class NeighborEntry(
@@ -319,29 +322,18 @@ internal object NetworkStack : EthernetProtocol {
     private val listeners = mutableSetOf<NetworkConfigurationListener>()
     private val nextInterfaceIndex = AtomicInt(2)
     private val nextIdentification = AtomicInt(0)
-    private var initialized = false
+    val tcp = TcpProtocol(this)
+    val udp = UdpProtocol(this)
+    val icmp = IcmpProtocol(this)
+    val packet = PacketSocketProtocol(this)
+    val netlink = NetlinkProtocols(this)
+    val unix = UnixSocketNamespace()
 
-    fun initialize() {
-        if (initialized) return
-        initialized = true
-        addListener(NetworkInterfaceKobjects)
+    init {
         val loopback = NetworkInterface(LOOPBACK_INDEX, "lo", NetworkInterfaceKind.LOOPBACK, null)
-        lock.withLock {
-            interfaces[loopback.index] = loopback
-            addresses[loopback.index] = mutableListOf(
-                NetworkInterfaceAddress(Ipv4Address.fromBits(0x7F00_0001u), 8),
-            )
-        }
-        notifyListeners { it.linkChanged(loopback, removed = false) }
-        EthernetDevices.installProtocol(this)
-        UdpProtocol.initialize()
-        TcpProtocol.initialize()
-        KernelCoroutines.launch("network-maintenance") {
-            while (true) {
-                delay(MAINTENANCE_INTERVAL_MILLIS)
-                expireState()
-            }
-        }
+        interfaces[loopback.index] = loopback
+        val reference = WeakReference(this)
+        namespacesLock.withLock { namespaces.add(reference) }
     }
 
     fun registerHandler(handler: IpProtocolHandler) {
@@ -423,6 +415,10 @@ internal object NetworkStack : EthernetProtocol {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
         val changed = intfc.setAdministrativeUp(up) || mtu != null
+        if (up && intfc.kind == NetworkInterfaceKind.LOOPBACK) {
+            val address = NetworkInterfaceAddress(Ipv4Address.fromBits(0x7f00_0001u), 8)
+            addAddress(index, address)
+        }
         if (changed) notifyListeners { it.linkChanged(intfc, removed = false) }
         return VfsResult.Ok(Unit)
     }
@@ -699,7 +695,7 @@ internal object NetworkStack : EthernetProtocol {
             ethernet.destination != MacAddress.BROADCAST &&
             ethernet.destination[0].toUInt() and 1u != 1u
         ) return
-        PacketSocketProtocol.receive(intfc, frame, ethernet)
+        packet.receive(intfc, frame, ethernet)
         when (ethernet.type) {
             EthernetType.ARP.value -> receiveArp(intfc, frame)
             EthernetType.IPV4.value -> receiveIpv4(intfc, frame)
@@ -856,7 +852,7 @@ internal object NetworkStack : EthernetProtocol {
         val input = NetworkOrderBuffer(packet.bytes)
         val type = input.readU8(packet.payloadOffset).toInt()
         val code = input.readU8(packet.payloadOffset + 1).toInt()
-        IcmpProtocol.receive(packet, type, code)
+        icmp.receive(packet, type, code)
         if (type == ICMP_ECHO_REQUEST && code == 0 &&
             !packet.destination.isLimitedBroadcast && !packet.destination.isMulticast
         ) {
@@ -1192,20 +1188,63 @@ internal object NetworkStack : EthernetProtocol {
         listenerLock.withLock { listeners.toList() }.forEach(notification)
     }
 
-    private const val LOOPBACK_INDEX = 1
-    private const val MAINTENANCE_INTERVAL_MILLIS = 1_000L
-    private const val NEIGHBOR_REACHABLE_NANOS = 60_000_000_000uL
-    private const val ARP_REQUEST_INTERVAL_NANOS = 1_000_000_000uL
-    private const val PENDING_NEIGHBOR_TIMEOUT_NANOS = 5_000_000_000uL
-    private const val FRAGMENT_TIMEOUT_NANOS = 30_000_000_000uL
-    private const val MAX_PENDING_NEIGHBOR_FRAMES = 64
-    private const val MAX_FRAGMENT_ASSEMBLIES = 256
-    private const val ICMP_HEADER_SIZE = 8
-    private const val ICMP_ECHO_REPLY = 0
-    private const val ICMP_DESTINATION_UNREACHABLE = 3
-    private const val ICMP_ECHO_REQUEST = 8
-    private const val ICMP_TIME_EXCEEDED = 11
-    private const val ICMP_PROTOCOL_UNREACHABLE = 2
-    private const val ICMP_PORT_UNREACHABLE = 3
-    private val ROUTE_PROTOCOL_KERNEL = 2u.toUByte()
+    companion object {
+        private val namespacesLock = IrqSpinLock()
+        private val namespaces = mutableListOf<WeakReference<NetworkStack>>()
+        val initial = NetworkStack()
+
+        fun initialize() {
+            initial.addListener(NetworkInterfaceKobjects)
+            initial.setLink(LOOPBACK_INDEX, true)
+            EthernetDevices.installProtocol(initial)
+            KernelCoroutines.launch("network-maintenance") {
+                var elapsed = 0L
+                while (true) {
+                    delay(TCP_TIMER_INTERVAL_MILLIS)
+                    elapsed += TCP_TIMER_INTERVAL_MILLIS
+                    val expire = elapsed >= MAINTENANCE_INTERVAL_MILLIS
+                    maintain(expire)
+                    if (expire) elapsed = 0L
+                }
+            }
+        }
+
+        private fun maintain(expire: Boolean) {
+            val now = TscClock.nanoTime()
+            for (network in snapshot()) {
+                network.tcp.tick(now)
+                if (expire) network.expireState()
+            }
+        }
+
+        internal fun snapshot(): List<NetworkStack> {
+            val references = namespacesLock.withLock { namespaces.toList() }
+            val active = ArrayList<NetworkStack>(references.size)
+            val expired = HashSet<WeakReference<NetworkStack>>()
+            for (reference in references) {
+                val network = reference.get()
+                if (network == null) expired.add(reference) else active.add(network)
+            }
+            if (expired.isNotEmpty()) namespacesLock.withLock { namespaces.removeAll(expired) }
+            return active
+        }
+
+        private const val TCP_TIMER_INTERVAL_MILLIS = 100L
+        private const val LOOPBACK_INDEX = 1
+        private const val MAINTENANCE_INTERVAL_MILLIS = 1_000L
+        private const val NEIGHBOR_REACHABLE_NANOS = 60_000_000_000uL
+        private const val ARP_REQUEST_INTERVAL_NANOS = 1_000_000_000uL
+        private const val PENDING_NEIGHBOR_TIMEOUT_NANOS = 5_000_000_000uL
+        private const val FRAGMENT_TIMEOUT_NANOS = 30_000_000_000uL
+        private const val MAX_PENDING_NEIGHBOR_FRAMES = 64
+        private const val MAX_FRAGMENT_ASSEMBLIES = 256
+        private const val ICMP_HEADER_SIZE = 8
+        private const val ICMP_ECHO_REPLY = 0
+        private const val ICMP_DESTINATION_UNREACHABLE = 3
+        private const val ICMP_ECHO_REQUEST = 8
+        private const val ICMP_TIME_EXCEEDED = 11
+        private const val ICMP_PROTOCOL_UNREACHABLE = 2
+        private const val ICMP_PORT_UNREACHABLE = 3
+        private val ROUTE_PROTOCOL_KERNEL = 2u.toUByte()
+    }
 }

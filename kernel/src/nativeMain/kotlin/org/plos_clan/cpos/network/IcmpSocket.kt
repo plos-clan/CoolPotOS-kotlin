@@ -3,7 +3,6 @@ package org.plos_clan.cpos.network
 import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.Inode
-import org.plos_clan.cpos.fs.sock.AbstractSocket
 import org.plos_clan.cpos.fs.sock.SocketAddress
 import org.plos_clan.cpos.fs.sock.SocketDomain
 import org.plos_clan.cpos.fs.sock.SocketReceiveRequest
@@ -24,7 +23,7 @@ import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 @OptIn(ExperimentalAtomicApi::class)
-internal object IcmpProtocol {
+internal class IcmpProtocol(val network: NetworkStack) {
     private data class Binding(
         val socket: IcmpSocket,
         val address: Ipv4SocketAddress,
@@ -87,13 +86,20 @@ internal object IcmpProtocol {
         return VfsResult.Ok(address)
     }
 
-    private const val ICMP_HEADER_SIZE = 8
-    private const val ICMP_ECHO_REPLY = 0
+    companion object {
+        private const val ICMP_HEADER_SIZE = 8
+        private const val ICMP_ECHO_REPLY = 0
+    }
 }
 
 internal class IcmpSocket internal constructor(
     private val subsystem: IcmpProtocol,
-) : AbstractSocket(SocketDomain.IPV4, SocketType.DATAGRAM, IpProtocol.ICMP.number.toInt()) {
+) : NetworkSocket(
+    subsystem.network,
+    SocketDomain.IPV4,
+    SocketType.DATAGRAM,
+    IpProtocol.ICMP.number.toInt(),
+) {
     private data class Datagram(
         val bytes: ByteArray,
         val source: Ipv4SocketAddress,
@@ -113,7 +119,7 @@ internal class IcmpSocket internal constructor(
     override fun bindSocket(process: Process, address: SocketAddress): VfsResult<Unit> {
         val requested = address as? Ipv4SocketAddress
             ?: return VfsResult.Err(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
-        if (!requested.address.isAny && !NetworkStack.isLocalAddress(requested.address)) {
+        if (!requested.address.isAny && !network.isLocalAddress(requested.address)) {
             return VfsResult.Err(VfsError.ADDRESS_NOT_AVAILABLE)
         }
         return lock.withLock {
@@ -150,7 +156,7 @@ internal class IcmpSocket internal constructor(
         return lock.withLock {
             val local = ensureBoundLocked()
             if (local is VfsResult.Err) return@withLock local
-            when (val path = NetworkStack.path(
+            when (val path = network.path(
                 (local as VfsResult.Ok).value.address,
                 destination.address,
             )) {
@@ -205,7 +211,7 @@ internal class IcmpSocket internal constructor(
             val local = ensureBoundLocked()
             if (local is VfsResult.Err) return@withLock local
             val bound = (local as VfsResult.Ok).value
-            when (val path = NetworkStack.path(bound.address, destination.address)) {
+            when (val path = network.path(bound.address, destination.address)) {
                 is VfsResult.Ok -> VfsResult.Ok(
                     Pair(Ipv4SocketAddress(path.value.source, bound.port), destination),
                 )
@@ -227,7 +233,7 @@ internal class IcmpSocket internal constructor(
         output.writeU16(2, 0u)
         output.writeU16(4, endpoints.first.port)
         output.writeU16(2, InternetChecksum.compute(message))
-        return when (val result = NetworkStack.sendIpv4(
+        return when (val result = network.sendIpv4(
             endpoints.first.address,
             endpoints.second.address,
             IpProtocol.ICMP,
@@ -321,7 +327,7 @@ internal class IcmpSocket internal constructor(
             IP_MTU -> {
                 val endpoints = lock.withLock { selectedSource to peer }
                 val remote = endpoints.second ?: return VfsResult.Err(VfsError.NOT_CONNECTED)
-                when (val path = NetworkStack.path(endpoints.first, remote.address)) {
+                when (val path = network.path(endpoints.first, remote.address)) {
                     is VfsResult.Ok -> path.value.mtu
                     is VfsResult.Err -> return path
                 }

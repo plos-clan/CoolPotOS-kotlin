@@ -391,7 +391,9 @@ internal fun mount(regs: PtraceRegisters, process: Process): Long {
         ?: return errno(Errno.EFAULT)
     val dataAddress = regs[PtraceRegisters.IDX_R8]
     val data = if (dataAddress == 0uL) null else {
-        UserMemory(process.addressSpace, dataAddress).copyCStringFromUser(PAGE_SIZE_BYTES.toInt())
+        val memory = UserMemory(process.addressSpace, dataAddress)
+        val result = memory.copyCStringFromUser(PAGE_SIZE_BYTES.toInt())
+        (result as? VfsResult.Ok)?.value
             ?: return errno(Errno.EFAULT)
     }
 

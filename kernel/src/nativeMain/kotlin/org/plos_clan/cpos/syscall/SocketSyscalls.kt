@@ -25,15 +25,10 @@ import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
-import org.plos_clan.cpos.network.IcmpProtocol
 import org.plos_clan.cpos.network.IpProtocol
 import org.plos_clan.cpos.network.NetlinkProtocolKind
-import org.plos_clan.cpos.network.NetlinkProtocols
-import org.plos_clan.cpos.network.PacketSocketProtocol
 import org.plos_clan.cpos.network.SocketAddressMemory
 import org.plos_clan.cpos.network.SocketConstants
-import org.plos_clan.cpos.network.TcpProtocol
-import org.plos_clan.cpos.network.UdpProtocol
 import org.plos_clan.cpos.network.SocketConstants.MSG_CMSG_CLOEXEC
 import org.plos_clan.cpos.network.SocketConstants.MSG_CTRUNC
 import org.plos_clan.cpos.network.SocketConstants.MSG_DONTWAIT
@@ -105,6 +100,7 @@ internal object SocketSyscalls {
         }
         val context = process.context ?: return errno(Errno.ENOENT)
         val caller = process.vfsOperationContext
+        val network = ProcessManager.currentThread()?.network ?: return errno(Errno.ESRCH)
         val fileResult = when (options.domain) {
             SocketDomain.UNIX -> FileSystemManager.vfs.createUnixSocket(
                 caller,
@@ -112,32 +108,29 @@ internal object SocketSyscalls {
                 options.type,
                 options.nonBlocking,
                 credentials(process),
+                network.unix,
             )
             SocketDomain.IPV4 -> {
                 val socket = when (options.protocol) {
                     IpProtocol.ICMP.number.toInt() -> {
                         if (!hasRawNetworkAccess(process)) return errno(Errno.EPERM)
-                        IcmpProtocol.createSocket()
+                        network.icmp.createSocket()
                     }
-                    IpProtocol.TCP.number.toInt() -> TcpProtocol.createSocket()
-                    IpProtocol.UDP.number.toInt() -> UdpProtocol.createSocket()
+                    IpProtocol.TCP.number.toInt() -> network.tcp.createSocket()
+                    IpProtocol.UDP.number.toInt() -> network.udp.createSocket()
                     else -> error("validated IPv4 protocol ${options.protocol}")
                 }
                 FileSystemManager.vfs.openSocket(caller, context, socket, options.nonBlocking)
             }
             SocketDomain.NETLINK -> {
-                val socket = NetlinkProtocols.createSocket(options.protocol, options.type)
+                val socket = network.netlink.createSocket(options.protocol, options.type)
                     ?: return errno(Errno.EPROTONOSUPPORT)
                 FileSystemManager.vfs.openSocket(caller, context, socket, options.nonBlocking)
             }
             SocketDomain.PACKET -> {
                 if (!hasRawNetworkAccess(process)) return errno(Errno.EPERM)
-                FileSystemManager.vfs.openSocket(
-                    caller,
-                    context,
-                    PacketSocketProtocol.createSocket(options.protocol),
-                    options.nonBlocking,
-                )
+                val socket = network.packet.createSocket(options.protocol)
+                FileSystemManager.vfs.openSocket(caller, context, socket, options.nonBlocking)
             }
         }
         val file = when (fileResult) {
@@ -164,12 +157,14 @@ internal object SocketSyscalls {
         if (options.domain != SocketDomain.UNIX) return errno(Errno.EAFNOSUPPORT)
         val context = process.context ?: return errno(Errno.ENOENT)
         val caller = process.vfsOperationContext
+        val network = ProcessManager.currentThread()?.network ?: return errno(Errno.ESRCH)
         val pair = when (val result = FileSystemManager.vfs.createUnixSocketPair(
             caller,
             context,
             options.type,
             credentials(process),
             options.nonBlocking,
+            network.unix,
         )) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return errno(result.error.errno)

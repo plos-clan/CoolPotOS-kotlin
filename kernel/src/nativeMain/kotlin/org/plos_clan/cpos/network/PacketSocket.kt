@@ -7,7 +7,6 @@ import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.Inode
 import kotlin.concurrent.atomics.AtomicReference
 import org.plos_clan.cpos.drivers.net.MacAddress
-import org.plos_clan.cpos.fs.sock.AbstractSocket
 import org.plos_clan.cpos.fs.sock.SocketAddress
 import org.plos_clan.cpos.fs.sock.SocketDomain
 import org.plos_clan.cpos.fs.sock.SocketReceiveRequest
@@ -23,7 +22,7 @@ import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.PollEvents
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
-internal object PacketSocketProtocol {
+internal class PacketSocketProtocol(val network: NetworkStack) {
     private val sockets = AtomicReference<List<PacketSocket>>(emptyList())
 
     fun createSocket(protocol: Int): PacketSocket = PacketSocket(
@@ -60,7 +59,7 @@ internal class PacketSocket internal constructor(
     private val subsystem: PacketSocketProtocol,
     protocol: Int,
     private val socketProtocol: UShort,
-) : AbstractSocket(SocketDomain.PACKET, SocketType.DATAGRAM, protocol) {
+) : NetworkSocket(subsystem.network, SocketDomain.PACKET, SocketType.DATAGRAM, protocol) {
     private data class Datagram(
         val bytes: ByteArray,
         val source: PacketSocketAddress,
@@ -78,7 +77,7 @@ internal class PacketSocket internal constructor(
         val requested = address as? PacketSocketAddress
             ?: return VfsResult.Err(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
         val intfc = requested.interfaceIndex.takeIf { it != 0 }?.let {
-            NetworkStack.interfaceByIndex(it) ?: return VfsResult.Err(VfsError.NO_DEVICE)
+            network.interfaceByIndex(it) ?: return VfsResult.Err(VfsError.NO_DEVICE)
         }
         if (intfc != null && intfc.kind != NetworkInterfaceKind.ETHERNET) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
@@ -120,7 +119,7 @@ internal class PacketSocket internal constructor(
         if (destination.interfaceIndex == 0 || destination.protocol == 0.toUShort() ||
             destination.hardwareAddress == null
         ) return IoResult.failure(VfsError.INVALID_ARGUMENT)
-        val intfc = NetworkStack.interfaceByIndex(destination.interfaceIndex)
+        val intfc = network.interfaceByIndex(destination.interfaceIndex)
             ?: return IoResult.failure(VfsError.NO_DEVICE)
         if (intfc.kind != NetworkInterfaceKind.ETHERNET) {
             return IoResult.failure(VfsError.INVALID_ARGUMENT)

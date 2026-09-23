@@ -3,10 +3,7 @@ package org.plos_clan.cpos.network
 import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.Inode
-import kotlinx.coroutines.delay
-import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.TscClock
-import org.plos_clan.cpos.fs.sock.AbstractSocket
 import org.plos_clan.cpos.fs.sock.AcceptedSocket
 import org.plos_clan.cpos.fs.sock.SocketAddress
 import org.plos_clan.cpos.fs.sock.SocketDeadline
@@ -30,7 +27,6 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.KernelRandom
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
-import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
@@ -58,7 +54,7 @@ internal data class TcpTransmission(
 )
 
 @OptIn(ExperimentalAtomicApi::class)
-internal object TcpProtocol : IpProtocolHandler {
+internal class TcpProtocol(val network: NetworkStack) : IpProtocolHandler {
     private data class Binding(
         val socket: TcpSocket,
         val address: Ipv4SocketAddress,
@@ -71,31 +67,22 @@ internal object TcpProtocol : IpProtocolHandler {
     )
 
     override val protocol = IpProtocol.TCP
-    private val initialized = AtomicBoolean(false)
     private val lock = IrqSpinLock()
     private val bindings = mutableMapOf<UShort, MutableList<Binding>>()
     private val listeners = mutableMapOf<UShort, MutableList<TcpSocket>>()
     private val connections = mutableMapOf<ConnectionKey, TcpSocket>()
     private val nextEphemeralPort = AtomicInt(EPHEMERAL_PORT_FIRST)
 
-    fun initialize() {
-        if (initialized.compareAndSet(false, true)) {
-            NetworkStack.registerHandler(this)
-            KernelCoroutines.launch("tcp-timers") {
-                while (true) {
-                    delay(TIMER_INTERVAL_MILLIS)
-                    val sockets = lock.withLock { connections.values.distinct() }
-                    val now = TscClock.nanoTime()
-                    sockets.forEach { it.tick(now) }
-                }
-            }
-        }
+    init {
+        network.registerHandler(this)
     }
 
-    fun createSocket(): TcpSocket {
-        initialize()
-        return TcpSocket(this)
+    fun tick(now: ULong) {
+        val sockets = lock.withLock { connections.values.distinct() }
+        sockets.forEach { it.tick(now) }
     }
+
+    fun createSocket(): TcpSocket = TcpSocket(this)
 
     fun bind(
         socket: TcpSocket,
@@ -223,7 +210,7 @@ internal object TcpProtocol : IpProtocolHandler {
             transmission.window,
             transmission.options,
         )
-        return when (val result = NetworkStack.sendIpv4(
+        return when (val result = network.sendIpv4(
             transmission.source.address,
             transmission.destination.address,
             IpProtocol.TCP,
@@ -274,15 +261,21 @@ internal object TcpProtocol : IpProtocolHandler {
         )
     }
 
-    private const val EPHEMERAL_PORT_FIRST = 32_768
-    private const val EPHEMERAL_PORT_LAST = 60_999
-    private const val EPHEMERAL_PORT_COUNT = EPHEMERAL_PORT_LAST - EPHEMERAL_PORT_FIRST + 1
-    private const val TIMER_INTERVAL_MILLIS = 100L
+    companion object {
+        private const val EPHEMERAL_PORT_FIRST = 32_768
+        private const val EPHEMERAL_PORT_LAST = 60_999
+        private const val EPHEMERAL_PORT_COUNT = EPHEMERAL_PORT_LAST - EPHEMERAL_PORT_FIRST + 1
+    }
 }
 
 internal class TcpSocket internal constructor(
     private val subsystem: TcpProtocol,
-) : AbstractSocket(SocketDomain.IPV4, SocketType.STREAM, IpProtocol.TCP.number.toInt()) {
+) : NetworkSocket(
+    subsystem.network,
+    SocketDomain.IPV4,
+    SocketType.STREAM,
+    IpProtocol.TCP.number.toInt(),
+) {
     private enum class State {
         IDLE,
         BOUND,
@@ -425,7 +418,7 @@ internal class TcpSocket internal constructor(
     override fun bindSocket(process: Process, address: SocketAddress): VfsResult<Unit> {
         val requested = address as? Ipv4SocketAddress
             ?: return VfsResult.Err(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
-        if (!requested.address.isAny && !NetworkStack.isLocalAddress(requested.address)) {
+        if (!requested.address.isAny && !network.isLocalAddress(requested.address)) {
             return VfsResult.Err(VfsError.ADDRESS_NOT_AVAILABLE)
         }
         return lock.withLock {
@@ -473,7 +466,7 @@ internal class TcpSocket internal constructor(
             }
             val bound = ensureBoundLocked()
             if (bound is VfsResult.Err) return@withLock bound
-            val path = NetworkStack.path((bound as VfsResult.Ok).value.address, destination.address)
+            val path = network.path((bound as VfsResult.Ok).value.address, destination.address)
             if (path is VfsResult.Err) return@withLock path
             val selectedPath = (path as VfsResult.Ok).value
             local = Ipv4SocketAddress(selectedPath.source, bound.value.port)
@@ -783,7 +776,7 @@ internal class TcpSocket internal constructor(
             SOL_IP if name == IP_TTL -> lock.withLock { ttl }
             SOL_IP if name == IP_MTU -> lock.withLock {
                 val destination = remote ?: return@withLock null
-                when (val path = NetworkStack.path(local.address, destination.address)) {
+                when (val path = network.path(local.address, destination.address)) {
                     is VfsResult.Ok -> path.value.mtu
                     is VfsResult.Err -> null
                 }

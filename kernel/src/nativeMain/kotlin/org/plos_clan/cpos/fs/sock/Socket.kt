@@ -181,7 +181,7 @@ internal abstract class AbstractSocket(
         return sendSocket(request)
     }
 
-    final override fun ioctl(
+    override fun ioctl(
         caller: VfsOperationContext,
         inode: Inode,
         command: Int,

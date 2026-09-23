@@ -49,7 +49,8 @@ internal abstract class GenericNetlinkFamily(
     }
 }
 
-internal object GenericNetlinkProtocol : NetlinkKernelProtocol(NetlinkProtocolKind.GENERIC) {
+internal class GenericNetlinkProtocol(network: NetworkStack) :
+    NetlinkKernelProtocol(network, NetlinkProtocolKind.GENERIC) {
     private val families: List<RegisteredGenericNetlinkFamily>
 
     init {
@@ -115,13 +116,15 @@ internal object GenericNetlinkProtocol : NetlinkKernelProtocol(NetlinkProtocolKi
         return family.handle(familyRequest)
     }
 
-    private const val GENL_HEADER_SIZE = 4
-    private const val GENL_ID_CTRL = 0x10
-    private const val CTRL_MCGRP_NAME = "notify"
-    private const val GENL_ADMIN_PERM = 0x01
-    private const val GENL_CMD_CAP_DO = 0x02
-    private const val GENL_CMD_CAP_DUMP = 0x04
-    private const val GENL_UNS_ADMIN_PERM = 0x10
+    companion object {
+        private const val GENL_HEADER_SIZE = 4
+        private const val GENL_ID_CTRL = 0x10
+        private const val CTRL_MCGRP_NAME = "notify"
+        private const val GENL_ADMIN_PERM = 0x01
+        private const val GENL_CMD_CAP_DO = 0x02
+        private const val GENL_CMD_CAP_DUMP = 0x04
+        private const val GENL_UNS_ADMIN_PERM = 0x10
+    }
 }
 
 private class GenericNetlinkController(

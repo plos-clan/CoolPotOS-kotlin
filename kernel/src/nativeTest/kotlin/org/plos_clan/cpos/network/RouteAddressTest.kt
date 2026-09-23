@@ -17,7 +17,8 @@ import kotlin.test.assertTrue
 class RouteAddressTest {
     @Test
     fun replacesExistingAddressAndHonorsExclusiveCreation() {
-        val intfc = checkNotNull(NetworkStack.interfaceByName("lo"))
+        val network = NetworkStack()
+        val intfc = checkNotNull(network.interfaceByName("lo"))
         val address = Ipv4Address.fromBits(0x7f070809u)
         val payload = ByteArray(24)
         LittleEndianBuffer(payload).apply {
@@ -31,7 +32,8 @@ class RouteAddressTest {
         }
         byteArrayOf(127, 7, 8, 9).copyInto(payload, 12)
         val process = checkNotNull(ProcessManager.currentThread()).process
-        val socket = RouteNetlinkProtocol.createSocket(SocketType.RAW)
+        val protocol = RouteNetlinkProtocol(network)
+        val socket = protocol.createSocket(SocketType.RAW)
         fun update(flags: Int): Int {
             val bytes = NetlinkCodec.encode(
                 20, flags or NetlinkAbi.NLM_F_REQUEST or NetlinkAbi.NLM_F_ACK, 1u, payload = payload,
@@ -59,16 +61,18 @@ class RouteAddressTest {
         }
         try {
             assertEquals(0, update(NetlinkAbi.NLM_F_REPLACE))
-            val original = NetworkStack.interfaceAddresses(intfc.index).single { it.address == address }
+            val assigned = network.interfaceAddresses(intfc.index)
+            val original = assigned.single { it.address == address }
             assertEquals(-VfsError.ALREADY_EXISTS.errno, update(0))
             assertEquals(0, update(NetlinkAbi.NLM_F_REPLACE))
             LittleEndianBuffer(payload).writeU32(20, 0x200u)
             assertEquals(0, update(NetlinkAbi.NLM_F_REPLACE or NetlinkAbi.NLM_F_ECHO))
             val exclusive = update(NetlinkAbi.NLM_F_REPLACE or NetlinkAbi.NLM_F_EXCL)
             assertEquals(-VfsError.ALREADY_EXISTS.errno, exclusive)
-            assertEquals(original, NetworkStack.interfaceAddresses(intfc.index).single { it.address == address })
+            val updated = network.interfaceAddresses(intfc.index)
+            assertEquals(original, updated.single { it.address == address })
         } finally {
-            NetworkStack.removeAddress(intfc.index, address, 8)
+            network.removeAddress(intfc.index, address, 8)
             socket.release()
         }
     }

@@ -179,13 +179,11 @@ private object ExtendedAttributes {
 
     private fun name(process: Process, address: ULong): VfsResult<ExtendedAttributeName> {
         val user = UserMemory(process.addressSpace, address)
-        val bytes = user.copyCStringFromUser(ExtendedAttributeName.MAX_LENGTH + 1)
-        if (bytes == null) {
-            val prefix = user.copyFromUser(ExtendedAttributeName.MAX_LENGTH + 1)
-                ?: return VfsResult.Err(VfsError.FAULT)
-            return VfsResult.Err(
-                if (prefix.none { it == 0.toByte() }) VfsError.RANGE else VfsError.FAULT,
-            )
+        val limit = ExtendedAttributeName.MAX_LENGTH + 1
+        val result = user.copyCStringFromUser(limit, VfsError.RANGE)
+        val bytes = when (result) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
         }
         return ExtendedAttributeName.fromBytes(bytes)
     }

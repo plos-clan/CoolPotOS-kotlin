@@ -27,7 +27,7 @@ internal object NetworkInterfaceKobjects : NetworkConfigurationListener {
         }
 
         if (publications.containsKey(intfc)) return@withLock
-        val kobject = NetworkInterfaceKobject(intfc, KobjectUeventNetlinkProtocol)
+        val kobject = NetworkInterfaceKobject(intfc, NetworkStack.initial.netlink.uevent)
         when (val result = Sysfs.registerObject(kobject.specification)) {
             is VfsResult.Ok -> {
                 publications[intfc] = Publication(kobject, result.value)

@@ -14,7 +14,8 @@ import org.plos_clan.cpos.utils.PollEvents
 internal class UnixDatagramSocket(
     subsystem: UnixSocketSubsystem,
     private val identity: UnixCredentials,
-) : UnixSocket(subsystem, SocketType.DATAGRAM) {
+    namespace: UnixSocketNamespace,
+) : UnixSocket(subsystem, SocketType.DATAGRAM, namespace) {
     private data class Peer(
         val socket: UnixDatagramSocket,
         val address: UnixSocketAddress,

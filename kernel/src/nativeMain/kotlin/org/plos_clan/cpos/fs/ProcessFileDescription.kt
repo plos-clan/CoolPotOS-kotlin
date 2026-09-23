@@ -118,9 +118,14 @@ class FileDescriptorTable {
 
     fun descriptorFlags(fd: Int): ULong? = entries[fd]?.flags
 
-    fun setDescriptorFlags(fd: Int, flags: ULong): Boolean = lock.withLock {
+    fun setDescriptorFlags(
+        fd: Int,
+        flags: ULong,
+        mask: ULong = ULong.MAX_VALUE,
+    ): Boolean = lock.withLock {
         val descriptor = entries[fd] ?: return@withLock false
-        entries[fd] = descriptor.copy(flags = flags)
+        val updated = descriptor.flags and mask.inv() or (flags and mask)
+        entries[fd] = descriptor.copy(flags = updated)
         true
     }
 

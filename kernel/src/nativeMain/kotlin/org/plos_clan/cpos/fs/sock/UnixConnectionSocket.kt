@@ -23,7 +23,8 @@ import org.plos_clan.cpos.utils.PollEvents
 internal class UnixConnectionSocket(
     subsystem: UnixSocketSubsystem,
     type: SocketType,
-) : UnixSocket(subsystem, type) {
+    namespace: UnixSocketNamespace,
+) : UnixSocket(subsystem, type, namespace) {
     private sealed interface State {
         data object Initial : State
         data object Connecting : State
@@ -69,16 +70,16 @@ internal class UnixConnectionSocket(
                     if (address == UnixSocketAddress.Unnamed) {
                         return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
                     }
-                    state = State.Listening(
-                        UnixSocketListener(
-                            subsystem,
-                            socketType,
-                            address,
-                            credentials,
-                            optionsLocked(),
-                            backlog,
-                        ),
+                    val listener = UnixSocketListener(
+                        namespace,
+                        subsystem,
+                        socketType,
+                        address,
+                        credentials,
+                        optionsLocked(),
+                        backlog,
                     )
+                    state = State.Listening(listener)
                     VfsResult.Ok(Unit)
                 }
                 is State.Listening -> {
@@ -505,35 +506,33 @@ internal class UnixConnectionSocket(
     }
 
     private constructor(
+        namespace: UnixSocketNamespace,
         subsystem: UnixSocketSubsystem,
         type: SocketType,
         connected: State.Connected,
         options: SocketOptions,
-    ) : this(subsystem, type) {
+    ) : this(subsystem, type, namespace) {
         state = connected
         inheritOptions(options)
     }
 
     companion object {
         private fun accepted(
+            namespace: UnixSocketNamespace,
             subsystem: UnixSocketSubsystem,
             type: SocketType,
             connection: UnixDuplexConnection,
             peerCredentials: UnixCredentials,
             options: SocketOptions,
-        ): UnixConnectionSocket = UnixConnectionSocket(
-            subsystem,
-            type,
-            State.Connected(
-                connection,
-                UnixDuplexConnection.Side.SECOND,
-                peerCredentials,
-            ),
-            options,
-        )
+        ): UnixConnectionSocket {
+            val side = UnixDuplexConnection.Side.SECOND
+            val state = State.Connected(connection, side, peerCredentials)
+            return UnixConnectionSocket(namespace, subsystem, type, state, options)
+        }
     }
 
     private class UnixSocketListener(
+        private val namespace: UnixSocketNamespace,
         private val subsystem: UnixSocketSubsystem,
         private val type: SocketType,
         private val localAddress: UnixSocketAddress,
@@ -588,6 +587,7 @@ internal class UnixConnectionSocket(
                         localAddress,
                     )
                     val acceptedSocket = accepted(
+                        namespace,
                         subsystem,
                         type,
                         connection,

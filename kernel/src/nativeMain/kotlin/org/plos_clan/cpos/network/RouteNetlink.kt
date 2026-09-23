@@ -5,21 +5,21 @@ import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 
-internal object RouteNetlinkProtocol :
-    NetlinkKernelProtocol(NetlinkProtocolKind.ROUTE),
+internal class RouteNetlinkProtocol(network: NetworkStack) :
+    NetlinkKernelProtocol(network, NetlinkProtocolKind.ROUTE),
     NetworkConfigurationListener {
     override val multicastGroupCount = RTNLGRP_MAX
 
     init {
-        NetworkStack.addListener(this)
+        network.addListener(this)
     }
 
     override fun handle(request: NetlinkRequest): NetlinkResult = when (request.message.type.toInt()) {
         RTM_GETLINK -> getLink(request)
         RTM_NEWLINK, RTM_SETLINK -> mutate(request) { echo -> setLink(request.message, echo) }
         RTM_GETADDR -> dump(request, IFADDR_SIZE, AF_INET) {
-            NetworkStack.snapshotInterfaces().flatMap { intfc ->
-                NetworkStack.interfaceAddresses(intfc.index).map {
+            network.snapshotInterfaces().flatMap { intfc ->
+                network.interfaceAddresses(intfc.index).map {
                     addressReply(intfc, it, removed = false)
                 }
             }
@@ -31,7 +31,7 @@ internal object RouteNetlinkProtocol :
             changeAddress(request.message, removed = true, echo)
         }
         RTM_GETROUTE -> dump(request, RTMSG_SIZE, AF_INET) {
-            NetworkStack.snapshotRoutes().map { routeReply(it, removed = false) }
+            network.snapshotRoutes().map { routeReply(it, removed = false) }
         }
         RTM_NEWROUTE -> mutate(request) { echo ->
             changeRoute(request.message, removed = false, echo)
@@ -40,7 +40,7 @@ internal object RouteNetlinkProtocol :
             changeRoute(request.message, removed = true, echo)
         }
         RTM_GETNEIGH -> dump(request, NDMSG_SIZE, AF_INET) {
-            NetworkStack.snapshotNeighbors().mapNotNull { neighborReply(it, removed = false) }
+            network.snapshotNeighbors().mapNotNull { neighborReply(it, removed = false) }
         }
         RTM_NEWNEIGH -> mutate(request) { echo ->
             changeNeighbor(request.message, removed = false, echo)
@@ -74,7 +74,7 @@ internal object RouteNetlinkProtocol :
     private fun getLink(request: NetlinkRequest): NetlinkResult {
         if (request.message.flags.toInt() and NetlinkAbi.NLM_F_DUMP == NetlinkAbi.NLM_F_DUMP) {
             return dump(request, IFINFO_SIZE, AF_PACKET) {
-                NetworkStack.snapshotInterfaces().map { linkReply(it, removed = false) }
+                network.snapshotInterfaces().map { linkReply(it, removed = false) }
             }
         }
         val decoded = when (val result = decodeLinkRequest(request.message)) {
@@ -153,9 +153,9 @@ internal object RouteNetlinkProtocol :
         } else {
             intfc.administrativeUp
         }
-        return when (val result = NetworkStack.setLink(intfc.index, up, mtu)) {
+        return when (val result = network.setLink(intfc.index, up, mtu)) {
             is VfsResult.Ok -> VfsResult.Ok(
-                if (echo) NetworkStack.interfaceByIndex(intfc.index)?.let {
+                if (echo) network.interfaceByIndex(intfc.index)?.let {
                     linkReply(it, removed = false)
                 } else {
                     null
@@ -186,8 +186,8 @@ internal object RouteNetlinkProtocol :
             } else {
                 null
             }
-        val byIndex = request.index.takeIf { it > 0 }?.let(NetworkStack::interfaceByIndex)
-        val byName = name?.let(NetworkStack::interfaceByName)
+        val byIndex = request.index.takeIf { it > 0 }?.let(network::interfaceByIndex)
+        val byName = name?.let(network::interfaceByName)
         if (request.index != 0 && byIndex == null || name != null && byName == null) {
             return VfsResult.Err(VfsError.NO_DEVICE)
         }
@@ -221,7 +221,7 @@ internal object RouteNetlinkProtocol :
         }
         val address = Ipv4Address.from(addressAttribute.payload.copy())
             ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        val intfc = NetworkStack.interfaceByIndex(index)
+        val intfc = network.interfaceByIndex(index)
             ?: return VfsResult.Err(VfsError.NO_DEVICE)
         val flagsAttribute = attributes[IFA_FLAGS]
         val flags = flagsAttribute?.u32()
@@ -233,8 +233,8 @@ internal object RouteNetlinkProtocol :
             automaticPrefixRoute = flags and IFA_F_NOPREFIXROUTE == 0u,
         )
         val replaceMask = NetlinkAbi.NLM_F_REPLACE or NetlinkAbi.NLM_F_EXCL
-        val result = if (removed) NetworkStack.removeAddress(index, address, prefixLength)
-        else NetworkStack.addAddress(
+        val result = if (removed) network.removeAddress(index, address, prefixLength)
+        else network.addAddress(
             index,
             configured,
             replace = message.flags.toInt() and replaceMask == NetlinkAbi.NLM_F_REPLACE,
@@ -308,10 +308,10 @@ internal object RouteNetlinkProtocol :
             protocol = message.payload.readU8(5),
         )
         val result = when {
-            removed -> NetworkStack.removeRoute(route)
+            removed -> network.removeRoute(route)
             message.flags.toInt() and NetlinkAbi.NLM_F_REPLACE != 0 ->
-                NetworkStack.replaceRoute(route)
-            else -> NetworkStack.addRoute(route)
+                network.replaceRoute(route)
+            else -> network.addRoute(route)
         }
         return when (result) {
             is VfsResult.Ok -> VfsResult.Ok(if (echo) routeReply(route, removed) else null)
@@ -339,13 +339,13 @@ internal object RouteNetlinkProtocol :
         }
         val address = Ipv4Address.from(addressAttribute.payload.copy())
             ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        val previous = if (removed && echo) NetworkStack.snapshotNeighbors().firstOrNull {
+        val previous = if (removed && echo) network.snapshotNeighbors().firstOrNull {
             it.interfaceIndex == interfaceIndex && it.address == address
         } else {
             null
         }
         val result = if (removed) {
-            NetworkStack.removeNeighbor(interfaceIndex, address)
+            network.removeNeighbor(interfaceIndex, address)
         } else {
             val hardwareAttribute = attributes[NDA_LLADDR]
                 ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
@@ -354,12 +354,12 @@ internal object RouteNetlinkProtocol :
             }
             val hardwareAddress = MacAddress.from(hardwareAttribute.payload.copy())
                 ?: return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-            NetworkStack.setNeighbor(interfaceIndex, address, hardwareAddress)
+            network.setNeighbor(interfaceIndex, address, hardwareAddress)
         }
         return when (result) {
             is VfsResult.Ok -> {
                 val neighbor = previous ?: if (echo) {
-                    NetworkStack.snapshotNeighbors().firstOrNull {
+                    network.snapshotNeighbors().firstOrNull {
                         it.interfaceIndex == interfaceIndex && it.address == address
                     }
                 } else {
@@ -496,7 +496,7 @@ internal object RouteNetlinkProtocol :
     }
 
     private fun neighborReply(neighbor: NetworkNeighbor, removed: Boolean): NetlinkReply? {
-        if (NetworkStack.interfaceByIndex(neighbor.interfaceIndex) == null) return null
+        if (network.interfaceByIndex(neighbor.interfaceIndex) == null) return null
         val fixed = ByteArray(NDMSG_SIZE)
         LittleEndianBuffer(fixed).apply {
             writeU8(0, AF_INET.toUByte())
@@ -523,60 +523,62 @@ internal object RouteNetlinkProtocol :
         )
     }
 
-    private const val AF_UNSPEC = 0
-    private const val AF_INET = 2
-    private const val AF_PACKET = 17
-    private const val RTM_NEWLINK = 16
-    private const val RTM_DELLINK = 17
-    private const val RTM_GETLINK = 18
-    private const val RTM_SETLINK = 19
-    private const val RTM_NEWADDR = 20
-    private const val RTM_DELADDR = 21
-    private const val RTM_GETADDR = 22
-    private const val RTM_NEWROUTE = 24
-    private const val RTM_DELROUTE = 25
-    private const val RTM_GETROUTE = 26
-    private const val RTM_NEWNEIGH = 28
-    private const val RTM_DELNEIGH = 29
-    private const val RTM_GETNEIGH = 30
-    private const val RTNLGRP_LINK = 1
-    private const val RTNLGRP_NEIGH = 3
-    private const val RTNLGRP_IPV4_IFADDR = 5
-    private const val RTNLGRP_IPV4_ROUTE = 7
-    private const val RTNLGRP_MAX = 39
-    private const val IFINFO_SIZE = 16
-    private const val IFADDR_SIZE = 8
-    private const val RTMSG_SIZE = 12
-    private const val NDMSG_SIZE = 12
-    private const val RTGENMSG_SIZE = 1
-    private const val IF_NAMESIZE = 16
-    private const val IFLA_ADDRESS = 1
-    private const val IFLA_BROADCAST = 2
-    private const val IFLA_IFNAME = 3
-    private const val IFLA_MTU = 4
-    private const val IFLA_OPERSTATE = 16
-    private const val IFA_ADDRESS = 1
-    private const val IFA_LOCAL = 2
-    private const val IFA_LABEL = 3
-    private const val IFA_BROADCAST = 4
-    private const val IFA_FLAGS = 8
-    private const val IFA_F_NOPREFIXROUTE = 0x200u
-    private const val RTA_DST = 1
-    private const val RTA_OIF = 4
-    private const val RTA_GATEWAY = 5
-    private const val RTA_PRIORITY = 6
-    private const val RTA_PREFSRC = 7
-    private const val RT_TABLE_UNSPEC = 0
-    private const val RT_TABLE_MAIN = 254
-    private const val RT_TABLE_LOCAL = 255
-    private const val RT_SCOPE_UNIVERSE = 0
-    private const val RT_SCOPE_LINK = 253
-    private const val RT_SCOPE_HOST = 254
-    private const val RTN_UNICAST = 1
-    private const val RTN_LOCAL = 2
-    private const val RTN_BROADCAST = 3
-    private const val NDA_DST = 1
-    private const val NDA_LLADDR = 2
-    private const val NUD_REACHABLE = 0x02
-    private const val NUD_FAILED = 0x20
+    companion object {
+        private const val AF_UNSPEC = 0
+        private const val AF_INET = 2
+        private const val AF_PACKET = 17
+        private const val RTM_NEWLINK = 16
+        private const val RTM_DELLINK = 17
+        private const val RTM_GETLINK = 18
+        private const val RTM_SETLINK = 19
+        private const val RTM_NEWADDR = 20
+        private const val RTM_DELADDR = 21
+        private const val RTM_GETADDR = 22
+        private const val RTM_NEWROUTE = 24
+        private const val RTM_DELROUTE = 25
+        private const val RTM_GETROUTE = 26
+        private const val RTM_NEWNEIGH = 28
+        private const val RTM_DELNEIGH = 29
+        private const val RTM_GETNEIGH = 30
+        private const val RTNLGRP_LINK = 1
+        private const val RTNLGRP_NEIGH = 3
+        private const val RTNLGRP_IPV4_IFADDR = 5
+        private const val RTNLGRP_IPV4_ROUTE = 7
+        private const val RTNLGRP_MAX = 39
+        private const val IFINFO_SIZE = 16
+        private const val IFADDR_SIZE = 8
+        private const val RTMSG_SIZE = 12
+        private const val NDMSG_SIZE = 12
+        private const val RTGENMSG_SIZE = 1
+        private const val IF_NAMESIZE = 16
+        private const val IFLA_ADDRESS = 1
+        private const val IFLA_BROADCAST = 2
+        private const val IFLA_IFNAME = 3
+        private const val IFLA_MTU = 4
+        private const val IFLA_OPERSTATE = 16
+        private const val IFA_ADDRESS = 1
+        private const val IFA_LOCAL = 2
+        private const val IFA_LABEL = 3
+        private const val IFA_BROADCAST = 4
+        private const val IFA_FLAGS = 8
+        private const val IFA_F_NOPREFIXROUTE = 0x200u
+        private const val RTA_DST = 1
+        private const val RTA_OIF = 4
+        private const val RTA_GATEWAY = 5
+        private const val RTA_PRIORITY = 6
+        private const val RTA_PREFSRC = 7
+        private const val RT_TABLE_UNSPEC = 0
+        private const val RT_TABLE_MAIN = 254
+        private const val RT_TABLE_LOCAL = 255
+        private const val RT_SCOPE_UNIVERSE = 0
+        private const val RT_SCOPE_LINK = 253
+        private const val RT_SCOPE_HOST = 254
+        private const val RTN_UNICAST = 1
+        private const val RTN_LOCAL = 2
+        private const val RTN_BROADCAST = 3
+        private const val NDA_DST = 1
+        private const val NDA_LLADDR = 2
+        private const val NUD_REACHABLE = 0x02
+        private const val NUD_FAILED = 0x20
+    }
 }

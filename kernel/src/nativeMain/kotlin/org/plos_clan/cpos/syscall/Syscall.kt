@@ -9,6 +9,7 @@ import kotlinx.cinterop.ptr
 import kotlinx.cinterop.rawValue
 import kotlinx.cinterop.toLong
 import kotlinx.cinterop.reinterpret
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.module.Vdso
 import org.plos_clan.cpos.syscall.fs.EventFdSyscalls
@@ -248,6 +249,7 @@ private enum class LinuxSyscall(
     MLOCKALL(151, MemoryLockSyscalls::lockAll),
     MUNLOCKALL(152, MemoryLockSyscalls::unlockAll),
     PRCTL(157, ::prctl),
+    UNSHARE(272, NamespaceSyscalls::unshare),
     ARCH_PRCTL(158, ::archPrctl),
     CHROOT(161, ::chroot),
     SYNC(162, ::sync),
@@ -418,8 +420,11 @@ object Syscall {
         }
     }
 
-    fun copyPath(process: Process, address: ULong): ByteArray? =
-        UserMemory(process.addressSpace, address).copyCStringFromUser(PATH_MAX)
+    fun copyPath(process: Process, address: ULong): ByteArray? {
+        val memory = UserMemory(process.addressSpace, address)
+        val result = memory.copyCStringFromUser(PATH_MAX)
+        return (result as? VfsResult.Ok)?.value
+    }
 
     fun userMemory(process: Process, base: ULong, offset: ULong): UserMemory? {
         if (offset > ULong.MAX_VALUE - base) {

@@ -138,6 +138,7 @@ private sealed interface UnixSocketBindingState {
 internal abstract class UnixSocket(
     protected val subsystem: UnixSocketSubsystem,
     socketType: SocketType,
+    val namespace: UnixSocketNamespace,
 ) : AbstractSocket(SocketDomain.UNIX, socketType, 0) {
     private var bindingState: UnixSocketBindingState = UnixSocketBindingState.Unbound
 
@@ -272,6 +273,7 @@ internal abstract class UnixSocket(
             process.vfsOperationContext,
             context,
             unixAddress,
+            namespace,
         )) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
@@ -394,6 +396,7 @@ internal abstract class UnixSocket(
             process.vfsOperationContext,
             context,
             address,
+            namespace,
         )) {
             is VfsResult.Ok -> VfsResult.Ok(
                 UnixSocketDestination.Resolved(result.value, address),
@@ -426,9 +429,7 @@ internal class UnixSocketSubsystem(
     private val anonymousFiles: AnonymousFileFactory,
 ) {
     private val lock = IrqSpinLock()
-    private val abstractBindings = mutableMapOf<UnixSocketName, UnixSocket>()
     private val pathnameBindings = mutableMapOf<Inode, UnixSocket>()
-    private var nextAutomaticName = 0u
 
     fun create(
         caller: VfsOperationContext,
@@ -436,12 +437,11 @@ internal class UnixSocketSubsystem(
         type: SocketType,
         nonBlocking: Boolean,
         credentials: UnixCredentials,
-    ): VfsResult<OpenFileDescription> = open(
-        caller,
-        context,
-        newSocket(type, credentials),
-        nonBlocking,
-    )
+        namespace: UnixSocketNamespace,
+    ): VfsResult<OpenFileDescription> {
+        val socket = newSocket(type, credentials, namespace)
+        return open(caller, context, socket, nonBlocking)
+    }
 
     fun open(
         caller: VfsOperationContext,
@@ -455,11 +455,15 @@ internal class UnixSocketSubsystem(
         OpenOptions(access = AccessMode.READ_WRITE, nonBlocking = nonBlocking),
     )
 
-    fun newSocket(type: SocketType, credentials: UnixCredentials): UnixSocket = when (type) {
-        SocketType.DATAGRAM -> UnixDatagramSocket(this, credentials)
+    fun newSocket(
+        type: SocketType,
+        credentials: UnixCredentials,
+        namespace: UnixSocketNamespace,
+    ): UnixSocket = when (type) {
+        SocketType.DATAGRAM -> UnixDatagramSocket(this, credentials, namespace)
         SocketType.STREAM,
         SocketType.SEQUENCED_PACKET,
-        -> UnixConnectionSocket(this, type)
+        -> UnixConnectionSocket(this, type, namespace)
         SocketType.RAW -> error("Raw Unix sockets are unsupported")
     }
 
@@ -476,7 +480,7 @@ internal class UnixSocketSubsystem(
         if (reserved is VfsResult.Err) return reserved
         val result = when (requested) {
             UnixSocketAddress.Unnamed -> bindAutomatic(socket)
-            is UnixSocketAddress.Abstract -> bindAbstract(socket, requested)
+            is UnixSocketAddress.Abstract -> socket.namespace.bind(socket, requested)
             is UnixSocketAddress.Pathname -> bindPathname(
                 caller,
                 context,
@@ -495,12 +499,10 @@ internal class UnixSocketSubsystem(
         caller: VfsOperationContext,
         context: FileSystemContext,
         address: UnixSocketAddress,
+        namespace: UnixSocketNamespace,
     ): VfsResult<UnixSocket> = when (address) {
         UnixSocketAddress.Unnamed -> VfsResult.Err(VfsError.ADDRESS_NOT_AVAILABLE)
-        is UnixSocketAddress.Abstract -> lock.withLock {
-            abstractBindings[address.name]?.let { VfsResult.Ok(it) }
-                ?: VfsResult.Err(VfsError.CONNECTION_REFUSED)
-        }
+        is UnixSocketAddress.Abstract -> namespace.resolve(address)
         is UnixSocketAddress.Pathname -> {
             val path = when (val result = paths.resolve(caller, context, address.pathname)) {
                 is VfsResult.Ok -> result.value
@@ -527,9 +529,10 @@ internal class UnixSocketSubsystem(
         type: SocketType,
         credentials: UnixCredentials,
         nonBlocking: Boolean,
+        namespace: UnixSocketNamespace,
     ): VfsResult<Pair<OpenFileDescription, OpenFileDescription>> {
-        val first = newSocket(type, credentials)
-        val second = newSocket(type, credentials)
+        val first = newSocket(type, credentials, namespace)
+        val second = newSocket(type, credentials, namespace)
         val paired = first.pairWith(second, credentials)
         if (paired is VfsResult.Err) {
             first.release()
@@ -556,52 +559,18 @@ internal class UnixSocketSubsystem(
     }
 
     fun unbind(socket: UnixSocket, binding: UnixSocketBinding) {
+        if (binding is UnixSocketBinding.Abstract) {
+            socket.namespace.unbind(socket, binding.address)
+            return
+        }
+        val inode = (binding as UnixSocketBinding.Pathname).inode
         lock.withLock {
-            when (binding) {
-                is UnixSocketBinding.Abstract -> if (
-                    abstractBindings[binding.address.name] === socket
-                ) {
-                    abstractBindings.remove(binding.address.name)
-                }
-                is UnixSocketBinding.Pathname -> if (pathnameBindings[binding.inode] === socket) {
-                    pathnameBindings.remove(binding.inode)
-                }
-            }
+            if (pathnameBindings[inode] === socket) pathnameBindings.remove(inode)
         }
     }
 
-    fun bindAutomatic(socket: UnixSocket): VfsResult<UnixSocketAddress> = lock.withLock {
-        repeat(AUTOMATIC_NAME_SPACE) {
-            val value = nextAutomaticName++ and AUTOMATIC_NAME_MASK
-            val address = UnixSocketAddress.Abstract(
-                UnixSocketName.fromHex(value, AUTOMATIC_NAME_LENGTH),
-            )
-            if (abstractBindings[address.name] == null) {
-                return@withLock commitAbstractBinding(socket, address)
-            }
-        }
-        VfsResult.Err(VfsError.NO_SPACE)
-    }
-
-    private fun bindAbstract(
-        socket: UnixSocket,
-        address: UnixSocketAddress.Abstract,
-    ): VfsResult<UnixSocketAddress> = lock.withLock {
-        commitAbstractBinding(socket, address)
-    }
-
-    private fun commitAbstractBinding(
-        socket: UnixSocket,
-        address: UnixSocketAddress.Abstract,
-    ): VfsResult<UnixSocketAddress> {
-        if (abstractBindings[address.name] != null) {
-            return VfsResult.Err(VfsError.ADDRESS_IN_USE)
-        }
-        val binding = UnixSocketBinding.Abstract(address)
-        if (!socket.commitBinding(binding)) return VfsResult.Err(VfsError.BAD_DESCRIPTOR)
-        abstractBindings[address.name] = socket
-        return VfsResult.Ok(address)
-    }
+    fun bindAutomatic(socket: UnixSocket): VfsResult<UnixSocketAddress> =
+        socket.namespace.bind(socket)
 
     private fun bindPathname(
         caller: VfsOperationContext,
@@ -633,6 +602,42 @@ internal class UnixSocketSubsystem(
             pathnameBindings[inode] = socket
             VfsResult.Ok(address)
         }
+    }
+}
+
+internal class UnixSocketNamespace {
+    private val lock = IrqSpinLock()
+    private val bindings = mutableMapOf<UnixSocketName, UnixSocket>()
+    private var nextAutomaticName = 0u
+
+    fun resolve(address: UnixSocketAddress.Abstract): VfsResult<UnixSocket> = lock.withLock {
+        bindings[address.name]?.let { VfsResult.Ok(it) }
+            ?: VfsResult.Err(VfsError.CONNECTION_REFUSED)
+    }
+
+    fun unbind(socket: UnixSocket, address: UnixSocketAddress.Abstract) = lock.withLock {
+        if (bindings[address.name] === socket) bindings.remove(address.name)
+    }
+
+    fun bind(
+        socket: UnixSocket,
+        requested: UnixSocketAddress.Abstract? = null,
+    ): VfsResult<UnixSocketAddress> = lock.withLock {
+        val address = requested ?: automaticAddress() ?: return VfsResult.Err(VfsError.NO_SPACE)
+        if (bindings.containsKey(address.name)) return VfsResult.Err(VfsError.ADDRESS_IN_USE)
+        val binding = UnixSocketBinding.Abstract(address)
+        if (!socket.commitBinding(binding)) return VfsResult.Err(VfsError.BAD_DESCRIPTOR)
+        bindings[address.name] = socket
+        VfsResult.Ok(address)
+    }
+
+    private fun automaticAddress(): UnixSocketAddress.Abstract? {
+        repeat(AUTOMATIC_NAME_SPACE) {
+            val value = nextAutomaticName++ and AUTOMATIC_NAME_MASK
+            val name = UnixSocketName.fromHex(value, AUTOMATIC_NAME_LENGTH)
+            if (!bindings.containsKey(name)) return UnixSocketAddress.Abstract(name)
+        }
+        return null
     }
 
     private companion object {

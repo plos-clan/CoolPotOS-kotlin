@@ -3,7 +3,6 @@ package org.plos_clan.cpos.network
 import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.Inode
-import org.plos_clan.cpos.fs.sock.AbstractSocket
 import org.plos_clan.cpos.fs.sock.SocketAddress
 import org.plos_clan.cpos.fs.sock.SocketControlMessage
 import org.plos_clan.cpos.fs.sock.SocketDeadline
@@ -33,6 +32,7 @@ internal data class NetlinkRequest(
 )
 
 internal abstract class NetlinkProtocol(
+    val network: NetworkStack,
     val kind: NetlinkProtocolKind,
     private val nonRootUserSend: Boolean = false,
     private val nonRootGroupReceive: Boolean = true,
@@ -292,9 +292,10 @@ internal abstract class NetlinkProtocol(
 }
 
 internal abstract class NetlinkKernelProtocol(
+    network: NetworkStack,
     kind: NetlinkProtocolKind,
     nonRootGroupReceive: Boolean = true,
-) : NetlinkProtocol(kind, nonRootGroupReceive = nonRootGroupReceive) {
+) : NetlinkProtocol(network, kind, nonRootGroupReceive = nonRootGroupReceive) {
     final override fun receiveFromUser(
         socket: NetlinkSocket,
         process: Process,
@@ -401,7 +402,8 @@ internal abstract class NetlinkKernelProtocol(
     }
 }
 
-private object UserspaceNetlinkProtocol : NetlinkProtocol(
+private class UserspaceNetlinkProtocol(network: NetworkStack) : NetlinkProtocol(
+    network,
     NetlinkProtocolKind.USERSOCK,
     nonRootUserSend = true,
     nonRootGroupReceive = false,
@@ -409,14 +411,19 @@ private object UserspaceNetlinkProtocol : NetlinkProtocol(
     override val multicastGroupCount = UInt.SIZE_BITS
 }
 
-internal object NetlinkProtocols {
+internal class NetlinkProtocols(network: NetworkStack) {
+    private val route = RouteNetlinkProtocol(network)
+    private val userspace = UserspaceNetlinkProtocol(network)
+    val uevent = KobjectUeventNetlinkProtocol(network)
+    private val generic = GenericNetlinkProtocol(network)
+
     fun createSocket(protocol: Int, type: SocketType): NetlinkSocket? = when (
         NetlinkProtocolKind.fromNumber(protocol)
     ) {
-        NetlinkProtocolKind.ROUTE -> RouteNetlinkProtocol.createSocket(type)
-        NetlinkProtocolKind.USERSOCK -> UserspaceNetlinkProtocol.createSocket(type)
-        NetlinkProtocolKind.KOBJECT_UEVENT -> KobjectUeventNetlinkProtocol.createSocket(type)
-        NetlinkProtocolKind.GENERIC -> GenericNetlinkProtocol.createSocket(type)
+        NetlinkProtocolKind.ROUTE -> route.createSocket(type)
+        NetlinkProtocolKind.USERSOCK -> userspace.createSocket(type)
+        NetlinkProtocolKind.KOBJECT_UEVENT -> uevent.createSocket(type)
+        NetlinkProtocolKind.GENERIC -> generic.createSocket(type)
         null -> null
     }
 }
@@ -433,7 +440,7 @@ internal data class NetlinkSocketOptions(
 internal class NetlinkSocket internal constructor(
     private val subsystem: NetlinkProtocol,
     type: SocketType,
-) : AbstractSocket(SocketDomain.NETLINK, type, subsystem.kind.number) {
+) : NetworkSocket(subsystem.network, SocketDomain.NETLINK, type, subsystem.kind.number) {
     private data class Datagram(
         val bytes: ByteArray,
         val sourcePort: UInt,

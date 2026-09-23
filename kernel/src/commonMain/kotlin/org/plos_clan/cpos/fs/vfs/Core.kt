@@ -14,6 +14,7 @@ value class VfsError private constructor(val errno: Int) {
         val INTERRUPTED = VfsError(4)
         val IO = VfsError(5)
         val NO_SUCH_DEVICE_OR_ADDRESS = VfsError(6)
+        val ARGUMENT_LIST_TOO_LONG = VfsError(7)
         val EXEC_FORMAT = VfsError(8)
         val BAD_DESCRIPTOR = VfsError(9)
         val WOULD_BLOCK = VfsError(11)

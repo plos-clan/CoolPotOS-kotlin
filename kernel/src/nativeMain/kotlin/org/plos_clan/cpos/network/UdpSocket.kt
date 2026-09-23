@@ -3,7 +3,6 @@ package org.plos_clan.cpos.network
 import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.Inode
-import org.plos_clan.cpos.fs.sock.AbstractSocket
 import org.plos_clan.cpos.fs.sock.SocketAddress
 import org.plos_clan.cpos.fs.sock.SocketDomain
 import org.plos_clan.cpos.fs.sock.SocketReceiveRequest
@@ -20,12 +19,11 @@ import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
-import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 @OptIn(ExperimentalAtomicApi::class)
-internal object UdpProtocol : IpProtocolHandler {
+internal class UdpProtocol(val network: NetworkStack) : IpProtocolHandler {
     private data class Binding(
         val socket: UdpSocket,
         val address: Ipv4SocketAddress,
@@ -33,19 +31,15 @@ internal object UdpProtocol : IpProtocolHandler {
     )
 
     override val protocol = IpProtocol.UDP
-    private val initialized = AtomicBoolean(false)
     private val lock = IrqSpinLock()
     private val bindings = mutableMapOf<UShort, MutableList<Binding>>()
     private val nextEphemeralPort = AtomicInt(EPHEMERAL_PORT_FIRST)
 
-    fun initialize() {
-        if (initialized.compareAndSet(false, true)) NetworkStack.registerHandler(this)
+    init {
+        network.registerHandler(this)
     }
 
-    fun createSocket(): UdpSocket {
-        initialize()
-        return UdpSocket(this)
-    }
+    fun createSocket(): UdpSocket = UdpSocket(this)
 
     fun bind(
         socket: UdpSocket,
@@ -89,15 +83,15 @@ internal object UdpProtocol : IpProtocolHandler {
                     binding.socket.accepts(packet.intfc.index, source)
             }
         val recipients =
-            if (NetworkStack.isBroadcast(packet.destination) || packet.destination.isMulticast) {
+            if (network.isBroadcast(packet.destination) || packet.destination.isMulticast) {
                 candidates.map(Binding::socket).distinct()
             } else {
                 candidates.maxByOrNull { if (it.address.address.isAny) 0 else 1 }
                     ?.let { listOf(it.socket) }.orEmpty()
             }
         if (recipients.isEmpty()) {
-            if (!NetworkStack.isBroadcast(packet.destination) && !packet.destination.isMulticast) {
-                NetworkStack.sendPortUnreachable(packet)
+            if (!network.isBroadcast(packet.destination) && !packet.destination.isMulticast) {
+                network.sendPortUnreachable(packet)
             }
             return
         }
@@ -163,14 +157,21 @@ internal object UdpProtocol : IpProtocolHandler {
         return VfsResult.Ok(address)
     }
 
-    private const val EPHEMERAL_PORT_FIRST = 32_768
-    private const val EPHEMERAL_PORT_LAST = 60_999
-    private const val EPHEMERAL_PORT_COUNT = EPHEMERAL_PORT_LAST - EPHEMERAL_PORT_FIRST + 1
+    companion object {
+        private const val EPHEMERAL_PORT_FIRST = 32_768
+        private const val EPHEMERAL_PORT_LAST = 60_999
+        private const val EPHEMERAL_PORT_COUNT = EPHEMERAL_PORT_LAST - EPHEMERAL_PORT_FIRST + 1
+    }
 }
 
 internal class UdpSocket internal constructor(
     private val subsystem: UdpProtocol,
-) : AbstractSocket(SocketDomain.IPV4, SocketType.DATAGRAM, IpProtocol.UDP.number.toInt()) {
+) : NetworkSocket(
+    subsystem.network,
+    SocketDomain.IPV4,
+    SocketType.DATAGRAM,
+    IpProtocol.UDP.number.toInt(),
+) {
     private data class Datagram(
         val bytes: ByteArray,
         val source: Ipv4SocketAddress,
@@ -203,7 +204,7 @@ internal class UdpSocket internal constructor(
     override fun bindSocket(process: Process, address: SocketAddress): VfsResult<Unit> {
         val requested = address as? Ipv4SocketAddress
             ?: return VfsResult.Err(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
-        if (!requested.address.isAny && !NetworkStack.isLocalAddress(requested.address)) {
+        if (!requested.address.isAny && !network.isLocalAddress(requested.address)) {
             return VfsResult.Err(VfsError.ADDRESS_NOT_AVAILABLE)
         }
         return lock.withLock {
@@ -211,7 +212,7 @@ internal class UdpSocket internal constructor(
             if (binding != null) return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
             val interfaceIndex = optionsLocked().boundInterfaceIndex
             if (!requested.address.isAny && interfaceIndex != null &&
-                NetworkStack.interfaceAddresses(interfaceIndex).none {
+                network.interfaceAddresses(interfaceIndex).none {
                     it.address == requested.address
                 }
             ) return@withLock VfsResult.Err(VfsError.ADDRESS_NOT_AVAILABLE)
@@ -247,7 +248,7 @@ internal class UdpSocket internal constructor(
             if (closed) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
             val local = ensureBoundLocked()
             if (local is VfsResult.Err) return@withLock local
-            val path = NetworkStack.path(
+            val path = network.path(
                 checkNotNull((local as VfsResult.Ok).value).address,
                 destination.address,
                 optionsLocked().boundInterfaceIndex,
@@ -299,13 +300,13 @@ internal class UdpSocket internal constructor(
             if (destination.port == 0.toUShort() || destination.address.isAny) {
                 return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
             }
-            if (NetworkStack.isBroadcast(destination.address) && !optionsLocked().broadcast) {
+            if (network.isBroadcast(destination.address) && !optionsLocked().broadcast) {
                 return@withLock VfsResult.Err(VfsError.PERMISSION_DENIED)
             }
             val local = ensureBoundLocked()
             if (local is VfsResult.Err) return@withLock local
             val bound = (local as VfsResult.Ok).value
-            val path = NetworkStack.path(
+            val path = network.path(
                 bound.address,
                 destination.address,
                 optionsLocked().boundInterfaceIndex,
@@ -336,7 +337,7 @@ internal class UdpSocket internal constructor(
             ) != request.count
         ) return IoResult.failure(VfsError.FAULT)
         UdpCodec.write(payload, 0, request.count, transmission.source, transmission.destination)
-        return when (val sent = NetworkStack.sendIpv4(
+        return when (val sent = network.sendIpv4(
             transmission.source.address,
             transmission.destination.address,
             IpProtocol.UDP,
@@ -443,7 +444,7 @@ internal class UdpSocket internal constructor(
                 val endpoints = lock.withLock { selectedSource to peer }
                 val remote = endpoints.second
                     ?: return VfsResult.Err(VfsError.NOT_CONNECTED)
-                when (val path = NetworkStack.path(endpoints.first, remote.address)) {
+                when (val path = network.path(endpoints.first, remote.address)) {
                     is VfsResult.Ok -> path.value.mtu
                     is VfsResult.Err -> return path
                 }

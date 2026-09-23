@@ -18,11 +18,14 @@ import kotlin.test.assertTrue
 class TcpStreamTest {
     private class Connection(receiveSize: Int) : AutoCloseable {
         val process = checkNotNull(ProcessManager.currentProcess())
-        val listener = TcpProtocol.createSocket()
-        val client = TcpProtocol.createSocket()
+        private val network = NetworkStack()
+        val listener = network.tcp.createSocket()
+        val client = network.tcp.createSocket()
         val server: TcpSocket
 
         init {
+            val loopback = checkNotNull(network.interfaceByName("lo"))
+            assertIs<VfsResult.Ok<Unit>>(network.setLink(loopback.index, true))
             val address = Ipv4SocketAddress(Ipv4Address.fromBits(0x7f000001u), 0u)
             assertIs<VfsResult.Ok<Unit>>(listener.setReceiveBufferSize(receiveSize))
             assertIs<VfsResult.Ok<Unit>>(listener.bindSocket(process, address))

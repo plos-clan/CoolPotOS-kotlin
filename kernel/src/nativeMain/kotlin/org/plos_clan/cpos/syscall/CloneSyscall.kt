@@ -9,6 +9,8 @@ import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.fs.cgroupfs.Cgroupfs
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.syscall.Syscall.errno
+import org.plos_clan.cpos.network.NetworkStack
+import org.plos_clan.cpos.tasks.CapEnum
 import org.plos_clan.cpos.tasks.MemoryCloneMode
 import org.plos_clan.cpos.tasks.PidHandle
 import org.plos_clan.cpos.tasks.Process
@@ -38,6 +40,7 @@ private enum class Flag(val mask: ULong) {
     PARENT_SETTID(0x0010_0000uL),
     CHILD_CLEARTID(0x0020_0000uL),
     CHILD_SETTID(0x0100_0000uL),
+    NEWNET(NamespaceSyscalls.CLONE_NEWNET),
     CLEAR_SIGHAND(0x1_0000_0000uL),
     INTO_CGROUP(0x2_0000_0000uL),
 }
@@ -61,6 +64,10 @@ internal data class CloneRequest(
         if (validationError != null) return errno(validationError)
 
         val current = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
+        val canCreateNamespace = current.capabilities.hasEffective(CapEnum.SYS_ADMIN)
+        if (has(Flag.NEWNET) && !canCreateNamespace) {
+            return errno(Errno.EPERM)
+        }
         val childStack = stackPointer.takeUnless { it == 0uL }
             ?: registers[PtraceRegisters.IDX_RSP]
         if (childStack == 0uL || childStack >= USER_VIRTUAL_ADDRESS_LIMIT) {
@@ -154,6 +161,7 @@ internal data class CloneRequest(
             } finally {
                 if (!threadClone) ProcessManager.discardUserProcess(child)
             }
+            if (has(Flag.NEWNET)) childThread.network = NetworkStack()
             childThread.capabilities.inherit(current.capabilities)
             Keys.fork(current, childThread)
             if (has(Flag.CHILD_CLEARTID)) childThread.clearChildTid = childTid

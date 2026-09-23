@@ -265,6 +265,8 @@ class Thread internal constructor(
     private val parentDeathSignalNumber = AtomicInt(0)
     internal val priority = NicePriority(nice)
 
+    internal var network = org.plos_clan.cpos.network.NetworkStack.initial
+
     internal var keys: KeyStore.Context? = null
 
     internal val hasTaskId: Boolean
@@ -729,6 +731,7 @@ object ProcessManager {
                 pidHandle = pidHandle,
                 nice = nice,
             ) {
+                if (creator != null) it.network = creator.network
                 if (creator != null && !creator.process.isKernelProcess) it.name = creator.name
                 if (registers == null) it.initializeUserContext(entryPoint, stackPointer, fsBase)
                 else it.initializeUserContext(registers, stackPointer, fsBase)
