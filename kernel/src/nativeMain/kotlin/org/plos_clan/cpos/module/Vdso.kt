@@ -7,8 +7,13 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.alloc
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
+import kotlinx.cinterop.plus
+import kotlinx.cinterop.pointed
+import kotlinx.cinterop.sizeOf
 import kotlinx.cinterop.readBytes
 import kotlinx.cinterop.reinterpret
+import org.plos_clan.cpos.drivers.RealtimeClock
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_EXECUTABLE
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE
@@ -36,6 +41,14 @@ object Vdso : CachedRegionBacking() {
         val size = embedded.size
         val data = embedded.data ?: return@memScoped false
         if (size == 0uL || size > Int.MAX_VALUE.toULong()) return@memScoped false
+
+        val clockOffset = size.toLong() - sizeOf<bridge.vdso_clock_data_t>()
+        val clockAddress = checkNotNull(data + clockOffset)
+        val clock = clockAddress.reinterpret<bridge.vdso_clock_data_t>().pointed
+        val monotonic = TscClock.nanoTime()
+        val realtime = RealtimeClock.atMonotonic(monotonic)
+        clock.realtime_seconds = realtime.seconds
+        clock.realtime_epoch = monotonic - realtime.nanoseconds.toULong()
 
         val embeddedImage = data.reinterpret<ByteVar>().readBytes(size.toInt())
         val capture = (embeddedImage.size + 15) and 15.inv()

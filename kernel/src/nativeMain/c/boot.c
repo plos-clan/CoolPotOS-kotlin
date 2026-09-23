@@ -103,17 +103,10 @@ void setup_xstate(void) {
     restore_xstate(&initial_xstate);
 }
 
-void setup_smep() {
-    uint64_t cr4;
-    __asm__ volatile("mov %%cr4, %0": "=r"(cr4):: "memory");
-    cr4 |= (1ULL << 20);
-    __asm__ volatile("mov %0, %%cr4":: "r"(cr4): "memory");
-}
-
-void setup_smap() {
+void enable_cr4(uint64_t flags) {
     uint64_t cr4;
     __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
-    cr4 |= (1ULL << 21);
+    cr4 |= flags;
     __asm__ volatile("mov %0, %%cr4" :: "r"(cr4) : "memory");
 }
 

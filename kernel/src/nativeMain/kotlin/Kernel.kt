@@ -51,13 +51,13 @@ object KernelBoot {
         if (!TscClock.initialize()) {
             return
         }
-        if (!Vdso.initialize()) {
-            return
-        }
         if (!Acpi.initialize()) {
             return
         }
         RealtimeClock.initialize()
+        if (!Vdso.initialize()) {
+            return
+        }
         SMProcessor.initialize()
         SMProcessor.currentLocal().also { local ->
             Syscall.initialize(local.lapicId.toULong(), local.isBsp)

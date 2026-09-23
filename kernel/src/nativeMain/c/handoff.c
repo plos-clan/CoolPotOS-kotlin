@@ -565,6 +565,9 @@ static enum fast_schedule_result fast_handoff_schedule(
         ? next->kernel_fs_base
         : runtime_fs_base;
     syscall->kernel_fs_base = kernel_fs_base;
+    previous->user_gs_base = rdmsr(ia32_kernel_gs_base_msr);
+    if (previous->user_gs_base != next->user_gs_base)
+        wrmsr(ia32_kernel_gs_base_msr, next->user_gs_base);
     if (previous_fs_base != kernel_fs_base)
         wrmsr(ia32_fs_base_msr, kernel_fs_base);
     fast_switch_to(previous, next->rsp);

@@ -186,13 +186,12 @@ internal object EpollSyscalls {
                     return errno(Errno.EFAULT)
                 }
         }
-        val waiter = PollWait(thread, file::release)
-        epoll.subscribe(process.vfsOperationContext, file.inode, waiter)
+        var waiter: PollWait? = null
         val previousMask = signalMask?.let { thread.signals.replaceMask(it) }
         try {
             val events = ArrayList<EpollEvent>()
             while (true) {
-                waiter.prepare()
+                waiter?.prepare()
                 epoll.collect(process.vfsOperationContext, maximumValue.toInt(), events)
                 if (events.isNotEmpty()) {
                     val bytes = ByteArray(events.size * EVENT_SIZE)
@@ -216,12 +215,18 @@ internal object EpollSyscalls {
                         return errno(Errno.EINTR)
                     }
                 }
+                if (waiter == null) {
+                    val pending = PollWait(thread, file::release)
+                    waiter = pending
+                    epoll.subscribe(process.vfsOperationContext, file.inode, pending)
+                    continue
+                }
                 waiter.await(timeout.deadline)
             }
         } catch (_: OutOfMemoryError) {
             return errno(Errno.ENOMEM)
         } finally {
-            waiter.close()
+            if (waiter == null) file.release() else waiter.close()
             if (previousMask != null && !regs.signalFrameInstalled) {
                 thread.signals.mask = previousMask
             }

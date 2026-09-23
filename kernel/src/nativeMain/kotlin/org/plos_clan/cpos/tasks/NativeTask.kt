@@ -101,6 +101,8 @@ internal class NativeTask private constructor(
         val context = contextAddress.toPointer<bridge.switch_frame_t>()!!.pointed
         clearMemory(contextAddress, 0, contextSize + frameSize)
         val regs = frame.regs
+        task.user_gs_base = if (registers == null) 0uL
+        else bridge.rdmsr(bridge.ia32_kernel_gs_base_msr)
         var xstate = bridge.initial_xstate.ptr.toLong().toULong()
         if (registers == null) {
             regs.rip = entry

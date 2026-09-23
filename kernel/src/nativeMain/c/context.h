@@ -19,11 +19,9 @@
 #define CPOS_LOAD_GENERAL CPOS_GENERAL_REGISTERS(CPOS_LOAD_REGISTER)
 
 #define CPOS_LOAD_USER_FS \
-    "movq 128(%r13), %rax\n" \
-    "movq %rax, %rdx\n" \
-    "shrq $32, %rdx\n" \
-    "movl $0xc0000100, %ecx\n" \
-    "wrmsr\n"
+    "movq 128(%r13), %rsi\n" \
+    "movl $0xc0000100, %edi\n" \
+    "call wrmsr\n"
 
 enum {
     cpu_slot_count = 256,
@@ -122,6 +120,7 @@ struct fast_task {
     uint64_t cr3;
     uint64_t kernel_rsp;
     uint64_t kernel_fs_base;
+    uint64_t user_gs_base;
     fast_task_t *next;
     fast_node_t run, sleep;
     fast_cpu_t *cpu;

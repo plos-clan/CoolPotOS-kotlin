@@ -159,21 +159,6 @@ void *runtime_vm_take_released(void) {
     return block;
 }
 
-static inline bool interrupts_enabled(void) {
-    uint64_t flags;
-    __asm__ volatile("pushfq; popq %0" : "=r"(flags) : : "memory");
-    return (flags & (1u << 9)) != 0;
-}
-
-static void wait_for_event(void) {
-    const bool switched = fast_handoff_yield();
-    if (!switched && interrupts_enabled()) {
-        __asm__ volatile("cli; sti; hlt" : : : "memory");
-    } else if (!switched) {
-        for (unsigned int i = 0; i < 64; i++) cpu_relax();
-    }
-}
-
 static long futex_deadline(const struct timespec_arg *time, uint64_t *deadline) {
     if (time->tv_sec < 0 || time->tv_nsec < 0 || time->tv_nsec >= (int64_t)NS_PER_SEC)
         return -EINVAL;
@@ -460,7 +445,7 @@ long syscall(long number, ...) {
         break;
     }
     case SYS_sched_yield:
-        wait_for_event();
+        fast_handoff_yield();
         ret = 0;
         break;
     case SYS_gettid:

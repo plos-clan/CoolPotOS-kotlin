@@ -14,6 +14,7 @@ import org.plos_clan.cpos.drivers.acpi.apic.LAPIC_TIMER_INTERRUPT_VECTOR
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.syscall.Syscall
 import org.plos_clan.cpos.utils.CpuID
+import org.plos_clan.cpos.utils.CpuFeature
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.concurrent.atomics.incrementAndFetch
@@ -25,7 +26,7 @@ data class CpuLocal(
     val isBsp: Boolean,
     var vendor: String = "",
     var modelName: String = "",
-    var features: String = "",
+    var features: Set<CpuFeature> = emptySet(),
     var physical: UInt = 0u,
     var virtual: UInt = 0u,
 ) {
@@ -46,12 +47,12 @@ fun apStart() {
             LocalApic.configureDeadlineTimer(
                 vector = LAPIC_TIMER_INTERRUPT_VECTOR.toUByte(),
             )
-    SMProcessor.load_done.incrementAndFetch()
     if (!timerReady) {
         println("APIC: failed to configure AP $lapicId TSC-deadline timer")
         return
     }
     CpuID.apInit(SMProcessor.currentLocal())
+    SMProcessor.load_done.incrementAndFetch()
     val scheduler = SMProcessor.currentLocal().scheduler
     scheduler.waitForBindRequest()
     val initialized = Scheduler.apInitialize()
@@ -101,7 +102,7 @@ object SMProcessor {
         for (index in 0 until cpu_count.toLong()) {
             val entry = (cpus[index] ?: continue).pointed
             if (entry.lapic_id == smp.bsp_lapic_id) {
-                CpuID.apInit(currentLocal(), true)
+                CpuID.apInit(currentLocal())
                 continue
             }
 
@@ -119,6 +120,7 @@ object SMProcessor {
             bridge.asm_pause()
         }
 
+        bridge.fs_base_instructions = locals.values.all { CpuFeature.FSGSBASE in it.features }
         println("MultiProcessor: loaded $cpu_count cores")
     }
 }

@@ -10,6 +10,8 @@ enum {
 typedef struct vdso_clock_data {
     uint64_t tsc_epoch;
     uint64_t tsc_to_ns_multiplier;
+    int64_t realtime_seconds;
+    uint64_t realtime_epoch;
 } vdso_clock_data_t;
 
 typedef struct vdso_image {

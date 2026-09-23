@@ -4,6 +4,7 @@
 #include "native.h"
 
 uint64_t kernel_runtime_fs_bases[cpu_slot_count];
+bool fs_base_instructions;
 
 void set_kernel_runtime_fs_base(uint64_t pointer) {
     uint32_t eax = 1, ebx;
@@ -59,13 +60,22 @@ void invlpg(uint64_t address) {
     __asm__ volatile("invlpg (%0)" : : "r"(address) : "memory");
 }
 
-uint64_t rdmsr(uint32_t msr) {
+__attribute__((used)) uint64_t rdmsr(uint32_t msr) {
+    if (msr == ia32_fs_base_msr && fs_base_instructions) {
+        uint64_t value;
+        __asm__ volatile("rdfsbase %0" : "=r"(value) : : "memory");
+        return value;
+    }
     uint32_t eax, edx;
     __asm__ volatile("rdmsr" : "=a"(eax), "=d"(edx) : "c"(msr) : "memory");
     return ((uint64_t)edx << 32) | eax;
 }
 
-void wrmsr(uint32_t msr, uint64_t value) {
+__attribute__((used)) void wrmsr(uint32_t msr, uint64_t value) {
+    if (msr == ia32_fs_base_msr && fs_base_instructions) {
+        __asm__ volatile("wrfsbase %0" : : "r"(value) : "memory");
+        return;
+    }
     __asm__ volatile("wrmsr" : : "a"((uint32_t)value),
         "d"((uint32_t)(value >> 32)), "c"(msr) : "memory");
 }
@@ -188,16 +198,12 @@ void asm_syscall_handle(void) {
         "xorq %rax, %rax\n"
         "movw %es, %ax\n"
         "movq %rax, 120(%rsp)\n"
-        "movl $0xc0000100, %ecx\n"
-        "rdmsr\n"
-        "shlq $32, %rdx\n"
-        "orq %rdx, %rax\n"
+        "movl $0xc0000100, %edi\n"
+        "call rdmsr\n"
         "movq %rax, 128(%rsp)\n"
-        "movq %gs:24, %rax\n"
-        "movq %rax, %rdx\n"
-        "shrq $32, %rdx\n"
-        "movl $0xc0000100, %ecx\n"
-        "wrmsr\n"
+        "movq %gs:24, %rsi\n"
+        "movl $0xc0000100, %edi\n"
+        "call wrmsr\n"
         "movq %gs:16, %rax\n"
         "movq %rax, 136(%rsp)\n"
         "movq %rax, 144(%rsp)\n"

@@ -29,6 +29,7 @@ enum class CpuFeature(
     val register: CpuidRegister,
     val bit: Int,
     val procName: String,
+    val controlRegisterBit: Int? = null,
 ) {
     SSE3(
         1u, 0u,
@@ -204,7 +205,8 @@ enum class CpuFeature(
         7u, 0u,
         CpuidRegister.EBX,
         0,
-        "fsgsbase"
+        "fsgsbase",
+        16,
     ),
 
     BMI1(
@@ -225,7 +227,8 @@ enum class CpuFeature(
         7u, 0u,
         CpuidRegister.EBX,
         7,
-        "smep"
+        "smep",
+        20,
     ),
 
     BMI2(
@@ -267,7 +270,8 @@ enum class CpuFeature(
         7u, 0u,
         CpuidRegister.EBX,
         20,
-        "smap"
+        "smap",
+        21,
     ),
 
     SHA(
@@ -345,19 +349,7 @@ object CpuID {
     }
 
     fun has(feature: CpuFeature): Boolean {
-        val leaf1 = cpuid(1u)
-        val leaf7 = cpuid(7u, 0u)
-
-        val result = when (feature.leaf) {
-            1u -> leaf1
-            7u -> leaf7
-            else ->
-                cpuid(
-                    feature.leaf,
-                    feature.subleaf
-                )
-        }
-
+        val result = cpuid(feature.leaf, feature.subleaf)
         val value = when (feature.register) {
             CpuidRegister.EAX -> result.eax
             CpuidRegister.EBX -> result.ebx
@@ -368,29 +360,15 @@ object CpuID {
         return value.hasBit(feature.bit)
     }
 
-
-
-    fun apInit(local: CpuLocal, isBsp: Boolean = false) {
-        local.features = CpuFeature.entries
-            .filter {
-                val h = has(it)
-                if(h) when(it) {
-                    CpuFeature.SMEP -> {
-                        bridge.setup_smep()
-                        if(isBsp) println("CPUID: setup smep feature.")
-                    }
-                    CpuFeature.SMAP -> {
-                        bridge.setup_smap()
-                        bridge.open_smap()
-                        if(isBsp) println("CPUID: setup smap feature.")
-                    }
-                    else -> {}
-                }
-                h
-            }
-            .joinToString(" ") {
-                it.procName
-            }
+    fun apInit(local: CpuLocal) {
+        local.features = CpuFeature.entries.filter(::has).toSet()
+        var controlFlags = 0uL
+        for (feature in local.features) {
+            val bit = feature.controlRegisterBit ?: continue
+            controlFlags = controlFlags or (1uL shl bit)
+        }
+        bridge.enable_cr4(controlFlags)
+        if (CpuFeature.SMAP in local.features) bridge.open_smap()
         addressBits(local)
         local.modelName = modelName()
         local.vendor = vendorId()

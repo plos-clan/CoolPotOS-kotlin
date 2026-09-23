@@ -106,7 +106,7 @@ object CpuInfo : ProcFSRender {
                 appendLine(" bits virtual")
 
                 append("flags\t\t: ")
-                appendLine(local.features)
+                appendLine(local.features.joinToString(" ") { it.procName })
 
                 appendLine()
             }

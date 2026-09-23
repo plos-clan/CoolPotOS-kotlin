@@ -298,7 +298,7 @@ private class VdsoConfig(
         "-o", objectFile.absolutePath,
     )
     val linkCommand = listOf(tools.linker) + FullLto.linkerArgs() + listOf(
-        "-shared", "-nostdlib", "--hash-style=sysv",
+        "-shared", "-Bsymbolic", "-nostdlib", "--hash-style=sysv",
         "-soname=linux-vdso.so.1", "-z", "max-page-size=0x1000", "-z", "noexecstack",
         "--build-id=none", "--orphan-handling=error",
         "-T", linkerScript.absolutePath,

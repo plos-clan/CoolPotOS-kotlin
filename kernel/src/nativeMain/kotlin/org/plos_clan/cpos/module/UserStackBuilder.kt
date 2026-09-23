@@ -40,6 +40,7 @@ private const val AT_GID = 13uL
 private const val AT_EGID = 14uL
 private const val AT_SECURE = 23uL
 private const val AT_RANDOM = 25uL
+private const val AT_HWCAP2 = 26uL
 private const val AT_EXECFN = 31uL
 private const val AT_SYSINFO_EHDR = 33uL
 
@@ -150,6 +151,7 @@ object UserStackBuilder {
         auxiliary(AT_EGID, execution.groupIds.effective.toUInt().toULong())
         auxiliary(AT_SECURE, if (execution.privileged) 1uL else 0uL)
         auxiliary(AT_RANDOM, randomAddress)
+        auxiliary(AT_HWCAP2, if (bridge.fs_base_instructions) 2uL else 0uL)
         auxiliary(AT_EXECFN, execfnAddress)
         auxiliary(AT_SYSINFO_EHDR, USER_MMAP_END)
         auxiliary(AT_NULL, 0uL)
