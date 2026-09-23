@@ -85,7 +85,8 @@ internal object TcpProtocol : IpProtocolHandler {
                 while (true) {
                     delay(TIMER_INTERVAL_MILLIS)
                     val sockets = lock.withLock { connections.values.distinct() }
-                    sockets.forEach(TcpSocket::tick)
+                    val now = TscClock.nanoTime()
+                    sockets.forEach { it.tick(now) }
                 }
             }
         }
@@ -419,6 +420,7 @@ internal class TcpSocket internal constructor(
     private var timeWaitUntil = 0uL
     private var finWaitUntil = 0uL
     private var corkUntil = 0uL
+    private var acknowledgeAt = 0uL
 
     override fun bindSocket(process: Process, address: SocketAddress): VfsResult<Unit> {
         val requested = address as? Ipv4SocketAddress
@@ -848,10 +850,9 @@ internal class TcpSocket internal constructor(
         }
     }
 
-    internal fun tick() {
+    internal fun tick(now: ULong) {
         var unregister = false
         val transmissions = lock.withLock {
-            val now = TscClock.nanoTime()
             if (state == State.TIME_WAIT) {
                 if (now >= timeWaitUntil) {
                     state = State.RESET
@@ -864,9 +865,16 @@ internal class TcpSocket internal constructor(
                 unregister = true
                 return@withLock emptyList()
             }
-            val first = outstanding.firstOrNull() ?: return@withLock flushLocked()
-            val timeout = INITIAL_RETRANSMISSION_NANOS shl minOf(first.retransmissions, 5)
-            if (now - first.sentAt < timeout) return@withLock flushLocked()
+            val first = outstanding.firstOrNull()
+            val retries = first?.retransmissions ?: 0
+            val timeout = INITIAL_RETRANSMISSION_NANOS shl minOf(retries, 5)
+            val elapsed = if (first != null && now >= first.sentAt) now - first.sentAt else 0uL
+            if (first == null || elapsed < timeout) {
+                val pending = flushLocked()
+                val acknowledge = acknowledgeAt != 0uL && now >= acknowledgeAt
+                if (pending.isNotEmpty() || !acknowledge) return@withLock pending
+                return@withLock listOf(acknowledgmentLocked())
+            }
             if (first.retransmissions >= MAX_RETRANSMISSIONS) {
                 state = State.RESET
                 storeErrorLocked(VfsError.TIMED_OUT)
@@ -1105,13 +1113,17 @@ internal class TcpSocket internal constructor(
                 accepted = parent != null,
             )
         }
-        var sendAck = false
-        if (segment.payloadLength != 0 || segment.flags and TcpFlags.FIN != 0) {
-            sendAck = receiveDataLocked(packet, segment)
-        }
+        val fin = segment.flags and TcpFlags.FIN != 0
+        val immediate = acknowledgeAt != 0uL || segment.sequenceNumber != rcvNxt ||
+            outOfOrder.isNotEmpty() || fin
+        val previousReceive = rcvNxt
+        val hasData = segment.payloadLength != 0 || fin
+        val acknowledge = hasData && receiveDataLocked(packet, segment)
+        val delayed = acknowledge && !immediate && rcvNxt != previousReceive && receiveWindowLocked() != 0
+        if (delayed) acknowledgeAt = TscClock.nanoTime() + DELAYED_ACK_NANOS
         val stateActions = advanceClosingStateLocked()
         val transmissions = ArrayList<TcpTransmission>()
-        if (sendAck) transmissions += acknowledgmentLocked()
+        if (acknowledge && !delayed) transmissions += acknowledgmentLocked()
         transmissions += flushLocked()
         transmissions += queueFinLocked()
         return SegmentActions(transmissions, unregister = stateActions)
@@ -1483,6 +1495,7 @@ internal class TcpSocket internal constructor(
         val window = (receiveWindowLocked() shr localWindowScale)
             .coerceAtMost(UShort.MAX_VALUE.toInt()).toUShort()
         rcvAdv = rcvNxt + (window.toUInt() shl localWindowScale)
+        acknowledgeAt = 0uL
         return window
     }
 
@@ -1499,6 +1512,7 @@ internal class TcpSocket internal constructor(
         private const val TIME_WAIT_NANOS = 60_000_000_000uL
         private const val FIN_WAIT_2_NANOS = 60_000_000_000uL
         private const val CORK_TIMEOUT_NANOS = 200_000_000uL
+        private const val DELAYED_ACK_NANOS = 40_000_000uL
         private const val SOL_IP = 0
         private const val IP_TTL = 2
         private const val IP_MTU = 14

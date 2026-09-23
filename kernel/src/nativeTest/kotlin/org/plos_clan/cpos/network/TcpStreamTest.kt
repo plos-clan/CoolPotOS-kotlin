@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.network
 
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.fs.sock.AcceptedSocket
 import org.plos_clan.cpos.fs.sock.SocketReceiveRequest
 import org.plos_clan.cpos.fs.sock.SocketReceiveResult
@@ -32,6 +33,23 @@ class TcpStreamTest {
             server = assertIs<TcpSocket>(peer.socket)
         }
 
+        fun send(socket: TcpSocket, count: Int = 1) {
+            val bytes = ByteArray(count) { it.toByte() }
+            val buffer = ByteArrayBuffer(bytes)
+            val source = checkNotNull(buffer.prepareRead(0, count))
+            val request = SocketSendRequest(process, source, 0, count, nonBlocking = true)
+            assertEquals(count, socket.sendSocket(request).bytesTransferred)
+        }
+
+        fun receive(count: Int): Int {
+            val bytes = ByteArray(count)
+            val buffer = ByteArrayBuffer(bytes)
+            val destination = checkNotNull(buffer.prepareWrite(0, count))
+            val request = SocketReceiveRequest(destination, 0, count, nonBlocking = true)
+            val received = server.receiveSocket(request)
+            return assertIs<VfsResult.Ok<SocketReceiveResult>>(received).value.bytes
+        }
+
         fun transfer() {
             val capacity = server.socketOptions().receiveBufferSize
             val input = ByteArray(capacity * 3) { (it * 31).toByte() }
@@ -57,6 +75,7 @@ class TcpStreamTest {
                 offset += bytes
             }
             assertContentEquals(input, output)
+            server.tick(TscClock.nanoTime() + 200_000_000uL)
             assertEquals(0, client.outputQueueBytes())
             assertIs<VfsResult.Ok<Unit>>(client.shutdownSocket(SocketShutdownMode.WRITE))
             val request = SocketReceiveRequest(destination, 0, 1, nonBlocking = true)
@@ -68,6 +87,63 @@ class TcpStreamTest {
             client.release()
             server.release()
             listener.release()
+        }
+    }
+
+    @Test
+    fun responsesPiggybackPendingAcknowledgments() {
+        Connection(4096).use { connection ->
+            connection.send(connection.client)
+            assertEquals(1, connection.client.outputQueueBytes())
+            connection.send(connection.server)
+            assertEquals(0, connection.client.outputQueueBytes())
+            assertEquals(1, connection.server.outputQueueBytes())
+            connection.send(connection.client)
+            assertEquals(0, connection.server.outputQueueBytes())
+            assertEquals(2, connection.receive(2))
+        }
+    }
+
+    @Test
+    fun secondDataSegmentIsAcknowledgedImmediately() {
+        Connection(4096).use { connection ->
+            val enabled = byteArrayOf(1, 0, 0, 0)
+            val option = connection.client.setProtocolOption(connection.process, 6, 1, enabled)
+            assertIs<VfsResult.Ok<Unit>>(option)
+            connection.send(connection.client)
+            assertEquals(1, connection.client.outputQueueBytes())
+            connection.send(connection.client)
+            assertEquals(0, connection.client.outputQueueBytes())
+            assertEquals(2, connection.receive(2))
+        }
+    }
+
+    @Test
+    fun delayedAcknowledgmentExpiresWithoutMoreTraffic() {
+        Connection(4096).use { connection ->
+            connection.send(connection.client)
+            connection.client.tick(0uL)
+            connection.server.tick(0uL)
+            assertEquals(1, connection.client.outputQueueBytes())
+            connection.server.tick(TscClock.nanoTime() + 200_000_000uL)
+            assertEquals(0, connection.client.outputQueueBytes())
+            assertEquals(1, connection.receive(1))
+        }
+    }
+
+    @Test
+    fun closingAndExhaustingTheReceiveWindowAreAcknowledgedImmediately() {
+        Connection(4096).use { connection ->
+            connection.send(connection.client)
+            val shutdown = connection.client.shutdownSocket(SocketShutdownMode.WRITE)
+            assertIs<VfsResult.Ok<Unit>>(shutdown)
+            assertEquals(0, connection.client.outputQueueBytes())
+        }
+        Connection(4096).use { connection ->
+            val capacity = connection.server.socketOptions().receiveBufferSize
+            connection.send(connection.client, capacity)
+            assertEquals(0, connection.client.outputQueueBytes())
+            assertEquals(capacity, connection.receive(capacity))
         }
     }
 
