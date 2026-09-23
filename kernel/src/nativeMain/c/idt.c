@@ -90,6 +90,7 @@ static inline __attribute__((always_inline)) uint64_t read_rbp(void) {
 
 static void set_idt_gate(uint16_t vector, void *handler, uint8_t ist, uint8_t flags) {
     const uint64_t address = (uint64_t)handler;
+    if (vector == 2 || vector == 8) ist = vector == 2 ? 2 : 1;
     idt_entries[vector] = (struct idt_entry){
         .offset_low = address,
         .selector = 0x08,
@@ -107,30 +108,25 @@ static void set_idt_gate(uint16_t vector, void *handler, uint8_t ist, uint8_t fl
 #define EXCEPTION_WITH_ERROR_CODE_LIST \
     X(8) X(10) X(11) X(12) X(13) X(14) X(17) X(21) X(29) X(30)
 
-#define X(vector) \
-    __attribute__((interrupt)) static void isr_no_error_##vector(interrupt_frame_t *frame) { \
+#define DEFINE_EXCEPTION(vector, arguments, error) \
+    __attribute__((interrupt)) static void isr_##vector arguments { \
+        if (vector == 2 && tlb_handle_nmi()) return; \
+        const uint64_t address = vector == page_fault_vector ? read_cr2() : 0; \
         kotlin_interrupt_handler_t handler = kotlin_handlers[vector]; \
         if (!handler) halt_forever(); \
-        dispatch_kotlin_handler(handler, frame, 0, read_rbp(), 0); \
+        dispatch_kotlin_handler(handler, frame, error, read_rbp(), address); \
     }
+#define X(vector) DEFINE_EXCEPTION(vector, (interrupt_frame_t *frame), 0)
 EXCEPTION_NO_ERROR_CODE_LIST
 #undef X
-
-#define X(vector) \
-    __attribute__((interrupt)) static void isr_with_error_##vector(interrupt_frame_t *frame, uint64_t error_code) { \
-        const uint64_t fault_address = vector == page_fault_vector ? read_cr2() : 0; \
-        kotlin_interrupt_handler_t handler = kotlin_handlers[vector]; \
-        if (!handler) halt_forever(); \
-        dispatch_kotlin_handler(handler, frame, error_code, read_rbp(), fault_address); \
-    }
+#define X(vector) DEFINE_EXCEPTION(vector, (interrupt_frame_t *frame, uint64_t error_code), error_code)
 EXCEPTION_WITH_ERROR_CODE_LIST
 #undef X
+#undef DEFINE_EXCEPTION
 
 static void *const exception_entry_stub[irq_vector_base] = {
-#define X(vector) [vector] = (void *)isr_no_error_##vector,
+#define X(vector) [vector] = (void *)isr_##vector,
     EXCEPTION_NO_ERROR_CODE_LIST
-#undef X
-#define X(vector) [vector] = (void *)isr_with_error_##vector,
     EXCEPTION_WITH_ERROR_CODE_LIST
 #undef X
 };
@@ -254,11 +250,8 @@ void idt_load(void) {
 }
 
 void idt_setup(void) {
-    __builtin_memset(idt_entries, 0, sizeof(idt_entries));
-    __builtin_memset(kotlin_handlers, 0, sizeof(kotlin_handlers));
     for (uint16_t vector = 0; vector < irq_vector_base; vector++) {
-        if (!exception_entry_stub[vector]) continue;
-        set_idt_gate(vector, exception_entry_stub[vector], vector == 8 ? 1 : 0, 0x8e);
+        set_idt_gate(vector, exception_entry_stub[vector], 0, 0x8e);
     }
 
     for (uint16_t vector = irq_vector_base; vector < idt_vector_count; vector++) {
@@ -281,10 +274,10 @@ void register_interrupt_handler(
     uint8_t ist,
     uint8_t flags
 ) {
-    if (vector >= irq_vector_base || !exception_entry_stub[vector]) {
+    if (vector >= irq_vector_base) {
         return;
     }
 
     kotlin_handlers[vector] = (kotlin_interrupt_handler_t)handler;
-    set_idt_gate(vector, exception_entry_stub[vector], vector == 8 ? 1 : ist, flags);
+    set_idt_gate(vector, exception_entry_stub[vector], ist, flags);
 }

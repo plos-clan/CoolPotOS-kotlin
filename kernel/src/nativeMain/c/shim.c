@@ -129,27 +129,7 @@ DEFINE_RANDOM_STEP(rdrand)
 DEFINE_RANDOM_STEP(rdseed)
 #undef DEFINE_RANDOM_STEP
 
-void setup_syscall_cpu(uint64_t lapic_id, uint8_t is_bsp) {
-    cpu_local_t *local = &locals[lapic_id % cpu_slot_count];
-    syscall_cpu_state_t *state = &local->syscall;
-    const uint64_t user_gs_base = rdmsr(ia32_gs_base_msr);
-    const uintptr_t stack_top =
-        ((uintptr_t)local->syscall_stack + sizeof(local->syscall_stack)) & ~0x3fULL;
-
-    state->kernel_rsp = stack_top;
-    state->user_rsp = 0;
-    state->user_rax = 0;
-    state->kernel_fs_base = rdmsr(ia32_fs_base_msr);
-    state->scheduler_cpu = 0;
-
-    set_kernel_stack(lapic_id, stack_top, is_bsp);
-    wrmsr(ia32_gs_base_msr, (uintptr_t)state);
-    wrmsr(ia32_kernel_gs_base_msr, user_gs_base);
-}
-
-uint64_t get_asm_syscall_handle_address(void) {
-    return (uintptr_t)&asm_syscall_handle;
-}
+void (*const syscall_entry)(void) = asm_syscall_handle;
 
 __attribute__((naked, used))
 void fast_user_task_entry(void) {

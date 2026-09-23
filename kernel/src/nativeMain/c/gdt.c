@@ -23,8 +23,8 @@ static void setup_gdt(
         | ((uint64_t)0x89U << 40U)
         | (sizeof(*tss) - 1U);
     entries[6] = address >> 32U;
-    tss->ist[0] =
-        ((uint64_t)exception_stack + sizeof(tss_stack_t)) & ~0xfULL;
+    tss->ist[0] = (uint64_t)(exception_stack[0] + sizeof(exception_stack[0]));
+    tss->ist[1] = (uint64_t)(exception_stack[1] + sizeof(exception_stack[1]));
     tss->io_map_base = sizeof(*tss);
 
     const descriptor_table_register_t pointer = {

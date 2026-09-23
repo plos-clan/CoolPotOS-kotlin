@@ -7,7 +7,7 @@
 #include "context.h"
 
 typedef uint64_t gdt_entries_t[7];
-typedef uint8_t tss_stack_t[4096];
+typedef uint8_t tss_stack_t[2][4096];
 typedef uint8_t syscall_stack_t[syscall_stack_size];
 
 typedef struct {
@@ -78,6 +78,7 @@ void idt_load(void);
 void kt_ap_start(void);
 void do_irq(uint64_t irq_num);
 bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num);
+bool tlb_handle_nmi(void);
 bool fast_handoff_prepare_runtime(uint64_t stack, uint64_t tls);
 void fast_handoff_publish_runtime(uint64_t task);
 void kernel_clone_thread_entry(void);

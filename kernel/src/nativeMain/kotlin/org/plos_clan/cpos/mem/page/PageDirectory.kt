@@ -138,9 +138,49 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
         }
 
         pt[index] = 0uL
-        invlpg(virtualAddress)
+        invalidate(virtualAddress, virtualAddress + PAGE_SIZE_BYTES)
         return physicalAddress
     }
+
+    internal fun releasePages(start: ULong, end: ULong, releaseFrames: Boolean = true) {
+        val table = pml4Table() ?: return
+        val frames = mutableListOf<ULong>()
+        removePages(table, PageTableLevel.PML4, start, end, frames)
+        if (frames.isEmpty()) return
+        invalidate(start, end)
+        if (releaseFrames) UserFrameReferences.releaseAll(frames)
+    }
+
+    private fun removePages(
+        table: CPointer<ULongVar>,
+        level: PageTableLevel,
+        start: ULong,
+        end: ULong,
+        frames: MutableList<ULong>,
+    ) {
+        val span = 1uL shl level.shift
+        var address = start
+        while (address < end) {
+            val index = level.index(address)
+            val entry = table[index]
+            val frame = entry and PTE_ADDR_MASK
+            val remaining = span - (address and (span - 1uL))
+            val next = address + minOf(remaining, end - address)
+            if (entry != 0uL && level == PageTableLevel.PT) {
+                table[index] = 0uL
+                frames += frame
+            } else if (entry and PTE_PRESENT != 0uL) {
+                check(entry and PTE_HUGE == 0uL)
+                val child = checkNotNull(frame.toVirtualPointer<ULongVar>())
+                val childLevel = PageTableLevel.entries[level.ordinal + 1]
+                removePages(child, childLevel, address, next, frames)
+            }
+            address = next
+        }
+    }
+
+    internal fun invalidate(start: ULong = 0uL, end: ULong = USER_VIRTUAL_ADDRESS_LIMIT) =
+        TranslationCache.invalidate(pml4PhysicalAddress, start, end)
 
     internal fun releaseUserPage(virtualAddress: ULong): Boolean =
         unmapPage(virtualAddress)?.let { physicalAddress ->
@@ -164,11 +204,9 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
             )
             pml4[index] = 0uL
         }
+        if (tableFrames.isNotEmpty()) invalidate()
         UserFrameReferences.releaseAll(userFrames)
         BuddyFrameAllocator.free(tableFrames)
-        if ((read_cr3() and PTE_ADDR_MASK) == pml4PhysicalAddress) {
-            bridge.write_cr3(pml4PhysicalAddress)
-        }
     }
 
     internal fun destroyUserDirectory() {
@@ -203,7 +241,8 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
             (if (accessible) PTE_PRESENT else 0uL) or
             (if (writeEnabled) PTE_WRITABLE else 0uL) or
             (if (executable) 0uL else PTE_NO_EXECUTE)
-        invlpg(virtualAddress)
+        if (pt[index] != entry) invalidate(virtualAddress, virtualAddress + PAGE_SIZE_BYTES)
+        else invlpg(virtualAddress)
         return true
     }
 
@@ -255,34 +294,7 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
             return null
         }
 
-        val pml4 = pml4Table() ?: return null
-        val pml4Entry = pml4[PageTableLevel.PML4.index(virtualAddress)]
-        if ((pml4Entry and PTE_PRESENT) == 0uL ||
-            (pml4Entry and PTE_USER) == 0uL ||
-            (pml4Entry and PTE_HUGE) != 0uL
-        ) {
-            return null
-        }
-
-        val pdpt = (pml4Entry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return null
-        val pdptEntry = pdpt[PageTableLevel.PDPT.index(virtualAddress)]
-        if ((pdptEntry and PTE_PRESENT) == 0uL ||
-            (pdptEntry and PTE_USER) == 0uL ||
-            (pdptEntry and PTE_HUGE) != 0uL
-        ) {
-            return null
-        }
-
-        val pd = (pdptEntry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return null
-        val pdEntry = pd[PageTableLevel.PD.index(virtualAddress)]
-        if ((pdEntry and PTE_PRESENT) == 0uL ||
-            (pdEntry and PTE_USER) == 0uL ||
-            (pdEntry and PTE_HUGE) != 0uL
-        ) {
-            return null
-        }
-
-        val pt = (pdEntry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return null
+        val pt = userPageTable(virtualAddress) ?: return null
         val entry = pt[PageTableLevel.PT.index(virtualAddress)]
         if ((entry and PTE_USER) == 0uL) {
             return null
@@ -305,6 +317,7 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
         }
         val frame = entry and PTE_ADDR_MASK
         if ((entry and PTE_PRESENT) != 0uL && (entry and PTE_WRITABLE) != 0uL) {
+            invlpg(virtualAddress)
             return true
         }
 
@@ -315,10 +328,12 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
         } ?: return false
         pt[index] = (entry and PTE_ADDR_MASK.inv()) or replacement or
             PTE_PRESENT or PTE_WRITABLE
-        if (replacement != frame) {
-            UserFrameReferences.release(frame)
+        if (replacement == frame) {
+            invlpg(virtualAddress)
+            return true
         }
-        invlpg(virtualAddress)
+        invalidate(virtualAddress, virtualAddress + PAGE_SIZE_BYTES)
+        UserFrameReferences.release(frame)
         return true
     }
 

@@ -51,6 +51,18 @@ class UserMemoryTest {
     }
 
     @Test
+    fun nestedUserCopiesWithinAnAddressSpaceDoNotHoldItsLockTwice() {
+        Fixture().use { fixture ->
+            val bytes = ByteArray(64) { it.toByte() }
+            assertTrue(fixture.memory.copyToUser(bytes))
+            val address = USER_MMAP_START + PAGE_SIZE_BYTES * 2uL
+            val destination = UserMemory(fixture.space, address)
+            assertEquals(bytes.size, destination.copyFrom(0, fixture.memory, 0, bytes.size))
+            assertContentEquals(bytes, destination.copyFromUser(bytes.size))
+        }
+    }
+
+    @Test
     fun rejectsUnmappedAndReadOnlyDestinations() {
         Fixture(writable = false).use { fixture ->
             val bytes = ByteArray(64)

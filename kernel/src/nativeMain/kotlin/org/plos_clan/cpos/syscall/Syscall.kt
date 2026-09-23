@@ -4,6 +4,10 @@ package org.plos_clan.cpos.syscall
 
 import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.get
+import kotlinx.cinterop.ptr
+import kotlinx.cinterop.rawValue
+import kotlinx.cinterop.toLong
 import kotlinx.cinterop.reinterpret
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.module.Vdso
@@ -436,10 +440,22 @@ object Syscall {
         val syscallUserBase = USER_DATA_SELECTOR - 8uL
         val star = (syscallUserBase shl 48) or (KERNEL_CODE_SELECTOR shl 32)
 
-        bridge.setup_syscall_cpu(lapicId, if (isBsp) 1u else 0u)
+        val local = bridge.locals[(lapicId % bridge.cpu_slot_count).toInt()]
+        val state = local.syscall
+        val stack = local.syscall_stack.rawValue.toLong().toULong()
+        val stackTop = (stack + bridge.syscall_stack_size) and 63uL.inv()
+        val userGs = bridge.rdmsr(bridge.ia32_gs_base_msr)
+        state.kernel_rsp = stackTop
+        state.user_rsp = 0uL
+        state.user_rax = 0uL
+        state.kernel_fs_base = bridge.rdmsr(bridge.ia32_fs_base_msr)
+        state.scheduler_cpu = 0uL
+        bridge.set_kernel_stack(lapicId, stackTop, if (isBsp) 1u else 0u)
+        bridge.wrmsr(bridge.ia32_gs_base_msr, state.ptr.rawValue.toLong().toULong())
+        bridge.wrmsr(bridge.ia32_kernel_gs_base_msr, userGs)
         bridge.wrmsr(MSR_EFER, bridge.rdmsr(MSR_EFER) or EFER_SYSCALL_ENABLE)
         bridge.wrmsr(MSR_STAR, star)
-        bridge.wrmsr(MSR_LSTAR, bridge.get_asm_syscall_handle_address())
+        bridge.wrmsr(MSR_LSTAR, bridge.syscall_entry.rawValue.toLong().toULong())
         bridge.wrmsr(MSR_SYSCALL_MASK, SYSCALL_RFLAGS_MASK)
     }
 }

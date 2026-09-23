@@ -3,7 +3,7 @@
 #include <limine.h>
 #include "os_terminal.h"
 #include "vdso.h"
-#include "context.h"
+#include "native.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,6 +26,7 @@ uint64_t read_cr3(void);
 uint64_t read_cr2(void);
 void write_cr3(uint64_t value);
 void invlpg(uint64_t address);
+void tlb_invalidate_remote(uint64_t directory, uint64_t lapic_id);
 uint64_t rdmsr(uint32_t msr);
 void wrmsr(uint32_t msr, uint64_t value);
 extern bool fs_base_instructions;
@@ -40,12 +41,9 @@ void io_out16(uint16_t port, uint16_t value);
 void io_out32(uint16_t port, uint32_t value);
 void enable_interrupt(void);
 void disable_interrupt(void);
-uint64_t irq_save(void);
-void irq_restore(uint64_t flags);
 bool can_use_runtime(void);
 void set_runtime_use_mask(bool enabled);
-uint64_t get_asm_syscall_handle_address(void);
-void setup_syscall_cpu(uint64_t lapic_id, uint8_t is_bsp);
+extern void (*const syscall_entry)(void);
 void wait_for_interrupt(void);
 void cpu_relax(void);
 void asm_pause(void);

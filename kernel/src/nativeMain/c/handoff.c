@@ -184,16 +184,43 @@ static void dispatch_device_irqs(void) {
     }
 }
 
-static void lapic_send_reschedule(uint64_t lapic_id) {
+static void lapic_send_interrupt(uint64_t lapic_id, uint32_t command) {
     if (lapic_x2apic) {
-        lapic_write(lapic_icr_register, lapic_id << 32 | scheduler_vector);
+        lapic_write(lapic_icr_register, lapic_id << 32 | command);
         return;
     }
 
-    while (lapic_read(lapic_icr_register) & lapic_delivery_pending)
+    uint32_t pending = lapic_read(lapic_icr_register) & lapic_delivery_pending;
+    while (pending) {
         __asm__ volatile("pause");
+        pending = lapic_read(lapic_icr_register) & lapic_delivery_pending;
+    }
     lapic_write(lapic_icr_high_register, (lapic_id & 0xffu) << 24);
-    lapic_write(lapic_icr_register, scheduler_vector);
+    lapic_write(lapic_icr_register, command);
+}
+
+static uint64_t tlb_directory, tlb_target;
+
+void tlb_invalidate_remote(uint64_t directory, uint64_t lapic_id) {
+    tlb_directory = directory;
+    __atomic_store_n(&tlb_target, lapic_id + 1, __ATOMIC_RELEASE);
+    lapic_send_interrupt(lapic_id, 4u << 8);
+    uint64_t pending = __atomic_load_n(&tlb_target, __ATOMIC_ACQUIRE);
+    while (pending) {
+        __asm__ volatile("pause");
+        pending = __atomic_load_n(&tlb_target, __ATOMIC_ACQUIRE);
+    }
+}
+
+bool tlb_handle_nmi(void) {
+    const uint64_t target = __atomic_load_n(&tlb_target, __ATOMIC_ACQUIRE);
+    uint32_t id = lapic_read(lapic_id_register);
+    if (!lapic_x2apic) id >>= 24;
+    if (target != (uint64_t)id + 1) return false;
+    const uint64_t current = read_cr3();
+    if (!tlb_directory || current == tlb_directory) write_cr3(current);
+    __atomic_store_n(&tlb_target, 0, __ATOMIC_RELEASE);
+    return true;
 }
 
 static void set_timer_deadline(fast_cpu_t *cpu, uint64_t deadline) {
@@ -266,7 +293,7 @@ static void wake_cpu(fast_cpu_t *cpu) {
     if (state == cpu_offline) return;
     const fast_task_t *running = __atomic_load_n(&cpu->current, __ATOMIC_ACQUIRE);
     const bool local = cpu == current_cpu() && state == cpu_online;
-    if (!local || running == cpu->idle) lapic_send_reschedule(cpu->lapic_id);
+    if (!local || running == cpu->idle) lapic_send_interrupt(cpu->lapic_id, scheduler_vector);
     const uint64_t queued = __atomic_load_n(&cpu->queue_size, __ATOMIC_ACQUIRE);
     const fast_task_t *runtime = __atomic_load_n(&runtime_tasks, __ATOMIC_ACQUIRE);
     if (!queued && !runtime) return;
@@ -274,7 +301,7 @@ static void wake_cpu(fast_cpu_t *cpu) {
     for (; idle; idle = idle->next) {
         if (idle == cpu || idle->state != cpu_online) continue;
         const fast_task_t *current = __atomic_load_n(&idle->current, __ATOMIC_ACQUIRE);
-        if (current == idle->idle) lapic_send_reschedule(idle->lapic_id);
+        if (current == idle->idle) lapic_send_interrupt(idle->lapic_id, scheduler_vector);
     }
 }
 
@@ -304,7 +331,7 @@ static void request_balance(fast_cpu_t *exclude) {
     fast_cpu_t *target = __atomic_load_n(&online_cpus, __ATOMIC_ACQUIRE);
     for (; target; target = target->next) {
         __atomic_store_n(&target->balance, true, __ATOMIC_RELEASE);
-        if (target != exclude) lapic_send_reschedule(target->lapic_id);
+        if (target != exclude) lapic_send_interrupt(target->lapic_id, scheduler_vector);
     }
 }
 
@@ -610,7 +637,7 @@ void fast_handoff_request_user_interrupt(uint64_t handle) {
     fast_cpu_t *cpu = __atomic_load_n(&task->cpu, __ATOMIC_ACQUIRE);
     if (!cpu) return;
     const uint64_t flags = irq_save();
-    lapic_send_reschedule(cpu->lapic_id);
+    lapic_send_interrupt(cpu->lapic_id, scheduler_vector);
     irq_restore(flags);
 }
 
@@ -945,7 +972,7 @@ __attribute__((used)) bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
     if (irq_num <= device_irq_limit) {
         __atomic_add_fetch(&cpu->wake_sequence, 1, __ATOMIC_RELEASE);
         __atomic_store_n(&cpu->worker_pending, true, __ATOMIC_RELEASE);
-        lapic_send_reschedule(cpu->lapic_id);
+        lapic_send_interrupt(cpu->lapic_id, scheduler_vector);
         goto finish;
     }
     if (irq_num == spurious_irq) goto finish;

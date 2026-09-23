@@ -201,4 +201,9 @@ internal fun mmap(regs: PtraceRegisters, process: Process): Long {
     }
 }
 
-internal fun mAdvise(regs: PtraceRegisters, process: Process): Long = errno(Errno.EOK)
+internal fun mAdvise(regs: PtraceRegisters, process: Process): Long {
+    val address = regs[PtraceRegisters.IDX_RDI]
+    val length = regs[PtraceRegisters.IDX_RSI]
+    val advice = regs[PtraceRegisters.IDX_RDX].toInt()
+    return process.addressSpace.advise(address, length, advice).toLong()
+}

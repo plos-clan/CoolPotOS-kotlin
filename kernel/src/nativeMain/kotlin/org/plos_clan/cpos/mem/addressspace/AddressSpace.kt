@@ -13,6 +13,7 @@ import org.plos_clan.cpos.mem.PageCacheFailure
 import org.plos_clan.cpos.mem.page.MMIO_PTE_FLAGS
 import org.plos_clan.cpos.mem.page.PageDirectory
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
+import org.plos_clan.cpos.mem.page.UserFrameReferences
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
@@ -254,9 +255,11 @@ class AddressSpace internal constructor(
             if (locksMemory && alignedLength > available) return MemoryMapResult.Err(EAGAIN)
             if (request.fixed) replacedBackings = unmapRangeLocked(selected, selectedEnd)
 
+            val sharedAnonymous = request.shared && request.type == MemoryRegionType.ANONYMOUS
+            val backing = request.backing ?: if (sharedAnonymous) AnonymousRegionBacking() else null
             val sharedIdentity = when {
                 !request.shared -> null
-                request.backing != null -> request.backing.sharedMemoryIdentity
+                backing != null -> backing.sharedMemoryIdentity
                 else -> Any()
             }
             val region = MemoryRegion(
@@ -269,12 +272,13 @@ class AddressSpace internal constructor(
                 offset = request.offset,
                 shared = request.shared,
                 memoryLock = memoryLock,
-                backing = request.backing,
+                backing = backing,
                 sharedIdentity = sharedIdentity,
             )
-            if (request.backing?.retain(this) == false) return@withLock null
+            if (backing?.retain(this) == false) return@withLock null
+            if (backing !== request.backing) backing?.release()
             if (regions.insertOwned(region)) return@withLock Pair(selected, region)
-            request.backing?.release(this)
+            backing?.release(this)
             null
         }
         replacedBackings.forEach { it.release(this) }
@@ -393,6 +397,42 @@ class AddressSpace internal constructor(
             page.release(commit.consumed)
             target.release()
             if (!commit.retry) return commit.result
+        }
+    }
+
+    internal fun acquireUserFrame(address: ULong, writable: Boolean): ULong? {
+        while (true) {
+            val frame = lock.withLock {
+                val physical = pageDirectory.resolveUserPhysicalAddress(address, writable)
+                    ?: return@withLock null
+                UserFrameReferences.retain(physical.alignDown(PAGE_SIZE_BYTES))
+                physical
+            }
+            if (frame != null) return frame
+            if (faultIn(address, writable) != PageFaultResult.RESOLVED) return null
+        }
+    }
+
+    internal inline fun accessUserPage(
+        address: ULong,
+        writable: Boolean,
+        pin: Boolean,
+        operation: (ULong) -> Int,
+    ): Int {
+        if (pin) {
+            val physical = acquireUserFrame(address, writable) ?: return 0
+            return try {
+                operation(physical)
+            } finally {
+                UserFrameReferences.release(physical.alignDown(PAGE_SIZE_BYTES))
+            }
+        }
+        while (true) {
+            lock.withLock {
+                val physical = pageDirectory.resolveUserPhysicalAddress(address, writable)
+                if (physical != null) return operation(physical)
+            }
+            if (faultIn(address, writable) != PageFaultResult.RESOLVED) return 0
         }
     }
 
@@ -599,6 +639,29 @@ class AddressSpace internal constructor(
         return result
     }
 
+    internal fun advise(address: ULong, length: ULong, advice: Int): Int {
+        if (advice !in 0..4 || !address.isPageAligned()) return -EINVAL
+        if (length == 0uL) return 0
+        val size = alignLength(length) ?: return -EINVAL
+        if (address > ULong.MAX_VALUE - size) return -EINVAL
+        val end = address + size
+        return lock.withLock {
+            var cursor = address
+            var result = 0
+            for (region in regions.intersecting(address, end)) {
+                if (region.start > cursor) result = -ENOMEM
+                val first = maxOf(address, region.start)
+                cursor = minOf(end, region.end)
+                if (advice != 4) continue
+                val locked = region.memoryLock != MemoryLock.NONE
+                if (locked || region.type == MemoryRegionType.MMIO) return@withLock -EINVAL
+                if (!region.type.userMutable) return@withLock -EINVAL
+                pageDirectory.releasePages(first, cursor)
+            }
+            if (cursor < end) -ENOMEM else result
+        }
+    }
+
     fun protect(address: ULong, length: ULong, access: ULong): MemoryMapResult<Unit> {
         val alignedLength = alignLength(length) ?: return MemoryMapResult.Err(EINVAL)
         if (!address.isPageAligned() ||
@@ -660,15 +723,7 @@ class AddressSpace internal constructor(
     private fun rollbackMapping(region: MemoryRegion, start: ULong, end: ULong) {
         val backing = lock.withLock {
             val removed = regions.removeOwned(region) ?: return@withLock null
-            var address = start
-            while (address < end) {
-                if (user) {
-                    pageDirectory.releaseUserPage(address)
-                } else {
-                    pageDirectory.unmapPage(address)
-                }
-                address += PAGE_SIZE_BYTES
-            }
+            pageDirectory.releasePages(start, end, user)
             removed.backing
         }
         backing?.release(this)
@@ -677,15 +732,7 @@ class AddressSpace internal constructor(
     private fun unmapRangeLocked(start: ULong, end: ULong): List<MemoryRegionBacking> =
         buildList {
             regions.removeRange(start, end).forEach { region ->
-                var address = region.start
-                while (address < region.end) {
-                    if (user) {
-                        pageDirectory.releaseUserPage(address)
-                    } else {
-                        pageDirectory.unmapPage(address)
-                    }
-                    address += PAGE_SIZE_BYTES
-                }
+                pageDirectory.releasePages(region.start, region.end, user)
                 region.backing?.let(::add)
             }
         }

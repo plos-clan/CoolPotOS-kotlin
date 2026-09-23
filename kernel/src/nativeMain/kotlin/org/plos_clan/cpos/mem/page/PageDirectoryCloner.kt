@@ -2,7 +2,6 @@
 
 package org.plos_clan.cpos.mem.page
 
-import bridge.read_cr3
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
@@ -123,11 +122,7 @@ internal class PageDirectoryCloner(
     }
 
     private fun flushModifiedMappings() {
-        if (modifiedPages.isNotEmpty() &&
-            (read_cr3() and PTE_ADDR_MASK) == source.pml4PhysicalAddress
-        ) {
-            bridge.write_cr3(source.pml4PhysicalAddress)
-        }
+        if (modifiedPages.isNotEmpty()) source.invalidate()
     }
 
     private fun ULong.withAddress(address: ULong): ULong =

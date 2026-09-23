@@ -10,7 +10,7 @@ import kotlinx.cinterop.get
 import kotlinx.cinterop.plus
 import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.mem.addressspace.AddressSpace
-import org.plos_clan.cpos.mem.addressspace.PageFaultResult
+import org.plos_clan.cpos.mem.page.UserFrameReferences
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -24,12 +24,6 @@ class UserMemory internal constructor(
     private val addressSpace: AddressSpace,
     val address: ULong,
 ) : NativeBuffer(), IoBuffer {
-    private val pageDirectory = addressSpace.pageDirectory
-    private var preparedVirtualPage = ULong.MAX_VALUE
-    private var preparedWritable = false
-    private var firstPhysicalPage = 0uL
-    private var additionalPhysicalPages: ULongArray? = null
-
     fun copyFromUser(size: Int): ByteArray? {
         if (size < 0) {
             return null
@@ -115,7 +109,7 @@ class UserMemory internal constructor(
         count: Int,
     ): Int {
         if (source !is NativeBuffer) return source.copyTo(sourceOffset, this, destinationOffset, count)
-        return transfer(destinationOffset, count, true) { destination, copied, chunk ->
+        return transfer(destinationOffset, count, true, pin = true) { destination, copied, chunk ->
             source.copyToNative(sourceOffset + copied, destination, chunk)
         }
     }
@@ -127,22 +121,12 @@ class UserMemory internal constructor(
         val start = address + offset.toULong()
         val firstPage = start.alignDown(PAGE_SIZE_BYTES)
         val lastPage = (start + count.toULong() - 1uL).alignDown(PAGE_SIZE_BYTES)
-        if (isPrepared(firstPage, lastPage, writable)) return true
-
-        preparedVirtualPage = ULong.MAX_VALUE
-        additionalPhysicalPages = null
-        val pageCount = ((lastPage - firstPage) / PAGE_SIZE_BYTES).toInt() + 1
-        val additional = if (pageCount > 1) ULongArray(pageCount - 1) else null
-        repeat(pageCount) { index ->
-            val virtualPage = firstPage + index.toULong() * PAGE_SIZE_BYTES
-            val physicalPage = resolveUserPhysicalAddress(virtualPage, writable)
-                ?: return false
-            if (index == 0) firstPhysicalPage = physicalPage
-            else additional!![index - 1] = physicalPage
+        var virtualPage = firstPage
+        while (virtualPage <= lastPage) {
+            val ready = addressSpace.accessUserPage(virtualPage, writable, pin = false) { 1 }
+            if (ready == 0) return false
+            virtualPage += PAGE_SIZE_BYTES
         }
-        preparedVirtualPage = firstPage
-        preparedWritable = writable
-        additionalPhysicalPages = additional
         return true
     }
 
@@ -164,14 +148,10 @@ class UserMemory internal constructor(
     }
 
     fun readUIntLE(): UInt? {
-        if (!validUserRange(UInt.SIZE_BYTES)) return null
+        val bytes = copyFromUser(UInt.SIZE_BYTES) ?: return null
         var value = 0u
-        repeat(UInt.SIZE_BYTES) { index ->
-            val currentAddress = address + index.toULong()
-            val physicalAddress = resolveUserPhysicalAddress(currentAddress, false)
-                ?: return null
-            val source = physicalAddress.toVirtualPointer<UByteVar>() ?: return null
-            value = value or (source[0].toUInt() shl (index * Byte.SIZE_BITS))
+        for (index in bytes.indices) {
+            value = value or (bytes[index].toUByte().toUInt() shl (index * Byte.SIZE_BITS))
         }
         return value
     }
@@ -184,21 +164,22 @@ class UserMemory internal constructor(
         var copied = 0
         var currentAddress = address
         while (copied < maxLength && currentAddress < USER_VIRTUAL_ADDRESS_LIMIT) {
-            val physicalAddress = resolveUserPhysicalAddress(
-                virtualAddress = currentAddress,
-                requireWritable = false,
-            ) ?: return null
-            val source = physicalAddress.toVirtualPointer<UByteVar>() ?: return null
+            val physicalAddress = addressSpace.acquireUserFrame(currentAddress, false) ?: return null
+            val source = checkNotNull(physicalAddress.toVirtualPointer<UByteVar>())
             val pageOffset = currentAddress - currentAddress.alignDown(PAGE_SIZE_BYTES)
             val chunkLength = minOf(
                 maxLength - copied,
                 (PAGE_SIZE_BYTES - pageOffset).toInt(),
             )
 
-            repeat(chunkLength) { index ->
-                val byte = source[index].toByte()
-                if (byte == 0.toByte()) return result.copyOf(copied + index)
-                result[copied + index] = byte
+            try {
+                repeat(chunkLength) { index ->
+                    val byte = source[index].toByte()
+                    if (byte == 0.toByte()) return result.copyOf(copied + index)
+                    result[copied + index] = byte
+                }
+            } finally {
+                UserFrameReferences.release(physicalAddress.alignDown(PAGE_SIZE_BYTES))
             }
             copied += chunkLength
             currentAddress += chunkLength.toULong()
@@ -234,19 +215,6 @@ class UserMemory internal constructor(
         return true
     }
 
-    private fun resolveUserPhysicalAddress(
-        virtualAddress: ULong,
-        requireWritable: Boolean,
-    ): ULong? {
-        pageDirectory.resolveUserPhysicalAddress(virtualAddress, requireWritable)?.let {
-            return it
-        }
-        if (addressSpace.faultIn(virtualAddress, write = requireWritable) != PageFaultResult.RESOLVED) {
-            return null
-        }
-        return pageDirectory.resolveUserPhysicalAddress(virtualAddress, requireWritable)
-    }
-
     private fun isValidRange(buffer: ByteArray, offset: Int, size: Int): Boolean =
         offset >= 0 && size >= 0 && offset <= buffer.size - size && validUserRange(size)
 
@@ -265,48 +233,23 @@ class UserMemory internal constructor(
         offset: Int,
         count: Int,
         requireWritable: Boolean,
+        pin: Boolean = false,
         operation: (CPointer<UByteVar>, Int, Int) -> Int,
     ): Int {
         if (!validUserRange(offset, count)) return 0
         var copied = 0
         while (copied < count) {
             val currentAddress = address + offset.toULong() + copied.toULong()
-            val physicalAddress = preparedPhysicalAddress(currentAddress, requireWritable)
-                ?: resolveUserPhysicalAddress(currentAddress, requireWritable)
-                ?: break
-            val pointer = physicalAddress.toVirtualPointer<UByteVar>() ?: break
             val chunk = pageChunkSize(currentAddress, count - copied)
-            val transferred = operation(pointer, copied, chunk)
+            val transferred = addressSpace.accessUserPage(currentAddress, requireWritable, pin) { physical ->
+                val pointer = checkNotNull(physical.toVirtualPointer<UByteVar>())
+                operation(pointer, copied, chunk)
+            }
             if (transferred !in 1..chunk) break
             copied += transferred
             if (transferred < chunk) break
         }
         return copied
-    }
-
-    private fun preparedPhysicalAddress(
-        virtualAddress: ULong,
-        requireWritable: Boolean,
-    ): ULong? {
-        if (preparedVirtualPage == ULong.MAX_VALUE || requireWritable && !preparedWritable) return null
-
-        val virtualPage = virtualAddress.alignDown(PAGE_SIZE_BYTES)
-        if (virtualPage < preparedVirtualPage) return null
-        val pageIndex = (virtualPage - preparedVirtualPage) / PAGE_SIZE_BYTES
-        val physicalPage = if (pageIndex == 0uL) {
-            firstPhysicalPage
-        } else {
-            additionalPhysicalPages?.getOrNull(pageIndex.toInt() - 1) ?: return null
-        }
-        return physicalPage + (virtualAddress - virtualPage)
-    }
-
-    private fun isPrepared(firstPage: ULong, lastPage: ULong, writable: Boolean): Boolean {
-        if (preparedVirtualPage == ULong.MAX_VALUE || writable && !preparedWritable ||
-            firstPage < preparedVirtualPage
-        ) return false
-        val additionalPageCount = additionalPhysicalPages?.size?.toULong() ?: 0uL
-        return lastPage <= preparedVirtualPage + additionalPageCount * PAGE_SIZE_BYTES
     }
 
     private fun pageChunkSize(currentAddress: ULong, remaining: Int): Int =
