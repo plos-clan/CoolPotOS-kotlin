@@ -15,6 +15,7 @@ import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_WRITABLE
 import org.plos_clan.cpos.mem.addressspace.MemoryRegion
 import org.plos_clan.cpos.mem.addressspace.MemoryRegionBacking
 import org.plos_clan.cpos.mem.addressspace.MemoryRegionType
+import org.plos_clan.cpos.mem.addressspace.USER_MMAP_START
 import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.module.UserStackBuilder
@@ -48,9 +49,8 @@ private const val PROGRAM_FLAG_EXECUTABLE = 0x1u
 private const val PROGRAM_FLAG_WRITABLE = 0x2u
 private const val PROGRAM_FLAG_READABLE = 0x4u
 
-const val DEFAULT_INTERPRETER_LOAD_BIAS = 0x0000_1000_0000_0000uL
-
 data class ElfLoadResult(
+    val loadBias: ULong,
     val entryPoint: ULong,
     val loadStart: ULong,
     val loadSize: ULong,
@@ -61,9 +61,11 @@ data class ElfLoadResult(
 
 data class ElfInterpreterLoadResult(
     val path: String,
-    val loadBias: ULong,
     val image: ElfLoadResult,
 ) {
+    val loadBias: ULong
+        get() = image.loadBias
+
     val entryPoint: ULong
         get() = image.entryPoint
 }
@@ -141,7 +143,7 @@ object ElfLoader {
             val executableFile = resolved.file
             val executable = try {
                 addressSpace.setExecutable(executableFile.file)
-                loadImage(executableFile, addressSpace, resolved.path, 0uL)
+                loadImage(executableFile, addressSpace, resolved.path)
             } finally {
                 executableFile.file.release()
             } ?: return VfsResult.Err(VfsError.EXEC_FORMAT)
@@ -160,11 +162,9 @@ object ElfLoader {
                         file = interpreterFile,
                         addressSpace = addressSpace,
                         name = interpreterPath,
-                        loadBias = DEFAULT_INTERPRETER_LOAD_BIAS,
                     )?.let { loaded ->
                         ElfInterpreterLoadResult(
                             path = interpreterPath,
-                            loadBias = DEFAULT_INTERPRETER_LOAD_BIAS,
                             image = loaded,
                         )
                     }
@@ -320,8 +320,8 @@ object ElfLoader {
         file: ElfFile,
         addressSpace: AddressSpace,
         name: String,
-        loadBias: ULong,
     ): ElfLoadResult? {
+        val loadBias = loadBias(file.image, addressSpace) ?: return null
         val segments = file.image.programHeaders.mapNotNull { header ->
             if (header.type != PROGRAM_TYPE_LOAD || header.memorySize == 0uL) {
                 null
@@ -359,6 +359,7 @@ object ElfLoader {
         val loadStart = segments.minOf(LoadSegment::start)
         val loadEnd = segments.maxOf(LoadSegment::end)
         return ElfLoadResult(
+            loadBias = loadBias,
             entryPoint = entryPoint,
             loadStart = loadStart,
             loadSize = loadEnd - loadStart,
@@ -366,6 +367,22 @@ object ElfLoader {
             programHeaderEntrySize = file.image.header.programHeaderEntrySize,
             programHeaderCount = file.image.header.programHeaderCount,
         )
+    }
+
+    private fun loadBias(image: ElfImage, addressSpace: AddressSpace): ULong? {
+        if (image.type == ElfObjectType.EXECUTABLE) return 0uL
+        val headers = image.programHeaders.filter { header ->
+            header.type == PROGRAM_TYPE_LOAD && header.memorySize != 0uL
+        }
+        if (headers.isEmpty()) return null
+        val alignment = maxOf(PAGE_SIZE_BYTES, headers.maxOf(ProgramHeader::alignment))
+        if (!alignment.isPowerOfTwo()) return null
+        val start = headers.minOf(ProgramHeader::virtualAddress).alignDown(alignment)
+        val end = headers.maxOf { header ->
+            checkedAdd(header.virtualAddress, header.memorySize) ?: return null
+        }.alignUp(PAGE_SIZE_BYTES) ?: return null
+        val address = addressSpace.findUnmappedArea(end - start, alignment) ?: return null
+        return if (address >= start) address - start else null
     }
 
     private fun parseImage(
@@ -465,7 +482,8 @@ object ElfLoader {
         }
         val start = checkedAdd(header.virtualAddress, loadBias) ?: return null
         val end = checkedAdd(start, header.memorySize) ?: return null
-        if (start >= USER_VIRTUAL_ADDRESS_LIMIT || end > USER_VIRTUAL_ADDRESS_LIMIT) {
+        val validStart = start in USER_MMAP_START..<USER_VIRTUAL_ADDRESS_LIMIT
+        if (!validStart || end > USER_VIRTUAL_ADDRESS_LIMIT) {
             println("ELF: load segment is outside userspace")
             return null
         }

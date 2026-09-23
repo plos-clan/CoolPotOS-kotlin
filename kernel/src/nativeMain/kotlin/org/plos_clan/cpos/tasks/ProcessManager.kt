@@ -491,19 +491,17 @@ class Process internal constructor(
         return null
     }
 
-    fun addThread(thread: Thread) {
+    internal fun addThread(thread: Thread): Boolean {
         require(thread.process === this) { "Thread ${thread.id} belongs to another process" }
         while (true) {
             val observed = lifecycle.load()
-            check(observed.state.canReceiveSignals) {
-                "process $id cannot add a thread while ${observed.state}"
-            }
-            if (thread in observed.threads) return
+            if (!observed.state.canReceiveSignals) return false
+            if (thread in observed.threads) return true
             val replacement = observed.copy(
                 threads = observed.threads + thread,
                 liveThreads = observed.liveThreads + 1,
             )
-            if (lifecycle.compareAndSet(observed, replacement)) return
+            if (lifecycle.compareAndSet(observed, replacement)) return true
         }
     }
 
@@ -621,7 +619,7 @@ object ProcessManager {
         }
         kernelProcess = systemProcess
 
-        bootstrapThread = newThread(systemProcess).also { thread ->
+        bootstrapThread = checkNotNull(newThread(systemProcess)).also { thread ->
             thread.state = TaskState.RUNNING
         }
 
@@ -644,8 +642,11 @@ object ProcessManager {
 
     fun currentProcess(): Process? = currentThread()?.process
 
-    fun getNewApIdleThread(): Thread = newThread(requireNotNull(kernelProcess)).also { thread ->
+    fun getNewApIdleThread(): Thread {
+        val process = requireNotNull(kernelProcess)
+        val thread = checkNotNull(newThread(process))
         thread.state = TaskState.READY
+        return thread
     }
 
     internal fun createUserProcess(
@@ -735,7 +736,7 @@ object ProcessManager {
                 if (creator != null && !creator.process.isKernelProcess) it.name = creator.name
                 if (registers == null) it.initializeUserContext(entryPoint, stackPointer, fsBase)
                 else it.initializeUserContext(registers, stackPointer, fsBase)
-            }
+            } ?: return VfsResult.Err(VfsError.INTERRUPTED)
             published = true
             Cgroups.published(thread)
             return VfsResult.Ok(thread)
@@ -1036,7 +1037,7 @@ object ProcessManager {
         pidHandle: PidHandle? = null,
         nice: Int = 0,
         initialize: (Thread) -> Unit = {},
-    ): Thread {
+    ): Thread? {
         val id = cgroup?.id ?: if (process.threads.isEmpty()) process.id else nextTaskId.fetchAndAdd(1)
         val task = nativeTask ?: checkNotNull(NativeTask.allocate(
             id, process.addressSpace.pageDirectory.pml4PhysicalAddress, nice = nice,
@@ -1053,8 +1054,11 @@ object ProcessManager {
                 nice = nice,
             )
             initialize(thread)
+            if (!process.addThread(thread)) {
+                task.close()
+                return null
+            }
             pidHandle?.attach(thread)
-            process.addThread(thread)
             threadTableLock.withLock { threadTable[thread.id] = thread }
             return thread
         } catch (failure: Throwable) {

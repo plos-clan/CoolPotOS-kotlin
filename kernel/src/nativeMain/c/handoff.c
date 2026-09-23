@@ -552,7 +552,7 @@ static enum fast_schedule_result fast_handoff_schedule(
     }
     if (select_next) {
         cpu->quantum_deadline = 0;
-        if (cpu->state == cpu_online && next != cpu->idle) {
+        if (cpu->state == cpu_online && (next != cpu->idle || cpu->head)) {
             const uint64_t quantum = __atomic_load_n(&next->quantum_cycles, __ATOMIC_RELAXED);
             cpu->quantum_deadline = now > UINT64_MAX - quantum ? UINT64_MAX : now + quantum;
         }

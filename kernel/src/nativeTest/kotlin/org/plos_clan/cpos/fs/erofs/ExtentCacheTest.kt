@@ -9,7 +9,7 @@ import kotlin.test.assertSame
 class ExtentCacheTest {
     @Test
     fun cacheHitsProtectHotExtentsFromEviction() {
-        val cache = ExtentCache(8)
+        val cache = ExtentCache<ULong>(8)
         val first = ByteArray(4)
         val second = ByteArray(4)
         assertSame(first, cache.getOrLoad(1uL) { first })
@@ -24,7 +24,7 @@ class ExtentCacheTest {
 
     @Test
     fun failuresAndOversizedExtentsDoNotPoisonTheCache() {
-        val cache = ExtentCache(4)
+        val cache = ExtentCache<ULong>(4)
         assertNull(cache.getOrLoad(1uL) { null })
         assertFailsWith<IllegalStateException> {
             cache.getOrLoad(1uL) { error("Read failed") }

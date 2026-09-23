@@ -30,7 +30,6 @@ import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.block.ByteSource
 import org.plos_clan.cpos.block.BlockDevices
 import org.plos_clan.cpos.block.BlockDeviceBackend
@@ -75,14 +74,17 @@ object Erofs : FileSystemType("erofs", 0xe0f5_e1e2uL, requiresDevice = true) {
 private class ErofsInstance private constructor(
     private val image: Image,
     private val header: Header,
-    private val packed: PackedData,
+    private val packed: FileData,
+    private val cache: ExtentCache<Extent.Stored>,
 ) : SuperBlockBackend {
     companion object {
         fun open(data: ByteSource, cacheBytes: Int): ErofsInstance? {
             val image = Image(data)
             val header = Header.read(image) ?: return null
-            val packed = PackedData.open(image, header, cacheBytes) ?: return null
-            return ErofsInstance(image, header, packed)
+            val inode = DiskInode.read(image, header, header.packedNid) ?: return null
+            val cache = ExtentCache<Extent.Stored>(cacheBytes)
+            val packed = CompressedData.open(image, header, inode, cache) ?: return null
+            return ErofsInstance(image, header, packed, cache)
         }
     }
 
@@ -105,7 +107,7 @@ private class ErofsInstance private constructor(
         val node = readNode(nid) ?: return null
         val backend = when (node) {
             is DirectoryNode -> ErofsDirectoryBackend(this, superBlock, node)
-            is FileNode -> RegularBackend(this, node)
+            is FileNode -> RegularBackend(node)
             is SymlinkNode -> ErofsSymlinkBackend(node.target)
             is SpecialNode -> node.backend
         }
@@ -156,7 +158,13 @@ private class ErofsInstance private constructor(
     }
 
     private fun fileNode(inode: DiskInode): FileNode? {
-        if (inode.size == 0uL) return FileNode(inode.metadata, Fragment(0uL, 0uL))
+        if (inode.layout == DataLayout.FLAT_PLAIN || inode.layout == DataLayout.FLAT_INLINE) {
+            return flatData(inode)?.let { FileNode(inode.metadata, it) }
+        }
+        if (inode.size == 0uL) {
+            val data = FragmentData(packed, 0uL, 0uL)
+            return FileNode(inode.metadata, data)
+        }
         if (inode.layout != DataLayout.COMPRESSED_FULL &&
             inode.layout != DataLayout.COMPRESSED_COMPACT
         ) {
@@ -165,14 +173,11 @@ private class ErofsInstance private constructor(
         val mapHeader = (inode.location + inode.inodeSize.toULong()).alignUp(8uL) ?: return null
         if (!image.contains(mapHeader, 8)) return null
         val fragmentHeader = image.u64(mapHeader)
-        if (fragmentHeader and Header.FRAGMENT_INODE_FLAG == 0uL) return null
-        val fragment = Fragment(
-            fragmentHeader xor Header.FRAGMENT_INODE_FLAG,
-            inode.size,
-        )
-        return FileNode(inode.metadata, fragment).takeIf {
-            fragment.offset <= packed.size && fragment.size <= packed.size - fragment.offset
-        }
+        val data = if (fragmentHeader and Header.FRAGMENT_INODE_FLAG != 0uL) {
+            val offset = fragmentHeader xor Header.FRAGMENT_INODE_FLAG
+            FragmentData(packed, offset, inode.size).takeIf(FragmentData::valid)
+        } else CompressedData.open(image, header, inode, cache, packed)
+        return data?.let { FileNode(inode.metadata, it) }
     }
 
     private fun directoryData(node: DirectoryNode): DirectoryData? {
@@ -226,13 +231,11 @@ private class ErofsInstance private constructor(
         var cached: DirectoryData? = null
     }
 
-    private class FileNode(metadata: InodeMetadata, val fragment: Fragment) : Node(metadata)
+    private class FileNode(metadata: InodeMetadata, val data: FileData) : Node(metadata)
 
     private class SymlinkNode(metadata: InodeMetadata, val target: VfsPathname) : Node(metadata)
 
     private class SpecialNode(metadata: InodeMetadata, val backend: InodeBackend) : Node(metadata)
-
-    private data class Fragment(val offset: ULong, val size: ULong)
 
     private data class Entry(
         val name: VfsName,
@@ -295,12 +298,8 @@ private class ErofsInstance private constructor(
         }
     }
 
-    private class RegularBackend(
-        instance: ErofsInstance,
-        node: FileNode,
-    ) : RegularFileBackend(), CachedFileBackend {
-        private val packed = instance.packed
-        private val fragment = node.fragment
+    private class RegularBackend(node: FileNode) : RegularFileBackend(), CachedFileBackend {
+        private val data = node.data
 
         override fun open(
             caller: VfsOperationContext,
@@ -310,10 +309,9 @@ private class ErofsInstance private constructor(
             VfsResult.Ok(this)
 
         override fun read(offset: ULong, destination: ByteArray): Int {
-            if (offset >= fragment.size) return 0
-            val count = minOf(destination.size.toULong(), fragment.size - offset).toInt()
-            val target = checkNotNull(ByteArrayBuffer(destination).prepareWrite(0, count))
-            return packed.read(fragment.offset + offset, target, 0, count) ?: -1
+            if (offset >= data.size) return 0
+            val count = minOf(destination.size.toULong(), data.size - offset).toInt()
+            return if (data.read(offset, destination, 0, count)) count else -1
         }
     }
 

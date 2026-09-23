@@ -18,6 +18,7 @@ internal class CompactIndex private constructor(
     private val initialFourByteCount: Int,
     private val compactTwoByteCount: Int,
     private val algorithmTypes: Int,
+    private val fragmentOffset: ULong?,
 ) {
     companion object {
         const val ADVISE_COMPACTED_2B = 0x0001
@@ -25,6 +26,7 @@ internal class CompactIndex private constructor(
         const val ADVISE_BIG_PCLUSTER_2 = 0x0004
         const val SUPPORTED_ADVISE = ADVISE_COMPACTED_2B or
             ADVISE_BIG_PCLUSTER_1 or ADVISE_BIG_PCLUSTER_2
+        const val ADVISE_FRAGMENT = 0x0020
         const val D0_COMPRESSED_BLOCKS = 1 shl 11
         const val ZSTD = 3
 
@@ -33,7 +35,7 @@ internal class CompactIndex private constructor(
             if (!image.contains(mapHeader, 8)) return null
             val advise = image.u16(mapHeader + 4uL)
             val clusterBits = image.u8(mapHeader + 7uL)
-            if (advise != SUPPORTED_ADVISE || clusterBits != 0) return null
+            if (advise and ADVISE_FRAGMENT.inv() != SUPPORTED_ADVISE || clusterBits != 0) return null
             val count = ((inode.size + header.blockSize.toULong() - 1uL) /
                 header.blockSize.toULong()).toInt()
             val base = mapHeader + 8uL
@@ -48,11 +50,12 @@ internal class CompactIndex private constructor(
                 initial,
                 compact,
                 image.u8(mapHeader + 6uL),
+                if (advise and ADVISE_FRAGMENT != 0) image.u32(mapHeader) else null,
             )
         }
     }
 
-    fun extents(size: ULong): List<Extent>? {
+    fun extents(size: ULong, packed: FileData? = null): List<Extent>? {
         val result = mutableListOf<Extent>()
         var head: Head? = null
         for (logicalCluster in 0 until count) {
@@ -65,9 +68,6 @@ internal class CompactIndex private constructor(
             if (head == null && start != 0uL) return null
             if (start >= size) {
                 if (start != size) return null
-                head?.toExtent(size, blockSize, algorithmTypes)?.let(result::add)
-                    ?: return null
-                head = null
                 break
             }
             val previous = head
@@ -76,7 +76,12 @@ internal class CompactIndex private constructor(
             }
             head = Head(logicalCluster, start, index.type, index.physicalBlock)
         }
-        if (head != null) {
+        if (head != null && fragmentOffset != null) {
+            val source = packed ?: return null
+            val fragment = FragmentData(source, fragmentOffset, size - head.logicalStart)
+            if (!fragment.valid()) return null
+            result += Extent.Fragment(head.logicalStart, size, fragment)
+        } else if (head != null) {
             head.toExtent(size, blockSize, algorithmTypes)?.let(result::add) ?: return null
         }
         return result.takeIf { it.isNotEmpty() && it.last().logicalEnd == size }
@@ -177,7 +182,7 @@ internal class CompactIndex private constructor(
             if (logicalSize > Header.MAX_DECOMPRESSED_PCLUSTER.toULong() ||
                 !compressed && logicalSize > blockSize.toULong()
             ) return null
-            return Extent(
+            return Extent.Stored(
                 logicalStart,
                 end,
                 physicalBlock * blockSize.toULong(),
@@ -189,50 +194,86 @@ internal class CompactIndex private constructor(
     }
 }
 
-internal data class Extent(
-    val logicalStart: ULong,
-    val logicalEnd: ULong,
-    val physicalOffset: ULong,
-    val physicalBlocks: Int,
-    private val blockSize: Int,
-    private val compressed: Boolean,
-) {
-    fun load(image: Image): ByteArray? {
-        val logicalSize = logicalEnd - logicalStart
-        if (logicalSize > Int.MAX_VALUE.toULong()) return null
-        val physicalSize = physicalBlocks * blockSize
-        if (!image.contains(physicalOffset, physicalSize)) return null
-        if (!compressed) return image.bytes(physicalOffset, logicalSize.toInt())
+internal sealed class Extent(val logicalStart: ULong, val logicalEnd: ULong) {
+    abstract fun read(
+        image: Image,
+        cache: ExtentCache<Extent.Stored>,
+        offset: ULong,
+        destination: ByteArray,
+        destinationOffset: Int,
+        count: Int,
+    ): Boolean
 
-        val input = image.bytes(physicalOffset, physicalSize) ?: return null
-        val source = input.indexOfFirst { it != 0.toByte() }
-        if (source < 0 || source > input.size - 4) return null
-        val destination = ByteArray(logicalSize.toInt())
-        return input.usePinned { compressed ->
-            destination.usePinned { output ->
-                val result = cp_zstd_decompress(
-                    output.addressOf(0),
-                    destination.size.toULong(),
-                    compressed.addressOf(source),
-                    (input.size - source).toULong(),
-                )
-                destination.takeIf { result == destination.size }
+    class Fragment(start: ULong, end: ULong, private val data: FileData) : Extent(start, end) {
+        override fun read(
+            image: Image,
+            cache: ExtentCache<Extent.Stored>,
+            offset: ULong,
+            destination: ByteArray,
+            destinationOffset: Int,
+            count: Int,
+        ): Boolean = data.read(offset - logicalStart, destination, destinationOffset, count)
+    }
+
+    class Stored(
+        start: ULong,
+        end: ULong,
+        private val physicalOffset: ULong,
+        val physicalBlocks: Int,
+        private val blockSize: Int,
+        private val compressed: Boolean,
+    ) : Extent(start, end) {
+        override fun read(
+            image: Image,
+            cache: ExtentCache<Extent.Stored>,
+            offset: ULong,
+            destination: ByteArray,
+            destinationOffset: Int,
+            count: Int,
+        ): Boolean {
+            val bytes = cache.getOrLoad(this) { load(image) } ?: return false
+            val start = (offset - logicalStart).toInt()
+            bytes.copyInto(destination, destinationOffset, start, start + count)
+            return true
+        }
+
+        private fun load(image: Image): ByteArray? {
+            val logicalSize = logicalEnd - logicalStart
+            if (logicalSize > Int.MAX_VALUE.toULong()) return null
+            val physicalSize = physicalBlocks * blockSize
+            if (!image.contains(physicalOffset, physicalSize)) return null
+            if (!compressed) return image.bytes(physicalOffset, logicalSize.toInt())
+
+            val input = image.bytes(physicalOffset, physicalSize) ?: return null
+            val source = input.indexOfFirst { it != 0.toByte() }
+            if (source < 0 || source > input.size - 4) return null
+            val destination = ByteArray(logicalSize.toInt())
+            return input.usePinned { compressed ->
+                destination.usePinned { output ->
+                    val result = cp_zstd_decompress(
+                        output.addressOf(0),
+                        destination.size.toULong(),
+                        compressed.addressOf(source),
+                        (input.size - source).toULong(),
+                    )
+                    destination.takeIf { result == destination.size }
+                }
             }
         }
     }
 }
 
-internal class ExtentCache(private val capacity: Int) {
+internal class ExtentCache<K : Any>(private val capacity: Int) {
     private class Entry {
         val loading = KernelMutex()
         var result: Result<ByteArray?>? = null
     }
 
     private val lock = IrqSpinLock()
-    private val entries = linkedMapOf<ULong, Entry>()
+    private val entries = linkedMapOf<K, Entry>()
     private var used = 0
 
-    fun getOrLoad(key: ULong, load: () -> ByteArray?): ByteArray? {
+    fun getOrLoad(key: K, load: () -> ByteArray?): ByteArray? {
         val entry = lock.withLock {
             val existing = entries.remove(key) ?: Entry()
             entries[key] = existing
@@ -247,7 +288,7 @@ internal class ExtentCache(private val capacity: Int) {
         }
     }
 
-    private fun publish(key: ULong, entry: Entry, result: Result<ByteArray?>) = lock.withLock {
+    private fun publish(key: K, entry: Entry, result: Result<ByteArray?>) = lock.withLock {
         entry.result = result
         entries.remove(key)
         val loaded = result.getOrNull() ?: return@withLock

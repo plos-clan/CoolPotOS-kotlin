@@ -22,7 +22,6 @@ import org.plos_clan.cpos.tasks.ProcessState
 import org.plos_clan.cpos.tasks.TaskState
 import org.plos_clan.cpos.tasks.cgroup.Cgroups
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
-import org.plos_clan.cpos.utils.hasBit
 
 val Process.comm: String
     get() = threads.firstOrNull { it.id == id }?.name?.take(MAX_COMM_LENGTH)
@@ -203,39 +202,14 @@ fun Process.maps(): String {
     val process = this
     return buildString {
         vds.forEach { region ->
-            append(
-                "${region.start.toString(16).padStart(12, '0')}-"
-            )
-            append(
-                "${
-                    region.end.toString(16).padStart(12, '0')
-                } "
-            )
+            val start = region.start.toString(16).padStart(12, '0')
+            val end = region.end.toString(16).padStart(12, '0')
+            append(start).append('-').append(end).append(' ')
+            append(if (region.access and MEMORY_REGION_READABLE != 0uL) 'r' else '-')
+            append(if (region.access and MEMORY_REGION_WRITABLE != 0uL) 'w' else '-')
+            append(if (region.access and MEMORY_REGION_EXECUTABLE != 0uL) 'x' else '-')
+            append(if (region.shared) 's' else 'p')
 
-            // 权限
-            append(
-                if (region.access.hasBit(
-                        MEMORY_REGION_READABLE.toInt()
-                    )
-                ) "r" else "-"
-            )
-            append(
-                if (region.access.hasBit(
-                        MEMORY_REGION_WRITABLE.toInt()
-                    )
-                ) "w" else "-"
-            )
-            append(
-                if (region.access.hasBit(
-                        MEMORY_REGION_EXECUTABLE.toInt()
-                    )
-                ) "x" else "-"
-            )
-            append(
-                if (region.shared) "s" else "p"
-            )
-
-            // 文件与其他映射
             when (region.type) {
                 MemoryRegionType.FILE, MemoryRegionType.IMAGE -> {
                     val file = (region.backing as FileRegionBacking).file

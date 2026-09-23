@@ -217,6 +217,9 @@ class AddressSpace internal constructor(
     fun insertAll(regionsToInsert: List<MemoryRegion>): Boolean =
         lock.withLock { regions.insertCopies(regionsToInsert) }
 
+    internal fun findUnmappedArea(length: ULong, alignment: ULong): ULong? =
+        lock.withLock { regions.findUnmappedArea(0uL, length, alignment) }
+
     fun map(request: MemoryMapRequest): MemoryMapResult<ULong> {
         val alignedLength = alignLength(request.length)
             ?: return MemoryMapResult.Err(EINVAL)

@@ -169,9 +169,10 @@ internal class MemoryRegionMap(
     fun validMmapRange(address: ULong, length: ULong): Boolean =
         address in allocationStart..<allocationEnd && length <= allocationEnd - address
 
-    fun findUnmappedArea(hint: ULong, length: ULong): ULong? {
+    fun findUnmappedArea(hint: ULong, length: ULong, alignment: ULong = pageSize): ULong? {
+        if (alignment < pageSize || alignment and (alignment - 1uL) != 0uL) return null
         if (length == 0uL || !length.isAligned(pageSize) || length > allocationEnd - allocationStart) return null
-        val alignedHint = hint.alignDown(pageSize)
+        val alignedHint = hint.alignDown(alignment)
         if (validMmapRange(alignedHint, length) &&
             intersection(alignedHint, alignedHint + length) == null
         ) {
@@ -179,10 +180,10 @@ internal class MemoryRegionMap(
         }
 
         if (alignedHint >= allocationStart && alignedHint < allocationEnd - length) {
-            findGap(alignedHint + length, allocationEnd, length)?.let { return it }
-            findGap(allocationStart, alignedHint, length)?.let { return it }
+            findGap(alignedHint + length, allocationEnd, length, alignment)?.let { return it }
+            findGap(allocationStart, alignedHint, length, alignment)?.let { return it }
         }
-        return findGap(allocationStart, allocationEnd, length)
+        return findGap(allocationStart, allocationEnd, length, alignment)
     }
 
     private fun merge(leftIndex: Int) {
@@ -216,8 +217,13 @@ internal class MemoryRegionMap(
         return low
     }
 
-    private fun findGap(windowStart: ULong, windowEnd: ULong, length: ULong): ULong? {
-        val start = windowStart.alignUp(pageSize) ?: return null
+    private fun findGap(
+        windowStart: ULong,
+        windowEnd: ULong,
+        length: ULong,
+        alignment: ULong,
+    ): ULong? {
+        val start = windowStart.alignUp(alignment) ?: return null
         val end = windowEnd.alignDown(pageSize)
         if (start >= end || length > end - start) return null
 
@@ -227,11 +233,16 @@ internal class MemoryRegionMap(
             if (region.end <= cursor) continue
             if (region.start >= end) break
             val gapEnd = minOf(region.start, end)
-            if (gapEnd > cursor && gapEnd - cursor >= length) best = gapEnd - length
-            cursor = maxOf(cursor, region.end.alignUp(pageSize) ?: return best)
+            if (gapEnd > cursor && gapEnd - cursor >= length) {
+                val candidate = (gapEnd - length).alignDown(alignment)
+                if (candidate >= cursor) best = candidate
+            }
+            cursor = maxOf(cursor, region.end.alignUp(alignment) ?: return best)
             if (cursor >= end) return best
         }
-        return if (end - cursor >= length) end - length else best
+        if (end - cursor < length) return best
+        val candidate = (end - length).alignDown(alignment)
+        return if (candidate >= cursor) candidate else best
     }
 
     private fun valid(region: MemoryRegion): Boolean =

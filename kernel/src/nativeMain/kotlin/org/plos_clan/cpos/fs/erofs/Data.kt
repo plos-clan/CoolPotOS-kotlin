@@ -1,6 +1,22 @@
 package org.plos_clan.cpos.fs.erofs
 
-import org.plos_clan.cpos.mem.PreparedBufferDestination
+internal interface FileData {
+    val size: ULong
+
+    fun read(offset: ULong, destination: ByteArray, destinationOffset: Int, count: Int): Boolean
+}
+
+internal class FragmentData(
+    private val source: FileData,
+    private val offset: ULong,
+    override val size: ULong,
+) : FileData {
+    fun valid(): Boolean = offset <= source.size && size <= source.size - offset
+
+    override fun read(offset: ULong, destination: ByteArray, destinationOffset: Int, count: Int): Boolean =
+        offset <= size && count >= 0 && count.toULong() <= size - offset &&
+            source.read(this.offset + offset, destination, destinationOffset, count)
+}
 
 internal class FlatData(
     private val image: Image,
@@ -8,9 +24,9 @@ internal class FlatData(
     private val inodeLocation: ULong,
     private val inodeSize: Int,
     private val rawBlock: ULong,
-    private val size: ULong,
+    override val size: ULong,
     inline: Boolean,
-) {
+) : FileData {
     private val externalSize = if (inline && size != 0uL) {
         ((size + blockSize.toULong() - 1uL) / blockSize.toULong() - 1uL) * blockSize.toULong()
     } else {
@@ -35,18 +51,20 @@ internal class FlatData(
         }
     }
 
-    private fun read(
+    override fun read(
         offset: ULong,
         destination: ByteArray,
         destinationOffset: Int,
         count: Int,
     ): Boolean {
+        if (offset > size || count < 0 || count.toULong() > size - offset) return false
         var copied = 0
         while (copied < count) {
             val logical = offset + copied.toULong()
             val external = logical < externalSize
             val limit = if (external) externalSize else size
-            val chunk = minOf(count - copied, (limit - logical).toInt())
+            val available = limit - logical
+            val chunk = minOf((count - copied).toULong(), available).toInt()
             val physical = if (external) {
                 rawBlock * blockSize.toULong() + logical
             } else {
@@ -59,56 +77,54 @@ internal class FlatData(
     }
 }
 
-internal class PackedData private constructor(
+internal class CompressedData private constructor(
     private val image: Image,
-    val size: ULong,
+    override val size: ULong,
     private val extents: List<Extent>,
-    cacheBytes: Int,
-) {
+    private val cache: ExtentCache<Extent.Stored>,
+) : FileData {
     companion object {
-        fun open(image: Image, header: Header, cacheBytes: Int): PackedData? {
-            val inode = DiskInode.read(image, header, header.packedNid) ?: return null
+        fun open(
+            image: Image,
+            header: Header,
+            inode: DiskInode,
+            cache: ExtentCache<Extent.Stored>,
+            packed: FileData? = null,
+        ): CompressedData? {
             if (inode.layout != DataLayout.COMPRESSED_COMPACT ||
                 inode.type != DiskFileType.REGULAR
             ) return null
-            if (inode.size == 0uL) return PackedData(image, 0uL, emptyList(), cacheBytes)
+            if (inode.size == 0uL) return CompressedData(image, 0uL, emptyList(), cache)
             val decoder = CompactIndex.open(image, header, inode) ?: return null
-            val extents = decoder.extents(inode.size) ?: return null
-            if (extents.sumOf { it.physicalBlocks.toULong() } != inode.rawBlock) return null
-            return PackedData(image, inode.size, extents, cacheBytes)
+            val extents = decoder.extents(inode.size, packed) ?: return null
+            val blocks = extents.sumOf { if (it is Extent.Stored) it.physicalBlocks.toULong() else 0uL }
+            if (blocks != inode.rawBlock) return null
+            return CompressedData(image, inode.size, extents, cache)
         }
     }
 
-    private val cache = ExtentCache(cacheBytes)
-
-    fun read(
+    override fun read(
         offset: ULong,
-        destination: PreparedBufferDestination,
+        destination: ByteArray,
         destinationOffset: Int,
         count: Int,
-    ): Int? {
-        if (count == 0) return 0
-        if (offset >= size || count.toULong() > size - offset) return null
+    ): Boolean {
+        if (count == 0) return true
+        if (offset >= size || count.toULong() > size - offset) return false
         var extentIndex = findExtent(offset)
-        if (extentIndex < 0) return null
+        if (extentIndex < 0) return false
         var copied = 0
         while (copied < count) {
             val extent = extents[extentIndex]
-            val data = cache.getOrLoad(extent.physicalOffset) { extent.load(image) } ?: return null
-            val sourceOffset = (offset + copied.toULong() - extent.logicalStart).toInt()
-            val chunk = minOf(count - copied, data.size - sourceOffset)
-            if (chunk <= 0) return null
-            val transferred = destination.copyFrom(
-                destinationOffset + copied,
-                data,
-                sourceOffset,
-                chunk,
-            )
-            copied += transferred
-            if (transferred < chunk) return copied
+            val position = offset + copied.toULong()
+            val available = extent.logicalEnd - position
+            val chunk = minOf((count - copied).toULong(), available).toInt()
+            if (chunk <= 0) return false
+            if (!extent.read(image, cache, position, destination, destinationOffset + copied, chunk)) return false
+            copied += chunk
             extentIndex++
         }
-        return copied
+        return true
     }
 
     private fun findExtent(offset: ULong): Int {

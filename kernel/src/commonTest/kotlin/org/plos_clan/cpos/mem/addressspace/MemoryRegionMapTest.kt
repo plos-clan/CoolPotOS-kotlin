@@ -117,6 +117,18 @@ class MemoryRegionMapTest {
         assertNull(map.findUnmappedArea(page(1), page(10)))
     }
 
+    @Test
+    fun honorsImageAlignmentAcrossFragmentedGaps() {
+        val map = regionMap()
+        assertTrue(map.insertOwned(region(9, 16)))
+        assertEquals(page(4), map.findUnmappedArea(0uL, page(3), page(4)))
+        assertEquals(page(8), map.findUnmappedArea(0uL, page(1), page(8)))
+        assertTrue(map.insertOwned(region(4, 5)))
+        assertNull(map.findUnmappedArea(0uL, page(3), page(4)))
+        assertNull(map.findUnmappedArea(0uL, page(1), page(3)))
+        assertNull(map.findUnmappedArea(0uL, page(1), 0uL))
+    }
+
     private fun regionMap(): MemoryRegionMap = MemoryRegionMap(
         allocationStart = page(1),
         allocationEnd = page(16),

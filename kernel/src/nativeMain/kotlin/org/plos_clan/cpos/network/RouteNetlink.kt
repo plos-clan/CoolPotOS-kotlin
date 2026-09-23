@@ -73,7 +73,7 @@ internal class RouteNetlinkProtocol(network: NetworkStack) :
 
     private fun getLink(request: NetlinkRequest): NetlinkResult {
         if (request.message.flags.toInt() and NetlinkAbi.NLM_F_DUMP == NetlinkAbi.NLM_F_DUMP) {
-            return dump(request, IFINFO_SIZE, AF_PACKET) {
+            return dump(request, IFINFO_SIZE, AF_UNSPEC) {
                 network.snapshotInterfaces().map { linkReply(it, removed = false) }
             }
         }
@@ -105,7 +105,7 @@ internal class RouteNetlinkProtocol(network: NetworkStack) :
             return NetlinkResult.Failure(VfsError.INVALID_ARGUMENT)
         }
         val requestedFamily = request.message.payload.readU8(0).toInt()
-        if (requestedFamily != AF_UNSPEC && requestedFamily != family) {
+        if (family != AF_UNSPEC && requestedFamily != AF_UNSPEC && requestedFamily != family) {
             return NetlinkResult.Failure(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
         }
         return NetlinkResult.Success(replies(), multipart = true)
@@ -430,7 +430,7 @@ internal class RouteNetlinkProtocol(network: NetworkStack) :
         if (!address.automaticPrefixRoute) {
             attributes += NetlinkAttribute.u32(IFA_FLAGS, IFA_F_NOPREFIXROUTE)
         }
-        if (address.prefixLength < 31) {
+        if (intfc.kind != NetworkInterfaceKind.LOOPBACK && address.prefixLength < 31) {
             attributes += NetlinkAttribute.binary(
                 IFA_BROADCAST,
                 ByteArray(Ipv4Address.SIZE_BYTES).also(address.prefix.broadcast::writeTo),
@@ -526,7 +526,6 @@ internal class RouteNetlinkProtocol(network: NetworkStack) :
     companion object {
         private const val AF_UNSPEC = 0
         private const val AF_INET = 2
-        private const val AF_PACKET = 17
         private const val RTM_NEWLINK = 16
         private const val RTM_DELLINK = 17
         private const val RTM_GETLINK = 18

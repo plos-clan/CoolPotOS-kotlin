@@ -20,10 +20,16 @@ internal abstract class NetworkSocket(
 ) : AbstractSocket(domain, type, protocol) {
     private enum class InterfaceControl(val command: Int, val writes: Boolean = false) {
         NAME(0x8910),
+        LIST(0x8912),
         GET_FLAGS(0x8913),
         SET_FLAGS(0x8914, true),
+        GET_ADDRESS(0x8915),
+        GET_DESTINATION(0x8917),
+        GET_BROADCAST(0x8919),
+        GET_NETMASK(0x891b),
         GET_MTU(0x8921),
         SET_MTU(0x8922, true),
+        GET_HARDWARE_ADDRESS(0x8927),
         INDEX(0x8933),
     }
 
@@ -35,6 +41,7 @@ internal abstract class NetworkSocket(
     ): Long {
         val control = InterfaceControl.entries.firstOrNull { it.command == command }
             ?: return super.ioctl(caller, inode, command, args)
+        if (control == InterfaceControl.LIST) return listInterfaces(args)
         val bytes = args.copyFromUser(IFREQ_SIZE) ?: return -VfsError.FAULT.errno.toLong()
         val data = LittleEndianBuffer(bytes)
         val terminator = bytes.indexOf(0)
@@ -55,8 +62,58 @@ internal abstract class NetworkSocket(
             InterfaceControl.GET_FLAGS -> data.writeU16(IFNAMSIZ, intfc.flags.toUShort())
             InterfaceControl.GET_MTU -> data.writeU32(IFNAMSIZ, intfc.mtu.toUInt())
             InterfaceControl.INDEX -> data.writeU32(IFNAMSIZ, intfc.index.toUInt())
+            InterfaceControl.GET_HARDWARE_ADDRESS -> {
+                bytes.fill(0, IFNAMSIZ)
+                data.writeU16(IFNAMSIZ, intfc.kind.hardwareType)
+                intfc.hardwareAddress.copyTo(bytes, IFNAMSIZ + UShort.SIZE_BYTES)
+            }
+            InterfaceControl.GET_ADDRESS,
+            InterfaceControl.GET_DESTINATION,
+            InterfaceControl.GET_BROADCAST,
+            InterfaceControl.GET_NETMASK,
+            -> {
+                val assigned = network.interfaceAddresses(intfc.index).firstOrNull()
+                    ?: return -VfsError.ADDRESS_NOT_AVAILABLE.errno.toLong()
+                val address = when (control) {
+                    InterfaceControl.GET_NETMASK -> Ipv4Address.fromBits(assigned.prefix.mask)
+                    InterfaceControl.GET_BROADCAST -> if (intfc.kind == NetworkInterfaceKind.LOOPBACK) {
+                        Ipv4Address.ANY
+                    } else assigned.prefix.broadcast
+                    else -> assigned.address
+                }
+                val socketAddress = Ipv4SocketAddress(address, 0u)
+                SocketAddressAbi.encode(socketAddress).copyInto(bytes, IFNAMSIZ)
+            }
             else -> return -VfsError.INVALID_ARGUMENT.errno.toLong()
         }
+        return if (args.copyToUser(bytes)) 0L else -VfsError.FAULT.errno.toLong()
+    }
+
+    private fun listInterfaces(args: UserMemory): Long {
+        val bytes = args.copyFromUser(IFCONF_SIZE) ?: return -VfsError.FAULT.errno.toLong()
+        val data = LittleEndianBuffer(bytes)
+        val length = data.readU32(0).toInt().coerceAtLeast(0)
+        val address = data.readU64(8)
+        val entries = network.snapshotInterfaces().flatMap { intfc ->
+            network.interfaceAddresses(intfc.index).map { intfc.name to it.address }
+        }
+        val count = if (address == 0uL) entries.size else minOf(entries.size, length / IFREQ_SIZE)
+        if (address != 0uL && count != 0) {
+            val output = ByteArray(count * IFREQ_SIZE)
+            for (index in 0 until count) {
+                val (name, local) = entries[index]
+                val offset = index * IFREQ_SIZE
+                val encodedName = name.encodeToByteArray()
+                encodedName.copyInto(output, offset, endIndex = minOf(encodedName.size, IFNAMSIZ - 1))
+                val socketAddress = Ipv4SocketAddress(local, 0u)
+                SocketAddressAbi.encode(socketAddress).copyInto(output, offset + IFNAMSIZ)
+            }
+            val process = ProcessManager.currentProcess()
+                ?: return -VfsError.NO_SUCH_PROCESS.errno.toLong()
+            val target = UserMemory(process.addressSpace, address)
+            if (!target.copyToUser(output)) return -VfsError.FAULT.errno.toLong()
+        }
+        data.writeU32(0, (count * IFREQ_SIZE).toUInt())
         return if (args.copyToUser(bytes)) 0L else -VfsError.FAULT.errno.toLong()
     }
 
@@ -85,5 +142,6 @@ internal abstract class NetworkSocket(
     companion object {
         private const val IFNAMSIZ = 16
         private const val IFREQ_SIZE = 40
+        private const val IFCONF_SIZE = 16
     }
 }
