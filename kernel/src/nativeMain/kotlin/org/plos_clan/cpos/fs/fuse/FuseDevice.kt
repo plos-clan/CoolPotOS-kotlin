@@ -113,6 +113,7 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
     private class PendingRequest(
         val kind: PendingKind,
         val thread: Thread?,
+        val resource: Any?,
     ) {
         var unique = 0uL
         var state = PendingState.QUEUED
@@ -175,6 +176,7 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
     fun request(
         caller: VfsOperationContext,
         request: FuseRequest,
+        resource: Any? = null,
     ): VfsResult<FuseReply> {
         when (val initialized = awaitActive()) {
             is VfsResult.Ok -> Unit
@@ -184,7 +186,7 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
             ?: return VfsResult.Err(VfsError.INTERRUPTED)
         val queued = lock.withLock {
             if (state != State.ACTIVE) return@withLock null
-            enqueueLocked(request, PendingKind.SYNCHRONOUS, thread, caller)
+            enqueueLocked(request, PendingKind.SYNCHRONOUS, thread, caller, resource)
         } ?: return VfsResult.Err(lock.withLock { disconnectionError })
 
         while (true) {
@@ -208,9 +210,9 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
         }
     }
 
-    fun submit(caller: VfsOperationContext, request: FuseRequest) = lock.withLock {
+    fun submit(caller: VfsOperationContext, request: FuseRequest, resource: Any? = null) = lock.withLock {
         if (state == State.ACTIVE || state == State.DESTROYING) {
-            enqueueLocked(request, PendingKind.BACKGROUND, null, caller)
+            enqueueLocked(request, PendingKind.BACKGROUND, null, caller, resource)
         }
     }
 
@@ -404,10 +406,11 @@ internal class FuseSession : WaitablePositionlessDeviceBackend, MountResource {
         kind: PendingKind,
         thread: Thread?,
         caller: VfsOperationContext,
+        resource: Any? = null,
     ): PendingRequest {
         val unique = allocateUniqueLocked()
         request.prepare(unique, caller)
-        val requestState = PendingRequest(kind, thread)
+        val requestState = PendingRequest(kind, thread, resource)
         requestState.unique = unique
         pending[unique] = requestState
         outbound.addLast(OutboundRequest(request, requestState))

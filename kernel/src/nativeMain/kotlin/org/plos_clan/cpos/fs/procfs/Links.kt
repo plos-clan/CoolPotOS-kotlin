@@ -2,6 +2,7 @@ package org.plos_clan.cpos.fs.procfs
 
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.vfs.AnonymousFileBackend
+import org.plos_clan.cpos.fs.vfs.FileSystemContext
 import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.fs.vfs.MagicLinkBackend
@@ -13,59 +14,16 @@ import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.tasks.CapEnum
 import org.plos_clan.cpos.tasks.PidHandle
+import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.TaskState
 
-internal class ProcFileSymlink(
+internal abstract class ProcMagicLink(
     private val target: PidHandle,
-    private val acquire: () -> OpenFileDescription?,
 ) : MagicLinkBackend {
-    override fun readLink(
+    protected fun <T> withProcess(
         caller: VfsOperationContext,
-        inode: Inode,
-        cachedOnly: Boolean,
-    ): VfsResult<VfsPathname> =
-        withFile(caller) { file ->
-            file.inode.backend.displayName?.let { return@withFile VfsResult.Ok(it) }
-            val fileInode = file.inode
-            val inodeId = fileInode.id.value
-            val anonymousName = (file.backend as? AnonymousFileBackend)?.anonymousName
-            val target = when {
-                fileInode.type == InodeType.PIPE && file.path.dentry === file.path.mount.root ->
-                    "pipe:[$inodeId]"
-                fileInode.type == InodeType.SOCKET -> "socket:[$inodeId]"
-                anonymousName != null -> "anon_inode:[$anonymousName]"
-                else -> null
-            }
-            if (target != null) return@withFile VfsResult.Ok(VfsPathname.fromString(target))
-
-            val context = ProcessManager.currentProcess()?.context ?: FileSystemManager.kernelContext
-                ?: return@withFile VfsResult.Err(VfsError.NOT_FOUND)
-            val path = when (val result = FileSystemManager.vfs.absolutePath(
-                context,
-                file.path,
-                allowUnreachable = true,
-            )) {
-                is VfsResult.Ok -> result.value
-                is VfsResult.Err -> return@withFile result
-            }
-            val targetPath = if (file.path.dentry.isUnlinked) path + DELETED_SUFFIX else path
-            VfsResult.Ok(VfsPathname.fromBytes(targetPath))
-        }
-
-    override fun resolveLink(
-        caller: VfsOperationContext,
-        inode: Inode,
-        cachedOnly: Boolean,
-    ): VfsResult<VfsPath> =
-        withFile(caller) { file ->
-            if (file.path.inode?.sameIdentity(file.inode) == true) VfsResult.Ok(file.path)
-            else VfsResult.Err(VfsError.NO_SUCH_DEVICE_OR_ADDRESS)
-        }
-
-    private inline fun <T> withFile(
-        caller: VfsOperationContext,
-        action: (OpenFileDescription) -> VfsResult<T>,
+        action: (Process) -> VfsResult<T>,
     ): VfsResult<T> {
         val leader = target.thread
         val process = leader.process
@@ -87,8 +45,90 @@ internal class ProcFileSymlink(
         ) {
             return VfsResult.Err(VfsError.PERMISSION_DENIED)
         }
-        val file = acquire() ?: return VfsResult.Err(VfsError.NOT_FOUND)
-        return try {
+        return action(process)
+    }
+
+    protected fun pathName(path: VfsPath): VfsResult<VfsPathname> {
+        val context = ProcessManager.currentProcess()?.context ?: FileSystemManager.kernelContext
+            ?: return VfsResult.Err(VfsError.NOT_FOUND)
+        val bytes = when (val result = FileSystemManager.vfs.absolutePath(
+            context,
+            path,
+            allowUnreachable = true,
+        )) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        val target = if (path.dentry.isUnlinked) bytes + DELETED_SUFFIX else bytes
+        return VfsResult.Ok(VfsPathname.fromBytes(target))
+    }
+}
+
+internal class ProcPathSymlink(
+    target: PidHandle,
+    private val path: (FileSystemContext) -> VfsPath,
+) : ProcMagicLink(target) {
+    override fun readLink(
+        caller: VfsOperationContext,
+        inode: Inode,
+        cachedOnly: Boolean,
+    ): VfsResult<VfsPathname> = when (val resolved = resolveLink(caller, inode, cachedOnly)) {
+        is VfsResult.Ok -> pathName(resolved.value)
+        is VfsResult.Err -> resolved
+    }
+
+    override fun resolveLink(
+        caller: VfsOperationContext,
+        inode: Inode,
+        cachedOnly: Boolean,
+    ): VfsResult<VfsPath> = withProcess(caller) { process ->
+        val context = process.context ?: return@withProcess VfsResult.Err(VfsError.NOT_FOUND)
+        VfsResult.Ok(path(context))
+    }
+}
+
+internal class ProcFileSymlink(
+    target: PidHandle,
+    private val acquire: () -> OpenFileDescription?,
+) : ProcMagicLink(target) {
+    override fun readLink(
+        caller: VfsOperationContext,
+        inode: Inode,
+        cachedOnly: Boolean,
+    ): VfsResult<VfsPathname> =
+        withFile(caller) { file ->
+            file.inode.backend.displayName?.let { return@withFile VfsResult.Ok(it) }
+            val fileInode = file.inode
+            val inodeId = fileInode.id.value
+            val anonymousName = (file.backend as? AnonymousFileBackend)?.anonymousName
+            val target = when {
+                fileInode.type == InodeType.PIPE && file.path.dentry === file.path.mount.root ->
+                    "pipe:[$inodeId]"
+                fileInode.type == InodeType.SOCKET -> "socket:[$inodeId]"
+                anonymousName != null -> "anon_inode:[$anonymousName]"
+                else -> null
+            }
+            if (target != null) return@withFile VfsResult.Ok(VfsPathname.fromString(target))
+
+            pathName(file.path)
+        }
+
+    override fun resolveLink(
+        caller: VfsOperationContext,
+        inode: Inode,
+        cachedOnly: Boolean,
+    ): VfsResult<VfsPath> =
+        withFile(caller) { file ->
+            if (file.path.inode?.sameIdentity(file.inode) == true) VfsResult.Ok(file.path)
+            else VfsResult.Err(VfsError.NO_SUCH_DEVICE_OR_ADDRESS)
+        }
+
+    private fun <T> withFile(
+        caller: VfsOperationContext,
+        action: (OpenFileDescription) -> VfsResult<T>,
+    ): VfsResult<T> = withProcess(caller) {
+        val file = acquire() ?: return@withProcess VfsResult.Err(VfsError.NOT_FOUND)
+        try {
             action(file)
         } finally {
             file.release()

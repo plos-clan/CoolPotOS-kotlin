@@ -1,3 +1,8 @@
+@file:OptIn(
+    kotlin.experimental.ExperimentalNativeApi::class,
+    kotlin.native.runtime.NativeRuntimeApi::class,
+)
+
 package org.plos_clan.cpos.fs.fuse
 
 import org.plos_clan.cpos.drivers.Device
@@ -18,6 +23,7 @@ import org.plos_clan.cpos.fs.vfs.VfsName
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserIoVector
+import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE
@@ -28,6 +34,8 @@ import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
+import kotlin.native.ref.WeakReference
+import kotlin.native.runtime.GC
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -62,7 +70,7 @@ class FuseReadTest {
             val metadata = checkNotNull(context.root.dentry.inode()).metadata()
             val inode = AnonymousFileFactory().createInode(context, backend, metadata)
             val device = Device("fuse-test", DeviceType.CHARACTER, number, session)
-            val options = OpenOptions(access = AccessMode.READ, nonBlocking = true)
+            val options = OpenOptions(access = AccessMode.READ_WRITE, nonBlocking = true)
             val opened = DeviceOpenFile.open(device, session)
             val result = OpenFileDescription.open(
                 caller, context.root, inode, options, openedBackend = opened,
@@ -74,6 +82,35 @@ class FuseReadTest {
         fun read(memory: UserMemory = this.memory, count: Int = FuseAbi.MAX_PACKET_SIZE) =
             file.read(caller, memory, 0, count)
 
+        fun activate() {
+            assertTrue(read().isSuccess)
+            val body = ByteArray(64)
+            val fields = LittleEndianBuffer(body)
+            fields.writeU32(0, FuseAbi.VERSION)
+            fields.writeU32(4, FuseAbi.MINOR_VERSION)
+            fields.writeU32(20, PAGE_SIZE_BYTES.toUInt())
+            reply(body)
+        }
+
+        fun reply(body: ByteArray = ByteArray(0)) {
+            val header = assertNotNull(memory.copyFromUser(FuseAbi.IN_HEADER_SIZE))
+            val unique = LittleEndianBuffer(header).readU64(8)
+            val bytes = ByteArray(FuseAbi.OUT_HEADER_SIZE + body.size)
+            val fields = LittleEndianBuffer(bytes)
+            fields.writeU32(0, bytes.size.toUInt())
+            fields.writeU64(8, unique)
+            body.copyInto(bytes, FuseAbi.OUT_HEADER_SIZE)
+            val buffer = ByteArrayBuffer(bytes)
+            assertTrue(file.write(caller, buffer, 0, bytes.size).isSuccess)
+        }
+
+        fun submitResource(): WeakReference<Any> {
+            val resource = Any()
+            val request = FuseRequest(FuseOpcode.RELEASE, 2uL, 24)
+            session.submit(caller, request, resource)
+            return WeakReference(resource)
+        }
+
         override fun wakePoll(handle: ULong) {}
         override fun invalidateInode(nodeId: ULong, offset: Long, length: Long) {}
         override fun invalidateEntry(parentId: ULong, name: VfsName, childId: ULong?) {}
@@ -83,6 +120,24 @@ class FuseReadTest {
             context.release()
             space.release()
         }
+    }
+
+    @Test
+    fun backgroundRequestRetainsItsResourceUntilTheDaemonReplies() {
+        Fixture().use { fixture ->
+            fixture.activate()
+            val resource = fixture.submitResource()
+            assertTrue(fixture.read().isSuccess)
+            assertRetained(resource)
+            fixture.reply()
+            GC.collect()
+            assertNull(resource.get())
+        }
+    }
+
+    private fun assertRetained(resource: WeakReference<Any>) {
+        GC.collect()
+        assertNotNull(resource.get())
     }
 
     @Test

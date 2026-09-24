@@ -589,6 +589,8 @@ private enum class RootNode(
 private enum class ProcessNode(val fileName: String, val type: InodeType) {
     DESCRIPTORS("fd", InodeType.DIRECTORY),
     EXECUTABLE("exe", InodeType.SYMLINK),
+    ROOT("root", InodeType.SYMLINK),
+    WORKING_DIRECTORY("cwd", InodeType.SYMLINK),
     ;
 
     val entryId: UInt
@@ -611,6 +613,12 @@ private enum class ProcessNode(val fileName: String, val type: InodeType) {
                 owner = process,
                 backend = ProcFileSymlink(target) { process.addressSpace.acquireExecutable() },
             )
+            ROOT, WORKING_DIRECTORY -> {
+                val backend = ProcPathSymlink(target) { context ->
+                    if (this == ROOT) context.root else context.workingDirectory
+                }
+                fileSystem.symlink(superBlock, id, owner = process, backend = backend)
+            }
         }
     }
 }

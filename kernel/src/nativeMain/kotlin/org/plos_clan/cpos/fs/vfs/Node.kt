@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalAtomicApi::class)
+@file:OptIn(ExperimentalAtomicApi::class, kotlin.experimental.ExperimentalNativeApi::class)
 
 package org.plos_clan.cpos.fs.vfs
 
@@ -8,6 +8,7 @@ import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.utils.IrqSpinLock
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import kotlin.native.ref.createCleaner
 
 class Inode internal constructor(
     val id: InodeId,
@@ -15,7 +16,9 @@ class Inode internal constructor(
     internal val backend: InodeBackend,
     initialAttributes: InodeAttributeSnapshot,
     val generation: ULong = 0uL,
+    resource: AutoCloseable? = null,
 ) {
+    private val cleanup = resource?.let { createCleaner(it) { resource -> resource.close() } }
     private val lock = IrqSpinLock()
     private var currentMetadata = initialAttributes.attributes.metadata
     private var attributeSnapshot: InodeAttributeSnapshot? = initialAttributes

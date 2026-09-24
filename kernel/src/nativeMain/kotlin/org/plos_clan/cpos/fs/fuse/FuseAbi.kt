@@ -210,6 +210,9 @@ internal class FuseRequest(
     val bodySize: Int
         get() = bytes.size - FuseAbi.IN_HEADER_SIZE
 
+    val nodeId: ULong
+        get() = fields.readU64(16)
+
     fun writeU16(offset: Int, value: UShort) =
         fields.writeU16(FuseAbi.IN_HEADER_SIZE + offset, value)
 

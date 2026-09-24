@@ -1,3 +1,5 @@
+@file:OptIn(kotlin.experimental.ExperimentalNativeApi::class)
+
 package org.plos_clan.cpos.fs.fuse
 
 import org.plos_clan.cpos.tasks.PollSource
@@ -12,7 +14,6 @@ import org.plos_clan.cpos.fs.vfs.AtomicCreateDirectoryBackend
 import org.plos_clan.cpos.fs.vfs.AtomicOpenResult
 import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.CopyingOpenFileBackend
-import org.plos_clan.cpos.fs.vfs.DentryReference
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
 import org.plos_clan.cpos.fs.vfs.DirectoryLookup
 import org.plos_clan.cpos.fs.vfs.EXTENDED_ATTRIBUTE_VALUE_MAX
@@ -70,6 +71,7 @@ import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.PollEvents
+import kotlin.native.ref.WeakReference
 
 object Fuse : FileSystemType("fuse", FuseAbi.SUPER_MAGIC) {
     override fun accepts(fileSystemName: String): Boolean =
@@ -256,7 +258,15 @@ private class FuseInstance(
     private val session: FuseSession,
     val options: FuseMountOptions,
 ) : SuperBlockBackend, FuseNotificationSink {
-    private data class NodeRecord(val inode: Inode, var lookups: ULong)
+    private class NodeRecord(instance: FuseInstance, val nodeId: ULong) : AutoCloseable {
+        private val owner = WeakReference(instance)
+        lateinit var inode: WeakReference<Inode>
+        var lookups = 0uL
+
+        override fun close() {
+            owner.get()?.releaseNode(this)
+        }
+    }
 
     private val lock = IrqSpinLock()
     class Poll(val id: ULong, val events: PollSource)
@@ -296,13 +306,17 @@ private class FuseInstance(
             ),
             CacheValidity.Volatile,
         )
+        val record = NodeRecord(this, FuseAbi.ROOT_ID)
         val inode = Inode(
             InodeId(FuseAbi.ROOT_ID),
             superBlock,
             FuseDirectoryNode(this, FuseAbi.ROOT_ID),
             attributes,
+            resource = record,
         )
-        lock.withLock { nodes[FuseAbi.ROOT_ID] = NodeRecord(inode, 1uL) }
+        record.inode = WeakReference(inode)
+        record.lookups = 1uL
+        lock.withLock { nodes[FuseAbi.ROOT_ID] = record }
         return inode
     }
 
@@ -382,7 +396,7 @@ private class FuseInstance(
     override fun release() = session.destroy()
 
     override fun invalidateInode(nodeId: ULong, offset: Long, length: Long) {
-        val inode = lock.withLock { nodes[nodeId]?.inode } ?: return
+        val inode = lock.withLock { nodes[nodeId]?.inode }?.get() ?: return
         inode.invalidateAttributes()
         if (offset >= 0) {
             when (val backend = inode.backend) {
@@ -398,7 +412,7 @@ private class FuseInstance(
     }
 
     override fun invalidateEntry(parentId: ULong, name: VfsName, childId: ULong?) {
-        val parent = lock.withLock { nodes[parentId]?.inode }
+        val parent = lock.withLock { nodes[parentId]?.inode }?.get()
         (parent?.backend as? FuseDirectoryNode)?.invalidate(name)
         childId?.let { invalidateInode(it, -1, -1) }
     }
@@ -410,10 +424,13 @@ private class FuseInstance(
             VfsResult.Err(VfsError.PERMISSION_DENIED)
         }
 
-    fun request(caller: VfsOperationContext, request: FuseRequest): VfsResult<FuseReply> =
-        session.request(caller, request)
+    fun request(caller: VfsOperationContext, request: FuseRequest): VfsResult<FuseReply> {
+        val inode = lock.withLock { nodes[request.nodeId]?.inode }?.get()
+        return session.request(caller, request, inode)
+    }
 
-    fun submit(caller: VfsOperationContext, request: FuseRequest) = session.submit(caller, request)
+    fun submit(caller: VfsOperationContext, request: FuseRequest, inode: Inode) =
+        session.submit(caller, request, inode)
 
     fun maxRead(): Int = session.maximumReadSize()
     fun maxReadAhead(): Int = session.maximumReadAheadSize()
@@ -436,35 +453,10 @@ private class FuseInstance(
         if (entry.nodeId == FuseAbi.ROOT_ID || entry.attributes == null || entry.type == null) {
             return VfsResult.Err(VfsError.IO)
         }
-        val inode = lock.withLock {
-            val existing = nodes[entry.nodeId]
-            if (existing != null) {
-                if (existing.inode.generation != entry.generation ||
-                    existing.inode.type != entry.type || existing.lookups == ULong.MAX_VALUE
-                ) {
-                    return@withLock null
-                }
-                existing.lookups++
-                existing.inode
-            } else {
-                val block = superBlock ?: return@withLock null
-                val backend = createNode(entry.nodeId, entry.type, entry.attributes.attributes.metadata)
-                Inode(
-                    InodeId(entry.nodeId),
-                    block,
-                    backend,
-                    entry.attributes,
-                    entry.generation,
-                ).also { nodes[entry.nodeId] = NodeRecord(it, 1uL) }
-            }
-        } ?: return VfsResult.Err(VfsError.IO)
+        val inode = acquireNode(entry) ?: return VfsResult.Err(VfsError.IO)
         installAttributes(inode, entry.attributes)
-        return VfsResult.Ok(
-            DirectoryLookup(
-                inode,
-                entry.entryValidity,
-            ) { releaseLookup(entry.nodeId) },
-        )
+        val lookup = DirectoryLookup(inode, entry.entryValidity)
+        return VfsResult.Ok(lookup)
     }
 
     fun forget(nodeId: ULong) = session.forget(nodeId, 1uL)
@@ -683,14 +675,44 @@ private class FuseInstance(
         }
     }
 
-    private fun releaseLookup(nodeId: ULong) {
-        lock.withLock {
-            val record = nodes[nodeId] ?: return@withLock
-            check(record.lookups > 0uL)
-            record.lookups--
-            if (record.lookups == 0uL) nodes.remove(nodeId)
+    private fun releaseNode(record: NodeRecord) {
+        val count = lock.withLock {
+            if (nodes[record.nodeId] === record) nodes.remove(record.nodeId)
+            record.lookups
         }
-        session.forget(nodeId, 1uL)
+        session.forget(record.nodeId, count)
+    }
+
+    private fun acquireNode(entry: FuseEntry): Inode? {
+        val type = entry.type ?: return null
+        val attributes = entry.attributes ?: return null
+        val block = superBlock ?: return null
+        val id = InodeId(entry.nodeId)
+        while (true) {
+            val previous = lock.withLock { nodes[entry.nodeId] }
+            val current = previous?.inode?.get()
+            val record = if (current != null) previous else NodeRecord(this, entry.nodeId)
+            val inode = current ?: run {
+                val backend = createNode(entry.nodeId, type, attributes.attributes.metadata)
+                val created = Inode(
+                    id, block, backend, attributes, entry.generation, record,
+                )
+                record.inode = WeakReference(created)
+                created
+            }
+            val acquired = lock.withLock {
+                if (nodes[entry.nodeId] !== previous) return@withLock false
+                if (inode.generation != entry.generation || inode.type != type ||
+                    record.lookups == ULong.MAX_VALUE
+                ) {
+                    return null
+                }
+                record.lookups++
+                if (current == null) nodes[entry.nodeId] = record
+                true
+            }
+            if (acquired) return inode
+        }
     }
 
     private fun createNode(nodeId: ULong, type: InodeType, metadata: InodeMetadata): FuseNode =
@@ -900,11 +922,9 @@ private class FuseDirectoryNode(
     data class CachedEntry(val entry: DirectoryEntry, val nextOffset: Long)
 
     private class DirectoryState {
-        private data class CachedRecord(var entry: DirectoryEntry, val nextOffset: Long)
-
         private val lock = IrqSpinLock()
         private val entries = mutableMapOf<VfsName, CacheValidity.Invalidatable>()
-        private val listing = mutableMapOf<Long, CachedRecord>()
+        private val listing = mutableMapOf<Long, CachedEntry>()
         private val ends = mutableSetOf<Long>()
         private var modificationTime: Instant? = null
         private var readdirPlusAdvised = false
@@ -929,61 +949,38 @@ private class FuseDirectoryNode(
             }
         }
 
-        fun validateListing(currentModificationTime: Instant) {
-            val retired = lock.withLock {
-                if (modificationTime != null && modificationTime != currentModificationTime) {
-                    clearListingLocked()
-                } else {
-                    emptyList()
-                }.also { modificationTime = currentModificationTime }
+        fun validateListing(currentModificationTime: Instant) = lock.withLock {
+            if (modificationTime != null && modificationTime != currentModificationTime) {
+                clearListingLocked()
             }
-            retired.forEach(DentryReference::release)
+            modificationTime = currentModificationTime
         }
 
-        fun take(position: Long): CachedEntry? = lock.withLock {
-            val record = listing[position] ?: return@withLock null
-            val entry = record.entry
-            record.entry = entry.copy(lookup = null)
-            CachedEntry(entry, record.nextOffset)
-        }
+        fun entry(position: Long): CachedEntry? = lock.withLock { listing[position] }
 
         fun isEnd(position: Long): Boolean = lock.withLock { position in ends }
 
-        fun cache(position: Long, entry: DirectoryEntry, nextOffset: Long) {
-            val retired = lock.withLock {
-                ends.remove(position)
-                listing.put(position, CachedRecord(entry, nextOffset))?.entry?.lookup?.reference
-            }
-            retired?.release()
+        fun cache(position: Long, entry: DirectoryEntry, nextOffset: Long) = lock.withLock {
+            ends.remove(position)
+            listing[position] = CachedEntry(entry, nextOffset)
         }
 
-        fun cacheEnd(position: Long) {
-            val retired = lock.withLock {
-                ends += position
-                listing.remove(position)?.entry?.lookup?.reference
-            }
-            retired?.release()
+        fun cacheEnd(position: Long) = lock.withLock {
+            ends += position
+            listing.remove(position)
         }
 
-        fun invalidate(name: VfsName) {
-            val retired = lock.withLock {
-                entries.remove(name)?.invalidate()
-                clearListingLocked()
-            }
-            retired.forEach(DentryReference::release)
+        fun invalidate(name: VfsName) = lock.withLock {
+            entries.remove(name)?.invalidate()
+            clearListingLocked()
         }
 
-        fun invalidateListing() {
-            val retired = lock.withLock { clearListingLocked() }
-            retired.forEach(DentryReference::release)
-        }
+        fun invalidateListing() = lock.withLock { clearListingLocked() }
 
-        private fun clearListingLocked(): List<DentryReference> {
-            val retired = listing.values.mapNotNull { it.entry.lookup?.reference }
+        private fun clearListingLocked() {
             listing.clear()
             ends.clear()
             modificationTime = null
-            return retired
         }
     }
 
@@ -1094,14 +1091,12 @@ private class FuseDirectoryNode(
         val inode = lookup.inode ?: return VfsResult.Err(VfsError.IO)
         if (inode.type != InodeType.REGULAR) {
             invalidate(name)
-            lookup.reference?.release()
             return VfsResult.Err(VfsError.IO)
         }
         val opened = when (val result = FuseDecoder.open(reply, FuseAbi.ENTRY_OUT_SIZE)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> {
                 invalidate(name)
-                lookup.reference?.release()
                 return result
             }
         }
@@ -1249,7 +1244,7 @@ private class FuseDirectoryNode(
             is VfsResult.Err -> result
         }
 
-    fun cachedDirectoryEntry(position: Long): CachedEntry? = state.take(position)
+    fun cachedDirectoryEntry(position: Long): CachedEntry? = state.entry(position)
 
     fun isDirectoryCacheEnd(position: Long): Boolean = state.isEnd(position)
 
@@ -1513,7 +1508,7 @@ private abstract class FuseHandle(
             writeU64(0, currentHandle)
             writeU32(8, fileFlags)
         }
-        instance.submit(opener, request)
+        instance.submit(opener, request, fuseInode)
     }
 }
 
@@ -1909,11 +1904,9 @@ private class FuseDirectoryHandle(
             if (cache) {
                 directory.cacheDirectoryEntry(
                     recordPosition,
-                    if (accepting) entry.copy(lookup = null) else entry,
+                    entry,
                     nextOffset,
                 )
-            } else if (!accepting) {
-                lookup?.reference?.release()
             }
             if (accepting) {
                 if (accepted) position.value = nextOffset else accepting = false
