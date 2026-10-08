@@ -23,250 +23,8 @@ import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.tasks.IoWaitQueue
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
-import org.plos_clan.cpos.utils.IrqSpinLock
-import org.plos_clan.cpos.utils.KernelRandom
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
-import kotlin.concurrent.atomics.AtomicInt
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
-
-private object TcpSequence {
-    fun before(first: UInt, second: UInt): Boolean = (first - second).toInt() < 0
-
-    fun after(first: UInt, second: UInt): Boolean = before(second, first)
-
-    fun between(value: UInt, first: UInt, last: UInt): Boolean =
-        !before(value, first) && !after(value, last)
-
-    fun distance(first: UInt, second: UInt): UInt = second - first
-}
-
-internal data class TcpTransmission(
-    val source: Ipv4SocketAddress,
-    val destination: Ipv4SocketAddress,
-    val sequenceNumber: UInt,
-    val acknowledgmentNumber: UInt,
-    val flags: Int,
-    val window: UShort,
-    val options: ByteArray = ByteArray(0),
-    val payload: ByteArray = ByteArray(0),
-    val ttl: UByte = 64u,
-)
-
-@OptIn(ExperimentalAtomicApi::class)
-internal class TcpProtocol(val network: NetworkStack) : IpProtocolHandler {
-    private data class Binding(
-        val socket: TcpSocket,
-        val address: Ipv4SocketAddress,
-        val reuseAddress: Boolean,
-    )
-
-    private data class ConnectionKey(
-        val local: Ipv4SocketAddress,
-        val remote: Ipv4SocketAddress,
-    )
-
-    override val protocol = IpProtocol.TCP
-    private val lock = IrqSpinLock()
-    private val bindings = mutableMapOf<UShort, MutableList<Binding>>()
-    private val listeners = mutableMapOf<UShort, MutableList<TcpSocket>>()
-    private val connections = mutableMapOf<ConnectionKey, TcpSocket>()
-    private val nextEphemeralPort = AtomicInt(EPHEMERAL_PORT_FIRST)
-
-    init {
-        network.registerHandler(this)
-    }
-
-    fun tick(now: ULong) {
-        val sockets = lock.withLock { connections.values.distinct() }
-        sockets.forEach { it.tick(now) }
-    }
-
-    fun createSocket(): TcpSocket = TcpSocket(this)
-
-    fun bind(
-        socket: TcpSocket,
-        requested: Ipv4SocketAddress,
-        reuseAddress: Boolean,
-    ): VfsResult<Ipv4SocketAddress> = lock.withLock {
-        if (requested.port != 0.toUShort()) return@withLock bindPort(
-            socket,
-            requested,
-            reuseAddress,
-        )
-        repeat(EPHEMERAL_PORT_COUNT) {
-            val value = nextEphemeralPort.fetchAndAdd(1)
-            val normalized = EPHEMERAL_PORT_FIRST +
-                (value.toUInt() % EPHEMERAL_PORT_COUNT.toUInt()).toInt()
-            val result = bindPort(
-                socket,
-                requested.copy(port = normalized.toUShort()),
-                reuseAddress,
-            )
-            if (result is VfsResult.Ok) return@withLock result
-        }
-        VfsResult.Err(VfsError.ADDRESS_IN_USE)
-    }
-
-    fun listen(socket: TcpSocket, address: Ipv4SocketAddress): VfsResult<Unit> = lock.withLock {
-        val entries = listeners.getOrPut(address.port) { mutableListOf() }
-        if (socket !in entries) entries += socket
-        VfsResult.Ok(Unit)
-    }
-
-    fun registerConnection(
-        socket: TcpSocket,
-        local: Ipv4SocketAddress,
-        remote: Ipv4SocketAddress,
-    ): VfsResult<Unit> = lock.withLock {
-        val key = ConnectionKey(local, remote)
-        val current = connections[key]
-        if (current != null && current !== socket) return@withLock VfsResult.Err(
-            VfsError.ADDRESS_IN_USE,
-        )
-        connections[key] = socket
-        VfsResult.Ok(Unit)
-    }
-
-    fun unregister(socket: TcpSocket) = lock.withLock {
-        connections.entries.removeAll { it.value === socket }
-        listeners.entries.removeAll { (_, entries) ->
-            entries.removeAll { it === socket }
-            entries.isEmpty()
-        }
-        bindings.entries.removeAll { (_, entries) ->
-            entries.removeAll { it.socket === socket }
-            entries.isEmpty()
-        }
-    }
-
-    override fun receive(packet: IpPacketContext) {
-        val segment = TcpCodec.decode(
-            packet.bytes,
-            packet.payloadOffset,
-            packet.payloadLength,
-            packet.source,
-            packet.destination,
-        ) ?: return
-        val local = Ipv4SocketAddress(packet.destination, segment.destinationPort)
-        val remote = Ipv4SocketAddress(packet.source, segment.sourcePort)
-        val connection = lock.withLock { connections[ConnectionKey(local, remote)] }
-        if (connection != null) {
-            connection.receiveSegment(packet, segment)
-            return
-        }
-        val listenerCandidates = lock.withLock { listeners[local.port]?.toList().orEmpty() }
-        val listener = listenerCandidates.firstOrNull {
-            val bound = it.boundAddress()
-            bound.address.isAny || bound.address == local.address
-        }
-        if (listener != null && segment.flags and TcpFlags.SYN != 0 &&
-            segment.flags and TcpFlags.ACK == 0
-        ) {
-            listener.receiveSyn(packet, segment, local, remote)
-            return
-        }
-        sendReset(local, remote, segment)
-    }
-
-    override fun receiveError(packet: IpPacketContext, error: IpTransportError) {
-        if (packet.payloadLength < TcpCodec.MIN_HEADER_SIZE) return
-        val input = NetworkOrderBuffer(packet.bytes)
-        val local = Ipv4SocketAddress(packet.source, input.readU16(packet.payloadOffset))
-        val remote = Ipv4SocketAddress(
-            packet.destination,
-            input.readU16(packet.payloadOffset + 2),
-        )
-        val socket = lock.withLock { connections[ConnectionKey(local, remote)] } ?: return
-        socket.reportError(
-            when (error) {
-                IpTransportError.NETWORK_UNREACHABLE -> VfsError.NETWORK_UNREACHABLE
-                IpTransportError.HOST_UNREACHABLE -> VfsError.HOST_UNREACHABLE
-                IpTransportError.PORT_UNREACHABLE -> VfsError.CONNECTION_REFUSED
-                IpTransportError.FRAGMENTATION_NEEDED -> VfsError.MESSAGE_TOO_LONG
-                IpTransportError.PROTOCOL_UNREACHABLE -> VfsError.PROTOCOL_NOT_SUPPORTED
-                IpTransportError.TIME_EXCEEDED -> VfsError.TIMED_OUT
-            },
-        )
-    }
-
-    fun transmit(transmission: TcpTransmission): VfsResult<Unit> {
-        val segment = ByteArray(
-            TcpCodec.MIN_HEADER_SIZE + transmission.options.size + transmission.payload.size,
-        )
-        transmission.payload.copyInto(
-            segment,
-            TcpCodec.MIN_HEADER_SIZE + transmission.options.size,
-        )
-        TcpCodec.write(
-            segment,
-            0,
-            transmission.payload.size,
-            transmission.source,
-            transmission.destination,
-            transmission.sequenceNumber,
-            transmission.acknowledgmentNumber,
-            transmission.flags,
-            transmission.window,
-            transmission.options,
-        )
-        return when (val result = network.sendIpv4(
-            transmission.source.address,
-            transmission.destination.address,
-            IpProtocol.TCP,
-            segment,
-            dontFragment = true,
-            ttl = transmission.ttl,
-        )) {
-            is VfsResult.Ok -> VfsResult.Ok(Unit)
-            is VfsResult.Err -> result
-        }
-    }
-
-    private fun bindPort(
-        socket: TcpSocket,
-        address: Ipv4SocketAddress,
-        reuseAddress: Boolean,
-    ): VfsResult<Ipv4SocketAddress> {
-        val entries = bindings.getOrPut(address.port) { mutableListOf() }
-        val conflict = entries.any { existing ->
-            val overlaps = existing.address.address.isAny || address.address.isAny ||
-                existing.address.address == address.address
-            overlaps && (!existing.reuseAddress || !reuseAddress)
-        }
-        if (conflict) return VfsResult.Err(VfsError.ADDRESS_IN_USE)
-        entries += Binding(socket, address, reuseAddress)
-        return VfsResult.Ok(address)
-    }
-
-    private fun sendReset(
-        local: Ipv4SocketAddress,
-        remote: Ipv4SocketAddress,
-        segment: TcpSegment,
-    ) {
-        if (segment.flags and TcpFlags.RST != 0) return
-        val acknowledges = segment.flags and TcpFlags.ACK == 0
-        val consumed = segment.payloadLength +
-            (if (segment.flags and TcpFlags.SYN != 0) 1 else 0) +
-            (if (segment.flags and TcpFlags.FIN != 0) 1 else 0)
-        transmit(
-            TcpTransmission(
-                local,
-                remote,
-                if (acknowledges) 0u else segment.acknowledgmentNumber,
-                if (acknowledges) segment.sequenceNumber + consumed.toUInt() else 0u,
-                TcpFlags.RST or if (acknowledges) TcpFlags.ACK else 0,
-                0u,
-            ),
-        )
-    }
-
-    companion object {
-        private const val EPHEMERAL_PORT_FIRST = 32_768
-        private const val EPHEMERAL_PORT_LAST = 60_999
-        private const val EPHEMERAL_PORT_COUNT = EPHEMERAL_PORT_LAST - EPHEMERAL_PORT_FIRST + 1
-    }
-}
 
 internal class TcpSocket internal constructor(
     private val subsystem: TcpProtocol,
@@ -275,7 +33,7 @@ internal class TcpSocket internal constructor(
     SocketDomain.IPV4,
     SocketType.STREAM,
     IpProtocol.TCP.number.toInt(),
-) {
+), TcpProtocol.Connection {
     private enum class State {
         IDLE,
         BOUND,
@@ -410,7 +168,6 @@ internal class TcpSocket internal constructor(
     private var noDelay = false
     private var requestedMss: Int? = null
     private var ttl = DEFAULT_TTL
-    private var timeWaitUntil = 0uL
     private var finWaitUntil = 0uL
     private var corkUntil = 0uL
     private var acknowledgeAt = 0uL
@@ -442,10 +199,7 @@ internal class TcpSocket internal constructor(
         nonBlocking: Boolean,
     ): VfsResult<Unit> {
         val destination = address as? Ipv4SocketAddress
-            ?: return VfsResult.Err(
-                if (address == null) VfsError.ADDRESS_FAMILY_NOT_SUPPORTED
-                else VfsError.ADDRESS_FAMILY_NOT_SUPPORTED,
-            )
+            ?: return VfsResult.Err(VfsError.ADDRESS_FAMILY_NOT_SUPPORTED)
         if (destination.address.isAny || destination.address.isLimitedBroadcast ||
             destination.address.isMulticast || destination.port == 0.toUShort()
         ) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
@@ -477,7 +231,7 @@ internal class TcpSocket internal constructor(
             localWindowScale = windowScale(optionsLocked().receiveBufferSize)
             peerMss = DEFAULT_MSS
             peerWindowScale = 0
-            iss = randomSequence()
+            iss = subsystem.initialSequence(local, destination)
             sndUna = iss
             sndNxt = iss + 1u
             sndWl1 = 0u
@@ -797,6 +551,8 @@ internal class TcpSocket internal constructor(
         segment: TcpSegment,
         local: Ipv4SocketAddress,
         remote: Ipv4SocketAddress,
+        previous: TcpProtocol.Connection? = null,
+        initialSequence: UInt? = null,
     ) {
         val reserved = lock.withLock {
             if (state != State.LISTEN || children.size >= backlog) return@withLock false
@@ -811,25 +567,31 @@ internal class TcpSocket internal constructor(
             segment,
             local,
             remote,
+            initialSequence,
         )
         val accepted = lock.withLock {
             if (state != State.LISTEN || children.size >= backlog) return@withLock false
             children += child
             true
         }
-        if (!accepted || subsystem.registerConnection(child, local, remote) is VfsResult.Err) {
+        if (!accepted) {
+            child.abort(VfsError.CONNECTION_ABORTED)
+            return
+        }
+        val registered = subsystem.registerConnection(child, local, remote, previous)
+        if (registered is VfsResult.Err) {
             child.abort(VfsError.CONNECTION_ABORTED)
             return
         }
         subsystem.transmit(transmission)
     }
 
-    internal fun receiveSegment(packet: IpPacketContext, segment: TcpSegment) {
+    override fun receiveSegment(packet: IpPacketContext, segment: TcpSegment) {
         val actions = lock.withLock { processSegmentLocked(packet, segment) }
         actions.transmissions.forEach(subsystem::transmit)
         if (actions.accepted) parent?.established(this)
         if (actions.unregister) {
-            subsystem.unregister(this)
+            subsystem.unregister(this, local, remote)
             parent?.removeChild(this)
         }
     }
@@ -846,13 +608,7 @@ internal class TcpSocket internal constructor(
     internal fun tick(now: ULong) {
         var unregister = false
         val transmissions = lock.withLock {
-            if (state == State.TIME_WAIT) {
-                if (now >= timeWaitUntil) {
-                    state = State.RESET
-                    unregister = true
-                }
-                return@withLock emptyList()
-            }
+            if (state == State.TIME_WAIT || state == State.RESET) return@withLock emptyList()
             if (state == State.FIN_WAIT_2 && now >= finWaitUntil) {
                 state = State.RESET
                 unregister = true
@@ -890,7 +646,7 @@ internal class TcpSocket internal constructor(
             )
         }
         transmissions.forEach(subsystem::transmit)
-        if (unregister) subsystem.unregister(this)
+        if (unregister) subsystem.unregister(this, local, remote)
     }
 
     override fun outputQueueBytes(): Int = lock.withLock { queuedSendBytesLocked() }
@@ -915,12 +671,15 @@ internal class TcpSocket internal constructor(
             if (accepted.isNotEmpty()) available = available or PollEvents.NORMAL_INPUT
         } else {
             if (receiveBuffer.size != 0 || !readOpen) available = available or PollEvents.NORMAL_INPUT
+            if (!readOpen) available = available or PollEvents.POLLRDHUP
             if (state.writable && writeOpen &&
                 queuedSendBytesLocked() < optionsLocked().sendBufferSize
             ) available = available or PollEvents.NORMAL_OUTPUT
         }
         if (hasPendingError()) available = available or PollEvents.POLLERR
-        if (state == State.RESET || closed) available = available or PollEvents.POLLHUP
+        if (state == State.TIME_WAIT || state == State.RESET || closed) {
+            available = available or PollEvents.POLLHUP
+        }
         available and (events or PollEvents.UNCONDITIONALLY_REPORTED)
     }
 
@@ -952,7 +711,7 @@ internal class TcpSocket internal constructor(
             accepted.clear()
             state = State.RESET
             return {
-                subsystem.unregister(this)
+                subsystem.unregister(this, local, remote)
                 abandoned.forEach { it.abort(VfsError.CONNECTION_ABORTED) }
             }
         }
@@ -976,12 +735,12 @@ internal class TcpSocket internal constructor(
             state = State.RESET
             return {
                 subsystem.transmit(reset)
-                subsystem.unregister(this)
+                subsystem.unregister(this, local, remote)
             }
         }
         if (state == State.IDLE || state == State.BOUND || state == State.RESET) {
             state = State.RESET
-            return if (binding == null) null else ({ subsystem.unregister(this) })
+            return if (binding == null) null else ({ subsystem.unregister(this, local, remote) })
         }
         val transmissions = flushLocked() + queueFinLocked()
         return { transmissions.forEach(subsystem::transmit) }
@@ -993,12 +752,13 @@ internal class TcpSocket internal constructor(
         segment: TcpSegment,
         local: Ipv4SocketAddress,
         remote: Ipv4SocketAddress,
+        initialSequence: UInt?,
     ): TcpTransmission = lock.withLock {
         this.parent = parent
         this.binding = local
         this.local = local
         this.remote = remote
-        localMss = ((requestedMss ?: (interfaceMtu - IPV4_TCP_HEADER_SIZE)))
+        localMss = (requestedMss ?: (interfaceMtu - IPV4_TCP_HEADER_SIZE))
             .coerceIn(MINIMUM_MSS, UShort.MAX_VALUE.toInt())
         peerMss = (segment.options.maximumSegmentSize?.toInt() ?: DEFAULT_MSS)
             .coerceAtLeast(MINIMUM_MSS)
@@ -1008,7 +768,10 @@ internal class TcpSocket internal constructor(
         sndWl1 = segment.sequenceNumber
         sndWl2 = segment.acknowledgmentNumber
         rcvNxt = segment.sequenceNumber + 1u
-        iss = randomSequence()
+        val generated = subsystem.initialSequence(local, remote)
+        iss = if (initialSequence != null && TcpSequence.before(generated, initialSequence)) {
+            initialSequence
+        } else generated
         sndUna = iss
         sndNxt = iss + 1u
         congestionWindow = (INITIAL_CONGESTION_SEGMENTS * minOf(localMss, peerMss)).toUInt()
@@ -1035,6 +798,7 @@ internal class TcpSocket internal constructor(
         packet: IpPacketContext,
         segment: TcpSegment,
     ): SegmentActions {
+        if (state == State.TIME_WAIT) return SegmentActions()
         if (state == State.SYN_SENT) return processSynSentLocked(packet, segment)
         if (!state.configurable && state != State.RESET &&
             !segmentAcceptableLocked(segment)
@@ -1045,7 +809,6 @@ internal class TcpSocket internal constructor(
             )
         }
         if (segment.flags and TcpFlags.RST != 0) {
-            if (state == State.TIME_WAIT) return SegmentActions()
             if (segment.sequenceNumber != rcvNxt) {
                 return SegmentActions(listOf(acknowledgmentLocked()))
             }
@@ -1078,10 +841,6 @@ internal class TcpSocket internal constructor(
             )
         }
         if (segment.flags and TcpFlags.SYN != 0) {
-            return SegmentActions(listOf(acknowledgmentLocked()))
-        }
-        if (state == State.TIME_WAIT) {
-            if (segment.flags and TcpFlags.FIN != 0) timeWaitUntil = TscClock.nanoTime() + TIME_WAIT_NANOS
             return SegmentActions(listOf(acknowledgmentLocked()))
         }
         if (state == State.RESET || state == State.IDLE || state == State.BOUND ||
@@ -1415,7 +1174,8 @@ internal class TcpSocket internal constructor(
     }
 
     private fun enterTimeWaitLocked(): State {
-        timeWaitUntil = TscClock.nanoTime() + TIME_WAIT_NANOS
+        val acknowledgment = acknowledgmentLocked()
+        subsystem.timeWait(this, acknowledgment)
         return State.TIME_WAIT
     }
 
@@ -1453,7 +1213,7 @@ internal class TcpSocket internal constructor(
             storeErrorLocked(error)
             wakeAllLocked()
         }
-        subsystem.unregister(this)
+        subsystem.unregister(this, local, remote)
         parent?.removeChild(this)
     }
 
@@ -1502,7 +1262,6 @@ internal class TcpSocket internal constructor(
         private const val MAX_BACKLOG = 4096
         private const val MAX_RETRANSMISSIONS = 8
         private const val INITIAL_RETRANSMISSION_NANOS = 1_000_000_000uL
-        private const val TIME_WAIT_NANOS = 60_000_000_000uL
         private const val FIN_WAIT_2_NANOS = 60_000_000_000uL
         private const val CORK_TIMEOUT_NANOS = 200_000_000uL
         private const val DELAYED_ACK_NANOS = 40_000_000uL
@@ -1512,9 +1271,6 @@ internal class TcpSocket internal constructor(
         private const val IPPROTO_TCP = 6
         private const val TCP_NODELAY = 1
         private const val TCP_MAXSEG = 2
-
-        private fun randomSequence(): UInt =
-            NetworkOrderBuffer(KernelRandom.bytes(UInt.SIZE_BYTES)).readU32(0)
 
         private fun windowScale(bufferSize: Int): Int {
             var scale = 0
