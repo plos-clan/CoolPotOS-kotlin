@@ -3,9 +3,36 @@ package org.plos_clan.cpos.drivers.usb.xhci.core
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlin.test.assertSame
+import kotlin.test.assertFailsWith
 import org.plos_clan.cpos.drivers.usb.bus.UsbBuffer
 
 class BuffersTest {
+    @Test
+    fun contiguousTransferRetainsItsDmaBuffer() {
+        for (length in listOf(1u, 63u, 64u, 65u, 1558u, 65536u)) {
+            val buffer = UsbBuffer(0x10000uL, length, 0x20000uL)
+            val source = listOf(buffer)
+            val planned = PacketBuffers(source, 64u) { _, _ -> error("Unexpected copy") }
+            assertSame(source, planned.buffers)
+            assertSame(buffer, planned.buffers.single())
+        }
+    }
+
+    @Test
+    fun boundaryAndEmptyBuffersPreservePacketRules() {
+        val empty = UsbBuffer(0x10000uL, 0u)
+        val ending = UsbBuffer(0xffc0uL, 64u)
+        val source = listOf(empty, ending, empty)
+        val planned = PacketBuffers(source, 64u) { _, _ -> error("Unexpected copy") }
+        assertEquals(listOf(ending), planned.buffers)
+        val zero = PacketBuffers(listOf(empty), 64u) { _, _ -> error("Unexpected copy") }
+        assertTrue(zero.buffers.isEmpty())
+        assertFailsWith<IllegalArgumentException> {
+            PacketBuffers(listOf(ending), 0u) { _, _ -> error("Unexpected copy") }
+        }
+    }
+
     @Test
     fun alignedStorageBuffersNeedNoCopies() {
         val planned =

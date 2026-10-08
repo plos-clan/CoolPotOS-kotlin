@@ -11,6 +11,21 @@ internal class PacketBuffers(
 
     init {
         require(packetSize != 0u)
+        val single = buffers.singleOrNull()
+        val boundary = 0x10000uL - ((single?.physicalAddress ?: 0uL) and 0xffffuL)
+        val contiguous = single != null && single.length != 0u && single.length.toULong() <= boundary
+        this.buffers = if (contiguous) {
+            buffers
+        } else {
+            gatherPackets(buffers, packetSize, gather)
+        }
+    }
+
+    private fun gatherPackets(
+        buffers: List<UsbBuffer>,
+        packetSize: UInt,
+        gather: (List<UsbBuffer>, UInt) -> UsbBuffer,
+    ): List<UsbBuffer> {
         val source = buffers.filter { it.length != 0u }
         var index = 0
         var offset = 0u
@@ -20,7 +35,7 @@ internal class PacketBuffers(
 
         fun take(length: UInt): UsbBuffer {
             val buffer = source[index]
-            val result =
+            val result = if (offset == 0u && length == buffer.length) buffer else
                 UsbBuffer(
                     buffer.physicalAddress + offset,
                     length,
@@ -34,7 +49,7 @@ internal class PacketBuffers(
             return result
         }
 
-        this.buffers = buildList {
+        return buildList {
             while (index < source.size) {
                 val current = source[index]
                 val address = current.physicalAddress + offset

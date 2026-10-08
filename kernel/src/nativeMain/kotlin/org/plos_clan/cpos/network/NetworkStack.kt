@@ -315,6 +315,7 @@ internal class NetworkStack : EthernetProtocol {
     private val deviceInterfaces = mutableMapOf<EthernetDevice, NetworkInterface>()
     private val addresses = mutableMapOf<Int, MutableList<NetworkInterfaceAddress>>()
     private val routes = mutableListOf<NetworkRoute>()
+    private var routingTable: List<NetworkRoute>? = null
     private val neighbors = mutableMapOf<NeighborKey, NeighborEntry>()
     private val pendingNeighbors = mutableMapOf<NeighborKey, PendingNeighbor>()
     private val handlers = mutableMapOf<UByte, IpProtocolHandler>()
@@ -439,6 +440,7 @@ internal class NetworkStack : EthernetProtocol {
             }
             if (existing != null && !replace) return VfsResult.Err(VfsError.ALREADY_EXISTS)
             if (existing == null) assigned += address
+            routingTable = null
             selected to existing
         }
         val configured = existing ?: address
@@ -461,6 +463,7 @@ internal class NetworkStack : EthernetProtocol {
                 it.address == address && (prefixLength == null || it.prefixLength == prefixLength)
             }
             if (position < 0) return VfsResult.Err(VfsError.ADDRESS_NOT_AVAILABLE)
+            routingTable = null
             selected to assigned.removeAt(position)
         }
         notifyListeners { it.addressChanged(intfc, removed, removed = true) }
@@ -475,6 +478,7 @@ internal class NetworkStack : EthernetProtocol {
             if (interfaces[normalized.interfaceIndex] == null) return@withLock false
             if (routes.contains(normalized)) return VfsResult.Err(VfsError.ALREADY_EXISTS)
             routes += normalized
+            routingTable = null
             true
         }
         if (!added) return VfsResult.Err(VfsError.NO_DEVICE)
@@ -494,7 +498,9 @@ internal class NetworkStack : EthernetProtocol {
                     (route.metric == 0u || existing.metric == route.metric) &&
                     (route.protocol == 0.toUByte() || existing.protocol == route.protocol)
             }
-            if (index < 0) null else routes.removeAt(index)
+            if (index < 0) return@withLock null
+            routingTable = null
+            routes.removeAt(index)
         } ?: return VfsResult.Err(VfsError.NOT_FOUND)
         notifyListeners { it.routeChanged(removed, removed = true) }
         return VfsResult.Ok(Unit)
@@ -513,6 +519,7 @@ internal class NetworkStack : EthernetProtocol {
             }
             if (index >= 0) replaced = routes.removeAt(index)
             routes += normalized
+            routingTable = null
             true
         }
         if (!added) return VfsResult.Err(VfsError.NO_DEVICE)
@@ -652,6 +659,7 @@ internal class NetworkStack : EthernetProtocol {
             val selected = deviceInterfaces.remove(device) ?: return
             interfaces.remove(selected.index)
             addresses.remove(selected.index)
+            routingTable = null
             routes.removeAll { route ->
                 (route.interfaceIndex == selected.index).also { if (it) removedRoutes += route }
             }
@@ -1037,37 +1045,29 @@ internal class NetworkStack : EthernetProtocol {
             val source = selectSourceLocked(intfc, requestedSource, destination) ?: return null
             return SelectedRoute(intfc, source, destination)
         }
-        val route = allRoutesLocked()
-            .asSequence()
-            .filter {
-                it.kind == NetworkRouteKind.UNICAST && it.destination.contains(destination) &&
-                    (interfaceIndex == null || it.interfaceIndex == interfaceIndex)
+        var route: NetworkRoute? = null
+        for (candidate in allRoutesLocked()) {
+            if (candidate.kind != NetworkRouteKind.UNICAST) continue
+            if (!candidate.destination.contains(destination)) continue
+            if (interfaceIndex != null && candidate.interfaceIndex != interfaceIndex) continue
+            if (interfaces[candidate.interfaceIndex]?.running != true) continue
+            val previous = route
+            if (previous != null) {
+                val prefix = candidate.destination.length.compareTo(previous.destination.length)
+                if (prefix < 0 || prefix == 0 && candidate.metric >= previous.metric) continue
             }
-            .mapNotNull { candidate ->
-                val intfc = interfaces[candidate.interfaceIndex]
-                    ?.takeIf(NetworkInterface::running) ?: return@mapNotNull null
-                Triple(candidate, intfc, candidate.destination.length)
-            }
-            .sortedWith(
-                compareByDescending<Triple<NetworkRoute, NetworkInterface, Int>> { it.third }
-                    .thenBy { it.first.metric },
-            )
-            .firstOrNull() ?: return null
+            route = candidate
+        }
+        val selected = route ?: return null
+        val intfc = interfaces[selected.interfaceIndex] ?: return null
+        val assigned = addresses[intfc.index].orEmpty()
         val source = if (!requestedSource.isAny) {
-            requestedSource.takeIf { address ->
-                addresses[route.second.index].orEmpty().any { it.address == address }
-            }
+            requestedSource.takeIf { address -> assigned.any { it.address == address } }
         } else {
-            route.first.preferredSource?.takeIf { address ->
-                addresses[route.second.index].orEmpty().any { it.address == address }
-            }
-                ?: selectSourceLocked(route.second, Ipv4Address.ANY, destination)
+            selected.preferredSource?.takeIf { address -> assigned.any { it.address == address } }
+                ?: selectSourceLocked(intfc, Ipv4Address.ANY, destination)
         } ?: return null
-        return SelectedRoute(
-            route.second,
-            source,
-            route.first.gateway ?: destination,
-        )
+        return SelectedRoute(intfc, source, selected.gateway ?: destination)
     }
 
     private fun selectSourceLocked(
@@ -1082,6 +1082,7 @@ internal class NetworkStack : EthernetProtocol {
     }
 
     private fun allRoutesLocked(): List<NetworkRoute> {
+        routingTable?.let { return it }
         val result = ArrayList<NetworkRoute>(routes.size + addresses.values.sumOf(List<*>::size) * 3)
         result += routes
         for ((index, assigned) in addresses) {
@@ -1113,7 +1114,7 @@ internal class NetworkStack : EthernetProtocol {
                 }
             }
         }
-        return result.distinct()
+        return result.distinct().also { routingTable = it }
     }
 
     private fun hasAddressLocked(address: Ipv4Address): Boolean =

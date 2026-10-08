@@ -3,6 +3,10 @@ package org.plos_clan.cpos.drivers.usb.xhci.regs
 import org.plos_clan.cpos.mem.MmioAddress
 
 class Capability(val baseAddress: MmioAddress) : RegisterBlock(baseAddress) {
+    private val hcsParams1 = readU32(CAP_HCSPARAMS1_OFFSET)
+    private val hcsParams2 = readU32(CAP_HCSPARAMS2_OFFSET)
+    private val hccParams1 = readU32(CAP_HCCPARAMS1_OFFSET)
+
     val length: UByte
         get() = readU8(CAP_LENGTH_OFFSET)
 
@@ -64,15 +68,6 @@ class Capability(val baseAddress: MmioAddress) : RegisterBlock(baseAddress) {
         }
         return null
     }
-
-    private val hcsParams1: UInt
-        get() = readU32(CAP_HCSPARAMS1_OFFSET)
-
-    private val hcsParams2: UInt
-        get() = readU32(CAP_HCSPARAMS2_OFFSET)
-
-    private val hccParams1: UInt
-        get() = readU32(CAP_HCCPARAMS1_OFFSET)
 }
 
 private const val CAP_LENGTH_OFFSET = 0x00uL
