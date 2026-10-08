@@ -13,9 +13,9 @@ internal class DelayedCoroutineTask(
 
 internal class KernelCoroutineQueue {
     private val immediate = ArrayDeque<Runnable>()
-    private val delayed = run {
-        val order = compareBy<DelayedCoroutineTask> { it.deadlineNanos }.thenBy { it.sequence }
-        IndexedHeap(order)
+    private val delayed = IndexedHeap<DelayedCoroutineTask> { first, second ->
+        val deadline = first.deadlineNanos.compareTo(second.deadlineNanos)
+        if (deadline != 0) deadline else first.sequence.compareTo(second.sequence)
     }
     private var nextSequence = 0uL
 

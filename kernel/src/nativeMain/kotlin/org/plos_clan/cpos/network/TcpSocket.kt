@@ -248,7 +248,7 @@ internal class TcpSocket internal constructor(
             val segment = Outstanding(
                 iss,
                 TcpFlags.SYN,
-                ByteArray(0),
+                TcpCodec.EMPTY,
                 options,
                 TscClock.nanoTime(),
             )
@@ -780,7 +780,7 @@ internal class TcpSocket internal constructor(
         val response = Outstanding(
             iss,
             TcpFlags.SYN or TcpFlags.ACK,
-            ByteArray(0),
+            TcpCodec.EMPTY,
             options,
             TscClock.nanoTime(),
         )
@@ -1096,7 +1096,7 @@ internal class TcpSocket internal constructor(
                 sndNxt,
                 flags,
                 payload,
-                ByteArray(0),
+                TcpCodec.EMPTY,
                 TscClock.nanoTime(),
             )
             sndNxt += length.toUInt()
@@ -1121,8 +1121,8 @@ internal class TcpSocket internal constructor(
         val segment = Outstanding(
             sndNxt,
             TcpFlags.FIN or TcpFlags.ACK,
-            ByteArray(0),
-            ByteArray(0),
+            TcpCodec.EMPTY,
+            TcpCodec.EMPTY,
             TscClock.nanoTime(),
         )
         sndNxt++

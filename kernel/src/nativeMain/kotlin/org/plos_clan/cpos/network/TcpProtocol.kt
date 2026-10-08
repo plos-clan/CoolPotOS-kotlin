@@ -15,8 +15,8 @@ internal data class TcpTransmission(
     val acknowledgmentNumber: UInt,
     val flags: Int,
     val window: UShort,
-    val options: ByteArray = ByteArray(0),
-    val payload: ByteArray = ByteArray(0),
+    val options: ByteArray = TcpCodec.EMPTY,
+    val payload: ByteArray = TcpCodec.EMPTY,
     val ttl: UByte = 64u,
 )
 
@@ -80,7 +80,9 @@ internal class TcpProtocol(val network: NetworkStack) : IpProtocolHandler {
     private val listeners = mutableMapOf<UShort, MutableList<TcpSocket>>()
     private val connections = mutableMapOf<ConnectionKey, Connection>()
     private val active = mutableSetOf<TcpSocket>()
-    private val timeWaits = IndexedHeap<TimeWait>(compareBy { it.expires })
+    private val timeWaits = IndexedHeap<TimeWait> { first, second ->
+        first.expires.compareTo(second.expires)
+    }
     private var nextEphemeralPort = EPHEMERAL_PORT_FIRST
     private val sequences by lazy {
         val bytes = KernelRandom.bytes(16)
@@ -243,16 +245,17 @@ internal class TcpProtocol(val network: NetworkStack) : IpProtocolHandler {
     }
 
     fun transmit(transmission: TcpTransmission): VfsResult<Unit> {
-        val segment = ByteArray(
-            TcpCodec.MIN_HEADER_SIZE + transmission.options.size + transmission.payload.size,
-        )
+        val headerLength = TcpCodec.MIN_HEADER_SIZE + transmission.options.size
+        val packet = Ipv4OutputPacket(headerLength + transmission.payload.size)
+        val segment = packet.bytes
+        val offset = Ipv4OutputPacket.PAYLOAD_OFFSET
         transmission.payload.copyInto(
             segment,
-            TcpCodec.MIN_HEADER_SIZE + transmission.options.size,
+            offset + headerLength,
         )
         TcpCodec.write(
             segment,
-            0,
+            offset,
             transmission.payload.size,
             transmission.source,
             transmission.destination,
@@ -266,7 +269,7 @@ internal class TcpProtocol(val network: NetworkStack) : IpProtocolHandler {
             transmission.source.address,
             transmission.destination.address,
             IpProtocol.TCP,
-            segment,
+            packet,
             dontFragment = true,
             ttl = transmission.ttl,
         )) {

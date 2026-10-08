@@ -6,8 +6,9 @@ import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.addressOf
-import kotlinx.cinterop.get
 import kotlinx.cinterop.plus
+import kotlinx.cinterop.rawValue
+import kotlinx.cinterop.toLong
 import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
@@ -18,6 +19,7 @@ import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignDown
 import org.plos_clan.cpos.utils.toVirtualPointer
+import platform.posix.memchr
 import platform.posix.memcpy
 import platform.posix.memmove
 import platform.posix.memset
@@ -165,7 +167,7 @@ class UserMemory internal constructor(
         if (maxLength <= 0 || address >= USER_VIRTUAL_ADDRESS_LIMIT) {
             return VfsResult.Err(VfsError.FAULT)
         }
-        var result = ByteArray(minOf(maxLength, PAGE_SIZE_BYTES.toInt()))
+        var result = ByteArray(0)
         var copied = 0
         var currentAddress = address
         while (copied < maxLength) {
@@ -182,15 +184,22 @@ class UserMemory internal constructor(
             )
 
             try {
-                val required = copied + chunkLength
+                val terminator = memchr(source, 0, chunkLength.toULong())
+                val length = if (terminator == null) chunkLength else {
+                    (terminator.rawValue.toLong() - source.rawValue.toLong()).toInt()
+                }
+                val required = copied + length
                 if (required > result.size) {
-                    val capacity = maxOf(required, minOf(maxLength, result.size * 2))
+                    val doubled = minOf(maxLength.toLong(), result.size.toLong() * 2).toInt()
+                    val capacity = if (terminator != null) required else maxOf(required, doubled)
                     result = result.copyOf(capacity)
                 }
-                repeat(chunkLength) { index ->
-                    val byte = source[index].toByte()
-                    if (byte == 0.toByte()) return VfsResult.Ok(result.copyOf(copied + index))
-                    result[copied + index] = byte
+                if (length != 0) result.usePinned { destination ->
+                    memcpy(destination.addressOf(copied), source, length.toULong())
+                }
+                if (terminator != null) {
+                    val bytes = if (required == result.size) result else result.copyOf(required)
+                    return VfsResult.Ok(bytes)
                 }
             } finally {
                 UserFrameReferences.release(physicalAddress.alignDown(PAGE_SIZE_BYTES))

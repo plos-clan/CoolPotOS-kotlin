@@ -152,6 +152,21 @@ internal enum class IpProtocol(val number: UByte) {
     }
 }
 
+@JvmInline
+internal value class Ipv4OutputPacket private constructor(val bytes: ByteArray) {
+    val payloadLength: Int get() = bytes.size - PAYLOAD_OFFSET
+
+    companion object {
+        const val PAYLOAD_OFFSET = EthernetHeader.SIZE + Ipv4Codec.MIN_HEADER_SIZE
+
+        operator fun invoke(payloadLength: Int): Ipv4OutputPacket {
+            require(payloadLength in 0..Ipv4Codec.MAX_PACKET_SIZE - Ipv4Codec.MIN_HEADER_SIZE)
+            val bytes = ByteArray(PAYLOAD_OFFSET + payloadLength)
+            return Ipv4OutputPacket(bytes)
+        }
+    }
+}
+
 internal object InternetChecksum {
     fun compute(bytes: ByteArray, offset: Int = 0, length: Int = bytes.size - offset): UShort =
         finalize(sum(bytes, offset, length))
@@ -480,6 +495,9 @@ internal data class TcpSegment(
 )
 
 internal object TcpCodec {
+    val EMPTY = ByteArray(0)
+    private val emptyOptions = TcpOptions()
+
     const val MIN_HEADER_SIZE = 20
     const val MAX_HEADER_SIZE = 60
 
@@ -527,7 +545,7 @@ internal object TcpCodec {
         acknowledgmentNumber: UInt,
         flags: Int,
         window: UShort,
-        options: ByteArray = ByteArray(0),
+        options: ByteArray = EMPTY,
     ) {
         require(options.size and 3 == 0 && options.size <= MAX_HEADER_SIZE - MIN_HEADER_SIZE)
         val headerLength = MIN_HEADER_SIZE + options.size
@@ -565,6 +583,7 @@ internal object TcpCodec {
     )
 
     private fun parseOptions(bytes: ByteArray, offset: Int, length: Int): TcpOptions? {
+        if (length == 0) return emptyOptions
         var maximumSegmentSize: UShort? = null
         var windowScale: UByte? = null
         var sackPermitted = false

@@ -546,34 +546,22 @@ internal class NetworkStack : EthernetProtocol {
         source: Ipv4Address,
         destination: Ipv4Address,
         protocol: IpProtocol,
-        payload: ByteArray,
-        payloadOffset: Int = 0,
-        payloadLength: Int = payload.size - payloadOffset,
+        packet: Ipv4OutputPacket,
         dontFragment: Boolean = false,
         ttl: UByte = 64u,
         typeOfService: UByte = 0u,
         interfaceIndex: Int? = null,
     ): VfsResult<Ipv4Address> {
-        if (payloadOffset < 0 || payloadLength < 0 ||
-            payloadOffset > payload.size - payloadLength ||
-            payloadLength > Ipv4Codec.MAX_PACKET_SIZE - Ipv4Codec.MIN_HEADER_SIZE
-        ) return VfsResult.Err(VfsError.MESSAGE_TOO_LONG)
+        val payloadLength = packet.payloadLength
         val route = lock.withLock { selectRouteLocked(source, destination, interfaceIndex) }
             ?: return VfsResult.Err(
                 if (source.isAny) VfsError.NETWORK_UNREACHABLE else VfsError.ADDRESS_NOT_AVAILABLE,
             )
         val identification = nextIdentification.fetchAndAdd(1).toUShort()
         if (route.intfc.kind == NetworkInterfaceKind.LOOPBACK) {
-            val packet = ByteArray(Ipv4Codec.MIN_HEADER_SIZE + payloadLength)
-            payload.copyInto(
-                packet,
-                Ipv4Codec.MIN_HEADER_SIZE,
-                payloadOffset,
-                payloadOffset + payloadLength,
-            )
             Ipv4Codec.writeHeader(
-                packet,
-                0,
+                packet.bytes,
+                EthernetHeader.SIZE,
                 payloadLength,
                 route.source,
                 destination,
@@ -582,19 +570,17 @@ internal class NetworkStack : EthernetProtocol {
                 ttl,
                 typeOfService = typeOfService,
             )
-            dispatchIpv4(
-                IpPacketContext(
-                    route.intfc,
-                    packet,
-                    route.source,
-                    destination,
-                    protocol.number,
-                    Ipv4Codec.MIN_HEADER_SIZE,
-                    payloadLength,
-                    0,
-                ),
+            val context = IpPacketContext(
+                route.intfc,
+                packet.bytes,
+                route.source,
+                destination,
                 protocol.number,
+                Ipv4OutputPacket.PAYLOAD_OFFSET,
+                payloadLength,
+                EthernetHeader.SIZE,
             )
+            dispatchIpv4(context, protocol.number)
             return VfsResult.Ok(route.source)
         }
         if (!route.intfc.running) return VfsResult.Err(VfsError.NETWORK_UNREACHABLE)
@@ -613,13 +599,12 @@ internal class NetworkStack : EthernetProtocol {
             val remaining = payloadLength - position
             val currentLength = if (remaining > maximumPayload) fragmentPayload else remaining
             val moreFragments = position + currentLength < payloadLength
-            val frame = ByteArray(EthernetHeader.SIZE + Ipv4Codec.MIN_HEADER_SIZE + currentLength)
-            payload.copyInto(
-                frame,
-                EthernetHeader.SIZE + Ipv4Codec.MIN_HEADER_SIZE,
-                payloadOffset + position,
-                payloadOffset + position + currentLength,
-            )
+            val frame = if (currentLength == payloadLength) packet.bytes else {
+                val fragment = Ipv4OutputPacket(currentLength)
+                val start = Ipv4OutputPacket.PAYLOAD_OFFSET + position
+                packet.bytes.copyInto(fragment.bytes, Ipv4OutputPacket.PAYLOAD_OFFSET, start, start + currentLength)
+                fragment.bytes
+            }
             Ipv4Codec.writeHeader(
                 frame,
                 EthernetHeader.SIZE,
@@ -856,14 +841,15 @@ internal class NetworkStack : EthernetProtocol {
         if (type == ICMP_ECHO_REQUEST && code == 0 &&
             !packet.destination.isLimitedBroadcast && !packet.destination.isMulticast
         ) {
-            val reply = packet.bytes.copyOfRange(
-                packet.payloadOffset,
-                packet.payloadOffset + packet.payloadLength,
+            val reply = Ipv4OutputPacket(packet.payloadLength)
+            val offset = Ipv4OutputPacket.PAYLOAD_OFFSET
+            packet.bytes.copyInto(
+                reply.bytes, offset, packet.payloadOffset, packet.payloadOffset + packet.payloadLength,
             )
-            val output = NetworkOrderBuffer(reply)
-            output.writeU8(0, ICMP_ECHO_REPLY.toUByte())
-            output.writeU16(2, 0u)
-            output.writeU16(2, InternetChecksum.compute(reply))
+            val output = NetworkOrderBuffer(reply.bytes)
+            output.writeU8(offset, ICMP_ECHO_REPLY.toUByte())
+            output.writeU16(offset + 2, 0u)
+            output.writeU16(offset + 2, InternetChecksum.compute(reply.bytes, offset))
             sendIpv4(packet.destination, packet.source, IpProtocol.ICMP, reply)
             return
         }
@@ -906,16 +892,18 @@ internal class NetworkStack : EthernetProtocol {
         ) return
         val quotedPayloadLength = minOf(packet.payloadLength, 8)
         val quotedLength = Ipv4Codec.MIN_HEADER_SIZE + quotedPayloadLength
-        val message = ByteArray(ICMP_HEADER_SIZE + quotedLength)
+        val reply = Ipv4OutputPacket(ICMP_HEADER_SIZE + quotedLength)
+        val message = reply.bytes
+        val offset = Ipv4OutputPacket.PAYLOAD_OFFSET
         packet.bytes.copyInto(
             message,
-            ICMP_HEADER_SIZE + Ipv4Codec.MIN_HEADER_SIZE,
+            offset + ICMP_HEADER_SIZE + Ipv4Codec.MIN_HEADER_SIZE,
             packet.payloadOffset,
             packet.payloadOffset + quotedPayloadLength,
         )
         Ipv4Codec.writeHeader(
             message,
-            ICMP_HEADER_SIZE,
+            offset + ICMP_HEADER_SIZE,
             quotedPayloadLength,
             packet.source,
             packet.destination,
@@ -923,12 +911,12 @@ internal class NetworkStack : EthernetProtocol {
             0u,
         )
         val output = NetworkOrderBuffer(message)
-        output.writeU8(0, type.toUByte())
-        output.writeU8(1, code.toUByte())
-        output.writeU16(2, 0u)
-        output.writeU32(4, 0u)
-        output.writeU16(2, InternetChecksum.compute(message))
-        sendIpv4(packet.destination, packet.source, IpProtocol.ICMP, message)
+        output.writeU8(offset, type.toUByte())
+        output.writeU8(offset + 1, code.toUByte())
+        output.writeU16(offset + 2, 0u)
+        output.writeU32(offset + 4, 0u)
+        output.writeU16(offset + 2, InternetChecksum.compute(message, offset))
+        sendIpv4(packet.destination, packet.source, IpProtocol.ICMP, reply)
     }
 
     private fun routeFrame(

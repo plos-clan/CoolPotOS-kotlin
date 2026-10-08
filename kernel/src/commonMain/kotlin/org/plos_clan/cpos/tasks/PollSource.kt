@@ -6,7 +6,11 @@ import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicReference
 
 class PollSource {
-    private val listeners = AtomicReference(emptyList<PollSubscription>())
+    private companion object {
+        val EMPTY = emptyArray<PollSubscription>()
+    }
+
+    private val listeners = AtomicReference(EMPTY)
 
     internal fun attach(subscription: PollSubscription) {
         while (true) {
@@ -20,8 +24,11 @@ class PollSource {
     internal fun detach(subscription: PollSubscription) {
         while (true) {
             val previous = listeners.load()
-            if (subscription !in previous) return
-            val replacement = previous - subscription
+            val index = previous.indexOf(subscription)
+            if (index < 0) return
+            val replacement = if (previous.size == 1) EMPTY else Array(previous.size - 1) { position ->
+                previous[if (position < index) position else position + 1]
+            }
             if (listeners.compareAndSet(previous, replacement)) return
         }
     }

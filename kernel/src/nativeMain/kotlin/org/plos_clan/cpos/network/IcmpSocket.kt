@@ -222,22 +222,24 @@ internal class IcmpSocket internal constructor(
             is VfsResult.Ok -> prepared.value
             is VfsResult.Err -> return IoResult.failure(prepared.error)
         }
-        val message = ByteArray(request.count)
-        if (request.source.copyTo(request.offset, message, 0, request.count) != request.count) {
+        val packet = Ipv4OutputPacket(request.count)
+        val message = packet.bytes
+        val offset = Ipv4OutputPacket.PAYLOAD_OFFSET
+        if (request.source.copyTo(request.offset, message, offset, request.count) != request.count) {
             return IoResult.failure(VfsError.FAULT)
         }
         val output = NetworkOrderBuffer(message)
-        if (output.readU8(0).toInt() != ICMP_ECHO_REQUEST || output.readU8(1) != 0.toUByte()) {
+        if (output.readU8(offset).toInt() != ICMP_ECHO_REQUEST || output.readU8(offset + 1) != 0.toUByte()) {
             return IoResult.failure(VfsError.NOT_PERMITTED)
         }
-        output.writeU16(2, 0u)
-        output.writeU16(4, endpoints.first.port)
-        output.writeU16(2, InternetChecksum.compute(message))
+        output.writeU16(offset + 2, 0u)
+        output.writeU16(offset + 4, endpoints.first.port)
+        output.writeU16(offset + 2, InternetChecksum.compute(message, offset))
         return when (val result = network.sendIpv4(
             endpoints.first.address,
             endpoints.second.address,
             IpProtocol.ICMP,
-            message,
+            packet,
             ttl = ttl.toUByte(),
         )) {
             is VfsResult.Ok -> IoResult.success(request.count)

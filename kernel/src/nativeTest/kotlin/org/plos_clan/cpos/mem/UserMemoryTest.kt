@@ -1,5 +1,7 @@
 package org.plos_clan.cpos.mem
 
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_WRITABLE
@@ -11,6 +13,7 @@ import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -34,6 +37,31 @@ class UserMemoryTest {
         }
 
         override fun close() = space.release()
+    }
+
+    @Test
+    fun stringsTerminateAtPageBoundariesAndRespectLimits() {
+        Fixture().use { fixture ->
+            for (length in listOf(0, 7, 16, 17, 18, PAGE_SIZE_BYTES.toInt() + 25)) {
+                val bytes = ByteArray(length + 1) { 65 }
+                bytes[length] = 0
+                assertTrue(fixture.memory.copyToUser(bytes))
+                val result = fixture.memory.copyCStringFromUser(bytes.size)
+                val copied = assertIs<VfsResult.Ok<ByteArray>>(result).value
+                assertContentEquals(bytes.copyOf(length), copied)
+                if (length == 0) continue
+                val limited = fixture.memory.copyCStringFromUser(length, VfsError.RANGE)
+                assertEquals(VfsError.RANGE, assertIs<VfsResult.Err>(limited).error)
+            }
+            val last = USER_MMAP_START + 3uL * PAGE_SIZE_BYTES - 1uL
+            val memory = UserMemory(fixture.space, last)
+            assertTrue(memory.copyToUser(byteArrayOf(0)))
+            val empty = assertIs<VfsResult.Ok<ByteArray>>(memory.copyCStringFromUser(2))
+            assertContentEquals(ByteArray(0), empty.value)
+            assertTrue(memory.copyToUser(byteArrayOf(65)))
+            val fault = assertIs<VfsResult.Err>(memory.copyCStringFromUser(2))
+            assertEquals(VfsError.FAULT, fault.error)
+        }
     }
 
     @Test

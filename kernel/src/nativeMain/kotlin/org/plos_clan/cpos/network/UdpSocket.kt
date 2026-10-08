@@ -328,20 +328,22 @@ internal class UdpSocket internal constructor(
             is VfsResult.Ok -> prepared.value
             is VfsResult.Err -> return IoResult.failure(prepared.error)
         }
-        val payload = ByteArray(UdpCodec.HEADER_SIZE + request.count)
+        val packet = Ipv4OutputPacket(UdpCodec.HEADER_SIZE + request.count)
+        val payload = packet.bytes
+        val offset = Ipv4OutputPacket.PAYLOAD_OFFSET
         if (request.source.copyTo(
                 request.offset,
                 payload,
-                UdpCodec.HEADER_SIZE,
+                offset + UdpCodec.HEADER_SIZE,
                 request.count,
             ) != request.count
         ) return IoResult.failure(VfsError.FAULT)
-        UdpCodec.write(payload, 0, request.count, transmission.source, transmission.destination)
+        UdpCodec.write(payload, offset, request.count, transmission.source, transmission.destination)
         return when (val sent = network.sendIpv4(
             transmission.source.address,
             transmission.destination.address,
             IpProtocol.UDP,
-            payload,
+            packet,
             ttl = transmission.ttl,
             typeOfService = transmission.typeOfService,
             interfaceIndex = transmission.interfaceIndex,
