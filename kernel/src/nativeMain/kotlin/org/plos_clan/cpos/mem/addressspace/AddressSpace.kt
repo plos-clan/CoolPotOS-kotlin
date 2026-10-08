@@ -407,7 +407,7 @@ class AddressSpace internal constructor(
         while (true) {
             val frame = lock.withLock {
                 val physical = pageDirectory.resolveUserPhysicalAddress(address, writable)
-                    ?: return@withLock null
+                if (physical == INVALID_FRAME) return@withLock null
                 UserFrameReferences.retain(physical.alignDown(PAGE_SIZE_BYTES))
                 physical
             }
@@ -433,7 +433,7 @@ class AddressSpace internal constructor(
         while (true) {
             lock.withLock {
                 val physical = pageDirectory.resolveUserPhysicalAddress(address, writable)
-                if (physical != null) return operation(physical)
+                if (physical != INVALID_FRAME) return operation(physical)
             }
             if (faultIn(address, writable) != PageFaultResult.RESOLVED) return 0
         }

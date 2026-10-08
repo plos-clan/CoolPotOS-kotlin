@@ -25,6 +25,6 @@ object Hhdm {
 
     fun toVirtual(physicalAddress: ULong): ULong = physicalAddress + offset
 
-    fun <T : CPointed> toVirtualPointer(physicalAddress: ULong): CPointer<T>? =
+    inline fun <T : CPointed> toVirtualPointer(physicalAddress: ULong): CPointer<T>? =
         toVirtual(physicalAddress).toPointer()
 }

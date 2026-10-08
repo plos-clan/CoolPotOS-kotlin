@@ -249,41 +249,41 @@ data class PageDirectory(val pml4PhysicalAddress: ULong) {
     internal fun resolveUserPhysicalAddress(
         virtualAddress: ULong,
         requireWritable: Boolean,
-    ): ULong? {
+    ): ULong {
         if (virtualAddress >= USER_VIRTUAL_ADDRESS_LIMIT) {
-            return null
+            return INVALID_FRAME
         }
 
-        val pml4 = pml4Table() ?: return null
+        val pml4 = pml4Table() ?: return INVALID_FRAME
         val pml4Entry = pml4[PageTableLevel.PML4.index(virtualAddress)]
         if (!pml4Entry.allowsUserAccess(requireWritable) || (pml4Entry and PTE_HUGE) != 0uL) {
-            return null
+            return INVALID_FRAME
         }
 
-        val pdpt = (pml4Entry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return null
+        val pdpt = (pml4Entry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return INVALID_FRAME
         val pdptEntry = pdpt[PageTableLevel.PDPT.index(virtualAddress)]
         if (!pdptEntry.allowsUserAccess(requireWritable)) {
-            return null
+            return INVALID_FRAME
         }
         if ((pdptEntry and PTE_HUGE) != 0uL) {
             return (pdptEntry and PTE_1_GIB_ADDR_MASK) or
                 (virtualAddress and PAGE_1_GIB_OFFSET_MASK)
         }
 
-        val pd = (pdptEntry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return null
+        val pd = (pdptEntry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return INVALID_FRAME
         val pdEntry = pd[PageTableLevel.PD.index(virtualAddress)]
         if (!pdEntry.allowsUserAccess(requireWritable)) {
-            return null
+            return INVALID_FRAME
         }
         if ((pdEntry and PTE_HUGE) != 0uL) {
             return (pdEntry and PTE_2_MIB_ADDR_MASK) or
                 (virtualAddress and PAGE_2_MIB_OFFSET_MASK)
         }
 
-        val pt = (pdEntry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return null
+        val pt = (pdEntry and PTE_ADDR_MASK).toVirtualPointer<ULongVar>() ?: return INVALID_FRAME
         val ptEntry = pt[PageTableLevel.PT.index(virtualAddress)]
         if (!ptEntry.allowsUserAccess(requireWritable)) {
-            return null
+            return INVALID_FRAME
         }
 
         return (ptEntry and PTE_ADDR_MASK) or (virtualAddress and (PAGE_SIZE_BYTES - 1uL))

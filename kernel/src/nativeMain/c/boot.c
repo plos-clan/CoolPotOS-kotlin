@@ -174,7 +174,7 @@ void _start(void) {
 
     setup_xstate();
     __dlapi_enter(entry_stack);
-    create_global_key();
+    initialize_runtime_access();
     kernel_main();
     halt_forever();
 }

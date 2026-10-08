@@ -95,7 +95,7 @@ uint64_t runtime_clock_nanos(void);
 bool runtime_vdso_initialize(vdso_image_t *image);
 uint64_t runtime_clock_deadline(uint64_t nanoseconds);
 void wrmsr(uint32_t msr, uint64_t value);
-void create_global_key(void);
+void initialize_runtime_access(void);
 bool can_use_runtime(void);
 long runtime_thread_prepare(void *stack, int *parent_tid, void *tls);
 int runtime_thread_id(void);

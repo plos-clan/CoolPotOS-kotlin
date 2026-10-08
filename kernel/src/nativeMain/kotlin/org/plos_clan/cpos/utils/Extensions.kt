@@ -18,7 +18,7 @@ const val PAGE_SIZE_BYTES = 4096uL
 
 fun ULong.isCanonicalKernelAddress(): Boolean = (this shr 48) == 0xFFFFuL
 
-fun <T : CPointed> ULong.toPointer(): CPointer<T>? = toLong().toCPointer()
+inline fun <T : CPointed> ULong.toPointer(): CPointer<T>? = toLong().toCPointer()
 
 fun CPointer<UByteVar>.readU8(offset: Int): UByte = this[offset]
 
@@ -47,7 +47,7 @@ fun CPointer<UByteVar>.checksumOk(length: Int): Boolean {
 
 fun ULong.isPageAligned(): Boolean = isAligned(PAGE_SIZE_BYTES)
 
-fun <T : CPointed> ULong.toVirtualPointer(): CPointer<T>? = Hhdm.toVirtualPointer(this)
+inline fun <T : CPointed> ULong.toVirtualPointer(): CPointer<T>? = Hhdm.toVirtualPointer(this)
 
 fun CPointer<ULongVar>.clear() {
     repeat(PTE_COUNT) { index ->
