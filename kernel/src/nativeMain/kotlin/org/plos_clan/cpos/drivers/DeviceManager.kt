@@ -12,6 +12,7 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.sysfs.Sysfs
 import org.plos_clan.cpos.fs.sysfs.SysfsDevicePublication
 import org.plos_clan.cpos.fs.vfs.DeviceNumber
+import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.IoMode
 import org.plos_clan.cpos.fs.vfs.OpenOptions
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
@@ -33,9 +34,12 @@ enum class LinuxDeviceMajor(val number: UInt) {
     TTY_AUXILIARY(5u),
     MISC(10u),
     INPUT(13u),
+    DRM(226u),
 }
 
 interface DeviceBackend {
+    val initialMode: FileMode get() = FileMode(0x180u)
+
     val readFaultPolicy: BufferFaultPolicy
         get() = BufferFaultPolicy.PREFAULT
 

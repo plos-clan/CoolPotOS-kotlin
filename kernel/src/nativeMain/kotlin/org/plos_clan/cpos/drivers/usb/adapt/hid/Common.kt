@@ -7,6 +7,7 @@ import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.coroutines.KernelSemaphore
 import org.plos_clan.cpos.drivers.usb.bus.ControlTransferArgs
 import org.plos_clan.cpos.drivers.usb.bus.GeneralTransferArgs
+import org.plos_clan.cpos.drivers.usb.bus.UsbDriver
 import org.plos_clan.cpos.drivers.usb.bus.UsbInterface
 import org.plos_clan.cpos.drivers.usb.bus.submitControl
 import org.plos_clan.cpos.drivers.usb.bus.submitTransfer
@@ -42,7 +43,17 @@ class HidDevice(
         reportDescriptorBuffer = null
     }
 
-    internal suspend fun submitTransfer() {
+    internal fun bind(driver: UsbDriver) {
+        iface.driver = driver
+        KernelCoroutines.launch("usb-hid") {
+            while (buffer != null) {
+                submitTransfer()
+                transferCompletion.acquire()
+            }
+        }
+    }
+
+    private suspend fun submitTransfer() {
         val buffer = buffer ?: return
 
         iface.device.submitTransfer(
@@ -133,6 +144,10 @@ class HidDevice(
                 }
             }
 
+            if (maxReportSize == 0u || maxReportSize > UShort.MAX_VALUE.toUInt()) {
+                descBuffer.free()
+                return null
+            }
             val pagesNeeded = (maxReportSize.toULong() + PAGE_SIZE_BYTES - 1uL) / PAGE_SIZE_BYTES
             val reportBuffer = MmioRegion.allocate(pagesNeeded) ?: run {
                 descBuffer.free()
@@ -141,15 +156,11 @@ class HidDevice(
             device.buffer = reportBuffer
             device.maxReportSize = maxReportSize.toUShort()
 
-            device.setProtocol(PROTO_REPORT.toUShort())
+            if (iface.desc.interfaceSubclass == 1u.toUByte()) {
+                device.setProtocol(PROTO_REPORT.toUShort())
+            }
             device.setIdle(0u.toUShort())
 
-            KernelCoroutines.launch("usb-common") {
-                while (device.buffer != null) {
-                    device.submitTransfer()
-                    device.transferCompletion.acquire()
-                }
-            }
             return device
         }
     }

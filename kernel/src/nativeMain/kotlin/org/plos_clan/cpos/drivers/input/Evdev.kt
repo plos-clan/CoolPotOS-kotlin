@@ -3,9 +3,12 @@ package org.plos_clan.cpos.drivers.input
 import org.plos_clan.cpos.tasks.PollSource
 import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.drivers.Device
+import org.plos_clan.cpos.drivers.RealtimeClock
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.DeviceBackend
 import org.plos_clan.cpos.drivers.DeviceIoEvent
 import org.plos_clan.cpos.drivers.WaitablePositionlessDeviceBackend
+import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
@@ -21,7 +24,16 @@ import org.plos_clan.cpos.utils.PollEvents
 internal enum class InputEventType(val value: UShort) {
     SYNCHRONIZATION(0u),
     KEY(1u),
+    RELATIVE(2u),
+    ABSOLUTE(3u),
     REPEAT(20u),
+}
+
+internal enum class RelativeAxis(val code: UShort) {
+    X(0u),
+    Y(1u),
+    WHEEL(8u),
+    HORIZONTAL_WHEEL(6u),
 }
 
 internal data class InputId(
@@ -46,16 +58,25 @@ internal data class InputId(
     }
 }
 
+internal enum class InputClock(val id: Int) {
+    REALTIME(0),
+    MONOTONIC(1),
+    BOOTTIME(7),
+}
+
 internal data class InputEvent(
     val timestampNanos: ULong,
     val type: InputEventType,
     val code: UShort,
     val value: Int,
 ) {
-    fun writeTo(bytes: ByteArray) {
+    fun writeTo(bytes: ByteArray, clock: InputClock) {
+        val realtime = if (clock == InputClock.REALTIME) RealtimeClock.atMonotonic(timestampNanos) else null
+        val seconds = realtime?.seconds?.toULong() ?: (timestampNanos / NANOS_PER_SECOND)
+        val nanos = realtime?.nanoseconds?.toULong() ?: (timestampNanos % NANOS_PER_SECOND)
         val output = LittleEndianBuffer(bytes)
-        output.writeU64(0, timestampNanos / NANOS_PER_SECOND)
-        output.writeU64(8, timestampNanos % NANOS_PER_SECOND / NANOS_PER_MICROSECOND)
+        output.writeU64(0, seconds)
+        output.writeU64(8, nanos / NANOS_PER_MICROSECOND)
         output.writeU16(16, type.value)
         output.writeU16(18, code)
         output.writeU32(20, value.toUInt())
@@ -85,29 +106,95 @@ internal class EvdevDevice(
     private val name: String,
     private val physicalPath: String,
     private val id: InputId,
-    supportedKeys: Collection<KeyCode>,
-    private val repeatController: RepeatController,
+    supportedKeys: Collection<UShort>,
+    supportedRelativeAxes: Collection<RelativeAxis>,
+    private val repeatController: RepeatController?,
+    supportedAbsoluteAxes: Map<AbsoluteAxis, AbsoluteAxisInfo> = emptyMap(),
 ) : DeviceBackend, InputEventSink {
     private val lock = IrqSpinLock()
     private val clients = mutableListOf<EvdevClient>()
     private val keyCapabilities = ByteArray(KEY_BITMAP_BYTES)
     private val keyState = ByteArray(KEY_BITMAP_BYTES)
+    private val relativeCapabilities = ByteArray(RELATIVE_BITMAP_BYTES)
+    private val absoluteCapabilities = ByteArray(ULong.SIZE_BYTES)
+    private val absoluteAxes = if (supportedAbsoluteAxes.isEmpty()) null else
+        Array(64) { AbsoluteAxisInfo() }
+    private val eventTypeCapabilities = ByteArray(EVENT_TYPE_BITMAP_BYTES)
     private var grabbed: EvdevClient? = null
+    private var disconnected = false
+    private var publication: InputPublication? = null
 
     init {
-        supportedKeys.forEach { keyCapabilities.setBit(it.linuxCode.toInt(), true) }
+        require(supportedKeys.all { it.toInt() <= KEY_MAX })
+        supportedKeys.forEach { keyCapabilities.setBit(it.toInt(), true) }
+        supportedRelativeAxes.forEach { relativeCapabilities.setBit(it.code.toInt(), true) }
+        eventTypeCapabilities.setBit(InputEventType.SYNCHRONIZATION.value.toInt(), true)
+        if (supportedKeys.isNotEmpty()) {
+            eventTypeCapabilities.setBit(InputEventType.KEY.value.toInt(), true)
+        }
+        if (supportedRelativeAxes.isNotEmpty()) {
+            eventTypeCapabilities.setBit(InputEventType.RELATIVE.value.toInt(), true)
+        }
+        for ((axis, info) in supportedAbsoluteAxes) {
+            absoluteCapabilities.setBit(axis.code.toInt(), true)
+            checkNotNull(absoluteAxes)[axis.code.toInt()] = info.copy()
+        }
+        if (supportedAbsoluteAxes.isNotEmpty()) {
+            eventTypeCapabilities.setBit(InputEventType.ABSOLUTE.value.toInt(), true)
+        }
+        if (repeatController != null) {
+            eventTypeCapabilities.setBit(InputEventType.REPEAT.value.toInt(), true)
+        }
     }
 
-    override fun open(device: Device): VfsResult<DeviceBackend> =
-        VfsResult.Ok(EvdevClient(this).also { client -> lock.withLock { clients += client } })
+    fun install(index: Int = allocateIndex()): Boolean {
+        val capabilities = mapOf(
+            "ev" to eventTypeCapabilities, "key" to keyCapabilities, "rel" to relativeCapabilities,
+            "abs" to absoluteCapabilities, "msc" to EMPTY_EVENT_CAPABILITIES,
+            "led" to EMPTY_EVENT_CAPABILITIES, "snd" to EMPTY_EVENT_CAPABILITIES,
+            "ff" to EMPTY_FORCE_FEEDBACK_CAPABILITIES, "sw" to EMPTY_EVENT_CAPABILITIES,
+        )
+        publication = InputPublication.create(index, this, name, physicalPath, id, capabilities)
+        return publication != null
+    }
 
-    override fun receive(event: InputEvent) {
+    fun uninstall(): Boolean {
         lock.withLock {
-            if (event.type == InputEventType.KEY && event.value != KeyAction.REPEATED.value) {
-                keyState.setBit(event.code.toInt(), event.value == KeyAction.PRESSED.value)
-            }
-            grabbed?.receive(event) ?: clients.forEach { it.receive(event) }
+            disconnected = true
+            grabbed = null
+            clients.forEach { it.revoke() }
         }
+        val registration = publication ?: return false
+        publication = null
+        registration.close()
+        return true
+    }
+
+    override fun open(device: Device): VfsResult<DeviceBackend> = lock.withLock {
+        if (disconnected) return@withLock VfsResult.Err(VfsError.NO_DEVICE)
+        val client = EvdevClient(this)
+        clients.add(client)
+        VfsResult.Ok(client)
+    }
+
+    override fun receive(event: InputEvent) = lock.withLock {
+        if (disconnected) return@withLock
+        if (event.type == InputEventType.KEY && event.value != KeyAction.REPEATED.value) {
+            val code = event.code.toInt()
+            val pressed = event.value == KeyAction.PRESSED.value
+            if (code > KEY_MAX) return@withLock
+            val mask = 1 shl (code % Byte.SIZE_BITS)
+            val previous = keyState[code / Byte.SIZE_BITS].toInt() and mask != 0
+            if (previous == pressed) return@withLock
+            keyState.setBit(code, pressed)
+        }
+        var forwarded = event
+        if (event.type == InputEventType.ABSOLUTE) {
+            val axis = absoluteAxes?.getOrNull(event.code.toInt()) ?: return@withLock
+            if (!absoluteCapabilities.hasBit(event.code.toInt()) || !axis.update(event.value)) return@withLock
+            if (axis.value != event.value) forwarded = event.copy(value = axis.value)
+        }
+        grabbed?.receive(forwarded) ?: clients.forEach { it.receive(forwarded) }
     }
 
     override fun ioctl(device: Device, command: Int, args: UserMemory): Long =
@@ -146,7 +233,7 @@ internal class EvdevDevice(
                 args.copyResult(id.toByteArray(), fixedSize = true)
 
             0x03 if direction.hasRead && size >= REPEAT_BYTES -> {
-                val repeat = repeatController.repeatSettings()
+                val repeat = repeatController?.repeatSettings() ?: return -Errno.ENOSYS.toLong()
                 args.copyResult(ByteArray(REPEAT_BYTES).also { bytes ->
                     LittleEndianBuffer(bytes).apply {
                         writeU32(0, repeat.delayMillis.toUInt())
@@ -156,12 +243,14 @@ internal class EvdevDevice(
             }
 
             0x03 if direction.hasWrite && size >= REPEAT_BYTES -> {
+                if (repeatController == null) return -Errno.ENOSYS.toLong()
                 val bytes = args.copyFromUser(REPEAT_BYTES) ?: return -Errno.EFAULT.toLong()
                 val input = LittleEndianBuffer(bytes)
                 val delay = input.readU32(0).toInt()
                 val period = input.readU32(UInt.SIZE_BYTES).toInt()
+                val settings = RepeatSettings(delay, period)
                 if (delay < 0 || period < 0 ||
-                    !repeatController.configureRepeat(RepeatSettings(delay, period))
+                    !repeatController.configureRepeat(settings)
                 ) -Errno.EINVAL.toLong() else 0L
             }
 
@@ -170,32 +259,54 @@ internal class EvdevDevice(
             0x08 if direction.hasRead -> args.copyCString("", size)
             0x09 if direction.hasRead -> args.copyBitmap(ByteArray(PROPERTY_BITMAP_BYTES), size)
             0x18 if direction.hasRead -> args.copyBitmap(lock.withLock { keyState.copyOf() }, size)
+            in 0x19..0x1b if direction.hasRead -> args.copyBitmap(EMPTY_EVENT_CAPABILITIES, size)
             in 0x20..0x3f if direction.hasRead -> {
                 val bitmap = when (number - 0x20) {
-                    0 -> EVENT_TYPE_CAPABILITIES
+                    0 -> eventTypeCapabilities
                     InputEventType.KEY.value.toInt() -> keyCapabilities
-                    InputEventType.REPEAT.value.toInt() -> REPEAT_CAPABILITIES
-                    else -> EMPTY_EVENT_CAPABILITIES
+                    InputEventType.RELATIVE.value.toInt() -> relativeCapabilities
+                    InputEventType.ABSOLUTE.value.toInt() -> absoluteCapabilities
+                    4, 5, 17, 18 -> EMPTY_EVENT_CAPABILITIES
+                    21 -> EMPTY_FORCE_FEEDBACK_CAPABILITIES
+                    else -> return -Errno.EINVAL.toLong()
                 }
                 args.copyBitmap(bitmap, size)
             }
 
+            in 0x40..0x7f if direction == 2 -> {
+                val axes = absoluteAxes ?: return -Errno.EINVAL.toLong()
+                val bytes = lock.withLock { axes[number - 0x40].encode() }
+                args.copyResult(bytes.copyOf(minOf(size, bytes.size)), fixedSize = true)
+            }
+
+            in 0xc0..0xff if direction == 1 -> {
+                val axes = absoluteAxes ?: return -Errno.EINVAL.toLong()
+                if (number - 0xc0 == 0x2f) return -Errno.EINVAL.toLong()
+                val bytes = args.copyFromUser(minOf(size, AbsoluteAxisInfo.SIZE_BYTES))
+                    ?: return -Errno.EFAULT.toLong()
+                val info = AbsoluteAxisInfo.decode(bytes)
+                lock.withLock { axes[number - 0xc0] = info }
+                0L
+            }
+
             0x90 if direction.hasWrite && size >= Int.SIZE_BYTES -> {
-                val enabled = args.readInt() ?: return -Errno.EFAULT.toLong()
-                if (enabled !in 0..1) -Errno.EINVAL.toLong() else setGrab(client, enabled == 1)
+                setGrab(client, args.address != 0uL)
             }
 
             0x91 if direction.hasWrite && size >= Int.SIZE_BYTES -> {
-                val value = args.readInt() ?: return -Errno.EFAULT.toLong()
-                if (value != 0) -Errno.EINVAL.toLong() else {
+                if (args.address != 0uL) return -Errno.EINVAL.toLong()
+                lock.withLock {
+                    if (grabbed === client) grabbed = null
                     client.revoke()
-                    0L
                 }
+                0L
             }
 
             0xa0 if direction.hasWrite && size >= Int.SIZE_BYTES -> {
                 val clockId = args.readInt() ?: return -Errno.EFAULT.toLong()
-                if (clockId in SUPPORTED_CLOCK_IDS) 0L else -Errno.EINVAL.toLong()
+                val clock = InputClock.entries.find { it.id == clockId } ?: return -Errno.EINVAL.toLong()
+                client.selectClock(clock)
+                0L
             }
 
             else -> -Errno.ENOTTY.toLong()
@@ -243,6 +354,7 @@ internal class EvdevDevice(
         private var committed = 0
         private var overflow = false
         private var revoked = false
+        private var clock = InputClock.REALTIME
 
         override fun receive(event: InputEvent) = lock.withLock {
             if (revoked) return@withLock
@@ -281,7 +393,7 @@ internal class EvdevDevice(
 
         override fun poll(device: Device, events: Int): Long = lock.withLock {
             val available = when {
-                revoked -> PollEvents.POLLHUP
+                revoked -> PollEvents.POLLHUP or PollEvents.POLLERR
                 committed != 0 -> PollEvents.NORMAL_INPUT
                 else -> 0
             }
@@ -307,7 +419,7 @@ internal class EvdevDevice(
                 var transferred = 0
                 repeat(count) {
                     val event = queue[tail] ?: return@withLock -Errno.EIO.toLong()
-                    event.writeTo(eventBytes)
+                    event.writeTo(eventBytes, clock)
                     val copied = buffer.copyFrom(
                         bufferOffset + transferred,
                         eventBytes,
@@ -363,6 +475,17 @@ internal class EvdevDevice(
             owner.close(this)
         }
 
+        fun selectClock(selected: InputClock) = lock.withLock {
+            if (clock == selected) return@withLock
+            clock = selected
+            if (size == 0) return@withLock
+            clearQueue()
+            val dropped = InputEvent(
+                TscClock.nanoTime(), InputEventType.SYNCHRONIZATION, InputEvent.SYN_DROPPED, 0,
+            )
+            enqueue(dropped)
+        }
+
         fun revoke() = lock.withLock {
             if (revoked) return@withLock
             revoked = true
@@ -400,28 +523,35 @@ internal class EvdevDevice(
         }
     }
 
-    private companion object {
-        const val EVDEV_IOCTL_TYPE = 0x45
-        const val EVDEV_VERSION = 0x0001_0001
-        const val KEY_MAX = 0x2ff
-        const val KEY_BITMAP_BYTES = (KEY_MAX + Byte.SIZE_BITS) / Byte.SIZE_BITS
-        const val PROPERTY_BITMAP_BYTES = 4
-        const val REPEAT_BYTES = 8
-        const val QUEUE_EVENTS = 256
-        val SUPPORTED_CLOCK_IDS = setOf(0, 1, 7)
-        val EVENT_TYPE_CAPABILITIES = ByteArray(4).apply {
-            setBit(InputEventType.SYNCHRONIZATION.value.toInt(), true)
-            setBit(InputEventType.KEY.value.toInt(), true)
-            setBit(InputEventType.REPEAT.value.toInt(), true)
-        }
-        val REPEAT_CAPABILITIES = byteArrayOf(0x03)
-        val EMPTY_EVENT_CAPABILITIES = ByteArray(0)
+    companion object {
+        private val indexLock = IrqSpinLock()
+        private var nextIndex = 0
 
-        fun intBytes(value: Int): ByteArray = ByteArray(Int.SIZE_BYTES).also { bytes ->
+        fun allocateIndex(): Int = indexLock.withLock { nextIndex++ }
+
+        private const val EVDEV_IOCTL_TYPE = 0x45
+        private const val EVDEV_VERSION = 0x0001_0001
+        private const val KEY_MAX = 0x2ff
+        private const val KEY_BITMAP_BYTES = (KEY_MAX + Byte.SIZE_BITS) / Byte.SIZE_BITS
+        private const val RELATIVE_BITMAP_BYTES = ULong.SIZE_BYTES
+        private const val PROPERTY_BITMAP_BYTES = ULong.SIZE_BYTES
+        private const val EVENT_TYPE_BITMAP_BYTES = ULong.SIZE_BYTES
+        private const val REPEAT_BYTES = 8
+        private const val QUEUE_EVENTS = 256
+        private val EMPTY_EVENT_CAPABILITIES = ByteArray(ULong.SIZE_BYTES)
+        private val EMPTY_FORCE_FEEDBACK_CAPABILITIES = ByteArray(ULong.SIZE_BYTES * 2)
+
+        private fun intBytes(value: Int): ByteArray = ByteArray(Int.SIZE_BYTES).also { bytes ->
             LittleEndianBuffer(bytes).writeU32(0, value.toUInt())
         }
 
-        fun ByteArray.setBit(index: Int, enabled: Boolean) {
+        private fun ByteArray.hasBit(index: Int): Boolean {
+            if (index !in 0 until size * Byte.SIZE_BITS) return false
+            val mask = 1 shl (index % Byte.SIZE_BITS)
+            return this[index / Byte.SIZE_BITS].toInt() and mask != 0
+        }
+
+        private fun ByteArray.setBit(index: Int, enabled: Boolean) {
             if (index !in 0 until size * Byte.SIZE_BITS) return
             val mask = 1 shl (index % Byte.SIZE_BITS)
             val byteIndex = index / Byte.SIZE_BITS
@@ -432,28 +562,28 @@ internal class EvdevDevice(
             }
         }
 
-        val UInt.ioctlNumber: Int
+        private val UInt.ioctlNumber: Int
             get() = (this and 0xffu).toInt()
-        val UInt.ioctlType: Int
+        private val UInt.ioctlType: Int
             get() = (this shr 8 and 0xffu).toInt()
-        val UInt.ioctlSize: Int
+        private val UInt.ioctlSize: Int
             get() = (this shr 16 and 0x3fffu).toInt()
-        val UInt.ioctlDirection: Int
+        private val UInt.ioctlDirection: Int
             get() = (this shr 30 and 0x03u).toInt()
-        val Int.hasWrite: Boolean
+        private val Int.hasWrite: Boolean
             get() = this and 1 != 0
-        val Int.hasRead: Boolean
+        private val Int.hasRead: Boolean
             get() = this and 2 != 0
 
-        fun UserMemory.readInt(): Int? = copyFromUser(Int.SIZE_BYTES)
+        private fun UserMemory.readInt(): Int? = copyFromUser(Int.SIZE_BYTES)
             ?.let { LittleEndianBuffer(it).readU32(0).toInt() }
 
-        fun UserMemory.copyResult(bytes: ByteArray, fixedSize: Boolean): Long {
+        private fun UserMemory.copyResult(bytes: ByteArray, fixedSize: Boolean): Long {
             if (!copyToUser(bytes)) return -Errno.EFAULT.toLong()
             return if (fixedSize) 0L else bytes.size.toLong()
         }
 
-        fun UserMemory.copyCString(value: String, requested: Int): Long {
+        private fun UserMemory.copyCString(value: String, requested: Int): Long {
             if (requested == 0) return 0L
             val encoded = value.encodeToByteArray()
             val bytes = ByteArray(minOf(requested, encoded.size + 1))
@@ -461,7 +591,7 @@ internal class EvdevDevice(
             return copyResult(bytes, fixedSize = false)
         }
 
-        fun UserMemory.copyBitmap(bitmap: ByteArray, requested: Int): Long {
+        private fun UserMemory.copyBitmap(bitmap: ByteArray, requested: Int): Long {
             val bytes = bitmap.copyOf(minOf(requested, bitmap.size))
             return copyResult(bytes, fixedSize = false)
         }

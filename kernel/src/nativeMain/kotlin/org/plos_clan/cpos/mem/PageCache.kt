@@ -121,6 +121,11 @@ internal object PageCache : FrameReclaimer {
         }
     }
 
+    fun contains(source: PageCacheSource, offset: ULong): Boolean = lock.withLock {
+        val key = PageCacheKey(source.identity, offset, source.cacheKind)
+        sources[source.identity]?.pages?.containsKey(key) == true
+    }
+
     fun read(
         source: PageCacheSource,
         sourceOffset: ULong,

@@ -4,7 +4,7 @@ package org.plos_clan.cpos.syscall
 
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.OpenFlags
-import org.plos_clan.cpos.fs.vfs.MappableFile
+import org.plos_clan.cpos.fs.vfs.FileMappingProvider
 import org.plos_clan.cpos.fs.vfs.MappedFile
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.fs.vfs.InodeType
@@ -14,11 +14,14 @@ import org.plos_clan.cpos.mem.addressspace.MemoryLock
 import org.plos_clan.cpos.mem.addressspace.MemoryMapRequest
 import org.plos_clan.cpos.mem.addressspace.MemoryMapResult
 import org.plos_clan.cpos.mem.addressspace.MemoryRegionType
+import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.isPageAligned
 
 private const val MAP_SHARED = 0x01uL
@@ -153,7 +156,7 @@ internal fun mmap(regs: PtraceRegisters, process: Process): Long {
         if (offset > Long.MAX_VALUE.toULong() || length > Long.MAX_VALUE.toULong() - offset) {
             return errno(Errno.EOVERFLOW)
         }
-        val mappable = file.inode.backend as? MappableFile
+        val mappable = (file.backend as? FileMappingProvider)?.mapping
         if (shared && access and PROT_WRITE != 0uL) {
             if (!file.access.canWrite || file.getStatusFlags() and OpenFlags.O_APPEND != 0) {
                 return errno(Errno.EACCES)
@@ -169,10 +172,10 @@ internal fun mmap(regs: PtraceRegisters, process: Process): Long {
         val maximumAccess = SUPPORTED_PROT and prohibitedAccess.inv()
         if (access and maximumAccess.inv() != 0uL) return errno(Errno.EACCES)
 
-        val backing = when (val result = mappable?.map(file, shared, access, maximumAccess)) {
+        val backing = when (val result = mappable?.map(file, shared, access, maximumAccess, offset, length)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return errno(result.error.errno)
-            null -> MappedFile(file, maximumAccess)
+            null -> MappedFile(file, maximumAccess, offset)
         }
         return try {
             val request = MemoryMapRequest(
@@ -184,7 +187,7 @@ internal fun mmap(regs: PtraceRegisters, process: Process): Long {
                 noReplace = noReplace,
                 shared = shared,
                 type = MemoryRegionType.FILE,
-                offset = offset,
+                offset = backing.offset,
                 backing = backing,
                 populate = populate,
                 memoryLock = memoryLock,
@@ -206,4 +209,34 @@ internal fun mAdvise(regs: PtraceRegisters, process: Process): Long {
     val length = regs[PtraceRegisters.IDX_RSI]
     val advice = regs[PtraceRegisters.IDX_RDX].toInt()
     return process.addressSpace.advise(address, length, advice).toLong()
+}
+
+internal fun mincore(regs: PtraceRegisters, process: Process): Long {
+    var address = regs[PtraceRegisters.IDX_RDI]
+    val length = regs[PtraceRegisters.IDX_RSI]
+    var vector = regs[PtraceRegisters.IDX_RDX]
+    if (!address.isPageAligned()) return errno(Errno.EINVAL)
+    if (address >= USER_VIRTUAL_ADDRESS_LIMIT) return errno(Errno.ENOMEM)
+    if (length > USER_VIRTUAL_ADDRESS_LIMIT - address) return errno(Errno.ENOMEM)
+    var pages = length / PAGE_SIZE_BYTES + if (length % PAGE_SIZE_BYTES == 0uL) 0uL else 1uL
+    if (pages == 0uL) return 0
+    if (vector >= USER_VIRTUAL_ADDRESS_LIMIT || pages > USER_VIRTUAL_ADDRESS_LIMIT - vector) {
+        return errno(Errno.EFAULT)
+    }
+    val buffer = try {
+        ByteArray(minOf(pages, PAGE_SIZE_BYTES).toInt())
+    } catch (_: OutOfMemoryError) {
+        return errno(Errno.ENOMEM)
+    }
+    while (pages > 0uL) {
+        val count = minOf(pages, buffer.size.toULong()).toInt()
+        val result = process.addressSpace.residency(address, buffer, count)
+        if (result != 0) return result.toLong()
+        val destination = UserMemory(process.addressSpace, vector)
+        if (!destination.copyToUser(buffer, size = count)) return errno(Errno.EFAULT)
+        address += count.toULong() * PAGE_SIZE_BYTES
+        vector += count.toULong()
+        pages -= count.toULong()
+    }
+    return 0
 }

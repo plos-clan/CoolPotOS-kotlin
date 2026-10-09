@@ -42,6 +42,7 @@ internal class AnonymousFileFactory {
         id = identity.inodeId,
         superBlock = context.root.mount.superBlock,
         backend = backend,
+        owner = backend,
         initialAttributes = InodeAttributeSnapshot(
             InodeAttributes(metadata),
             CacheValidity.Persistent,

@@ -19,6 +19,8 @@ import org.plos_clan.cpos.network.KobjectUeventPublisher
 import org.plos_clan.cpos.time.Instant
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.tasks.PollSource
+import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
@@ -47,6 +49,15 @@ class SysfsTextAttribute(
     private val reader: () -> VfsResult<ByteArray>,
     private val writer: ((ByteArray) -> VfsResult<Unit>)? = null,
 ) : SysfsAttribute(name, mode, TEXT_SIZE) {
+    val changes = PollSource()
+    private val generation = AtomicLong(1)
+    val revision: Long get() = generation.load()
+
+    fun notifyChanged() {
+        generation.fetchAndAdd(1)
+        changes.signal()
+    }
+
     val writable: Boolean
         get() = writer != null
 
@@ -116,6 +127,7 @@ data class SysfsObjectSpec(
     val gid: UInt = 0u,
     val attributes: List<SysfsAttribute> = emptyList(),
     val bindings: SysfsBindings = SysfsBindings(),
+    val links: Map<String, SysfsObjectHandle> = emptyMap(),
 ) {
     companion object {
         const val DIRECTORY_MODE = 0x16du
@@ -518,6 +530,10 @@ internal class SysfsRegistry(
                 return VfsResult.Err(VfsError.ALREADY_EXISTS)
             }
         }
+        for (name in spec.links.keys) {
+            if (!validName(name)) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            if (name in attributes) return VfsResult.Err(VfsError.ALREADY_EXISTS)
+        }
         return VfsResult.Ok(PreparedObject(spec, vfsName(spec.name), attributes))
     }
 
@@ -528,6 +544,7 @@ internal class SysfsRegistry(
 
     private fun createObjectLocked(prepared: PreparedObject): VfsResult<SysfsNode.Directory> {
         val spec = prepared.spec
+        if (spec.links.values.any { liveObjectLocked(it) == null }) return VfsResult.Err(VfsError.NOT_FOUND)
         val existingParentId = when (val parent = spec.parent) {
             SysfsParent.Devices -> DEVICES_ID
             is SysfsParent.Object -> liveObjectLocked(parent.handle)?.id
@@ -553,7 +570,7 @@ internal class SysfsRegistry(
         val classBinding = spec.bindings.deviceClass
         val busBinding = spec.bindings.bus
         if ((classBinding != null || busBinding != null) &&
-            prepared.attributes.containsKey(SUBSYSTEM_LINK)
+            (prepared.attributes.containsKey(SUBSYSTEM_LINK) || SUBSYSTEM_LINK in spec.links)
         ) {
             return VfsResult.Err(VfsError.ALREADY_EXISTS)
         }
@@ -569,7 +586,7 @@ internal class SysfsRegistry(
         val linkCount = listOfNotNull(classBinding, busBinding).size +
             if (classBinding != null || busBinding != null) 1 else 0
         if (!reserveIdsLocked(
-                newVirtual + newClass + newBus + 1 + prepared.attributes.size + linkCount +
+                newVirtual + newClass + newBus + 1 + prepared.attributes.size + spec.links.size + linkCount +
                     if (spec.bindings.block) 1 else 0
             )
         ) {
@@ -601,6 +618,7 @@ internal class SysfsRegistry(
                 ),
             )
         }
+        for ((name, target) in spec.links) addLinkLocked(objectNode.id, name, target.id, createdAt)
         if (spec.bindings.block) addLinkLocked(BLOCK_ID, spec.name, objectNode.id, createdAt)
         val classDirectoryId = classBinding?.let { binding ->
             val directoryId = classes[binding.name] ?: createClassLocked(binding.name)
@@ -884,6 +902,7 @@ internal class SysfsRegistry(
 
     private fun removeNodeLocked(id: ULong) {
         val node = nodesById.remove(id) ?: return
+        if (node is SysfsNode.Attribute) (node.attribute as? SysfsTextAttribute)?.notifyChanged()
         check(childrenIndex[id].isNullOrEmpty())
         childrenIndex.remove(id)
         node.parentId?.let { parentId -> childrenIndex[parentId]?.remove(node.name) }

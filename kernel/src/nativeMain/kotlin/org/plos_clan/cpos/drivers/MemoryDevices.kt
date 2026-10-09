@@ -1,6 +1,7 @@
 package org.plos_clan.cpos.drivers
 
 import org.plos_clan.cpos.fs.sysfs.SysfsDevicePublication
+import org.plos_clan.cpos.fs.vfs.FileMode
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.UserMemory
@@ -9,6 +10,8 @@ import org.plos_clan.cpos.utils.KernelRandom
 import org.plos_clan.cpos.utils.PollEvents
 
 internal interface MemoryDeviceBackend : DiscardingDeviceBackend {
+    override val initialMode: FileMode get() = FileMode(0x1b6u)
+
     override fun ioctl(device: Device, command: Int, args: UserMemory): Long =
         -Errno.ENOTTY.toLong()
 

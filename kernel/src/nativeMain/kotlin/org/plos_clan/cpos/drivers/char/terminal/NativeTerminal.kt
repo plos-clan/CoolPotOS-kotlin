@@ -20,7 +20,7 @@ import kotlinx.cinterop.set
 import kotlinx.cinterop.staticCFunction
 import kotlinx.cinterop.usePinned
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
-import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.KernelMutex
 import platform.posix.memcpy
 import platform.posix.memset
 
@@ -46,7 +46,7 @@ internal class NativeTerminal private constructor(
 ) {
     data class Dimensions(val rows: ULong, val columns: ULong)
 
-    private val lock = IrqSpinLock()
+    private val lock = KernelMutex()
     private var dirty = false
 
     fun process(data: ByteArray, offset: Int, length: Int): ByteArray? {
@@ -84,8 +84,7 @@ internal class NativeTerminal private constructor(
     fun flushIfDirty() = lock.withLock {
         if (!dirty) return@withLock
         bridge.terminal_flush(handle)
-        memcpy(device.address, framebuffer, device.pitch * device.height)
-        dirty = false
+        dirty = !device.presentConsole(framebuffer)
     }
 
     fun destroy() = lock.withLock {

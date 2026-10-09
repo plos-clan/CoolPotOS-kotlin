@@ -109,8 +109,8 @@ Run `./gradlew buildImage` to also update the bootable disk image before testing
 
 CI shares the generated EROFS archive between QEMU tests and benchmarks using
 [`actions/cache`](https://github.com/actions/cache). The cache key covers
-`assets/systemd/**`, `assets/userland.sh`, and `kernel/build.gradle.kts`. A matching cache
-skips Podman installation and rootfs generation. Cache misses use the normal
+`assets/systemd/**`, `assets/userland.sh`, and `kernel/build.gradle.kts`.
+A matching cache skips Podman installation and rootfs generation. Cache misses use the normal
 Gradle task dependencies, and successful jobs automatically save new archives.
 Concurrent cache misses can still build separately. Delete the repository's
 rootfs cache to refresh upstream packages when these inputs have not changed.
@@ -263,6 +263,13 @@ than polling in the bootstrap loop.
 * libzstd-decompress [facebook/zstd](https://github.com/facebook/zstd)
 
 ## Persistent disk images
+
+`./gradlew :kernel:prepareUserland` downloads the AUR PKGBUILDs for
+`xdg-desktop-portal-umbriel-git` and `umbriel-git`, builds them with `makepkg`
+as an unprivileged container user, and installs the packages into EROFS.
+Build tools and the build account remain in the disposable container.
+Noctalia and greetd come from the configured binary repositories;
+`assets/userland.sh` generates the greeter and desktop configuration.
 
 `./gradlew buildImage` creates `kernel/build/CoolPotOS.img`, a sparse raw GPT disk
 with FAT32 ESP, read-only EROFS root, and an ext4 persistent partition. The guest

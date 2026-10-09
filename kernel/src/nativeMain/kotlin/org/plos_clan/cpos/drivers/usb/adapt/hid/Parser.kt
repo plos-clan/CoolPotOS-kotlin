@@ -51,6 +51,7 @@ enum class HidKind {
 
 class HidField(
     val reportId: UByte,
+    val applicationUsage: UInt,
     val kind: HidKind,
     val bitOffset: UInt,
     val bitSize: UInt,
@@ -139,6 +140,7 @@ class HidParser(
     private var global = GlobalState()
     private val globalStack = mutableListOf<GlobalState>()
     private val local = LocalState()
+    private val collections = mutableListOf<UInt>()
     private val descriptor = HidDescriptor()
 
     fun parse(): HidDescriptor {
@@ -180,9 +182,11 @@ class HidParser(
         when (tag) {
             TAG_USAGE_PAGE -> global.usagePage = readUnsigned(length).toUShort()
             TAG_LOGICAL_MIN -> global.logicalMin = readSigned(length)
-            TAG_LOGICAL_MAX -> global.logicalMax = readSigned(length)
+            TAG_LOGICAL_MAX -> global.logicalMax =
+                if (global.logicalMin < 0) readSigned(length) else readUnsigned(length).toInt()
             TAG_PHYSICAL_MIN -> global.physicalMin = readSigned(length)
-            TAG_PHYSICAL_MAX -> global.physicalMax = readSigned(length)
+            TAG_PHYSICAL_MAX -> global.physicalMax =
+                if (global.physicalMin < 0) readSigned(length) else readUnsigned(length).toInt()
             TAG_REPORT_SIZE -> global.reportSize = readUnsigned(length)
             TAG_REPORT_COUNT -> global.reportCount = readUnsigned(length)
             TAG_REPORT_ID -> global.reportId = readUnsigned(length).toUByte()
@@ -221,6 +225,17 @@ class HidParser(
                 TAG_INPUT -> HidKind.INPUT
                 TAG_OUTPUT -> HidKind.OUTPUT
                 TAG_FEATURE -> HidKind.FEATURE
+                TAG_COLLECTION -> {
+                    val parent = collections.lastOrNull() ?: 0u
+                    val usage = local.items.firstOrNull()?.min ?: 0u
+                    val application = if (flags == 1u) usage else parent
+                    collections.add(application)
+                    return
+                }
+                TAG_END_COLLECTION -> {
+                    if (collections.isNotEmpty()) collections.removeLast()
+                    return
+                }
                 else -> return
             }
 
@@ -244,23 +259,23 @@ class HidParser(
 
             if (!isVariable && isSingleRange) {
                 val usageItem = local.items[0]
-                layout.fields.add(
-                    HidField(
-                        reportId = reportId,
-                        kind = kind,
-                        bitOffset = layout.sizeBits[kindIndex],
-                        bitSize = reportSize,
-                        reportCount = reportCount,
-                        logicalMin = global.logicalMin,
-                        logicalMax = global.logicalMax,
-                        physicalMin = global.physicalMin,
-                        physicalMax = global.physicalMax,
-                        flags = flags,
-                        usagePage = global.usagePage,
-                        usageMin = usageItem.min,
-                        usageMax = usageItem.max,
-                    ),
+                val field = HidField(
+                    reportId = reportId,
+                    applicationUsage = collections.lastOrNull() ?: 0u,
+                    kind = kind,
+                    bitOffset = layout.sizeBits[kindIndex],
+                    bitSize = reportSize,
+                    reportCount = reportCount,
+                    logicalMin = global.logicalMin,
+                    logicalMax = global.logicalMax,
+                    physicalMin = global.physicalMin,
+                    physicalMax = global.physicalMax,
+                    flags = flags,
+                    usagePage = (usageItem.min shr 16).toUShort(),
+                    usageMin = usageItem.min,
+                    usageMax = usageItem.max,
                 )
+                layout.fields.add(field)
                 layout.sizeBits[kindIndex] += reportSize * reportCount
             } else {
                 var itemIndex = 0
@@ -276,23 +291,23 @@ class HidParser(
                             rangeOffset = 0u
                         }
                     }
-                    layout.fields.add(
-                        HidField(
-                            reportId = reportId,
-                            kind = kind,
-                            bitOffset = layout.sizeBits[kindIndex],
-                            bitSize = reportSize,
-                            reportCount = 1u,
-                            logicalMin = global.logicalMin,
-                            logicalMax = global.logicalMax,
-                            physicalMin = global.physicalMin,
-                            physicalMax = global.physicalMax,
-                            flags = flags,
-                            usagePage = global.usagePage,
-                            usageMin = currentUsage,
-                            usageMax = currentUsage,
-                        ),
+                    val field = HidField(
+                        reportId = reportId,
+                        applicationUsage = collections.lastOrNull() ?: 0u,
+                        kind = kind,
+                        bitOffset = layout.sizeBits[kindIndex],
+                        bitSize = reportSize,
+                        reportCount = 1u,
+                        logicalMin = global.logicalMin,
+                        logicalMax = global.logicalMax,
+                        physicalMin = global.physicalMin,
+                        physicalMax = global.physicalMax,
+                        flags = flags,
+                        usagePage = (currentUsage shr 16).toUShort(),
+                        usageMin = currentUsage,
+                        usageMax = currentUsage,
                     )
+                    layout.fields.add(field)
                     layout.sizeBits[kindIndex] += reportSize
                 }
             }

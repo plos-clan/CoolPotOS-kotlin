@@ -90,6 +90,10 @@ abstract class MemoryRegionBacking : PageCacheSource {
 
     internal abstract fun acquirePage(offset: ULong, scratch: ByteArray): PageCacheAcquireResult
 
+    internal open fun isPageResident(offset: ULong): Boolean = false
+
+    internal open val pageResidencyVisible: Boolean get() = true
+
     internal open fun isPageCurrent(offset: ULong, frame: ULong): Boolean = true
 
     internal open fun attached(addressSpace: MemoryRegionOwner) {}

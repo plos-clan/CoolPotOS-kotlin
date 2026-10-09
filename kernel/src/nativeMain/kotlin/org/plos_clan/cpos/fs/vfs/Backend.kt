@@ -73,7 +73,11 @@ abstract class FileSystemType(
     protected abstract fun createBackend(options: FileSystemOptions): VfsResult<SuperBlockBackend>
 }
 
-interface SuperBlockBackend {
+interface InodeOwner {
+    fun evict(inode: Inode)
+}
+
+interface SuperBlockBackend : InodeOwner {
     val mountOptions: List<String>
         get() = emptyList()
 
@@ -82,7 +86,7 @@ interface SuperBlockBackend {
 
     fun createRoot(superBlock: SuperBlock): Inode
 
-    fun evict(inode: Inode) = inode.backend.evict(inode)
+    override fun evict(inode: Inode) = inode.backend.evict(inode)
 
     fun updateTimestamps(
         caller: VfsOperationContext,
@@ -195,7 +199,7 @@ class SuperBlock internal constructor(
     }
 }
 
-interface InodeBackend {
+interface InodeBackend : InodeOwner {
     val type: InodeType
 
     val displayName: VfsPathname?
@@ -256,6 +260,8 @@ interface InodeBackend {
             }
         }
 
+        val acl = inode.aclAccess(caller, requested)
+        if (acl != null) return if (acl) VfsResult.Ok(Unit) else VfsResult.Err(VfsError.PERMISSION_DENIED)
         val shift = when {
             caller.uid == metadata.uid -> 6
             caller.belongsToGroup(metadata.gid) -> 3
@@ -303,7 +309,7 @@ interface InodeBackend {
     ): VfsResult<Unit> = VfsResult.Err(
         VfsError.NOT_SUPPORTED)
 
-    fun evict(inode: Inode) {}
+    override fun evict(inode: Inode) {}
 }
 
 interface MutableInodeBackend : InodeBackend {
@@ -648,7 +654,9 @@ interface FixedSizeIoOpenFileBackend : OpenFileBackend {
         get() = ioSize
 }
 
-internal interface NoopSeekOpenFileBackend : OpenFileBackend
+internal interface SeekingOpenFileBackend : OpenFileBackend {
+    fun seek(position: FilePosition, offset: Long, origin: SeekOrigin): VfsResult<Long>
+}
 
 interface AllocatingOpenFileBackend : OpenFileBackend {
     fun allocate(

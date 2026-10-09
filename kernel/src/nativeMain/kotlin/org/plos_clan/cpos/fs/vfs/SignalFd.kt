@@ -19,12 +19,16 @@ import kotlin.concurrent.atomics.ExperimentalAtomicApi
 internal class SignalFd(initialMask: ULong) :
     AnonymousFileBackend(InodeType.SIGNALFD, "signalfd"),
     ModeAwareOpenFileBackend,
-    NoopSeekOpenFileBackend {
+    SeekingOpenFileBackend {
     private val lock = IrqSpinLock()
     private val transfer = ByteArray(SignalFdSigInfoAbi.SIZE)
     private var mask = initialMask and Signal.BLOCKABLE_MASK
 
     private val changes = PollSource()
+
+    override fun seek(position: FilePosition, offset: Long, origin: SeekOrigin): VfsResult<Long> =
+        VfsResult.Ok(position.value)
+
     override fun subscribe(
         caller: VfsOperationContext,
         inode: Inode,

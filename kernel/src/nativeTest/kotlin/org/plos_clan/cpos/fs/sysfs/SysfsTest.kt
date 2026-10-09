@@ -26,6 +26,40 @@ import kotlin.test.assertTrue
 
 class SysfsTest {
     @Test
+    fun objectLinksFollowTargetsAndDisappearWhenTargetsAreRemoved() {
+        val registry = registry()
+        val targetSpec = SysfsObjectSpec("physical")
+        val target = registry.registerObject(targetSpec).value()
+        val sourceSpec = SysfsObjectSpec("card", links = mapOf("device" to target))
+        val source = registry.registerObject(sourceSpec).value()
+        val link = assertIs<SysfsNode.Link>(registry.child(source.id, "device"))
+        assertEquals("../physical", registry.readLink(link).value().toString())
+        registry.unregisterObject(target).value()
+        assertNull(registry.childOrNull(source.id, "device"))
+        assertNotNull(registry.childOrNull(SysfsRegistry.DEVICES_ID, "card"))
+    }
+
+    @Test
+    fun objectLinksRejectMissingTargetsAndConflictingAttributesWithoutPublishing() {
+        val registry = registry()
+        val targetSpec = SysfsObjectSpec("physical")
+        val target = registry.registerObject(targetSpec).value()
+        val attribute = SysfsTextAttribute.constant("device", "value")
+        val conflict = SysfsObjectSpec(
+            "card",
+            attributes = listOf(attribute),
+            links = mapOf("device" to target),
+        )
+        val conflictResult = assertIs<VfsResult.Err>(registry.registerObject(conflict))
+        assertEquals(VfsError.ALREADY_EXISTS, conflictResult.error)
+        registry.unregisterObject(target).value()
+        val missing = SysfsObjectSpec("card", links = mapOf("device" to target))
+        val missingResult = assertIs<VfsResult.Err>(registry.registerObject(missing))
+        assertEquals(VfsError.NOT_FOUND, missingResult.error)
+        assertNull(registry.childOrNull(SysfsRegistry.DEVICES_ID, "card"))
+    }
+
+    @Test
     fun projectsOneCanonicalObjectThroughAllIndexes() {
         val registry = registry()
         val device = device("null", 1u, 3u)

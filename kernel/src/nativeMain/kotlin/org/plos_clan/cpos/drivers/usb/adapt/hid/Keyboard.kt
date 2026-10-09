@@ -153,6 +153,7 @@ class Keyboard(
             val hid = HidDevice.create(iface, endpointAddress) ?: return null
             val keyboard = Keyboard(hid = hid, layout = KeyLayout())
             keyboard.scanLayout()
+            hid.bind(keyboard)
             return keyboard
         }
     }

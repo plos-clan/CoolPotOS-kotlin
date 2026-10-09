@@ -27,6 +27,8 @@ import org.plos_clan.cpos.fs.vfs.IoEvent
 import org.plos_clan.cpos.fs.vfs.IoMode
 import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.ModeAwareOpenFileBackend
+import org.plos_clan.cpos.fs.vfs.MappableFile
+import org.plos_clan.cpos.fs.vfs.FileMappingProvider
 import org.plos_clan.cpos.fs.vfs.MountResource
 import org.plos_clan.cpos.fs.vfs.MountResourceProvider
 import org.plos_clan.cpos.fs.vfs.MutableInodeBackend
@@ -75,7 +77,7 @@ private class DevtmpfsInstance(options: TmpfsOptions) :
                 device.number.value,
             ),
             metadata = InodeMetadata(
-                mode = FileMode(0x180u),
+                mode = device.backend.initialMode,
                 linkCount = 1u,
                 deviceNumber = device.number.value,
             ),
@@ -142,7 +144,7 @@ internal class DeviceNode(
 internal sealed class DeviceOpenFile(
     protected val device: Device,
     protected val backend: DeviceBackend,
-) : OpenFileBackend, MountResourceProvider {
+) : OpenFileBackend, MountResourceProvider, FileMappingProvider {
     override val readFaultPolicy: BufferFaultPolicy
         get() = backend.readFaultPolicy
 
@@ -215,6 +217,9 @@ internal sealed class DeviceOpenFile(
         events: Int,
     ): Long =
         backend.poll(device, events)
+
+    override val mapping: MappableFile?
+        get() = (backend as? FileMappingProvider)?.mapping
 
     override fun release() = backend.close(device)
 
@@ -331,6 +336,9 @@ internal sealed class DeviceOpenFile(
         device: Device,
         private val waitableBackend: WaitablePositionlessDeviceBackend,
     ) : Positionless(device, waitableBackend), WaitableOpenFileBackend {
+        override val supportsEpoll = true
+        override val seekable = false
+
         override fun write(
             caller: VfsOperationContext,
             inode: Inode,

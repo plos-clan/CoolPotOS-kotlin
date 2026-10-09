@@ -6,10 +6,12 @@ import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_READABLE
 import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_WRITABLE
 import org.plos_clan.cpos.mem.addressspace.MemoryRegion
+import org.plos_clan.cpos.mem.addressspace.MemoryMapResult
 import org.plos_clan.cpos.mem.addressspace.USER_MMAP_START
 import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
+import org.plos_clan.cpos.utils.Errno
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -37,6 +39,26 @@ class UserMemoryTest {
         }
 
         override fun close() = space.release()
+    }
+
+    @Test
+    fun residencyDoesNotFaultPagesAndRetainsInaccessiblePages() {
+        Fixture().use { fixture ->
+            val vector = ByteArray(3) { 7 }
+            val start = USER_MMAP_START
+            assertEquals(0, fixture.space.residency(start, vector, 3))
+            assertContentEquals(byteArrayOf(0, 0, 0), vector)
+            val memory = UserMemory(fixture.space, start + PAGE_SIZE_BYTES)
+            assertTrue(memory.copyToUser(byteArrayOf(42)))
+            assertEquals(0, fixture.space.residency(start, vector, 3))
+            assertContentEquals(byteArrayOf(0, 1, 0), vector)
+            val protection = fixture.space.protect(start, 3uL * PAGE_SIZE_BYTES, 0uL)
+            assertIs<MemoryMapResult.Ok<Unit>>(protection)
+            assertEquals(0, fixture.space.residency(start, vector, 3))
+            assertContentEquals(byteArrayOf(0, 1, 0), vector)
+            val unmapped = start + 3uL * PAGE_SIZE_BYTES
+            assertEquals(-Errno.ENOMEM, fixture.space.residency(unmapped, vector, 1))
+        }
     }
 
     @Test

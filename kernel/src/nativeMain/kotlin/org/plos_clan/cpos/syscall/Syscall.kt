@@ -159,6 +159,7 @@ private enum class LinuxSyscall(
     ACCESS(21, ::access),
     PIPE(22, ::pipe),
     SCHED_YIELD(24, SchedulerSyscalls::yield),
+    MINCORE(27, ::mincore),
     MADVISE(28, ::mAdvise),
     DUP(32, ::dup),
     DUP2(33, ::dup2),

@@ -321,9 +321,11 @@ class OpenFileDescription private constructor(
     }
 
     fun retain(): Boolean {
-        val previous = references.fetchAndAdd(1)
-        if (previous in 1 until Int.MAX_VALUE) return true
-        references.fetchAndAdd(-1)
+        var observed = references.load()
+        while (observed in 1 until Int.MAX_VALUE) {
+            if (references.compareAndSet(observed, observed + 1)) return true
+            observed = references.load()
+        }
         return false
     }
 
@@ -591,8 +593,8 @@ class OpenFileDescription private constructor(
             if (references.load() == 0) {
                 return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
             }
-            if (backend is NoopSeekOpenFileBackend) {
-                return@withLock VfsResult.Ok(position.value)
+            if (backend is SeekingOpenFileBackend) {
+                return@withLock backend.seek(position, offset, origin)
             }
             val base = when (origin) {
                 SeekOrigin.START -> 0L

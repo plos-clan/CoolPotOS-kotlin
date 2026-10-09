@@ -1,5 +1,10 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package org.plos_clan.cpos.fs.sysfs
 
+import kotlin.concurrent.atomics.AtomicLong
+import org.plos_clan.cpos.tasks.PollSubscription
+import org.plos_clan.cpos.utils.PollEvents
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.DirectoryBackend
@@ -205,6 +210,19 @@ private class SysfsTextHandle(
     private val attribute: SysfsTextAttribute,
 ) : OpenFileBackend {
     private var content: ByteArray? = null
+    private val revision = AtomicLong(0)
+    override val supportsEpoll: Boolean get() = true
+
+    override fun subscribe(caller: VfsOperationContext, inode: Inode, subscription: PollSubscription) {
+        subscription.watch(attribute.changes)
+    }
+
+    override fun poll(caller: VfsOperationContext, inode: Inode, events: Int): Long {
+        val changed = revision.load() != attribute.revision || !registry.isLive(node)
+        val exceptional = if (changed) PollEvents.POLLPRI or PollEvents.POLLERR else 0
+        return ((events and PollEvents.DEFAULT_FILE_EVENTS) or exceptional).toLong()
+    }
+
 
     override fun read(
         caller: VfsOperationContext,
@@ -216,6 +234,7 @@ private class SysfsTextHandle(
     ): IoResult {
         if (count == 0 || position.value < 0) return IoResult.success(0)
         if (content == null || position.value == 0L) {
+            revision.store(attribute.revision)
             content = when (val result = show()) {
                 is VfsResult.Ok -> result.value
                 is VfsResult.Err -> return IoResult.failure(result.error)

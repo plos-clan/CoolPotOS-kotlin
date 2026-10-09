@@ -1,11 +1,14 @@
 package org.plos_clan.cpos.mem.addressspace
 
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
+import org.plos_clan.cpos.fs.vfs.AccessPermissions
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.PageCacheSource
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.CapEnum
 import org.plos_clan.cpos.mem.PageCache
 import org.plos_clan.cpos.mem.PageCacheAcquireResult
 import org.plos_clan.cpos.mem.PageCacheFailure
@@ -20,6 +23,8 @@ const val USER_MMAP_END = 0x0000_7f00_0000_0000uL
 internal class AnonymousRegionBacking : MemoryRegionBacking() {
     private val lock = IrqSpinLock()
     private val pages = mutableMapOf<ULong, ResidentPage>()
+
+    override fun isPageResident(offset: ULong): Boolean = lock.withLock { pages.containsKey(offset) }
 
     override fun acquirePage(offset: ULong, scratch: ByteArray): PageCacheAcquireResult = lock.withLock {
         val page = pages[offset] ?: ResidentPage.allocate()?.also { pages[offset] = it }
@@ -39,6 +44,8 @@ internal class AnonymousRegionBacking : MemoryRegionBacking() {
 }
 
 abstract class CachedRegionBacking : MemoryRegionBacking() {
+    override fun isPageResident(offset: ULong): Boolean = PageCache.contains(cacheSource, offset)
+
     override fun acquirePage(offset: ULong, scratch: ByteArray): PageCacheAcquireResult =
         PageCache.acquire(cacheSource, offset, scratch)
 }
@@ -49,6 +56,15 @@ abstract class FileRegionBacking(
     init {
         check(file.retain())
     }
+
+    override val pageResidencyVisible: Boolean
+        get() {
+            val caller = ProcessManager.currentProcess()?.vfsOperationContext ?: return true
+            if (file.access.canWrite || caller.uid == file.inode.metadata().uid) return true
+            val capabilities = ProcessManager.currentThread()?.capabilities
+            if (capabilities?.hasEffective(CapEnum.FOWNER) == true) return true
+            return file.inode.backend.access(caller, file.inode, AccessPermissions.WRITE) is VfsResult.Ok
+        }
 
     protected fun readFile(
         offset: ULong,

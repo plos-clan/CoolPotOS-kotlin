@@ -202,6 +202,30 @@ class AddressSpace internal constructor(
         regions.find(address)?.copy()
     }
 
+    internal fun residency(address: ULong, destination: ByteArray, count: Int): Int {
+        require(address.isPageAligned() && count in 0..destination.size)
+        var page = address
+        for (index in 0 until count) {
+            var backing: MemoryRegionBacking? = null
+            var offset = 0uL
+            val mapped = lock.withLock {
+                val region = regions.find(page) ?: return -ENOMEM
+                backing = region.backing
+                check(backing?.retain() != false)
+                offset = region.offset + page - region.start
+                pageDirectory.userPageFrame(page) != null
+            }
+            val resident = try {
+                backing?.pageResidencyVisible == false || mapped || backing?.isPageResident(offset) == true
+            } finally {
+                backing?.release()
+            }
+            destination[index] = if (resident) 1 else 0
+            page += PAGE_SIZE_BYTES
+        }
+        return 0
+    }
+
     internal fun sharedMemoryLocation(address: ULong, size: ULong): SharedMemoryLocation? =
         lock.withLock {
             val region = regions.find(address) ?: return@withLock null

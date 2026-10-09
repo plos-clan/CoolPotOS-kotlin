@@ -6,6 +6,7 @@ import org.plos_clan.cpos.fs.vfs.ContentBackedFile
 import org.plos_clan.cpos.fs.vfs.FileAllocationMode
 import org.plos_clan.cpos.fs.vfs.FileContent
 import org.plos_clan.cpos.fs.vfs.FileMode
+import org.plos_clan.cpos.fs.vfs.FilePageRange
 import org.plos_clan.cpos.fs.vfs.FilePosition
 import org.plos_clan.cpos.fs.vfs.FileSeals
 import org.plos_clan.cpos.fs.vfs.Inode
@@ -19,6 +20,8 @@ import org.plos_clan.cpos.fs.vfs.MutableInodeBackend
 import org.plos_clan.cpos.fs.vfs.OpenFileBackend
 import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.fs.vfs.OpenOptions
+import org.plos_clan.cpos.fs.vfs.PinnableFile
+import org.plos_clan.cpos.fs.vfs.PinnedFilePages
 import org.plos_clan.cpos.fs.vfs.RegularFileBackend
 import org.plos_clan.cpos.fs.vfs.SealableFile
 import org.plos_clan.cpos.fs.vfs.VfsError
@@ -41,7 +44,8 @@ internal class TmpfsRegularFile(
     private val fileSystem: TmpfsInstance,
     initialSeals: Int = FileSeals.SEAL,
     override val displayName: VfsPathname? = null,
-) : RegularFileBackend(), MutableInodeBackend, ContentBackedFile, OpenFileBackend, MappableFile, SealableFile {
+) : RegularFileBackend(), MutableInodeBackend, ContentBackedFile, OpenFileBackend,
+    MappableFile, SealableFile, PinnableFile {
 
     private val lock = IrqSpinLock()
     private val pages = mutableMapOf<ULong, ResidentPage>()
@@ -310,6 +314,60 @@ internal class TmpfsRegularFile(
 
     override fun getSeals(): Int = lock.withLock { seals.bits }
 
+    override fun pin(file: OpenFileDescription, range: FilePageRange): VfsResult<PinnedFilePages> {
+        val pinned = ArrayList<ResidentPage>(range.pageCount)
+        val acquired = lock.withLock {
+            val fileSize = file.inode.metadata().size
+            if (range.offset > fileSize || range.size > fileSize - range.offset) {
+                return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            }
+            seals.acquirePin()
+        }
+        if (acquired is VfsResult.Err) return acquired
+        var completed = false
+        try {
+            val first = range.offset / PAGE_SIZE_BYTES
+            for (index in 0 until range.pageCount) {
+                when (val result = pinPage(first + index.toULong())) {
+                    is VfsResult.Ok -> pinned.add(result.value)
+                    is VfsResult.Err -> return result
+                }
+            }
+            val pin = Pin(file, pinned)
+            val result = VfsResult.Ok(pin)
+            check(file.retain())
+            completed = true
+            return result
+        } finally {
+            file.inode.invalidateAttributes()
+            if (!completed) {
+                pinned.forEach(ResidentPage::release)
+                lock.withLock { seals.releasePin() }
+            }
+        }
+    }
+
+    private fun pinPage(index: ULong): VfsResult<ResidentPage> = lock.withLock {
+        val page = pages[index] ?: when (val result = createPage(index)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return result
+        }
+        val result = VfsResult.Ok(page)
+        UserFrameReferences.retain(page.frame)
+        result
+    }
+
+    private inner class Pin(
+        private val file: OpenFileDescription,
+        override val pages: List<ResidentPage>,
+    ) : PinnedFilePages() {
+        override fun close() {
+            pages.forEach(ResidentPage::release)
+            lock.withLock { seals.releasePin() }
+            file.release()
+        }
+    }
+
     override fun addSeals(inode: Inode, seals: Int): VfsResult<Unit> = lock.withLock {
         this.seals.add(seals, inode.metadata().mode)
     }
@@ -326,13 +384,15 @@ internal class TmpfsRegularFile(
         shared: Boolean,
         access: ULong,
         maximumAccess: ULong,
+        offset: ULong,
+        length: ULong,
     ): VfsResult<MappedFile> = lock.withLock {
         val maximum = when (val result = seals.acquireMapping(shared, access, maximumAccess)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
         try {
-            VfsResult.Ok(Mapping(file, shared, maximum))
+            VfsResult.Ok(Mapping(file, shared, maximum, offset))
         } catch (_: OutOfMemoryError) {
             seals.releaseMapping(shared, maximum)
             VfsResult.Err(VfsError.NO_MEMORY)
@@ -343,7 +403,12 @@ internal class TmpfsRegularFile(
         file: OpenFileDescription,
         private val shared: Boolean,
         maximumAccess: ULong,
-    ) : MappedFile(file, maximumAccess) {
+        offset: ULong,
+    ) : MappedFile(file, maximumAccess, offset) {
+        override fun isPageResident(offset: ULong): Boolean = lock.withLock {
+            offset < file.inode.metadata().size && pages.containsKey(offset / PAGE_SIZE_BYTES)
+        }
+
         override fun acquirePage(offset: ULong, scratch: ByteArray): PageCacheAcquireResult = lock.withLock {
             val size = file.inode.metadata().size
             if (offset >= size) return PageCacheAcquireResult.failed(PageCacheFailure.IO_ERROR)

@@ -99,6 +99,9 @@ class TtySession(
 
     internal fun flushIfDirty() = withBackend(TtySessionBackend::flushIfDirty)
 
+    internal val isAllocated: Boolean
+        get() = lifecycleLock.withLock { backend != null }
+
     internal val isInUse: Boolean
         get() = lifecycleLock.withLock { openCount != 0 || sessionId != 0 }
 

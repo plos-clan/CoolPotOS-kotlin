@@ -17,14 +17,20 @@ internal abstract class VirtualTerminal : TerminalBackend() {
         private set
 
     final override fun consoleIoctl(file: TtySession.OpenFile, command: Int, args: UserMemory): Int? {
+        if (command != VTModeConstants.VT_DISALLOCATE) {
+            TtyManager.virtualConsoleIoctl(file, command, args)?.let { return it }
+        }
         when (command) {
             VTModeConstants.VT_DISALLOCATE -> return if (file.isHungUp) -Errno.EIO
                 else TtyManager.disallocateVirtualTerminals(args.address)
-            VTModeConstants.KDGETMODE, VTModeConstants.KDGKBMODE,
+            VTModeConstants.KDGKBTYPE, VTModeConstants.KDGETMODE, VTModeConstants.KDGKBMODE,
             VTModeConstants.KDSETMODE, VTModeConstants.KDSKBMODE -> Unit
             else -> return null
         }
         return file.control(command) {
+            if (command == VTModeConstants.KDGKBTYPE) {
+                return@control if (args.copyToUser(byteArrayOf(2))) 0 else -Errno.EFAULT
+            }
             if (command == VTModeConstants.KDGETMODE) return@control copyIntToUser(args, displayMode.value)
             if (command == VTModeConstants.KDGKBMODE) return@control copyIntToUser(args, keyboardMode.value)
             val thread = ProcessManager.currentThread() ?: return@control -Errno.EPERM

@@ -9,6 +9,7 @@ import org.plos_clan.cpos.fs.vfs.AccessPermissions
 import org.plos_clan.cpos.fs.vfs.EXTENDED_ATTRIBUTE_VALUE_MAX
 import org.plos_clan.cpos.fs.vfs.ExtendedAttributeMode
 import org.plos_clan.cpos.fs.vfs.ExtendedAttributeName
+import org.plos_clan.cpos.fs.vfs.PosixAcl
 import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
@@ -23,6 +24,8 @@ import org.plos_clan.cpos.syscall.fs.FsConstants.AT_FDCWD
 import org.plos_clan.cpos.syscall.fs.FsConstants.XATTR_CREATE
 import org.plos_clan.cpos.syscall.fs.FsConstants.XATTR_REPLACE
 import org.plos_clan.cpos.syscall.fs.FsPathResolver.resolveAt
+import org.plos_clan.cpos.tasks.CapEnum
+import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
@@ -87,11 +90,7 @@ private object ExtendedAttributes {
         val value = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDX])
             .copyFromUser(size.toInt()) ?: return errno(Errno.EFAULT)
         return withNode(regs, process, caller, target) { path, inode ->
-            when (val access = FileSystemManager.vfs.checkAccess(
-                caller,
-                inode,
-                AccessPermissions.WRITE,
-            )) {
+            when (val access = checkWrite(caller, inode, name)) {
                 is VfsResult.Ok -> Unit
                 is VfsResult.Err -> return@withNode errno(access.error.errno)
             }
@@ -157,11 +156,7 @@ private object ExtendedAttributes {
             is VfsResult.Err -> return errno(result.error.errno)
         }
         return withNode(regs, process, caller, target) { path, inode ->
-            when (val access = FileSystemManager.vfs.checkAccess(
-                caller,
-                inode,
-                AccessPermissions.WRITE,
-            )) {
+            when (val access = checkWrite(caller, inode, name)) {
                 is VfsResult.Ok -> Unit
                 is VfsResult.Err -> return@withNode errno(access.error.errno)
             }
@@ -175,6 +170,19 @@ private object ExtendedAttributes {
                 is VfsResult.Err -> errno(result.error.errno)
             }
         }
+    }
+
+    private fun checkWrite(
+        caller: VfsOperationContext,
+        inode: Inode,
+        name: ExtendedAttributeName,
+    ): VfsResult<Unit> {
+        if (name != PosixAcl.ACCESS && name != PosixAcl.DEFAULT) {
+            return FileSystemManager.vfs.checkAccess(caller, inode, AccessPermissions.WRITE)
+        }
+        val owner = caller.uid == inode.metadata().uid
+        val capable = ProcessManager.currentThread()?.capabilities?.hasEffective(CapEnum.FOWNER) == true
+        return if (owner || capable) VfsResult.Ok(Unit) else VfsResult.Err(VfsError.NOT_PERMITTED)
     }
 
     private fun name(process: Process, address: ULong): VfsResult<ExtendedAttributeName> {

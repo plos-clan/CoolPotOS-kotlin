@@ -2,14 +2,9 @@ package org.plos_clan.cpos.drivers.input
 
 import kotlinx.coroutines.delay
 import org.plos_clan.cpos.coroutines.KernelCoroutines
-import org.plos_clan.cpos.drivers.DeviceManager
-import org.plos_clan.cpos.drivers.DeviceRegistration
-import org.plos_clan.cpos.drivers.DeviceType
-import org.plos_clan.cpos.drivers.LinuxDeviceMajor
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.char.VirtualTerminal
 import org.plos_clan.cpos.drivers.char.tty.TtyManager
-import org.plos_clan.cpos.fs.sysfs.SysfsDevicePublication
 import org.plos_clan.cpos.utils.IrqSpinLock
 
 internal class KeyboardReport(
@@ -78,26 +73,28 @@ internal class KeyboardInputDevice(
     private val pressed = BooleanArray(KeyCode.stateSize)
     private val report = KeyboardReport(this)
     private val console = ConsoleKeyboard()
-    private val evdev = EvdevDevice(deviceName, physicalPath, id, KeyCode.entries, this)
+    private val evdev = EvdevDevice(
+        name = deviceName,
+        physicalPath = physicalPath,
+        id = id,
+        supportedKeys = KeyCode.entries.map { it.linuxCode },
+        supportedRelativeAxes = emptyList(),
+        repeatController = this,
+    )
     private var repeatDelayMillis = DEFAULT_REPEAT_DELAY_MILLIS
     private var repeatPeriodMillis = DEFAULT_REPEAT_PERIOD_MILLIS
     private var repeatKey: KeyCode? = null
     private var repeatGeneration = 0
 
-    internal fun install(): Boolean {
-        val minor = EVENT_MINOR_BASE + eventIndex
-        val registration = DeviceRegistration(
-            name = "input/event$eventIndex",
-            type = DeviceType.CHARACTER,
-            major = LinuxDeviceMajor.INPUT.number,
-            minor = minor.toUInt(),
-            backend = evdev,
-            sysfs = SysfsDevicePublication.virtual("input", "event$eventIndex"),
-        )
-        return DeviceManager.register(registration) != null
-    }
+    internal fun install(): Boolean = evdev.install(eventIndex)
 
-    internal fun uninstall(): Boolean = DeviceManager.unregisterAll(evdev) != 0
+    internal fun uninstall(): Boolean {
+        lock.withLock {
+            repeatGeneration++
+            repeatKey = null
+        }
+        return evdev.uninstall()
+    }
 
     fun beginReport(): KeyboardReport = report.reset()
 
@@ -240,7 +237,6 @@ internal class KeyboardInputDevice(
     }
 
     private companion object {
-        const val EVENT_MINOR_BASE = 64
         const val DEFAULT_REPEAT_DELAY_MILLIS = 250
         const val DEFAULT_REPEAT_PERIOD_MILLIS = 33
         const val MAX_REPEAT_MILLIS = 60_000
@@ -250,7 +246,6 @@ internal class KeyboardInputDevice(
 internal object InputManager {
     private val lock = IrqSpinLock()
     private val keyboards = mutableMapOf<Any, KeyboardInputDevice>()
-    private var nextEventIndex = 0
 
     fun findKeyboard(source: Any): KeyboardInputDevice? =
         lock.withLock { keyboards[source] }
@@ -267,10 +262,9 @@ internal object InputManager {
         id: InputId,
     ): KeyboardInputDevice? = lock.withLock {
         keyboards[source]?.let { return@withLock it }
-        val eventIndex = nextEventIndex
+        val eventIndex = EvdevDevice.allocateIndex()
         val keyboard = KeyboardInputDevice(eventIndex, name, physicalPath, id)
         if (!keyboard.install()) return@withLock null
-        nextEventIndex++
         keyboards[source] = keyboard
         keyboard
     }

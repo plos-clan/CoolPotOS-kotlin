@@ -17,6 +17,7 @@ class Inode internal constructor(
     initialAttributes: InodeAttributeSnapshot,
     val generation: ULong = 0uL,
     resource: AutoCloseable? = null,
+    private val owner: InodeOwner = superBlock.backend,
 ) {
     private val cleanup = resource?.let { createCleaner(it) { resource -> resource.close() } }
     private val lock = IrqSpinLock()
@@ -24,6 +25,7 @@ class Inode internal constructor(
     private var attributeSnapshot: InodeAttributeSnapshot? = initialAttributes
     private var attributeGeneration = 0uL
     private var extendedAttributes: MutableMap<ExtendedAttributeName, ByteArray>? = null
+    private var accessAcl: PosixAcl? = null
     private val observers = AtomicReference<List<InodeObserver>?>(null)
     private var openReferences = 0
     private var evicted = false
@@ -147,9 +149,12 @@ class Inode internal constructor(
         }
         if (shouldEvict) {
             removeObservers(InodeObserverRemoval.DELETED)
-            superBlock.backend.evict(this)
+            owner.evict(this)
         }
     }
+
+    internal fun aclAccess(caller: VfsOperationContext, requested: AccessPermissions): Boolean? =
+        lock.withLock { accessAcl?.permits(caller, currentMetadata, requested) }
 
     internal fun getExtendedAttribute(name: ExtendedAttributeName): VfsResult<ByteArray> =
         lock.withLock {
@@ -178,6 +183,10 @@ class Inode internal constructor(
         if (value.size > EXTENDED_ATTRIBUTE_VALUE_MAX) {
             return@withLock VfsResult.Err(VfsError.RANGE)
         }
+        val acl = if (name == PosixAcl.ACCESS) {
+            PosixAcl.parse(value) ?: return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        } else null
+        if (name == PosixAcl.DEFAULT) return@withLock VfsResult.Err(VfsError.NOT_SUPPORTED)
         val attributes = extendedAttributes
         val exists = attributes?.containsKey(name) == true
         if (mode == ExtendedAttributeMode.CREATE && exists) {
@@ -196,6 +205,10 @@ class Inode internal constructor(
             extendedAttributes = it
         }
         destination[name] = value.copyOf()
+        if (acl != null) {
+            accessAcl = acl
+            currentMetadata = currentMetadata.copy(mode = acl.mode(currentMetadata.mode))
+        }
         currentMetadata = updateMetadataLocked(InodeTimestampEvent.STATUS_CHANGED)
         attributeSnapshot = null
         attributeGeneration++
@@ -208,6 +221,7 @@ class Inode internal constructor(
             if (attributes?.remove(name) == null) {
                 return@withLock VfsResult.Err(VfsError.NO_DATA)
             }
+            if (name == PosixAcl.ACCESS) accessAcl = null
             if (attributes.isEmpty()) extendedAttributes = null
             currentMetadata = updateMetadataLocked(InodeTimestampEvent.STATUS_CHANGED)
             attributeSnapshot = null
@@ -220,6 +234,12 @@ class Inode internal constructor(
         update: (InodeMetadata) -> InodeMetadata = { it },
     ): InodeMetadata {
         val metadata = update(currentMetadata)
+        val acl = accessAcl
+        if (acl != null && metadata.mode != currentMetadata.mode) {
+            val updated = acl.chmod(metadata.mode)
+            accessAcl = updated
+            extendedAttributes?.set(PosixAcl.ACCESS, updated.bytes())
+        }
         if (!timestamps.requiresCurrentTime) return metadata
         val updatedTimestamps = timestamps.apply(metadata.timestamps, RealtimeClock.now())
         return if (updatedTimestamps == metadata.timestamps) metadata
@@ -247,7 +267,7 @@ class Inode internal constructor(
         }
         if (shouldEvict) {
             removeObservers(InodeObserverRemoval.DELETED)
-            superBlock.backend.evict(this)
+            owner.evict(this)
         }
     }
 

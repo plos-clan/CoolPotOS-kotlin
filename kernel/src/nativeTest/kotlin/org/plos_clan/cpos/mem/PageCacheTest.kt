@@ -3,6 +3,7 @@ package org.plos_clan.cpos.mem
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class PageCacheTest {
@@ -42,13 +43,16 @@ class PageCacheTest {
         }
         val scratch = ByteArray(PAGE_SIZE_BYTES.toInt()) { 42 }
         try {
+            assertFalse(PageCache.contains(source, 0uL))
             val result = PageCache.acquire(source, 0uL, scratch)
             assertTrue(result.isSuccess)
+            assertTrue(PageCache.contains(source, 0uL))
             PageCache.release(result.frame)
             assertEquals(7.toByte(), scratch[0])
         } finally {
             PageCache.invalidate(source.identity)
         }
+        assertFalse(PageCache.contains(source, 0uL))
     }
 
     @Test

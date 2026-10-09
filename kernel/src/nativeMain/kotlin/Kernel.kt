@@ -13,6 +13,7 @@ import org.plos_clan.cpos.drivers.usb.Usb
 import org.plos_clan.cpos.fault.ErrorHandler
 import org.plos_clan.cpos.fs.FileSystemManager
 import org.plos_clan.cpos.fs.fuse.FuseDevice
+import org.plos_clan.cpos.mem.dmabuf.UdmabufDevice
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.RuntimeMemory
@@ -73,10 +74,11 @@ object KernelBoot {
         if (!FileSystemManager.initialize()) {
             return
         }
-        FrameBuffer.initialize()
         if (!KernelCoroutines.initialize()) {
             return
         }
+        Acpi.enumerateDevices()
+        FrameBuffer.initialize()
         TaskReaper.initialize()
         NetworkStack.initialize()
         if (!SerialConsole.install()) {
@@ -91,7 +93,9 @@ object KernelBoot {
         if (!FuseDevice.initialize()) {
             return
         }
-        Acpi.enumerateDevices()
+        if (!UdmabufDevice.initialize()) {
+            return
+        }
         Usb.initialize()
         if (!Scheduler.finishBootstrap()) {
             return

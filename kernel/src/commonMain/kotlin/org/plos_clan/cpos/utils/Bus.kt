@@ -1,6 +1,7 @@
 package org.plos_clan.cpos.utils
 
 object VTModeConstants {
+    const val KDGKBTYPE = 0x4B33
     const val KDGETMODE = 0x4B3B // 获取终端模式命令
     const val KDSETMODE = 0x4B3A // 设置终端模式命令
 
@@ -23,6 +24,7 @@ object VTModeConstants {
     const val VT_SETMODE = 0x5602
 
     const val VT_GETSTATE = 0x5603
+    const val VT_RELDISP = 0x5605
     const val VT_SENDSIG = 0x5604
 
     const val VT_ACTIVATE = 0x5606   // make vt active

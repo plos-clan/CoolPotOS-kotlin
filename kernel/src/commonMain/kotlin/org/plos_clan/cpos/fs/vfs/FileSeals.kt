@@ -5,7 +5,7 @@ import org.plos_clan.cpos.mem.addressspace.MEMORY_REGION_WRITABLE
 internal class FileSeals(initial: Int = SEAL) {
     var bits: Int = initial
         private set
-    private var writableMappings = 0
+    private var writableReferences = 0
 
     fun add(requested: Int, mode: FileMode): VfsResult<Unit> {
         if (requested and ALL.inv() != 0) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
@@ -13,7 +13,7 @@ internal class FileSeals(initial: Int = SEAL) {
         val added = if (requested and EXEC != 0 && mode.bits and EXECUTE_BITS != 0u) {
             requested or SHRINK or GROW or WRITE or FUTURE_WRITE
         } else requested
-        if (added and WRITE != 0 && writableMappings != 0) return VfsResult.Err(VfsError.BUSY)
+        if (added and WRITE != 0 && writableReferences != 0) return VfsResult.Err(VfsError.BUSY)
         bits = bits or added
         return VfsResult.Ok(Unit)
     }
@@ -26,15 +26,28 @@ internal class FileSeals(initial: Int = SEAL) {
             }
             maximumAccess and MEMORY_REGION_WRITABLE.inv()
         } else maximumAccess
-        if (maximum and MEMORY_REGION_WRITABLE != 0uL) writableMappings++
+        if (maximum and MEMORY_REGION_WRITABLE != 0uL) writableReferences++
         return VfsResult.Ok(maximum)
     }
 
     fun releaseMapping(shared: Boolean, maximumAccess: ULong) {
         if (shared && maximumAccess and MEMORY_REGION_WRITABLE != 0uL) {
-            check(writableMappings > 0)
-            writableMappings--
+            releasePin()
         }
+    }
+
+    fun acquirePin(): VfsResult<Unit> {
+        if (bits and SHRINK == 0 || bits and (WRITE or FUTURE_WRITE) != 0) {
+            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+        }
+        val result = VfsResult.Ok(Unit)
+        writableReferences++
+        return result
+    }
+
+    fun releasePin() {
+        check(writableReferences > 0)
+        writableReferences--
     }
 
     fun allowsResize(previous: ULong, size: ULong): Boolean =
