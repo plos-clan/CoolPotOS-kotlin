@@ -239,17 +239,14 @@ class UserMemory internal constructor(
     }
 
     private fun isValidRange(buffer: ByteArray, offset: Int, size: Int): Boolean =
-        offset >= 0 && size >= 0 && offset <= buffer.size - size && validUserRange(size)
+        offset >= 0 && size >= 0 && offset <= buffer.size - size && validUserRange(0, size)
 
-    private fun validUserRange(size: Int): Boolean =
-        validUserRange(0, size)
+    internal fun covers(length: ULong): Boolean =
+        address < USER_VIRTUAL_ADDRESS_LIMIT && length <= USER_VIRTUAL_ADDRESS_LIMIT - address
 
     private fun validUserRange(offset: Int, size: Int): Boolean {
         if (offset < 0 || size < 0) return false
-        if (size == 0) return true
-        if (address >= USER_VIRTUAL_ADDRESS_LIMIT) return false
-        val available = USER_VIRTUAL_ADDRESS_LIMIT - address
-        return offset.toULong() <= available && size.toULong() <= available - offset.toULong()
+        return size == 0 || covers(offset.toULong() + size.toULong())
     }
 
     private inline fun transfer(

@@ -109,7 +109,7 @@ internal data class UserMessageHeader(
     val controlAddress: ULong,
     val controlLength: Int,
 ) {
-    fun vector(process: Process): UserIoVector? = UserIoVector.fromUser(
+    fun vector(process: Process): VfsResult<UserIoVector> = UserIoVector.fromUser(
         process.addressSpace,
         vectorAddress,
         vectorCount,

@@ -6,11 +6,13 @@ import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.plus
+import org.plos_clan.cpos.fs.vfs.VfsError
+import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.addressspace.AddressSpace
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 
 internal class UserIoVector private constructor(
-    private val segments: Array<Segment>,
+    private val segments: List<Segment>,
     val size: Int,
 ) : NativeBuffer(), IoBuffer {
     override fun prepareRead(offset: Int, count: Int): PreparedBufferSource? =
@@ -100,9 +102,9 @@ internal class UserIoVector private constructor(
         var copied = 0
         while (copied < count) {
             val segment = segments[segmentIndex]
-            val segmentOffset = offset + copied - segmentStart
-            val chunk = minOf(count - copied, segment.endOffset - segmentStart - segmentOffset)
-            val current = operation(segment, segmentOffset, copied, chunk)
+            val cursor = offset + copied
+            val chunk = minOf(count - copied, segment.endOffset - cursor)
+            val current = operation(segment, cursor - segmentStart, copied, chunk)
             if (current !in 1..chunk) break
             copied += current
             if (current < chunk) break
@@ -126,38 +128,38 @@ internal class UserIoVector private constructor(
 
     companion object {
         const val NATIVE_SEGMENT_SIZE = ULong.SIZE_BYTES * 2
+        private val empty = UserIoVector(emptyList(), 0)
 
         fun fromUser(
             addressSpace: AddressSpace,
             address: ULong,
             count: Int,
             maximumSize: Int,
-        ): UserIoVector? {
+        ): VfsResult<UserIoVector> {
             require(count >= 0 && maximumSize >= 0)
-            if (count == 0) return UserIoVector(emptyArray(), 0)
-            if (count > Int.MAX_VALUE / NATIVE_SEGMENT_SIZE) return null
-            val input = UserMemory(addressSpace, address)
-                .copyFromUser(count * NATIVE_SEGMENT_SIZE)
-                ?.let(::LittleEndianBuffer)
-                ?: return null
+            if (count == 0) return VfsResult.Ok(empty)
+            if (count > Int.MAX_VALUE / NATIVE_SEGMENT_SIZE) {
+                return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+            }
+            val table = UserMemory(addressSpace, address)
+            val bytes = table.copyFromUser(count * NATIVE_SEGMENT_SIZE)
+                ?: return VfsResult.Err(VfsError.FAULT)
+            val input = LittleEndianBuffer(bytes)
             val segments = ArrayList<Segment>(count)
             var size = 0
-            repeat(count) { index ->
-                val vectorOffset = index * NATIVE_SEGMENT_SIZE
-                val available = maximumSize - size
-                val length = minOf(
-                    input.readU64(vectorOffset + ULong.SIZE_BYTES),
-                    available.toULong(),
-                ).toInt()
-                if (length != 0) {
-                    size += length
-                    segments += Segment(
-                        UserMemory(addressSpace, input.readU64(vectorOffset)),
-                        size,
-                    )
-                }
+            for (offset in bytes.indices step NATIVE_SEGMENT_SIZE) {
+                val length = input.readU64(offset + ULong.SIZE_BYTES)
+                if (length.toLong() < 0) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                val base = input.readU64(offset)
+                val memory = UserMemory(addressSpace, base)
+                if (!memory.covers(length)) return VfsResult.Err(VfsError.FAULT)
+                if (length == 0uL || size == maximumSize) continue
+                val available = (maximumSize - size).toULong()
+                size += minOf(length, available).toInt()
+                segments += Segment(memory, size)
             }
-            return UserIoVector(segments.toTypedArray(), size)
+            val vector = UserIoVector(segments, size)
+            return VfsResult.Ok(vector)
         }
     }
 }

@@ -193,16 +193,12 @@ class FuseReadTest {
             fields.writeU64(16, USER_VIRTUAL_ADDRESS_LIMIT)
             fields.writeU64(24, FuseAbi.MAX_PACKET_SIZE.toULong())
             assertTrue(fixture.memory.copyToUser(descriptors))
-            val invalid = assertNotNull(UserIoVector.fromUser(
-                fixture.space, USER_MMAP_START, 2, Int.MAX_VALUE,
-            ))
-            val failed = fixture.file.read(fixture.caller, invalid, 0, invalid.size)
-            assertEquals(VfsError.FAULT, failed.error)
+            val invalid = UserIoVector.fromUser(fixture.space, USER_MMAP_START, 2, Int.MAX_VALUE)
+            assertEquals(VfsResult.Err(VfsError.FAULT), invalid)
             fields.writeU64(16, USER_MMAP_START - PAGE_SIZE_BYTES)
             assertTrue(fixture.memory.copyToUser(descriptors))
-            val vector = assertNotNull(UserIoVector.fromUser(
-                fixture.space, USER_MMAP_START, 2, Int.MAX_VALUE,
-            ))
+            val imported = UserIoVector.fromUser(fixture.space, USER_MMAP_START, 2, Int.MAX_VALUE)
+            val vector = assertIs<VfsResult.Ok<UserIoVector>>(imported).value
             val result = fixture.file.read(fixture.caller, vector, 0, vector.size)
             assertTrue(result.isSuccess)
             assertEquals(size, result.bytesTransferred)

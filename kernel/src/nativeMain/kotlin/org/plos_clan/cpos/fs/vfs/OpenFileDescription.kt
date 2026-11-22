@@ -116,6 +116,8 @@ class OpenFileDescription private constructor(
 
     internal val isOpen: Boolean get() = references.load() > 0
 
+    internal val supportsPositionedIo: Boolean get() = positionlessBackend == null && backend.seekable
+
     val offset: Long
         get() = positionLock.withLock { position.value }
 
@@ -382,7 +384,7 @@ class OpenFileDescription private constructor(
         if (fileOffset > Long.MAX_VALUE.toULong()) {
             return IoResult.failure(VfsError.INVALID_ARGUMENT)
         }
-        if (positionlessBackend != null) return IoResult.failure(VfsError.ILLEGAL_SEEK)
+        if (!supportsPositionedIo) return IoResult.failure(VfsError.ILLEGAL_SEEK)
         readError(offset, count)?.let { return IoResult.failure(it) }
         val transferCount = fixedSizeIoBackend?.ioSize ?: count
         val prepared = destination.prepareWrite(offset, transferCount, backend.readFaultPolicy)
@@ -485,7 +487,7 @@ class OpenFileDescription private constructor(
         if (fileOffset > Long.MAX_VALUE.toULong()) {
             return IoResult.failure(VfsError.INVALID_ARGUMENT)
         }
-        if (positionlessBackend != null) return IoResult.failure(VfsError.ILLEGAL_SEEK)
+        if (!supportsPositionedIo) return IoResult.failure(VfsError.ILLEGAL_SEEK)
         writeError(offset, count)?.let { return IoResult.failure(it) }
         val prepared = source.prepareRead(offset, count)
             ?: return IoResult.failure(VfsError.FAULT)
@@ -678,11 +680,10 @@ class OpenFileDescription private constructor(
         val positionless = positionlessBackend
         if (positionless == null) {
             if (filePosition !== position) {
-                return writePositioned(caller, source, offset, count, filePosition, false)
+                return writePositioned(caller, source, offset, count, filePosition)
             }
             return positionLock.withLock {
-                val append = statusFlags.load() and OpenFlags.O_APPEND != 0
-                writePositioned(caller, source, offset, count, filePosition, append)
+                writePositioned(caller, source, offset, count, filePosition)
             }
         }
         if (positionless is ModeAwareOpenFileBackend) {
@@ -735,9 +736,9 @@ class OpenFileDescription private constructor(
         offset: Int,
         count: Int,
         filePosition: FilePosition,
-        append: Boolean,
     ): IoResult {
         val initialPosition = filePosition.value
+        val append = statusFlags.load() and OpenFlags.O_APPEND != 0
         val result = backend.write(
             caller,
             inode,

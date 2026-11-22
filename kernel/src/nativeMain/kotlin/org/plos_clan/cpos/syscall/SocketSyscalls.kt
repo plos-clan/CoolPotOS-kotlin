@@ -683,7 +683,10 @@ internal object SocketSyscalls {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return errno(result.error.errno)
         }
-        val vector = header.vector(process) ?: return errno(Errno.EFAULT)
+        val vector = when (val result = header.vector(process)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return errno(result.error.errno)
+        }
         val source = vector.prepareRead(0, vector.size) ?: return errno(Errno.EFAULT)
         val ancillary = when (val result = SocketControlMessages.read(
             process,
@@ -718,7 +721,10 @@ internal object SocketSyscalls {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return errno(result.error.errno)
         }
-        val vector = header.vector(process) ?: return errno(Errno.EFAULT)
+        val vector = when (val result = header.vector(process)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return errno(result.error.errno)
+        }
         val destination = vector.prepareWrite(0, vector.size) ?: return errno(Errno.EFAULT)
         val addressOutput = when (val result = SocketAddressMemory.prepareMessage(
             process,

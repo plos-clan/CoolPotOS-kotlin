@@ -43,17 +43,18 @@ Include = /etc/pacman.d/cachyos-v3-mirrorlist\
 [cachyos-extra-v3]\
 Include = /etc/pacman.d/cachyos-v3-mirrorlist\
 ' /etc/pacman.conf
-printf 'Server = https://mirrors.sustech.edu.cn/archlinux/$repo/os/$arch\n' \
+printf 'Server = https://mirrors.ustc.edu.cn/archlinux/$repo/os/$arch\n' \
     > /etc/pacman.d/mirrorlist
-printf 'Server = https://mirrors.sustech.edu.cn/cachyos/repo/$arch/$repo\n' \
+printf 'Server = https://mirrors.ustc.edu.cn/cachyos/repo/$arch/$repo\n' \
     > /etc/pacman.d/cachyos-mirrorlist
-printf 'Server = https://mirrors.sustech.edu.cn/cachyos/repo/$arch_v3/$repo\n' \
+printf 'Server = https://mirrors.ustc.edu.cn/cachyos/repo/$arch_v3/$repo\n' \
     > /etc/pacman.d/cachyos-v3-mirrorlist
 
 "${pacman[@]}" -Syu --needed erofs-utils base-devel curl git
 useradd --home-dir "$build" builder
 chown builder:builder "$build"
 printf 'builder ALL=(root) NOPASSWD: /usr/bin/pacman\n' >> /etc/sudoers
+sed -i.before-makepkg '/^\[options\]$/a DisableSandboxNetwork' /etc/pacman.conf
 for package in xdg-desktop-portal-umbriel-git umbriel-git; do
     install -d -o builder -g builder "$build/$package"
     runuser -u builder -- curl -fsSL --retry 3 \
@@ -62,6 +63,7 @@ for package in xdg-desktop-portal-umbriel-git umbriel-git; do
     runuser -u builder -- env PKGDEST="$build" \
         makepkg -si --noconfirm --dir "$build/$package"
 done
+mv /etc/pacman.conf.before-makepkg /etc/pacman.conf
 
 mkdir -p "$rootfs/var/lib/pacman"
 install -Dm644 /etc/os-release "$rootfs/etc/os-release"

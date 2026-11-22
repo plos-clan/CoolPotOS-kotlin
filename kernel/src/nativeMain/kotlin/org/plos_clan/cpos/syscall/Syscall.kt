@@ -14,6 +14,7 @@ import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.module.Vdso
 import org.plos_clan.cpos.syscall.fs.EventFdSyscalls
 import org.plos_clan.cpos.syscall.fs.EpollSyscalls
+import org.plos_clan.cpos.syscall.fs.FileIo
 import org.plos_clan.cpos.syscall.fs.InotifySyscalls
 import org.plos_clan.cpos.syscall.fs.MemFdSyscalls
 import org.plos_clan.cpos.syscall.fs.NewMountSyscalls
@@ -80,13 +81,9 @@ import org.plos_clan.cpos.syscall.fs.pipe
 import org.plos_clan.cpos.syscall.fs.pipe2
 import org.plos_clan.cpos.syscall.fs.poll
 import org.plos_clan.cpos.syscall.fs.ppoll
-import org.plos_clan.cpos.syscall.fs.pread64
 import org.plos_clan.cpos.syscall.fs.pselect6
-import org.plos_clan.cpos.syscall.fs.pwrite64
-import org.plos_clan.cpos.syscall.fs.read
 import org.plos_clan.cpos.syscall.fs.readlink
 import org.plos_clan.cpos.syscall.fs.readlinkAt
-import org.plos_clan.cpos.syscall.fs.readv
 import org.plos_clan.cpos.syscall.fs.removexattr
 import org.plos_clan.cpos.syscall.fs.rename
 import org.plos_clan.cpos.syscall.fs.renameAt
@@ -105,8 +102,6 @@ import org.plos_clan.cpos.syscall.fs.umount2
 import org.plos_clan.cpos.syscall.fs.unlink
 import org.plos_clan.cpos.syscall.fs.unlinkAt
 import org.plos_clan.cpos.syscall.fs.utimensAt
-import org.plos_clan.cpos.syscall.fs.write
-import org.plos_clan.cpos.syscall.fs.writev
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.keys.Keys
@@ -135,8 +130,8 @@ private enum class LinuxSyscall(
     val handler: SyscallHandler,
     val restartable: Boolean = false,
 ) {
-    READ(0, ::read, restartable = true),
-    WRITE(1, ::write, restartable = true),
+    READ(0, FileIo.READ::scalar, restartable = true),
+    WRITE(1, FileIo.WRITE::scalar, restartable = true),
     OPEN(2, ::open, restartable = true),
     CLOSE(3, ::close),
     STAT(4, ::stat),
@@ -152,10 +147,10 @@ private enum class LinuxSyscall(
     RT_SIGPROCMASK(14, SignalSyscalls::rtSigprocmask),
     RT_SIGRETURN(15, SignalSyscalls::rtSigreturn),
     IOCTL(16, ::ioctl),
-    PREAD64(17, ::pread64, restartable = true),
-    PWRITE64(18, ::pwrite64, restartable = true),
-    READV(19, ::readv, restartable = true),
-    WRITEV(20, ::writev, restartable = true),
+    PREAD64(17, FileIo.PREAD::scalar, restartable = true),
+    PWRITE64(18, FileIo.PWRITE::scalar, restartable = true),
+    READV(19, FileIo.READ::vector, restartable = true),
+    WRITEV(20, FileIo.WRITE::vector, restartable = true),
     ACCESS(21, ::access),
     PIPE(22, ::pipe),
     SCHED_YIELD(24, SchedulerSyscalls::yield),
@@ -324,6 +319,8 @@ private enum class LinuxSyscall(
     DUP3(292, ::dup3),
     PIPE2(293, ::pipe2),
     INOTIFY_INIT1(294, InotifySyscalls::init1),
+    PREADV(295, FileIo.PREAD::vector, restartable = true),
+    PWRITEV(296, FileIo.PWRITE::vector, restartable = true),
     RT_TGSIGQUEUEINFO(297, SignalSyscalls::rtTgsigqueueinfo),
     RECVMMSG(299, SocketSyscalls::recvmmsg, restartable = true),
     PRLIMIT64(302, ::prlimit64),
