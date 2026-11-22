@@ -55,6 +55,7 @@ struct fast_cpu {
     fast_node_t *head;
     fast_cpu_t *next;
     uint64_t virtual_time, slice_started, worker_deadline;
+    uint64_t account_started;
     uint32_t logical_id;
     uint8_t reschedule, worker_pending, balance;
     uint64_t queue_size;
@@ -132,9 +133,7 @@ static inline void task_state_store(fast_task_t *task, enum fast_task_state stat
 }
 
 static fast_cpu_t *current_cpu(void) {
-    fast_cpu_t *cpu;
-    __asm__ volatile("movq %%gs:32, %0" : "=r"(cpu));
-    return cpu;
+    return (fast_cpu_t *)CPOS_CPU_STATE->scheduler_cpu;
 }
 
 static fast_cpu_t *current_schedulable_cpu(void) {
@@ -378,33 +377,26 @@ static void balance_cpu(fast_cpu_t *cpu) {
     }
 }
 
-static void account_task(fast_cpu_t *cpu, fast_task_t *task, uint64_t now) {
-    const uint64_t started = task->clock.started;
+static void account_group(fast_cpu_t *cpu, uint64_t now) {
+    const uint64_t started = cpu->account_started;
+    cpu->account_started = now;
     if (!started) return;
-    __atomic_add_fetch(&task->clock.sequence, 1, __ATOMIC_ACQ_REL);
+    fast_task_t *task = cpu->current;
     const uint64_t elapsed = now - started;
-    __atomic_add_fetch(&task->clock.elapsed, elapsed, __ATOMIC_RELAXED);
     const size_t slot = cpu->logical_id * cpu_account_stride + !task->user_mode;
     for (cpu_account_t *account = task->account; account; account = account->parent) {
         uint64_t *counter = &account->time[slot];
-        __atomic_add_fetch(counter, elapsed, __ATOMIC_RELAXED);
+        const uint64_t previous = __atomic_load_n(counter, __ATOMIC_RELAXED);
+        __atomic_store_n(counter, previous + elapsed, __ATOMIC_RELAXED);
     }
-    __atomic_store_n(&task->clock.started, now, __ATOMIC_RELAXED);
-    __atomic_add_fetch(&task->clock.sequence, 1, __ATOMIC_RELEASE);
 }
 
-void fast_handoff_account_mode(uint8_t user) {
-    const uint64_t flags = irq_save();
-    fast_cpu_t *cpu = current_schedulable_cpu();
-    if (!cpu) {
-        irq_restore(flags);
-        return;
-    }
+__attribute__((used)) static void fast_handoff_account_mode(bool user) {
+    fast_cpu_t *cpu = current_cpu();
     lock_cpu(cpu);
-    account_task(cpu, cpu->current, runtime_clock_nanos());
+    account_group(cpu, runtime_clock_nanos());
     cpu->current->user_mode = user;
     unlock_cpu(cpu);
-    irq_restore(flags);
 }
 
 static fast_cpu_t *lock_task(fast_task_t *task) {
@@ -446,7 +438,7 @@ void fast_handoff_set_account(uint64_t handle, cpu_account_t *account) {
     fast_task_t *task = task_from_handle(handle);
     const uint64_t flags = irq_save();
     fast_cpu_t *cpu = lock_task(task);
-    if (cpu) account_task(cpu, task, runtime_clock_nanos());
+    if (cpu && cpu->current == task) account_group(cpu, runtime_clock_nanos());
     task->account = account;
     if (cpu) unlock_cpu(cpu);
     irq_restore(flags);
@@ -501,7 +493,8 @@ static enum fast_schedule_result fast_handoff_schedule(
     bool select_next = request != schedule_tick || cpu->reschedule ||
         cpu->worker_pending || expired || !running;
     cpu->reschedule = false;
-    account_task(cpu, previous, runtime_clock_nanos());
+    const uint64_t accounted = runtime_clock_nanos();
+    account_group(cpu, accounted);
     if (previous != cpu->idle && cpu->slice_started) {
         if (previous->queued) heap_remove(&cpu->head, &previous->run);
         const uint32_t weight = __atomic_load_n(&previous->weight, __ATOMIC_RELAXED);
@@ -558,11 +551,16 @@ static enum fast_schedule_result fast_handoff_schedule(
         }
     }
     if (next != previous) {
+        const uint64_t started = previous->clock.started;
         __atomic_add_fetch(&previous->clock.sequence, 1, __ATOMIC_ACQ_REL);
+        if (started) {
+            const uint64_t elapsed = accounted - started;
+            __atomic_add_fetch(&previous->clock.elapsed, elapsed, __ATOMIC_RELAXED);
+        }
         __atomic_store_n(&previous->clock.started, 0, __ATOMIC_RELAXED);
         __atomic_add_fetch(&previous->clock.sequence, 1, __ATOMIC_RELEASE);
-        const uint64_t started = runtime_clock_nanos();
-        __atomic_store_n(&next->clock.started, started, __ATOMIC_RELEASE);
+        cpu->account_started = runtime_clock_nanos();
+        __atomic_store_n(&next->clock.started, cpu->account_started, __ATOMIC_RELEASE);
     }
     __atomic_store_n(&next->on_cpu, true, __ATOMIC_RELEASE);
     cpu->current = next;

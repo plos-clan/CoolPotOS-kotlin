@@ -61,17 +61,14 @@ static void dispatch_kotlin_handler(
     uint64_t user_fs_base = 0;
 
     if (from_user) {
-        user_fs_base = rdmsr(ia32_fs_base_msr);
         __asm__ volatile("swapgs" : : : "memory");
-        uint64_t kernel_fs_base;
-        __asm__ volatile("movq %%gs:24, %0" : "=r"(kernel_fs_base));
-        wrmsr(ia32_fs_base_msr, kernel_fs_base);
+        user_fs_base = enter_kernel_tls();
     }
 
     handler(frame, error_code, rbp, fault_address);
 
     if (from_user) {
-        wrmsr(ia32_fs_base_msr, user_fs_base);
+        leave_kernel_tls(user_fs_base);
         __asm__ volatile("swapgs" : : : "memory");
     }
 
@@ -140,28 +137,17 @@ static __attribute__((naked, used)) void irq_common_entry(void) {
         "andq $-64, %rsp\n"
         "subq $" CPOS_ASM_STRINGIFY(KERNEL_ENTRY_FRAME_SIZE_VALUE) ", %rsp\n"
         CPOS_SAVE_GENERAL
-        "movq %r13, 16(%rsp)\n"
-        "movq %r12, 24(%rsp)\n"
-        "movq %r11, 32(%rsp)\n"
-        "movq %rcx, 72(%rsp)\n"
         "movq -8(%rax), %rdx\n"
         "movq %rdx, 136(%rsp)\n"
         "movq %rax, 200(%rsp)\n"
-        "xorq %rax, %rax\n"
-        "movw %ds, %ax\n"
+        "movq %rax, %rdx\n"
+        "movl %ds, %eax\n"
         "movq %rax, 112(%rsp)\n"
-        "xorq %rax, %rax\n"
-        "movw %es, %ax\n"
+        "movl %es, %eax\n"
         "movq %rax, 120(%rsp)\n"
-        "movl $0xc0000100, %edi\n"
-        "call rdmsr\n"
-        "movq %rax, 128(%rsp)\n"
-        "xorq %rax, %rax\n"
-        "movq 200(%rsp), %rdx\n"
         "movq (%rdx), %rax\n"
         "movq %rax, 144(%rsp)\n"
-        "xorq %rax, %rax\n"
-        "movq %rax, 152(%rsp)\n"
+        "movq $0, 152(%rsp)\n"
         "movq 8(%rdx), %rax\n"
         "movq %rax, 160(%rsp)\n"
         "movq 16(%rdx), %rax\n"
@@ -176,31 +162,26 @@ static __attribute__((naked, used)) void irq_common_entry(void) {
         "movq 40(%rdx), %rax\n"
         "movq %rax, 192(%rsp)\n"
         "swapgs\n"
+        "call enter_kernel_tls\n"
+        "movq %rax, 128(%rsp)\n"
         "jmp 2f\n"
         "1:\n"
         "leaq 32(%rdx), %rax\n"
         "movq %rax, 184(%rsp)\n"
-        "xorq %rax, %rax\n"
-        "movw %ss, %ax\n"
+        "movl %ss, %eax\n"
         "movq %rax, 192(%rsp)\n"
         "2:\n"
-        "movq %gs:24, %rsi\n"
-        "movl $0xc0000100, %edi\n"
-        "call wrmsr\n"
         "movq 200(%rsp), %rdx\n"
         "movq %rsp, %r13\n"
         "movq %rsp, %rdi\n"
         "movq (%rdx), %rsi\n"
-        "andq $-16, %rsp\n"
         "call fast_handoff_irq\n"
-        "movq %r13, %rsp\n"
         "testb %al, %al\n"
         "jz 4f\n"
         "movl $" CPOS_ASM_STRINGIFY(XSTATE_MASK_VALUE) ", %eax\n"
         "xorl %edx, %edx\n"
         "xrstor64 256(%r13)\n"
         "4:\n"
-        CPOS_LOAD_USER_FS
 
         "movq 200(%r13), %r12\n"
         "movq 160(%r13), %rax\n"
@@ -216,12 +197,11 @@ static __attribute__((naked, used)) void irq_common_entry(void) {
         "movq %rax, 32(%r12)\n"
         "movq 192(%r13), %rax\n"
         "movq %rax, 40(%r12)\n"
+        CPOS_LOAD_USER_FS
         "swapgs\n"
         "3:\n"
-        "movq 112(%r13), %rax\n"
-        "movw %ax, %ds\n"
-        "movq 120(%r13), %rax\n"
-        "movw %ax, %es\n"
+        CPOS_RESTORE_SEGMENT(ds, 112)
+        CPOS_RESTORE_SEGMENT(es, 120)
         CPOS_LOAD_GENERAL
         "movq 32(%r13), %r11\n"
         "movq 72(%r13), %rcx\n"

@@ -969,9 +969,9 @@ private object SignalFrame {
         registers[PtraceRegisters.IDX_CS] = USER_CODE_SELECTOR
         registers[PtraceRegisters.IDX_SS] = USER_DATA_SELECTOR
         registers[PtraceRegisters.IDX_ERRCODE] = general(input, GENERAL_ERROR)
-        registers[PtraceRegisters.IDX_FUNC] = PtraceRegisters.SIGNAL_RETURN
+        registers[PtraceRegisters.IDX_FUNC] = PtraceRegisters.NO_SYSCALL
         if (xstate == null) {
-            thread.nativeTask.resetUserXstate()
+            registers.resetExtendedState()
         } else if (!registers.restoreExtendedState(xstate)) {
             return null
         }

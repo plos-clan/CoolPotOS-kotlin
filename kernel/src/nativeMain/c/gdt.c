@@ -63,5 +63,7 @@ void gdt_setup(void) {
 }
 
 void set_kernel_stack(uint64_t lapic_id, uint64_t rsp, uint8_t is_bsp) {
-    (is_bsp ? &tss0 : &locals[lapic_id % cpu_slot_count].tss0)->rsp[0] = rsp;
+    const uint64_t interrupt_rsp = rsp - sizeof(kernel_entry_frame_t);
+    tss_t *tss = is_bsp ? &tss0 : &locals[lapic_id % cpu_slot_count].tss0;
+    tss->rsp[0] = interrupt_rsp;
 }

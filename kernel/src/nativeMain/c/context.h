@@ -15,13 +15,28 @@
     X(rbx, 64) X(rdx, 80) X(rsi, 88) X(rdi, 96) X(rbp, 104)
 #define CPOS_SAVE_REGISTER(name, offset) "movq %" #name ", " #offset "(%rsp)\n"
 #define CPOS_LOAD_REGISTER(name, offset) "movq " #offset "(%r13), %" #name "\n"
-#define CPOS_SAVE_GENERAL CPOS_GENERAL_REGISTERS(CPOS_SAVE_REGISTER)
+#define CPOS_SAVE_GENERAL CPOS_GENERAL_REGISTERS(CPOS_SAVE_REGISTER) \
+    CPOS_SAVE_REGISTER(r13, 16) CPOS_SAVE_REGISTER(r12, 24) \
+    CPOS_SAVE_REGISTER(r11, 32) CPOS_SAVE_REGISTER(rcx, 72)
 #define CPOS_LOAD_GENERAL CPOS_GENERAL_REGISTERS(CPOS_LOAD_REGISTER)
 
 #define CPOS_LOAD_USER_FS \
-    "movq 128(%r13), %rsi\n" \
-    "movl $0xc0000100, %edi\n" \
-    "call wrmsr\n"
+    "movq 128(%r13), %rdi\n" \
+    "call leave_kernel_tls\n"
+
+#define CPOS_RESTORE_SEGMENT(name, offset) \
+    "movl %" #name ", %eax\n" \
+    "cmpw " #offset "(%r13), %ax\n" \
+    "je 5f\n" \
+    "movw " #offset "(%r13), %" #name "\n" \
+    "5:\n"
+
+#define CPOS_USER_REGISTERS \
+    CPOS_LOAD_GENERAL \
+    "movq 24(%r13), %r12\n" \
+    "movq 136(%r13), %rax\n" \
+    "movq 16(%r13), %r13\n" \
+    "swapgs\n"
 
 enum {
     cpu_slot_count = 256,

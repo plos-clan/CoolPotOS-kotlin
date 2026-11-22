@@ -7,6 +7,8 @@ import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.get
 import kotlinx.cinterop.plus
+import kotlinx.cinterop.pointed
+import kotlinx.cinterop.ptr
 import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.set
 import kotlinx.cinterop.usePinned
@@ -48,10 +50,15 @@ value class PtraceRegisters(private val registers: CPointer<ULongVar>) {
         const val REGISTER_COUNT = IDX_SS + 1
         const val EXTENDED_STATE_SIZE = 832
         const val NO_SYSCALL = ULong.MAX_VALUE
-        const val SIGNAL_RETURN = 0xffff_ffff_ffff_fffeuL
         private const val SIGNAL_FRAME_INSTALLED = ULong.MAX_VALUE
-        private const val EXTENDED_STATE_OFFSET = 256
     }
+
+    private enum class XstatePart(val mask: ULong, val start: Int, val end: Int) {
+        X87_ENV(1uL, 0, 24), MXCSR(0uL, 24, 32), X87_STACK(1uL, 32, 160),
+        XMM(2uL, 160, 416), YMM_HIGH(4uL, bridge.xstate_ymm_offset.toInt(), EXTENDED_STATE_SIZE),
+    }
+
+    private val xstate get() = registers.reinterpret<bridge.kernel_entry_frame_t>().pointed.xstate
 
     operator fun get(index: Int): ULong =
         if (index in 0 until REGISTER_COUNT) {
@@ -87,27 +94,34 @@ value class PtraceRegisters(private val registers: CPointer<ULongVar>) {
         registers[IDX_RFLAGS] = USER_ENTRY_FLAGS
         registers[IDX_RSP] = stackPointer
         registers[IDX_SS] = USER_DATA_SELECTOR
+        resetExtendedState()
+    }
+
+    fun resetExtendedState() {
+        memcpy(xstate.ptr, bridge.initial_xstate.ptr, EXTENDED_STATE_SIZE.toULong())
     }
 
     fun copyExtendedStateTo(destination: ByteArray, offset: Int) {
         require(offset >= 0 && offset <= destination.size - EXTENDED_STATE_SIZE)
+        val state = xstate
+        val active = state.header.state_bv
+        val source = state.ptr.reinterpret<UByteVar>()
         destination.usePinned { bytes ->
-            memcpy(
-                bytes.addressOf(offset),
-                requireNotNull(registers.reinterpret<UByteVar>() + EXTENDED_STATE_OFFSET),
-                EXTENDED_STATE_SIZE.toULong(),
-            )
+            memcpy(bytes.addressOf(offset), bridge.initial_xstate.ptr, EXTENDED_STATE_SIZE.toULong())
+            for (part in XstatePart.entries) {
+                if (part.mask != 0uL && active and part.mask == 0uL) continue
+                val size = (part.end - part.start).toULong()
+                memcpy(bytes.addressOf(offset + part.start), source + part.start, size)
+            }
         }
+        val headerOffset = offset + bridge.xstate_header_offset.toInt()
+        LittleEndianBuffer(destination).writeU64(headerOffset, active)
     }
 
     fun restoreExtendedState(source: ByteArray, offset: Int = 0): Boolean {
         if (offset < 0 || offset > source.size - EXTENDED_STATE_SIZE) return false
         source.usePinned { bytes ->
-            memcpy(
-                requireNotNull(registers.reinterpret<UByteVar>() + EXTENDED_STATE_OFFSET),
-                bytes.addressOf(offset),
-                EXTENDED_STATE_SIZE.toULong(),
-            )
+            memcpy(xstate.ptr, bytes.addressOf(offset), EXTENDED_STATE_SIZE.toULong())
         }
         return true
     }

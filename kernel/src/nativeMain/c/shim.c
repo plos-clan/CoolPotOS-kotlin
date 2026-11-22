@@ -129,6 +129,38 @@ DEFINE_RANDOM_STEP(rdrand)
 DEFINE_RANDOM_STEP(rdseed)
 #undef DEFINE_RANDOM_STEP
 
+__attribute__((used)) uint64_t enter_kernel_tls(void) {
+    const uint64_t user = rdmsr(ia32_fs_base_msr);
+    const uint64_t kernel = CPOS_CPU_STATE->kernel_fs_base;
+    if (user != kernel) wrmsr(ia32_fs_base_msr, kernel);
+    return user;
+}
+
+__attribute__((used)) void leave_kernel_tls(uint64_t user) {
+    if (user != CPOS_CPU_STATE->kernel_fs_base) wrmsr(ia32_fs_base_msr, user);
+}
+
+__attribute__((used)) static void enter_syscall(kernel_entry_frame_t *frame) {
+    enum { xsaveopt = 1, xgetbv1 = 1 << 2 };
+    xstate_t *state = &frame->xstate;
+    const uint32_t features = CPOS_CPU_STATE->xsave_features;
+    if (!state->header.state_bv && state->legacy.mxcsr_mask && (features & xgetbv1)) {
+        uint32_t active;
+        __asm__ volatile("xgetbv" : "=a"(active) : "c"(1) : "edx");
+        if (!(active & xstate_mask)) {
+            __asm__ volatile("stmxcsr %0" : "=m"(state->legacy.mxcsr));
+            goto kernel_env;
+        }
+    }
+    if (features & xsaveopt)
+        __asm__ volatile("xsaveopt64 %0" : "+m"(*state) : "a"(xstate_mask), "d"(0) : "memory");
+    else save_xstate(state);
+    if (state->header.state_bv & xstate_x87) __asm__ volatile("fninit");
+kernel_env:
+    __asm__ volatile("ldmxcsr %0" : : "m"(initial_xstate.legacy.mxcsr));
+    frame->regs.fs_base = enter_kernel_tls();
+}
+
 void (*const syscall_entry)(void) = asm_syscall_handle;
 
 __attribute__((naked, used))
@@ -136,13 +168,7 @@ void fast_user_task_entry(void) {
     __asm__ volatile(
         ".cfi_undefined %rip\n"
         "movq %rsp, %r13\n"
-        CPOS_LOAD_USER_FS
-        "leaq 200(%r13), %rsp\n"
-        "movq 112(%r13), %rax\n"
-        "movw %ax, %ds\n"
-        "movq 120(%r13), %rax\n"
-        "movw %ax, %es\n"
-        "jmp .Luser_iret\n"
+        "jmp .Lrestore_user\n"
     );
 }
 
@@ -152,50 +178,26 @@ __attribute__((naked, used))
 void asm_syscall_handle(void) {
     __asm__ volatile(
         ".cfi_undefined %rip\n"
-        "cli\n"
-        "cld\n"
         "swapgs\n"
         "movq %rsp, %gs:8\n"
-        "movq %rax, %gs:16\n"
         "movq %gs:0, %rsp\n"
         "subq $" CPOS_ASM_STRINGIFY(KERNEL_ENTRY_FRAME_SIZE_VALUE) ", %rsp\n"
         CPOS_SAVE_GENERAL
-        "movq %r13, 16(%rsp)\n"
-        "movq %r12, 24(%rsp)\n"
-        "movq %r11, 32(%rsp)\n"
-        "movq %rcx, 72(%rsp)\n"
-        "leaq 768(%rsp), %rdi\n"
-        "xorl %eax, %eax\n"
-        "movl $8, %ecx\n"
-        "rep stosq\n"
-        "movl $" CPOS_ASM_STRINGIFY(XSTATE_MASK_VALUE) ", %eax\n"
-        "xorl %edx, %edx\n"
-        "xsave64 256(%rsp)\n"
-        "xrstor64 initial_xstate(%rip)\n"
-        "xorq %rax, %rax\n"
-        "movw %ds, %ax\n"
-        "movq %rax, 112(%rsp)\n"
-        "xorq %rax, %rax\n"
-        "movw %es, %ax\n"
-        "movq %rax, 120(%rsp)\n"
-        "movl $0xc0000100, %edi\n"
-        "call rdmsr\n"
-        "movq %rax, 128(%rsp)\n"
-        "movq %gs:24, %rsi\n"
-        "movl $0xc0000100, %edi\n"
-        "call wrmsr\n"
-        "movq %gs:16, %rax\n"
         "movq %rax, 136(%rsp)\n"
         "movq %rax, 144(%rsp)\n"
         "movq $0, 152(%rsp)\n"
-        "movq 72(%rsp), %rax\n"
-        "movq %rax, 160(%rsp)\n"
+        "movq %rcx, 160(%rsp)\n"
         "movq $0x23, 168(%rsp)\n"
-        "movq 32(%rsp), %rax\n"
-        "movq %rax, 176(%rsp)\n"
+        "movq %r11, 176(%rsp)\n"
         "movq %gs:8, %rax\n"
         "movq %rax, 184(%rsp)\n"
         "movq $0x1b, 192(%rsp)\n"
+        "movl %ds, %eax\n"
+        "movq %rax, 112(%rsp)\n"
+        "movl %es, %eax\n"
+        "movq %rax, 120(%rsp)\n"
+        "movq %rsp, %rdi\n"
+        "call enter_syscall\n"
         "xorl %edi, %edi\n"
         "call fast_handoff_account_mode\n"
         "movq %rsp, %rdi\n"
@@ -205,56 +207,42 @@ void asm_syscall_handle(void) {
         "movl $1, %edi\n"
         "call fast_handoff_account_mode\n"
         "movq %rsp, %r13\n"
+        ".Lrestore_user:\n"
         CPOS_LOAD_USER_FS
-        "movl $0x1b, %eax\n"
-        "movw %ax, %ds\n"
-        "movw %ax, %es\n"
+        CPOS_RESTORE_SEGMENT(ds, 112)
+        CPOS_RESTORE_SEGMENT(es, 120)
+        "movl $" CPOS_ASM_STRINGIFY(XSTATE_MASK_VALUE) ", %eax\n"
+        "xorl %edx, %edx\n"
+        "xrstor64 256(%r13)\n"
+        "movq 160(%r13), %rcx\n"
+        "movq 176(%r13), %r11\n"
+        "cmpq 72(%r13), %rcx\n"
+        "jne 1f\n"
+        "cmpq 32(%r13), %r11\n"
+        "jne 1f\n"
         "cmpq $0x23, 168(%r13)\n"
         "jne 1f\n"
         "cmpq $0x1b, 192(%r13)\n"
         "jne 1f\n"
         "movabsq $0x0000800000000000, %rax\n"
-        "cmpq %rax, 160(%r13)\n"
+        "cmpq %rax, %rcx\n"
         "jae 1f\n"
         "cmpq %rax, 184(%r13)\n"
         "jae 1f\n"
-        "testq $0x30100, 176(%r13)\n"
+        "testq $0x30100, %r11\n"
         "jnz 1f\n"
-        "movq $1, %gs:16\n"
-        "movq 160(%r13), %rcx\n"
-        "movq 176(%r13), %r11\n"
         "andq $-159745, %r11\n"
         "orq $2, %r11\n"
-        "jmp 2f\n"
-        "1:\n"
-        ".Luser_iret:\n"
-        "movq $0, %gs:16\n"
-        "pushq 192(%r13)\n"
-        "pushq 184(%r13)\n"
-        "movq 176(%r13), %rax\n"
-        "andq $-159745, %rax\n"
-        "orq $2, %rax\n"
-        "pushq %rax\n"
-        "pushq 168(%r13)\n"
-        "pushq 160(%r13)\n"
-        "2:\n"
-        "movl $" CPOS_ASM_STRINGIFY(XSTATE_MASK_VALUE) ", %eax\n"
-        "xorl %edx, %edx\n"
-        "xrstor64 256(%r13)\n"
-        CPOS_LOAD_GENERAL
-        "movq 24(%r13), %r12\n"
-        "movq 136(%r13), %rax\n"
-        "cmpq $0, %gs:16\n"
-        "je 3f\n"
         "movq 184(%r13), %rsp\n"
-        "movq 16(%r13), %r13\n"
-        "swapgs\n"
+        CPOS_USER_REGISTERS
         "sysretq\n"
-        "3:\n"
+        "1:\n"
+        "andq $-159745, 176(%r13)\n"
+        "orq $2, 176(%r13)\n"
         "movq 32(%r13), %r11\n"
         "movq 72(%r13), %rcx\n"
-        "movq 16(%r13), %r13\n"
-        "swapgs\n"
+        "leaq 160(%r13), %rsp\n"
+        CPOS_USER_REGISTERS
         "iretq\n"
     );
 }

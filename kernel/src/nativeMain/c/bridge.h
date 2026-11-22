@@ -57,7 +57,6 @@ bool fast_handoff_unpark(uint64_t task);
 bool fast_handoff_affinity_settled(uint64_t task);
 void fast_handoff_set_affinity(uint64_t task, uint8_t *mask, size_t size);
 void fast_handoff_set_weight(uint64_t task, uint32_t weight);
-void fast_handoff_account_mode(uint8_t user);
 void fast_handoff_set_account(uint64_t task, cpu_account_t *account);
 uint64_t fast_handoff_account_time(cpu_account_t *account, size_t index);
 uint64_t fast_handoff_queue_size(uint64_t lapic_id);

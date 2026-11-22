@@ -23,6 +23,21 @@
 - Linux programs binary compatible (glibc)
 - GC & Coroutine & runtime exception
 
+## x86-64 syscall context
+
+Each user thread owns a syscall frame at the top of its kernel stack. Its TSS
+interrupt stack starts below that frame: even an interrupt from userspace must
+not overwrite the last image restored by `XRSTOR`. This lets `XSAVEOPT` skip
+unmodified components. When `XGETBV(1)` confirms a previously empty image is
+still empty, only MXCSR needs saving. CPUs without these features use `XSAVE`.
+Signals export initialized component values, not stale bytes from the save area.
+
+`SWAPGS` selects the CPU-local entry state. Kernel Kotlin/Native and mlibc both
+address their thread-local storage through FS, so entering managed code still
+requires the kernel FS base when it differs from the user's. An interrupt in
+kernel mode does not repeat this exchange. Return to userspace restores the
+thread's xstate before either `SYSRET` or `IRET`.
+
 ## Build
 
 This project uses Gradle for kernel build, GPT disk image packaging, and QEMU run.

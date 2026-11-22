@@ -283,6 +283,8 @@ enum class CpuFeature(
 }
 
 object CpuID {
+    val xsaveFeatures: UInt get() = cpuid(0xdu, 1u).eax
+
     private fun cpuid(
         leaf: UInt,
         subleaf: UInt = 0u,

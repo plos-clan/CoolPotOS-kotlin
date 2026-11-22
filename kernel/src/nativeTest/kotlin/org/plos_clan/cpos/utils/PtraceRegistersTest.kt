@@ -4,10 +4,13 @@ package org.plos_clan.cpos.utils
 
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ULongVar
+import kotlinx.cinterop.alloc
 import kotlinx.cinterop.allocArray
 import kotlinx.cinterop.get
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.plus
+import kotlinx.cinterop.ptr
+import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.set
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -38,7 +41,8 @@ class PtraceRegistersTest {
 
     @Test
     fun execCreatesCleanUserEntryContext() = memScoped {
-        val registers = PtraceRegisters(allocArray<ULongVar>(PtraceRegisters.REGISTER_COUNT))
+        val frame = alloc<bridge.kernel_entry_frame_t>()
+        val registers = PtraceRegisters(frame.ptr.reinterpret())
         repeat(PtraceRegisters.REGISTER_COUNT) { registers[it] = ULong.MAX_VALUE }
 
         registers.resetForExec(0x1234uL, 0x7fff_ffff_f000uL)
@@ -55,5 +59,31 @@ class PtraceRegistersTest {
         registers.copyInto(actual)
 
         assertContentEquals(expected, actual)
+        assertEquals(0uL, frame.xstate.header.state_bv)
+        assertEquals(0x1f80u, frame.xstate.legacy.mxcsr)
+    }
+
+    @Test
+    fun signalSnapshotUsesOnlyLiveXstateComponents() = memScoped {
+        val frame = alloc<bridge.kernel_entry_frame_t>()
+        val registers = PtraceRegisters(frame.ptr.reinterpret())
+        val image = ByteArray(PtraceRegisters.EXTENDED_STATE_SIZE) { 0x55 }
+        val output = ByteArray(image.size + 2) { 0x33 }
+        val fields = LittleEndianBuffer(image)
+        val header = bridge.xstate_header_offset.toInt()
+        for (active in 0uL..7uL) {
+            fields.writeU64(header, active)
+            registers.restoreExtendedState(image)
+            registers.copyExtendedStateTo(output, 1)
+            val saved = LittleEndianBuffer(output)
+            assertEquals(active, saved.readU64(1 + header))
+            assertEquals(if (active and 1uL != 0uL) 0x5555 else 0x037f, saved.readU16(1).toInt())
+            assertEquals(0x55555555u, saved.readU32(25))
+            assertEquals(if (active and 2uL != 0uL) 0x55 else 0, output[161].toInt())
+            assertEquals(if (active and 4uL != 0uL) 0x55 else 0, output[577].toInt())
+            assertEquals(0, output[417].toInt())
+            assertEquals(0x33, output.first().toInt())
+            assertEquals(0x33, output.last().toInt())
+        }
     }
 }

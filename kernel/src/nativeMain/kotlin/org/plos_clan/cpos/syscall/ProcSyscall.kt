@@ -640,7 +640,6 @@ internal fun execve(regs: PtraceRegisters, process: Process): Long {
 
     regs.resetForExec(image.entryPoint, image.stackPointer)
     bridge.wrmsr(MSR_KERNEL_GS_BASE, 0uL)
-    thread.nativeTask.resetUserXstate()
     return 0L
 }
 

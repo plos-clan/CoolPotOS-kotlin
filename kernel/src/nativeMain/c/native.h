@@ -30,15 +30,13 @@ _Static_assert(sizeof(tss_t) == 104, "invalid TSS layout");
 typedef struct syscall_cpu_state {
     uint64_t kernel_rsp;
     uint64_t user_rsp;
-    uint64_t user_rax;
+    uint32_t xsave_features;
     uint64_t kernel_fs_base;
     uint64_t scheduler_cpu;
 } syscall_cpu_state_t;
+#define CPOS_CPU_STATE ((const volatile syscall_cpu_state_t __seg_gs *)0)
 _Static_assert(offsetof(syscall_cpu_state_t, kernel_rsp) == 0, "invalid syscall kernel RSP offset");
 _Static_assert(offsetof(syscall_cpu_state_t, user_rsp) == 8, "invalid syscall user RSP offset");
-_Static_assert(offsetof(syscall_cpu_state_t, user_rax) == 16, "invalid syscall RAX offset");
-_Static_assert(offsetof(syscall_cpu_state_t, kernel_fs_base) == 24, "invalid syscall FS offset");
-_Static_assert(offsetof(syscall_cpu_state_t, scheduler_cpu) == 32, "invalid scheduler CPU offset");
 
 typedef struct cpu_local {
     gdt_entries_t gdt_entries;
@@ -95,6 +93,8 @@ uint64_t runtime_clock_nanos(void);
 bool runtime_vdso_initialize(vdso_image_t *image);
 uint64_t runtime_clock_deadline(uint64_t nanoseconds);
 void wrmsr(uint32_t msr, uint64_t value);
+uint64_t enter_kernel_tls(void);
+void leave_kernel_tls(uint64_t user);
 void initialize_runtime_access(void);
 bool can_use_runtime(void);
 long runtime_thread_prepare(void *stack, int *parent_tid, void *tls);

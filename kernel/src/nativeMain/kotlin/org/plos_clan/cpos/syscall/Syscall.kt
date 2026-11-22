@@ -1,3 +1,4 @@
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
 @file:OptIn(ExperimentalForeignApi::class)
 
 package org.plos_clan.cpos.syscall
@@ -105,9 +106,10 @@ import org.plos_clan.cpos.syscall.fs.utimensAt
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.keys.Keys
+import org.plos_clan.cpos.utils.CpuID
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
-import kotlin.experimental.ExperimentalNativeApi
+import kotlin.native.internal.ExportForCppRuntime
 
 private const val MSR_EFER = 0xC0000080U // EFER MSR寄存器
 private const val MSR_STAR = 0xC0000081U // STAR MSR寄存器
@@ -119,7 +121,6 @@ private const val KERNEL_CODE_SELECTOR = 0x08uL
 private const val USER_DATA_SELECTOR = 0x1buL
 
 private const val PATH_MAX = 4096
-private const val FORCE_IRET_FLAG = 0x0002_0000uL
 
 private fun interface SyscallHandler {
     operator fun invoke(regs: PtraceRegisters, process: Process): Long
@@ -350,12 +351,11 @@ private enum class LinuxSyscall(
     FCHMODAT2(452, ::fchmodAt2),
 }
 
-@ExperimentalNativeApi
 @Suppress("unused")
-@CName("syscall_handler")
-fun syscallHandler(frame: COpaquePointer?) {
-    bridge.set_runtime_use_mask(true)
-    Syscall.syscallHandle(PtraceRegisters(requireNotNull(frame).reinterpret()))
+@ExportForCppRuntime("kotlin_syscall_handler")
+fun syscallHandler(frame: COpaquePointer) {
+    val registers = PtraceRegisters(frame.reinterpret())
+    Syscall.syscallHandle(registers)
 }
 
 object Syscall {
@@ -373,10 +373,7 @@ object Syscall {
         val thread = ProcessManager.currentThread()
         if (thread != null) Keys.applyPendingSession(thread)
         if (number == Vdso.SIGNAL_GATEWAY_SYSCALL) {
-            if (thread != null && SignalDelivery.deliverGateway(regs, thread)) {
-                regs[PtraceRegisters.IDX_RFLAGS] =
-                    regs[PtraceRegisters.IDX_RFLAGS] or FORCE_IRET_FLAG
-            } else {
+            if (thread == null || !SignalDelivery.deliverGateway(regs, thread)) {
                 regs[PtraceRegisters.IDX_RAX] = errno(Errno.ENOSYS).toULong()
             }
             return
@@ -397,10 +394,6 @@ object Syscall {
         if (!frameInstalled) regs[PtraceRegisters.IDX_RAX] = result.toULong()
         if (thread != null && !frameInstalled) {
             SignalDelivery.deliverPending(regs, thread)
-        }
-        if (regs[PtraceRegisters.IDX_FUNC] == PtraceRegisters.SIGNAL_RETURN) {
-            regs[PtraceRegisters.IDX_RFLAGS] =
-                regs[PtraceRegisters.IDX_RFLAGS] or FORCE_IRET_FLAG
         }
     }
 
@@ -450,7 +443,7 @@ object Syscall {
         val userGs = bridge.rdmsr(bridge.ia32_gs_base_msr)
         state.kernel_rsp = stackTop
         state.user_rsp = 0uL
-        state.user_rax = 0uL
+        state.xsave_features = CpuID.xsaveFeatures
         state.kernel_fs_base = bridge.rdmsr(bridge.ia32_fs_base_msr)
         state.scheduler_cpu = 0uL
         bridge.set_kernel_stack(lapicId, stackTop, if (isBsp) 1u else 0u)

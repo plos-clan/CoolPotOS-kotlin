@@ -76,15 +76,6 @@ internal class NativeTask private constructor(
         return true
     }
 
-    fun resetUserXstate() = access { handle ->
-        val task = handle.toPointer<bridge.fast_task_t>()!!.pointed
-        val frame = (task.kernel_rsp - sizeOf<bridge.kernel_entry_frame_t>().toULong())
-            .toPointer<bridge.kernel_entry_frame_t>()!!.pointed
-        val destination = frame.xstate.ptr.toLong().toULong()
-        val initial = bridge.initial_xstate.ptr.toLong().toULong()
-        copyMemory(destination, initial, sizeOf<bridge.xstate_t>().toULong())
-    }
-
     fun initializeUser(
         entry: ULong,
         rsp: ULong,

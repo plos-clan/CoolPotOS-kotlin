@@ -39,7 +39,6 @@ static volatile uint64_t limine_requests_end_marker[] = LIMINE_REQUESTS_END_MARK
 const xstate_t initial_xstate = {
     .legacy.control_word = 0x037f,
     .legacy.mxcsr = 0x1f80,
-    .header.state_bv = xstate_mask,
 };
 static char boot_argv0[] = "kernel";
 
