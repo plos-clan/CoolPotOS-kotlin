@@ -34,7 +34,7 @@ typedef struct syscall_cpu_state {
     uint64_t kernel_fs_base;
     uint64_t scheduler_cpu;
 } syscall_cpu_state_t;
-#define CPOS_CPU_STATE ((const volatile syscall_cpu_state_t __seg_gs *)0)
+#define CPOS_CPU_STATE ((volatile syscall_cpu_state_t __seg_gs *)0)
 _Static_assert(offsetof(syscall_cpu_state_t, kernel_rsp) == 0, "invalid syscall kernel RSP offset");
 _Static_assert(offsetof(syscall_cpu_state_t, user_rsp) == 8, "invalid syscall user RSP offset");
 
@@ -74,8 +74,8 @@ static inline void restore_xstate(const xstate_t *state) {
 void setup_xstate(void);
 void idt_load(void);
 void kt_ap_start(void);
-void do_irq(uint64_t irq_num);
 bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num);
+void fast_handoff_account_mode(bool user);
 bool tlb_handle_nmi(void);
 bool fast_handoff_prepare_runtime(uint64_t stack, uint64_t tls);
 void fast_handoff_publish_runtime(uint64_t task);
@@ -90,6 +90,7 @@ uint64_t read_tsc(void);
 uint64_t runtime_clock_initialize(uint64_t frequency);
 uint64_t runtime_clock_frequency(void);
 uint64_t runtime_clock_nanos(void);
+uint64_t runtime_clock_duration(uint64_t cycles);
 bool runtime_vdso_initialize(vdso_image_t *image);
 uint64_t runtime_clock_deadline(uint64_t nanoseconds);
 void wrmsr(uint32_t msr, uint64_t value);

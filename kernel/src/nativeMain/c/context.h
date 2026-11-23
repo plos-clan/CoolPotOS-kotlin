@@ -40,7 +40,6 @@
 
 enum {
     cpu_slot_count = 256,
-    cpu_account_stride = 64 / sizeof(uint64_t),
     ia32_fs_base_msr = 0xc0000100u,
     ia32_gs_base_msr = 0xc0000101u,
     ia32_kernel_gs_base_msr = 0xc0000102u,
@@ -114,15 +113,19 @@ _Static_assert(sizeof(kernel_entry_frame_t) == KERNEL_ENTRY_FRAME_SIZE_VALUE,
 
 typedef struct fast_task fast_task_t;
 typedef struct fast_cpu fast_cpu_t;
-typedef struct fast_node {
-    struct fast_node *next, *previous, *child;
-    uint64_t key;
-    fast_task_t *task;
-} fast_node_t;
-typedef struct cpu_account {
-    struct cpu_account *parent;
-    uint64_t time[] __attribute__((aligned(64)));
-} cpu_account_t;
+typedef struct { uint64_t user, system; } cpu_times_t;
+
+struct fast_cpu {
+    fast_task_t *current, *idle;
+    fast_task_t *head, *tail, *sleepers;
+    uint64_t *active_clock;
+    const uint64_t *slices;
+    size_t *counts;
+    uint64_t lapic_id, queue_size, accounted_at, wake_sequence;
+    uint64_t timer_deadline, quantum_deadline, worker_deadline;
+    uint32_t levels, strongest, logical_id;
+    uint8_t state, lock, reschedule, worker_pending, device_pending, balance, is_bsp;
+} __attribute__((aligned(64)));
 
 typedef struct {
     uint64_t r15, r14, r13, r12;
@@ -136,24 +139,18 @@ struct fast_task {
     uint64_t kernel_rsp;
     uint64_t kernel_fs_base;
     uint64_t user_gs_base;
-    fast_task_t *next;
-    fast_node_t run, sleep;
+    fast_task_t *next, *previous, *child;
+    uint64_t deadline;
     fast_cpu_t *cpu;
-    uint64_t quantum_cycles;
-    uint32_t id, weight;
-    uint8_t on_cpu, sleeping, user_mode;
+    uint32_t id, priority;
+    uint8_t on_cpu;
     uint8_t *affinity;
     size_t affinity_size;
-    cpu_account_t *account;
     uint8_t state;
     uint8_t queued;
     uint64_t wake_sequence;
     uint8_t user_interrupt_pending;
-    struct {
-        uint64_t elapsed;
-        uint64_t started;
-        uint64_t sequence;
-    } clock;
+    cpu_times_t clock;
 };
 
 extern const xstate_t initial_xstate;

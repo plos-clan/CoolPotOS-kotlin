@@ -21,9 +21,18 @@ internal class FairSchedulingPolicy<T>(
 
     private val cursor = AtomicInt(0)
 
-    fun weight(nice: Int): UInt {
-        val priority = nice.coerceIn(NicePriority.MIN, NicePriority.MAX)
-        return weights[priority - NicePriority.MIN]
+    val levels: Int get() = weights.size
+
+    fun rank(nice: Int): Int = nice.coerceIn(NicePriority.MIN, NicePriority.MAX) - NicePriority.MIN
+
+    fun sliceTable(): ULongArray = ULongArray(levels * levels) { index ->
+        val rank = index / levels
+        val strongest = minOf(rank, index % levels)
+        val weight = weights[rank].toULong()
+        val scale = weights[strongest].toULong()
+        val whole = quantumCycles / scale * weight
+        val fraction = quantumCycles % scale * weight / scale
+        maxOf(1uL, whole + fraction)
     }
 
     private val weights = uintArrayOf(
@@ -32,6 +41,27 @@ internal class FairSchedulingPolicy<T>(
         1024u, 820u, 655u, 526u, 423u, 335u, 272u, 215u, 172u, 137u,
         110u, 87u, 70u, 56u, 45u, 36u, 29u, 23u, 18u, 15u,
     )
+
+    inline fun distribute(source: T, load: (T) -> ULong, transfer: (T) -> Boolean): Boolean {
+        var first = -1
+        var smallest = ULong.MAX_VALUE
+        for (index in processors.indices) {
+            val target = processors[index]
+            if (target == source) continue
+            val queued = load(target)
+            if (queued >= smallest) continue
+            first = index
+            smallest = queued
+            if (queued == 0uL) break
+        }
+        if (first < 0) return false
+        if (transfer(processors[first])) return true
+        for (index in processors.indices) {
+            val target = processors[index]
+            if (index != first && target != source && transfer(target)) return true
+        }
+        return false
+    }
 
     fun nextProcessor(eligible: (T) -> Boolean = { true }, load: (T) -> ULong): T {
         if (processors.size == 1) {

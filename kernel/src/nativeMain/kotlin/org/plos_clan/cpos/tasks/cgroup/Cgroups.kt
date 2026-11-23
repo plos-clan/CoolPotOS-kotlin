@@ -20,21 +20,20 @@ internal fun interface CgroupPlacement {
 internal object Cgroups {
     val lock = IrqSpinLock()
     var observer: ((CgroupHierarchy.Group, CgroupHierarchy.Event) -> Unit)? = null
-    private val accounting = HashMap<CgroupHierarchy.Group, CpuAccounting>()
-    private fun account(group: CgroupHierarchy.Group): CpuAccounting {
-        accounting[group]?.let { return it }
-        val parent = group.parent?.let(::account)
-        val created = CpuAccounting(parent)
-        accounting[group] = created
-        return created
+    private val accounting = CpuAccounting<CgroupHierarchy.Group, Thread> { it.nativeTask.cpuCycles }
+
+    fun cpuStat(group: CgroupHierarchy.Group): String {
+        val cycles = accounting.read(group.subtree())
+        val user = bridge.runtime_clock_duration(cycles.user)
+        val system = bridge.runtime_clock_duration(cycles.system)
+        return "usage_usec ${(user + system) / 1000u}\nuser_usec ${user / 1000u}\nsystem_usec ${system / 1000u}\n"
     }
 
-    fun cpuStat(group: CgroupHierarchy.Group): String = account(group).render()
-    fun remove(group: CgroupHierarchy.Group) = accounting.remove(group)?.close()
+    fun remove(group: CgroupHierarchy.Group) = accounting.remove(group, checkNotNull(group.parent))
     fun account(tasks: Collection<CgroupHierarchy.Task>) {
         for (task in tasks) {
             val thread = ProcessManager.findThread(task.id) ?: continue
-            account(task.group).attach(thread)
+            accounting.move(thread, task.group)
         }
     }
 
@@ -48,12 +47,15 @@ internal object Cgroups {
 
     fun exit(thread: Thread) {
         val task = thread.cgroup ?: return
-        lock.withLock { hierarchy.exit(task) }
+        lock.withLock {
+            accounting.move(thread, null)
+            hierarchy.exit(task)
+        }
     }
 
     fun published(thread: Thread) = lock.withLock {
         val task = thread.cgroup ?: return@withLock
-        account(task.group).attach(thread)
+        accounting.move(thread, task.group)
         if (task.killed) {
             val signal = SignalInfo(Signal.KILL, SignalInfo.KERNEL)
             SignalRouter.sendProcess(null, thread.process, signal)

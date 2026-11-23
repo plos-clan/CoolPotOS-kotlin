@@ -280,8 +280,8 @@ class Thread internal constructor(
     internal fun setPriority(requested: Int, limit: ULong, privileged: Boolean): Boolean = nativeTask.access { handle ->
         if (!priority.set(requested, limit, privileged)) return@access false
         if (handle != 0uL) {
-            val weight = Scheduler.policy.weight(priority.value)
-            bridge.fast_handoff_set_weight(handle, weight)
+            val rank = Scheduler.policy.rank(priority.value)
+            bridge.fast_handoff_set_priority(handle, rank.toUInt())
         }
         true
     }

@@ -4,6 +4,7 @@
 package org.plos_clan.cpos.tasks
 
 import kotlinx.cinterop.*
+import org.plos_clan.cpos.tasks.cgroup.CpuTime
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.INVALID_FRAME
@@ -18,9 +19,6 @@ private external fun copyMemory(destination: ULong, source: ULong, size: ULong):
 
 @GCUnsafeCall("memset")
 private external fun clearMemory(destination: ULong, value: Int, size: ULong): ULong
-
-@GCUnsafeCall("fast_handoff_task_cpu_time")
-private external fun taskCpuTime(task: ULong): ULong
 
 @GCUnsafeCall("fast_handoff_task_has_exited")
 private external fun taskHasExited(task: ULong): Boolean
@@ -40,15 +38,17 @@ internal class NativeTask private constructor(
     private val runtime: Runtime?,
 ) : AutoCloseable {
     private val lock = IrqSpinLock()
-    private var exitedCpuTime = 0uL
+    private var exitedCycles = CpuTime.ZERO
 
     inline fun <T> access(action: (ULong) -> T): T = lock.withLock { action(handle) }
 
     val hasExited: Boolean
         get() = access { it == 0uL || taskHasExited(it) }
 
-    val cpuTimeNanos: ULong
-        get() = access { if (it == 0uL) exitedCpuTime else taskCpuTime(it) }
+    private fun clock(task: ULong): CpuTime = bridge.fast_handoff_clock(task).useContents { CpuTime(user, system) }
+
+    val cpuCycles: CpuTime get() = access { if (it == 0uL) exitedCycles else clock(it) }
+    val cpuTimeNanos: ULong get() = bridge.runtime_clock_duration(cpuCycles.total)
 
     fun affinity(): ByteArray? = access {
         if (it == 0uL) return@access null
@@ -138,7 +138,7 @@ internal class NativeTask private constructor(
         val context = lock.withLock {
             val task = handle
             if (task == 0uL) return
-            exitedCpuTime = taskCpuTime(task)
+            exitedCycles = clock(task)
             val context = task.toPointer<bridge.fast_task_t>()!!
             check(context.pointed.cpu == null || taskHasExited(task)) { "Cannot release a scheduled task" }
             handle = 0uL
@@ -210,9 +210,9 @@ internal class NativeTask private constructor(
                 val stackTop = stack?.top ?: 0uL
                 val fsBase = runtime?.fsBase ?: 0uL
                 val policy = Scheduler.policy
-                val weight = policy.weight(nice)
+                val rank = policy.rank(nice).toUInt()
                 handle = bridge.fast_handoff_create_task(
-                    id.toUInt(), cr3, stackTop, fsBase, policy.quantumCycles, weight,
+                    id.toUInt(), cr3, stackTop, fsBase, rank,
                 )
                 if (handle == 0uL) return null
                 return NativeTask(handle, stack, runtime)

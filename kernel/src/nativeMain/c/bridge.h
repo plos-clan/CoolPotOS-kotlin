@@ -56,29 +56,24 @@ bool fast_handoff_park_current(uint64_t deadline_ns, uint64_t sequence);
 bool fast_handoff_unpark(uint64_t task);
 bool fast_handoff_affinity_settled(uint64_t task);
 void fast_handoff_set_affinity(uint64_t task, uint8_t *mask, size_t size);
-void fast_handoff_set_weight(uint64_t task, uint32_t weight);
-void fast_handoff_set_account(uint64_t task, cpu_account_t *account);
-uint64_t fast_handoff_account_time(cpu_account_t *account, size_t index);
-uint64_t fast_handoff_queue_size(uint64_t lapic_id);
+void fast_handoff_set_priority(uint64_t task, uint32_t priority);
+cpu_times_t fast_handoff_clock(uint64_t task);
+bool fast_handoff_transfer(fast_cpu_t *donor, fast_cpu_t *target);
+bool fast_handoff_needs_balance(void);
+uint64_t fast_handoff_load(fast_cpu_t *cpu);
 uint64_t fast_handoff_service(void);
 void fast_handoff_wake_bsp(void);
 void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence, bool may_sleep);
-_Noreturn void fast_handoff_idle(void);
-bool fast_handoff_configure_timer(uint8_t vector);
 uint64_t fast_handoff_create_task(
     uint32_t id,
     uint64_t cr3,
     uint64_t kernel_rsp,
     uint64_t kernel_fs_base,
-    uint64_t quantum_cycles, uint32_t weight
+    uint32_t priority
 );
-bool fast_handoff_bind_current(
-    uint64_t task,
-    uint64_t lapic_id,
-    uint8_t is_bsp, uint32_t logical_id
-);
-bool fast_handoff_finish_bootstrap(uint64_t task);
-bool fast_handoff_enqueue(uint64_t task, uint64_t lapic_id);
+bool fast_handoff_bind_current(uint64_t task, fast_cpu_t *cpu);
+bool fast_handoff_finish_bootstrap(void);
+bool fast_handoff_enqueue(uint64_t task, fast_cpu_t *cpu);
 uint8_t fast_handoff_task_state(uint64_t task);
 void fast_handoff_set_task_state(uint64_t task, uint8_t state);
 uint64_t fast_handoff_current_task_handle(void);

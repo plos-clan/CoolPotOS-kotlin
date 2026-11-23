@@ -2,25 +2,18 @@
 #include "native.h"
 #include <stdlib.h>
 
-extern void do_irq(uint64_t irq_num);
-
 enum {
     irq_vector_base = 0x20,
     device_vector_limit = 0xef,
     scheduler_vector = 0xfe,
     device_irq_limit = device_vector_limit - irq_vector_base + 1,
-    device_irq_service_budget = 64,
     timer_irq = scheduler_vector - irq_vector_base + 1,
     spurious_irq = 0xff - irq_vector_base + 1,
     lapic_id_register = 0x20,
     lapic_eoi_register = 0xb0,
-    lapic_isr_base_register = 0x100,
-    lapic_register_stride = 0x10,
     lapic_icr_register = 0x300,
     lapic_icr_high_register = 0x310,
-    lapic_timer_register = 0x320,
     lapic_delivery_pending = 1u << 12,
-    lapic_timer_tsc_deadline = 1u << 18,
     x2apic_msr_base = 0x800,
 };
 
@@ -49,34 +42,11 @@ enum fast_schedule_result {
     schedule_switched,
 };
 
-struct fast_cpu {
-    fast_task_t *current;
-    fast_task_t *idle;
-    fast_node_t *head;
-    fast_cpu_t *next;
-    uint64_t virtual_time, slice_started, worker_deadline;
-    uint64_t account_started;
-    uint32_t logical_id;
-    uint8_t reschedule, worker_pending, balance;
-    uint64_t queue_size;
-    uint8_t is_bsp;
-    enum fast_cpu_state state;
-    uint8_t lock;
-    uint64_t lapic_id;
-    uint64_t timer_deadline;
-    uint64_t quantum_deadline;
-    uint64_t wake_sequence;
-    fast_node_t *sleepers;
-} __attribute__((aligned(64)));
-
-static fast_cpu_t fast_cpus[cpu_slot_count];
-static fast_cpu_t *online_cpus;
 static fast_task_t *runtime_tasks;
 static fast_task_t *exited_runtime;
-static uint8_t handoff_enabled;
 static uint8_t lapic_x2apic;
 static uint64_t lapic_mmio_base;
-static uint64_t bsp_lapic_id = UINT64_MAX;
+static fast_cpu_t *bsp_cpu;
 static void (*user_interrupt_handler)(void *frame);
 
 __attribute__((naked))
@@ -136,12 +106,8 @@ static fast_cpu_t *current_cpu(void) {
     return (fast_cpu_t *)CPOS_CPU_STATE->scheduler_cpu;
 }
 
-static fast_cpu_t *current_schedulable_cpu(void) {
-    if (!__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE)) return NULL;
-    fast_cpu_t *cpu = current_cpu();
-    if (!cpu || __atomic_load_n(&cpu->state, __ATOMIC_ACQUIRE) == cpu_offline)
-        return NULL;
-    return cpu;
+static fast_cpu_t *bound_cpu(void) {
+    return __atomic_load_n(&bsp_cpu, __ATOMIC_ACQUIRE) ? current_cpu() : NULL;
 }
 
 static uint32_t lapic_read(uint32_t reg) {
@@ -156,30 +122,6 @@ static void lapic_write(uint32_t reg, uint64_t value) {
         wrmsr(x2apic_msr_base + (reg >> 4), value);
     } else if (lapic_mmio_base) {
         *(volatile uint32_t *)(uintptr_t)(lapic_mmio_base + reg) = value;
-    }
-}
-
-static void dispatch_device_irqs(void) {
-    const uint32_t last_register = device_vector_limit / 32;
-    const uint32_t last_mask = UINT32_MAX >>
-        (31 - device_vector_limit % 32);
-    uint32_t serviced = 0;
-
-    for (uint32_t index = last_register; index > 0; index--) {
-        const uint32_t register_address =
-            lapic_isr_base_register + index * lapic_register_stride;
-        const uint32_t mask = index == last_register
-            ? last_mask : UINT32_MAX;
-        uint32_t pending = lapic_read(register_address) & mask;
-        while (pending && serviced < device_irq_service_budget) {
-            const uint32_t bit = 31 - __builtin_clz(pending);
-            const uint32_t vector = index * 32 + bit;
-            pending &= ~(1u << bit);
-            do_irq(vector - irq_vector_base + 1);
-            lapic_write(lapic_eoi_register, 0);
-            serviced++;
-        }
-        if (serviced == device_irq_service_budget) break;
     }
 }
 
@@ -227,11 +169,11 @@ static void set_timer_deadline(fast_cpu_t *cpu, uint64_t deadline) {
     wrmsr(ia32_tsc_deadline_msr, deadline);
 }
 
-static fast_node_t *heap_meld(fast_node_t *first, fast_node_t *second) {
+static fast_task_t *heap_meld(fast_task_t *first, fast_task_t *second) {
     if (!first) return second;
     if (!second) return first;
-    if (first->key > second->key) {
-        fast_node_t *swap = first;
+    if (first->deadline > second->deadline) {
+        fast_task_t *swap = first;
         first = second;
         second = swap;
     }
@@ -242,81 +184,85 @@ static fast_node_t *heap_meld(fast_node_t *first, fast_node_t *second) {
     return first;
 }
 
-static void heap_remove(fast_node_t **root, fast_node_t *node) {
-    fast_node_t *previous = node->previous;
+static void sleep_remove_locked(fast_task_t *node) {
+    if (!node->deadline) return;
+    fast_task_t **root = &node->cpu->sleepers;
+    fast_task_t *previous = node->previous;
     if (previous) {
         if (previous->child == node) previous->child = node->next;
         else previous->next = node->next;
         if (node->next) node->next->previous = previous;
     } else *root = NULL;
-    fast_node_t *pairs = NULL, *child = node->child;
+    fast_task_t *pairs = NULL, *child = node->child;
     while (child) {
-        fast_node_t *first = child, *second = first->next;
+        fast_task_t *first = child, *second = first->next;
         child = second ? second->next : NULL;
         first->next = first->previous = NULL;
         if (second) second->next = second->previous = NULL;
-        fast_node_t *pair = heap_meld(first, second);
+        fast_task_t *pair = heap_meld(first, second);
         pair->next = pairs;
         pairs = pair;
     }
-    fast_node_t *merged = NULL;
+    fast_task_t *merged = NULL;
     while (pairs) {
-        fast_node_t *pair = pairs;
+        fast_task_t *pair = pairs;
         pairs = pair->next;
         pair->next = NULL;
         merged = heap_meld(pair, merged);
     }
     *root = heap_meld(*root, merged);
     node->next = node->previous = node->child = NULL;
-}
-
-static void sleep_remove_locked(fast_task_t *task) {
-    if (!task->sleeping) return;
-    heap_remove(&task->cpu->sleepers, &task->sleep);
-    task->sleeping = false;
+    node->deadline = 0;
 }
 
 static void update_scheduler_timer(fast_cpu_t *cpu) {
     uint64_t deadline = cpu->quantum_deadline;
-    if (cpu->sleepers && (!deadline || cpu->sleepers->key < deadline))
-        deadline = cpu->sleepers->key;
+    if (cpu->sleepers && (!deadline || cpu->sleepers->deadline < deadline))
+        deadline = cpu->sleepers->deadline;
     if (cpu->worker_deadline && (!deadline || cpu->worker_deadline < deadline))
         deadline = cpu->worker_deadline;
     if (deadline != cpu->timer_deadline) set_timer_deadline(cpu, deadline);
 }
 
 static void wake_cpu(fast_cpu_t *cpu) {
-    __atomic_add_fetch(&cpu->wake_sequence, 1, __ATOMIC_RELEASE);
-    __atomic_store_n(&cpu->reschedule, true, __ATOMIC_RELEASE);
     const enum fast_cpu_state state = __atomic_load_n(&cpu->state, __ATOMIC_ACQUIRE);
     if (state == cpu_offline) return;
     const fast_task_t *running = __atomic_load_n(&cpu->current, __ATOMIC_ACQUIRE);
-    const bool local = cpu == current_cpu() && state == cpu_online;
-    if (!local || running == cpu->idle) lapic_send_interrupt(cpu->lapic_id, scheduler_vector);
     const uint64_t queued = __atomic_load_n(&cpu->queue_size, __ATOMIC_ACQUIRE);
-    const fast_task_t *runtime = __atomic_load_n(&runtime_tasks, __ATOMIC_ACQUIRE);
-    if (!queued && !runtime) return;
-    fast_cpu_t *idle = __atomic_load_n(&online_cpus, __ATOMIC_ACQUIRE);
-    for (; idle; idle = idle->next) {
-        if (idle == cpu || idle->state != cpu_online) continue;
-        const fast_task_t *current = __atomic_load_n(&idle->current, __ATOMIC_ACQUIRE);
-        if (current == idle->idle) lapic_send_interrupt(idle->lapic_id, scheduler_vector);
-    }
+    const bool busy = queued > 1 || (queued && running != cpu->idle);
+    if (busy) __atomic_store_n(&cpu->balance, true, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&cpu->wake_sequence, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&cpu->reschedule, true, __ATOMIC_RELEASE);
+    if (running == cpu->idle || cpu != current_cpu()) lapic_send_interrupt(cpu->lapic_id, scheduler_vector);
 }
 
-static bool queue_push(fast_cpu_t *cpu, fast_task_t *task) {
-    if (!task || task == cpu->idle || task->queued) return false;
-    if ((int64_t)(task->run.key - cpu->virtual_time) < 0) task->run.key = cpu->virtual_time;
+static void queue_push(fast_cpu_t *cpu, fast_task_t *task) {
+    if (task == cpu->idle || task->queued) return;
+    task->next = NULL;
+    task->previous = cpu->tail;
+    if (cpu->tail) cpu->tail->next = task;
+    else cpu->head = task;
+    cpu->tail = task;
+    cpu->counts[task->priority]++;
+    if (task->priority < cpu->strongest) cpu->strongest = task->priority;
     task->queued = true;
-    cpu->head = heap_meld(cpu->head, &task->run);
-    __atomic_add_fetch(&cpu->queue_size, 1, __ATOMIC_RELAXED);
-    return true;
+    __atomic_store_n(&cpu->queue_size, cpu->queue_size + 1, __ATOMIC_RELEASE);
 }
 
 static void queue_remove(fast_cpu_t *cpu, fast_task_t *task) {
     if (!task->queued) return;
-    heap_remove(&cpu->head, &task->run);
-    __atomic_sub_fetch(&cpu->queue_size, 1, __ATOMIC_RELAXED);
+    if (task->previous) task->previous->next = task->next;
+    else cpu->head = task->next;
+    if (task->next) task->next->previous = task->previous;
+    else cpu->tail = task->previous;
+    task->previous = task->next = NULL;
+    cpu->counts[task->priority]--;
+    if (!cpu->head) cpu->strongest = cpu->levels - 1;
+    while (cpu->strongest + 1 < cpu->levels) {
+        if (cpu->counts[cpu->strongest]) break;
+        cpu->strongest++;
+    }
+    __atomic_store_n(&cpu->queue_size, cpu->queue_size - 1, __ATOMIC_RELEASE);
     task->queued = false;
 }
 
@@ -326,76 +272,66 @@ static bool cpu_allowed(fast_task_t *task, fast_cpu_t *cpu) {
         (task->affinity[byte] & (1u << (cpu->logical_id % 8))));
 }
 
-static void request_balance(fast_cpu_t *exclude) {
-    fast_cpu_t *target = __atomic_load_n(&online_cpus, __ATOMIC_ACQUIRE);
-    for (; target; target = target->next) {
-        __atomic_store_n(&target->balance, true, __ATOMIC_RELEASE);
-        if (target != exclude) lapic_send_interrupt(target->lapic_id, scheduler_vector);
-    }
-}
-
 static fast_task_t *queue_pop(fast_cpu_t *cpu) {
-    while (cpu->head) {
-        fast_task_t *task = cpu->head->task;
+    fast_task_t *candidate = cpu->head;
+    while (candidate) {
+        fast_task_t *task = candidate;
+        candidate = task->next;
         if (!cpu_allowed(task, cpu)) {
-            request_balance(cpu);
-            return NULL;
+            __atomic_store_n(&cpu->balance, true, __ATOMIC_RELEASE);
+            continue;
         }
         queue_remove(cpu, task);
         if (task_state_load(task) != task_ready) continue;
-        const int64_t advance = task->run.key - cpu->virtual_time;
-        if (advance > 0) cpu->virtual_time = task->run.key;
-        task_state_store(task, task_running);
         return task;
     }
     return NULL;
 }
 
-static void balance_cpu(fast_cpu_t *cpu) {
-    fast_cpu_t *source = __atomic_load_n(&online_cpus, __ATOMIC_ACQUIRE);
-    for (; source; source = source->next) {
-        if (source == cpu) continue;
-        const uint64_t queued = __atomic_load_n(&source->queue_size, __ATOMIC_RELAXED);
-        if (!queued) continue;
-        fast_cpu_t *first = source->lapic_id < cpu->lapic_id ? source : cpu;
-        fast_cpu_t *second = first == cpu ? source : cpu;
-        lock_cpu(first);
-        lock_cpu(second);
-        fast_task_t *task = source->head ? source->head->task : NULL;
-        const bool movable = task && (!cpu->head || !cpu_allowed(task, source)) &&
-            task->kernel_rsp && task->id != UINT32_MAX &&
-            !__atomic_load_n(&task->on_cpu, __ATOMIC_ACQUIRE) && cpu_allowed(task, cpu);
-        if (movable) {
-            queue_remove(source, task);
-            task->run.key = cpu->virtual_time;
-            __atomic_store_n(&task->cpu, cpu, __ATOMIC_RELEASE);
-            queue_push(cpu, task);
-        }
-        unlock_cpu(second);
-        unlock_cpu(first);
-        if (movable) return;
+bool fast_handoff_transfer(fast_cpu_t *source, fast_cpu_t *cpu) {
+    if (cpu == source) return false;
+    if (__atomic_load_n(&cpu->state, __ATOMIC_ACQUIRE) != cpu_online) return false;
+    const uint64_t flags = irq_save();
+    fast_cpu_t *first = source->logical_id < cpu->logical_id ? source : cpu;
+    fast_cpu_t *second = first == cpu ? source : cpu;
+    lock_cpu(first);
+    lock_cpu(second);
+    const uint64_t supply = source->queue_size + (source->current != source->idle);
+    const uint64_t demand = cpu->queue_size + (cpu->current != cpu->idle);
+    fast_task_t *candidate = source->tail;
+    bool moved = false;
+    while (candidate) {
+        fast_task_t *task = candidate;
+        candidate = task->previous;
+        if (!task->kernel_rsp || !cpu_allowed(task, cpu)) continue;
+        if (__atomic_load_n(&task->on_cpu, __ATOMIC_ACQUIRE)) continue;
+        if (supply <= demand + 1 && cpu_allowed(task, source)) continue;
+        queue_remove(source, task);
+        __atomic_store_n(&task->cpu, cpu, __ATOMIC_RELEASE);
+        queue_push(cpu, task);
+        moved = true;
+        if (source->head) __atomic_store_n(&source->balance, true, __ATOMIC_RELEASE);
+        break;
     }
+    unlock_cpu(second);
+    unlock_cpu(first);
+    if (moved) wake_cpu(cpu);
+    irq_restore(flags);
+    return moved;
 }
 
-static void account_group(fast_cpu_t *cpu, uint64_t now) {
-    const uint64_t started = cpu->account_started;
-    cpu->account_started = now;
-    if (!started) return;
-    fast_task_t *task = cpu->current;
-    const uint64_t elapsed = now - started;
-    const size_t slot = cpu->logical_id * cpu_account_stride + !task->user_mode;
-    for (cpu_account_t *account = task->account; account; account = account->parent) {
-        uint64_t *counter = &account->time[slot];
-        const uint64_t previous = __atomic_load_n(counter, __ATOMIC_RELAXED);
-        __atomic_store_n(counter, previous + elapsed, __ATOMIC_RELAXED);
-    }
+static void account_until(fast_cpu_t *cpu, uint64_t now) {
+    if (now <= cpu->accounted_at) return;
+    *cpu->active_clock += now - cpu->accounted_at;
+    cpu->accounted_at = now;
 }
 
-__attribute__((used)) static void fast_handoff_account_mode(bool user) {
+void fast_handoff_account_mode(bool user) {
     fast_cpu_t *cpu = current_cpu();
     lock_cpu(cpu);
-    account_group(cpu, runtime_clock_nanos());
-    cpu->current->user_mode = user;
+    account_until(cpu, read_tsc());
+    cpu_times_t *clock = &cpu->current->clock;
+    cpu->active_clock = user ? &clock->user : &clock->system;
     unlock_cpu(cpu);
 }
 
@@ -407,10 +343,6 @@ static fast_cpu_t *lock_task(fast_task_t *task) {
         if (cpu == __atomic_load_n(&task->cpu, __ATOMIC_ACQUIRE)) return cpu;
         unlock_cpu(cpu);
     }
-}
-
-uint64_t fast_handoff_account_time(cpu_account_t *account, size_t index) {
-    return __atomic_load_n(&account->time[index], __ATOMIC_RELAXED);
 }
 
 bool fast_handoff_affinity_settled(uint64_t handle) {
@@ -427,21 +359,22 @@ void fast_handoff_set_affinity(uint64_t handle, uint8_t *mask, size_t size) {
     task->affinity_size = size;
     const bool migrate = cpu && !cpu_allowed(task, cpu);
     if (cpu) {
-        cpu->reschedule |= migrate;
+        if (migrate) __atomic_store_n(&cpu->balance, true, __ATOMIC_RELEASE);
         unlock_cpu(cpu);
     }
-    if (migrate) request_balance(NULL);
+    if (migrate) wake_cpu(cpu);
     irq_restore(flags);
 }
 
-void fast_handoff_set_account(uint64_t handle, cpu_account_t *account) {
+cpu_times_t fast_handoff_clock(uint64_t handle) {
     fast_task_t *task = task_from_handle(handle);
     const uint64_t flags = irq_save();
     fast_cpu_t *cpu = lock_task(task);
-    if (cpu && cpu->current == task) account_group(cpu, runtime_clock_nanos());
-    task->account = account;
+    if (cpu && cpu->current == task) account_until(cpu, read_tsc());
+    const cpu_times_t clock = task->clock;
     if (cpu) unlock_cpu(cpu);
     irq_restore(flags);
+    return clock;
 }
 
 static enum fast_schedule_result fast_handoff_schedule(
@@ -450,125 +383,87 @@ static enum fast_schedule_result fast_handoff_schedule(
     enum fast_schedule_request request,
     uint64_t deadline, uint64_t sequence
 ) {
-    const uint64_t flags = irq_save();
-    if (!__atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE) ||
-        cpu->state == cpu_offline || !cpu->current) {
-        irq_restore(flags);
-        return schedule_rejected;
-    }
-
-    if (cpu->state == cpu_online) {
-        const uint64_t queued = __atomic_load_n(&cpu->queue_size, __ATOMIC_RELAXED);
-        bool balance = !queued;
-        if (queued) balance = __atomic_exchange_n(&cpu->balance, false, __ATOMIC_ACQ_REL);
-        if (balance) balance_cpu(cpu);
-    }
     lock_cpu(cpu);
     fast_task_t *runtime = __atomic_load_n(&runtime_tasks, __ATOMIC_ACQUIRE);
     if (runtime) runtime = __atomic_exchange_n(&runtime_tasks, NULL, __ATOMIC_ACQ_REL);
+    bool added = runtime != NULL;
     while (runtime) {
         fast_task_t *next = runtime->next;
         runtime->cr3 = cpu->idle->cr3;
-        runtime->quantum_cycles = cpu->idle->quantum_cycles;
-        runtime->cpu = cpu;
+        runtime->priority = cpu->idle->priority;
+        __atomic_store_n(&runtime->cpu, cpu, __ATOMIC_RELEASE);
         queue_push(cpu, runtime);
         runtime = next;
     }
     const uint64_t now = read_tsc();
-    while (cpu->sleepers && cpu->sleepers->key <= now) {
-        fast_task_t *task = cpu->sleepers->task;
+    while (cpu->sleepers) {
+        fast_task_t *task = cpu->sleepers;
+        if (task->deadline > now) break;
         sleep_remove_locked(task);
         if (task_state_load(task) != task_blocked) continue;
         task_state_store(task, task_ready);
         queue_push(cpu, task);
-        cpu->reschedule = true;
+        added = true;
     }
+    if (added && cpu->queue_size > 1) __atomic_store_n(&cpu->balance, true, __ATOMIC_RELEASE);
     if (cpu->worker_deadline && cpu->worker_deadline <= now) {
         cpu->worker_pending = true;
         cpu->worker_deadline = 0;
     }
     fast_task_t *previous = cpu->current;
     const bool expired = !cpu->quantum_deadline || now >= cpu->quantum_deadline;
-    bool running = task_state_load(previous) == task_running;
-    bool select_next = request != schedule_tick || cpu->reschedule ||
+    if (__atomic_load_n(&cpu->balance, __ATOMIC_ACQUIRE)) cpu->worker_pending = true;
+    const bool running = task_state_load(previous) == task_running;
+    const bool requested = __atomic_load_n(&cpu->reschedule, __ATOMIC_ACQUIRE) &&
+        __atomic_exchange_n(&cpu->reschedule, false, __ATOMIC_ACQ_REL);
+    const bool reschedule = request != schedule_tick || requested || added ||
         cpu->worker_pending || expired || !running;
-    cpu->reschedule = false;
-    const uint64_t accounted = runtime_clock_nanos();
-    account_group(cpu, accounted);
-    if (previous != cpu->idle && cpu->slice_started) {
-        if (previous->queued) heap_remove(&cpu->head, &previous->run);
-        const uint32_t weight = __atomic_load_n(&previous->weight, __ATOMIC_RELAXED);
-        const __uint128_t weighted_time = (__uint128_t)(now - cpu->slice_started) * 1024;
-        previous->run.key += (uint64_t)(weighted_time / weight);
-        if (previous->queued) cpu->head = heap_meld(cpu->head, &previous->run);
-        uint64_t floor = previous->run.key;
-        if (cpu->head && cpu->head->key < floor) floor = cpu->head->key;
-        if (floor > cpu->virtual_time) cpu->virtual_time = floor;
-    }
-    cpu->slice_started = now;
+    account_until(cpu, now);
     const bool parking = request == schedule_park;
     if (parking && (previous == cpu->idle || !running)) {
         unlock_cpu(cpu);
-        irq_restore(flags);
         return schedule_rejected;
     }
-    const bool awakened = previous->wake_sequence != sequence;
-    if (parking && (awakened || (deadline && deadline <= now))) {
-        select_next = false;
-    } else if (parking) {
-        task_state_store(previous, task_blocked);
-        running = false;
-        if (deadline) {
-            previous->sleep.key = deadline;
-            previous->sleeping = true;
-            cpu->sleepers = heap_meld(cpu->sleepers, &previous->sleep);
-        }
+    const bool block = parking && previous->wake_sequence == sequence && (!deadline || deadline > now);
+    if (block) task_state_store(previous, task_blocked);
+    if (block && deadline) {
+        previous->deadline = deadline;
+        cpu->sleepers = heap_meld(cpu->sleepers, previous);
     }
 
     fast_task_t *next = previous;
-    const bool can_continue = running && cpu_allowed(previous, cpu);
-    if (select_next && (cpu->head || cpu->worker_pending || !can_continue)) {
-        if (running) {
-            task_state_store(previous, task_ready);
-            if (previous != cpu->idle) queue_push(cpu, previous);
-        }
-
+    const bool select_next = parking ? block : reschedule;
+    const bool can_continue = running && !block && cpu_allowed(previous, cpu);
+    const bool rotate = select_next && (cpu->head || cpu->worker_pending || !can_continue);
+    if (rotate && running && !block) {
+        task_state_store(previous, task_ready);
+        queue_push(cpu, previous);
+    }
+    if (rotate) {
         const bool run_worker = cpu->worker_pending && previous != cpu->idle && cpu->idle->rsp;
         next = run_worker ? cpu->idle : queue_pop(cpu);
-        if (!next && cpu->idle && cpu->idle->rsp) next = cpu->idle;
-        if (next) task_state_store(next, task_running);
-        if (!next && parking) {
+        if (!next && cpu->idle->rsp) next = cpu->idle;
+        if (!next && block) {
             sleep_remove_locked(previous);
-            task_state_store(previous, task_running);
+            next = previous;
         }
-        if (!next) next = previous;
+        if (next) task_state_store(next, task_running);
+        else next = previous;
     }
-    if (select_next) {
-        cpu->quantum_deadline = 0;
-        if (cpu->state == cpu_online && (next != cpu->idle || cpu->head)) {
-            const uint64_t quantum = __atomic_load_n(&next->quantum_cycles, __ATOMIC_RELAXED);
-            cpu->quantum_deadline = now > UINT64_MAX - quantum ? UINT64_MAX : now + quantum;
-        }
-    }
-    if (next != previous) {
-        const uint64_t started = previous->clock.started;
-        __atomic_add_fetch(&previous->clock.sequence, 1, __ATOMIC_ACQ_REL);
-        if (started) {
-            const uint64_t elapsed = accounted - started;
-            __atomic_add_fetch(&previous->clock.elapsed, elapsed, __ATOMIC_RELAXED);
-        }
-        __atomic_store_n(&previous->clock.started, 0, __ATOMIC_RELAXED);
-        __atomic_add_fetch(&previous->clock.sequence, 1, __ATOMIC_RELEASE);
-        cpu->account_started = runtime_clock_nanos();
-        __atomic_store_n(&next->clock.started, cpu->account_started, __ATOMIC_RELEASE);
+    if (select_next) cpu->quantum_deadline = 0;
+    const bool active = next != cpu->idle || cpu->head;
+    if (select_next && active && cpu->state == cpu_online) {
+        const size_t row = (size_t)next->priority * cpu->levels;
+        const uint64_t quantum = cpu->slices[row + cpu->strongest];
+        cpu->quantum_deadline = now > UINT64_MAX - quantum ? UINT64_MAX : now + quantum;
     }
     __atomic_store_n(&next->on_cpu, true, __ATOMIC_RELEASE);
-    cpu->current = next;
+    __atomic_store_n(&cpu->current, next, __ATOMIC_RELEASE);
+    cpu->active_clock = &next->clock.system;
     update_scheduler_timer(cpu);
     unlock_cpu(cpu);
 
     if (next == previous) {
-        irq_restore(flags);
         return parking && select_next ? schedule_rejected : schedule_same_task;
     }
     if (interrupted_xstate) {
@@ -596,7 +491,6 @@ static enum fast_schedule_result fast_handoff_schedule(
     if (previous_fs_base != kernel_fs_base)
         wrmsr(ia32_fs_base_msr, kernel_fs_base);
     fast_switch_to(previous, next->rsp);
-    irq_restore(flags);
     return schedule_switched;
 }
 
@@ -606,7 +500,7 @@ static enum fast_schedule_result fast_handoff_schedule_current(
 ) {
     xstate_t xstate;
     const uint64_t flags = irq_save();
-    fast_cpu_t *cpu = current_schedulable_cpu();
+    fast_cpu_t *cpu = bound_cpu();
     if (!cpu) {
         irq_restore(flags);
         return schedule_rejected;
@@ -639,15 +533,6 @@ void fast_handoff_request_user_interrupt(uint64_t handle) {
     irq_restore(flags);
 }
 
-bool fast_handoff_configure_timer(uint8_t vector) {
-    if (vector != scheduler_vector) return false;
-    lapic_write(lapic_timer_register, vector | lapic_timer_tsc_deadline);
-    const uint32_t id = lapic_read(lapic_id_register);
-    const uint32_t lapic_id = lapic_x2apic ? id : id >> 24;
-    fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
-    set_timer_deadline(cpu, 0);
-    return true;
-}
 bool fast_handoff_yield(void) {
     return fast_handoff_schedule_current(schedule_reschedule, 0, 0) == schedule_switched;
 }
@@ -686,22 +571,20 @@ bool fast_handoff_unpark(uint64_t handle) {
 }
 
 uint64_t fast_handoff_service(void) {
-    const uint64_t flags = irq_save();
     fast_cpu_t *cpu = current_cpu();
     __atomic_store_n(&cpu->worker_pending, true, __ATOMIC_RELEASE);
-    dispatch_device_irqs();
-    const uint64_t sequence = __atomic_load_n(&cpu->wake_sequence, __ATOMIC_ACQUIRE);
-    irq_restore(flags);
-    return sequence;
+    return __atomic_load_n(&cpu->wake_sequence, __ATOMIC_ACQUIRE);
 }
 
 void fast_handoff_wake_bsp(void) {
-    const uint64_t lapic_id = __atomic_load_n(&bsp_lapic_id, __ATOMIC_ACQUIRE);
-    if (lapic_id == UINT64_MAX) return;
-
-    fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
+    fast_cpu_t *cpu = __atomic_load_n(&bsp_cpu, __ATOMIC_ACQUIRE);
+    if (!cpu) return;
+    const uint64_t flags = irq_save();
+    lock_cpu(cpu);
     __atomic_store_n(&cpu->worker_pending, true, __ATOMIC_RELEASE);
     wake_cpu(cpu);
+    unlock_cpu(cpu);
+    irq_restore(flags);
 }
 
 void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence, bool may_sleep) {
@@ -709,7 +592,7 @@ void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence, bool
     fast_cpu_t *cpu = current_cpu();
     lock_cpu(cpu);
     const uint64_t observed = __atomic_load_n(&cpu->wake_sequence, __ATOMIC_ACQUIRE);
-    cpu->worker_pending = !may_sleep || wake_sequence != observed;
+    cpu->worker_pending = !may_sleep || cpu->device_pending || wake_sequence != observed;
     cpu->worker_deadline = runtime_clock_deadline(deadline_ns);
     unlock_cpu(cpu);
     fast_handoff_schedule_current(schedule_reschedule, 0, 0);
@@ -722,14 +605,15 @@ void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence, bool
 
     if (sleep && (flags & (1u << 9)))
         __asm__ volatile("sti; hlt; cli" : : : "memory");
+    __atomic_store_n(&cpu->worker_pending, true, __ATOMIC_RELEASE);
     irq_restore(flags);
 }
 
-_Noreturn void fast_handoff_idle(void) {
-    for (;;) {
-        const uint64_t sequence = fast_handoff_service();
-        fast_handoff_park_kotlin(0, sequence, true);
-    }
+bool fast_handoff_needs_balance(void) {
+    fast_cpu_t *cpu = current_cpu();
+    if (cpu->state != cpu_online) return false;
+    return __atomic_load_n(&cpu->balance, __ATOMIC_ACQUIRE) &&
+        __atomic_exchange_n(&cpu->balance, false, __ATOMIC_ACQ_REL);
 }
 
 uint64_t fast_handoff_create_task(
@@ -737,20 +621,25 @@ uint64_t fast_handoff_create_task(
     uint64_t cr3,
     uint64_t kernel_rsp,
     uint64_t kernel_fs_base,
-    uint64_t quantum_cycles, uint32_t weight
+    uint32_t priority
 ) {
     fast_task_t *task = malloc(sizeof(*task));
     if (!task) return 0;
     *task = (fast_task_t){.id = id, .cr3 = cr3, .kernel_rsp = kernel_rsp,
-        .kernel_fs_base = kernel_fs_base, .quantum_cycles = quantum_cycles, .weight = weight,
-        .user_mode = kernel_rsp != 0};
-    task->run.task = task->sleep.task = task;
+        .kernel_fs_base = kernel_fs_base, .priority = priority};
     return (uintptr_t)task;
 }
 
-void fast_handoff_set_weight(uint64_t handle, uint32_t weight) {
+void fast_handoff_set_priority(uint64_t handle, uint32_t priority) {
     fast_task_t *task = task_from_handle(handle);
-    __atomic_store_n(&task->weight, weight, __ATOMIC_RELAXED);
+    const uint64_t flags = irq_save();
+    fast_cpu_t *cpu = lock_task(task);
+    const bool queued = cpu && task->queued;
+    if (queued) queue_remove(cpu, task);
+    task->priority = priority;
+    if (queued) queue_push(cpu, task);
+    if (cpu) unlock_cpu(cpu);
+    irq_restore(flags);
 }
 
 bool fast_handoff_task_has_exited(uint64_t handle) {
@@ -758,22 +647,6 @@ bool fast_handoff_task_has_exited(uint64_t handle) {
     return task_state_load(task) == task_zombie &&
         !__atomic_load_n(&task->on_cpu, __ATOMIC_ACQUIRE) &&
         !__atomic_load_n(&task->rsp, __ATOMIC_ACQUIRE);
-}
-
-uint64_t fast_handoff_task_cpu_time(uint64_t handle) {
-    const fast_task_t *task = task_from_handle(handle);
-    for (;;) {
-        const uint64_t sequence = __atomic_load_n(&task->clock.sequence, __ATOMIC_ACQUIRE);
-        if (sequence & 1) goto retry;
-        uint64_t elapsed = __atomic_load_n(&task->clock.elapsed, __ATOMIC_RELAXED);
-        const uint64_t started = __atomic_load_n(&task->clock.started, __ATOMIC_ACQUIRE);
-        if (started) elapsed += runtime_clock_nanos() - started;
-        __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        const uint64_t observed = __atomic_load_n(&task->clock.sequence, __ATOMIC_RELAXED);
-        if (sequence == observed) return elapsed;
-retry:
-        __asm__ volatile("pause");
-    }
 }
 
 static void publish_runtime(fast_task_t **queue, fast_task_t *task) {
@@ -791,8 +664,7 @@ uint64_t fast_handoff_take_exited_runtime(void) {
     return (uintptr_t)__atomic_exchange_n(&exited_runtime, NULL, __ATOMIC_ACQ_REL);
 }
 
-uint64_t fast_handoff_queue_size(uint64_t lapic_id) {
-    fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
+uint64_t fast_handoff_load(fast_cpu_t *cpu) {
     const uint64_t queued = __atomic_load_n(&cpu->queue_size, __ATOMIC_RELAXED);
     const fast_task_t *current = __atomic_load_n(&cpu->current, __ATOMIC_ACQUIRE);
     return queued + (current != cpu->idle);
@@ -808,12 +680,11 @@ _Noreturn void fast_handoff_exit_current(void) {
     sleep_remove_locked(task);
     unlock_cpu(cpu);
     if (task->id == UINT32_MAX) publish_runtime(&exited_runtime, task);
-    fast_handoff_yield();
-    fast_handoff_idle();
+    for (;;) fast_handoff_yield();
 }
 
 bool fast_handoff_prepare_runtime(uint64_t rsp, uint64_t fs_base) {
-    const uint64_t handle = fast_handoff_create_task(UINT32_MAX, 0, rsp, fs_base, 0, 1024);
+    const uint64_t handle = fast_handoff_create_task(UINT32_MAX, 0, rsp, fs_base, 0);
     fast_task_t *task = task_from_handle(handle);
     if (!task) return false;
     runtime_tls_owner(fs_base)->task = (uintptr_t)task;
@@ -829,68 +700,37 @@ void fast_handoff_publish_runtime(uint64_t handle) {
     publish_runtime(&runtime_tasks, task);
 }
 
-bool fast_handoff_bind_current(
-    uint64_t handle,
-    uint64_t lapic_id,
-    uint8_t is_bsp, uint32_t logical_id
-) {
+bool fast_handoff_bind_current(uint64_t handle, fast_cpu_t *cpu) {
     fast_task_t *task = task_from_handle(handle);
-    if (!task) return false;
-    fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
+    if (!task || current_cpu() || task->priority >= cpu->levels) return false;
     const uint64_t flags = irq_save();
-    lock_cpu(cpu);
-    if (cpu->state != cpu_offline) {
-        unlock_cpu(cpu);
-        irq_restore(flags);
-        return false;
-    }
-    cpu->current = task;
     cpu->idle = task;
-    cpu->is_bsp = is_bsp != 0;
-    cpu->lapic_id = lapic_id;
-    cpu->logical_id = logical_id;
+    __atomic_store_n(&cpu->current, task, __ATOMIC_RELEASE);
+    cpu->worker_pending = true;
+    cpu->accounted_at = read_tsc();
+    cpu->active_clock = &task->clock.system;
     task->on_cpu = true;
-    fast_cpu_t *head = __atomic_load_n(&online_cpus, __ATOMIC_RELAXED);
-    do {
-        cpu->next = head;
-    } while (!__atomic_compare_exchange_n(
-        &online_cpus, &head, cpu, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED
-    ));
-    locals[lapic_id % cpu_slot_count].syscall.scheduler_cpu = (uintptr_t)cpu;
-    __atomic_store_n(&task->cpu, cpu, __ATOMIC_RELEASE);
-    if (cpu->is_bsp)
-        __atomic_store_n(&bsp_lapic_id, lapic_id, __ATOMIC_RELEASE);
-    __atomic_store_n(&cpu->state, cpu_bootstrapping, __ATOMIC_RELEASE);
-    if (!task->kernel_fs_base)
-        task->kernel_fs_base = rdmsr(ia32_fs_base_msr);
+    task->kernel_fs_base = rdmsr(ia32_fs_base_msr);
     task_state_store(task, task_running);
-    task->queued = false;
-    unlock_cpu(cpu);
-    if (cpu->is_bsp) __atomic_store_n(&handoff_enabled, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&task->cpu, cpu, __ATOMIC_RELEASE);
+    CPOS_CPU_STATE->scheduler_cpu = (uintptr_t)cpu;
+    __atomic_store_n(&cpu->state, cpu_bootstrapping, __ATOMIC_RELEASE);
+    if (cpu->is_bsp) __atomic_store_n(&bsp_cpu, cpu, __ATOMIC_RELEASE);
     irq_restore(flags);
     return true;
 }
 
-bool fast_handoff_finish_bootstrap(uint64_t handle) {
-    fast_task_t *task = task_from_handle(handle);
-    if (!task || !task->cpu) return false;
-
-    fast_cpu_t *cpu = task->cpu;
-    const uint64_t flags = irq_save();
-    lock_cpu(cpu);
-    const bool finished = cpu->state == cpu_bootstrapping &&
-        cpu->current == task && cpu->idle == task;
-    if (finished) __atomic_store_n(&cpu->state, cpu_online, __ATOMIC_RELEASE);
-    unlock_cpu(cpu);
-    irq_restore(flags);
-    return finished;
+bool fast_handoff_finish_bootstrap(void) {
+    fast_cpu_t *cpu = current_cpu();
+    if (!cpu || cpu->state != cpu_bootstrapping || cpu->current != cpu->idle) return false;
+    __atomic_store_n(&cpu->state, cpu_online, __ATOMIC_RELEASE);
+    return true;
 }
 
-bool fast_handoff_enqueue(uint64_t handle, uint64_t lapic_id) {
+bool fast_handoff_enqueue(uint64_t handle, fast_cpu_t *cpu) {
     fast_task_t *task = task_from_handle(handle);
-    if (!task || !__atomic_load_n(&task->rsp, __ATOMIC_ACQUIRE))
-        return false;
-    fast_cpu_t *cpu = &fast_cpus[lapic_id % cpu_slot_count];
+    if (!task || !__atomic_load_n(&task->rsp, __ATOMIC_ACQUIRE)) return false;
+    if (__atomic_load_n(&cpu->state, __ATOMIC_ACQUIRE) == cpu_offline) return false;
     const uint64_t flags = irq_save();
     lock_cpu(cpu);
     fast_cpu_t *owner = __atomic_load_n(&task->cpu, __ATOMIC_ACQUIRE);
@@ -901,13 +741,12 @@ bool fast_handoff_enqueue(uint64_t handle, uint64_t lapic_id) {
         if (assigned) owner = cpu;
     }
     const enum fast_task_state state = task_state_load(task);
-    bool accepted = owner == cpu && task != cpu->current &&
-        state != task_running &&
-        state != task_zombie;
+    const bool runnable = state == task_ready || state == task_blocked;
+    const bool accepted = owner == cpu && task != cpu->current && task != cpu->idle && runnable;
     if (accepted) {
         if (state == task_blocked) sleep_remove_locked(task);
         task_state_store(task, task_ready);
-        accepted = queue_push(cpu, task) || task->queued;
+        queue_push(cpu, task);
     }
     unlock_cpu(cpu);
     if (accepted) wake_cpu(cpu);
@@ -941,7 +780,7 @@ void fast_handoff_set_task_state(uint64_t handle, uint8_t state) {
 
 uint64_t fast_handoff_current_task_handle(void) {
     const uint64_t flags = irq_save();
-    const fast_cpu_t *cpu = current_schedulable_cpu();
+    const fast_cpu_t *cpu = bound_cpu();
     const uint64_t handle = cpu ? (uintptr_t)cpu->current : 0;
     irq_restore(flags);
     return handle;
@@ -963,19 +802,22 @@ bool fast_handoff_replace_address_space(uint64_t handle, uint64_t cr3) {
 }
 
 __attribute__((used)) bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
-    fast_cpu_t *cpu = current_cpu();
+    fast_cpu_t *cpu = bound_cpu();
+    if (!cpu) {
+        if (irq_num != spurious_irq) lapic_write(lapic_eoi_register, 0);
+        return false;
+    }
     const bool user = (regs->cs & 3u) != 0;
-    bool restore = false;
-    if (user) fast_handoff_account_mode(false);
     if (irq_num <= device_irq_limit) {
+        cpu->device_pending = true;
         __atomic_add_fetch(&cpu->wake_sequence, 1, __ATOMIC_RELEASE);
         __atomic_store_n(&cpu->worker_pending, true, __ATOMIC_RELEASE);
         lapic_send_interrupt(cpu->lapic_id, scheduler_vector);
-        goto finish;
+        return false;
     }
-    if (irq_num == spurious_irq) goto finish;
+    if (irq_num == spurious_irq) return false;
     lapic_write(lapic_eoi_register, 0);
-    if (irq_num != timer_irq) goto finish;
+    if (irq_num != timer_irq) return false;
     cpu->timer_deadline = 0;
     xstate_t *xstate = &((kernel_entry_frame_t *)regs)->xstate;
     void (*handler)(void *) = __atomic_load_n(&user_interrupt_handler, __ATOMIC_ACQUIRE);
@@ -988,15 +830,7 @@ __attribute__((used)) bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num) {
         handler(&regs->rip);
         cpu = current_cpu();
     }
-    const bool enabled = __atomic_load_n(&handoff_enabled, __ATOMIC_ACQUIRE);
-    if (enabled && cpu->state != cpu_offline) {
-        xstate_t *interrupted = deliver ? NULL : xstate;
-        const enum fast_schedule_result result =
-            fast_handoff_schedule(cpu, interrupted, schedule_tick, 0, 0);
-        restore = result == schedule_switched;
-    } else update_scheduler_timer(cpu);
-    restore |= deliver;
-finish:
-    if (user) fast_handoff_account_mode(true);
-    return restore;
+    xstate_t *interrupted = deliver ? NULL : xstate;
+    const enum fast_schedule_result result = fast_handoff_schedule(cpu, interrupted, schedule_tick, 0, 0);
+    return deliver || result == schedule_switched;
 }

@@ -8,7 +8,6 @@ extern void Kotlin_mm_switchThreadStateRunnable(void);
 extern void Kotlin_mm_switchThreadStateNative(void);
 extern void *kotlin_runtime_allocate(size_t);
 extern void kotlin_serial_print(const char *, size_t);
-extern void kotlin_do_irq(uint64_t);
 extern void kotlin_syscall_handler(void *);
 extern void set_runtime_use_mask(bool);
 extern void kotlin_handle_exception(void *, uint64_t, uint64_t, uint64_t, int32_t);
@@ -27,7 +26,6 @@ CALLBACK(void *, runtime_allocate, (size_t size),
     void *result = kotlin_runtime_allocate(size), result)
 CALLBACK(void, serial_print, (const char *buffer, size_t size),
     kotlin_serial_print(buffer, size), )
-CALLBACK(void, do_irq, (uint64_t irq), kotlin_do_irq(irq), )
 CALLBACK(void, syscall_handler, (void *regs),
     set_runtime_use_mask(true); kotlin_syscall_handler(regs), )
 

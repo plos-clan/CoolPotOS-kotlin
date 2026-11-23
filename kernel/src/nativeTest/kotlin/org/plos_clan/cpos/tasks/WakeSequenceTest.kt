@@ -15,16 +15,58 @@ import kotlinx.cinterop.pointed
 import kotlinx.cinterop.ptr
 import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.staticCFunction
+import kotlinx.cinterop.useContents
 import kotlinx.cinterop.value
 import platform.posix.pthread_create
 import platform.posix.pthread_join
 import platform.posix.pthread_tVar
 import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.AtomicLong
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class WakeSequenceTest {
+    @Test
+    fun parkedThreadAccruesNeitherUserNorSystemCycles() = memScoped {
+        val handle = AtomicLong(0L)
+        val reference = StableRef.create(handle)
+        val thread = alloc<pthread_tVar>()
+        val entry = staticCFunction<COpaquePointer?, COpaquePointer?> { argument ->
+            val shared = requireNotNull(argument).asStableRef<AtomicLong>().get()
+            val sequence = bridge.fast_handoff_prepare_park()
+            shared.store(bridge.fast_handoff_current_task_handle().toLong())
+            val deadline = bridge.runtime_clock_nanos() + 2_000_000_000uL
+            bridge.fast_handoff_park_current(deadline, sequence)
+            null
+        }
+        val created = pthread_create(thread.ptr, null, entry, reference.asCPointer())
+        try {
+            assertEquals(0, created)
+            val deadline = bridge.runtime_clock_nanos() + 1_000_000_000uL
+            var task = 0uL
+            while (bridge.runtime_clock_nanos() < deadline) {
+                task = handle.load().toULong()
+                val state = bridge.fast_handoff_task_state(task).toInt()
+                if (state == TaskState.BLOCKED.ordinal) break
+                bridge.fast_handoff_yield()
+            }
+            assertEquals(TaskState.BLOCKED.ordinal, bridge.fast_handoff_task_state(task).toInt())
+            val before = bridge.fast_handoff_clock(task).useContents { system }
+            repeat(32) { bridge.fast_handoff_yield() }
+            bridge.fast_handoff_clock(task).useContents {
+                assertEquals(0uL, user)
+                assertEquals(before, system)
+            }
+        } finally {
+            if (created == 0) {
+                bridge.fast_handoff_unpark(handle.load().toULong())
+                assertEquals(0, pthread_join(thread.value, null))
+            }
+            reference.dispose()
+        }
+    }
+
     @Test
     fun busyKernelWorkerCannotStarveRunnableRuntimeThread() = memScoped {
         val progress = AtomicInt(0)

@@ -18,10 +18,7 @@ object Apic {
     ) {
         disableLegacyPic()
 
-        val lapicReady = LocalApic.initialize(
-            physicalAddress = lapicPhysicalAddress.toULong(),
-            timerVector = LAPIC_TIMER_INTERRUPT_VECTOR,
-        )
+        val lapicReady = LocalApic.initialize(lapicPhysicalAddress.toULong())
         if (!lapicReady) {
             println("APIC: LAPIC initialization failed")
             return

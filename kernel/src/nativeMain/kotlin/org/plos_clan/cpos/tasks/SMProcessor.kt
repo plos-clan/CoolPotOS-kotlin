@@ -10,7 +10,6 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.get
 import kotlinx.cinterop.pointed
 import kotlinx.cinterop.toLong
-import org.plos_clan.cpos.drivers.acpi.apic.LAPIC_TIMER_INTERRUPT_VECTOR
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.syscall.Syscall
 import org.plos_clan.cpos.utils.CpuID
@@ -30,7 +29,7 @@ data class CpuLocal(
     var physical: UInt = 0u,
     var virtual: UInt = 0u,
 ) {
-    var scheduler = PerCpuScheduler()
+    val scheduler = PerCpuScheduler()
 }
 
 @OptIn(ExperimentalNativeApi::class)
@@ -43,23 +42,23 @@ fun apStart() {
     bridge.ap_gdt_setup(lapicId.toULong())
     Syscall.initialize(lapicId.toULong(), false)
     LocalApic.enableController()
-    val timerReady = LAPIC_TIMER_INTERRUPT_VECTOR <= UByte.MAX_VALUE.toUInt() &&
-            LocalApic.configureDeadlineTimer(
-                vector = LAPIC_TIMER_INTERRUPT_VECTOR.toUByte(),
-            )
-    if (!timerReady) {
+    if (!LocalApic.configureDeadlineTimer()) {
         println("APIC: failed to configure AP $lapicId TSC-deadline timer")
         return
     }
     CpuID.apInit(SMProcessor.currentLocal())
     SMProcessor.load_done.incrementAndFetch()
-    val scheduler = SMProcessor.currentLocal().scheduler
+    val local = SMProcessor.currentLocal()
+    val scheduler = local.scheduler
     scheduler.waitForBindRequest()
     val initialized = Scheduler.apInitialize()
     scheduler.completeBind(initialized)
     if (!initialized || !scheduler.waitUntilEnabled()) return
     bridge.enable_interrupt()
-    bridge.fast_handoff_idle()
+    while (true) {
+        val sequence = Scheduler.service(local)
+        bridge.fast_handoff_park_kotlin(0uL, sequence, true)
+    }
 }
 
 object SMProcessor {

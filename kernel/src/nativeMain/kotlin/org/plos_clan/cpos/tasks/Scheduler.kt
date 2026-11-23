@@ -1,9 +1,13 @@
-@file:OptIn(ExperimentalForeignApi::class, ExperimentalAtomicApi::class)
+@file:OptIn(ExperimentalForeignApi::class, ExperimentalAtomicApi::class, ExperimentalUnsignedTypes::class)
 
 package org.plos_clan.cpos.tasks
 
-import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.*
+import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.tasks.cgroup.Cgroups
+import org.plos_clan.cpos.utils.restoreInterrupts
+import org.plos_clan.cpos.utils.saveInterrupts
+import platform.posix.memset
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
@@ -18,6 +22,27 @@ private enum class SchedulerStartupState {
 class PerCpuScheduler {
     var bootstrapThread: Thread? = null
     private val startupState = AtomicReference(SchedulerStartupState.WAITING)
+    internal lateinit var queue: CPointer<bridge.fast_cpu_t>
+        private set
+
+    internal fun initialize(local: CpuLocal, levels: Int, slices: CPointer<ULongVar>) {
+        val header = sizeOf<bridge.fast_cpu_t>()
+        val size = header + levels * sizeOf<ULongVar>()
+        val allocation = nativeHeap.alloc(size, alignOf<bridge.fast_cpu_t>())
+        val storage = allocation.reinterpret<ByteVar>().ptr
+        memset(storage, 0, size.toULong())
+        queue = storage.reinterpret()
+        val counts = checkNotNull(storage + header)
+        with(queue.pointed) {
+            this.counts = counts.reinterpret()
+            this.slices = slices
+            this.levels = levels.toUInt()
+            strongest = this.levels - 1u
+            logical_id = local.cpuid.toUInt()
+            lapic_id = local.lapicId.toULong()
+            is_bsp = if (local.isBsp) 1u else 0u
+        }
+    }
 
     internal fun requestBind() {
         check(startupState.compareAndSet(
@@ -70,8 +95,31 @@ object Scheduler {
         )
     }
 
+    private val slices by lazy(LazyThreadSafetyMode.NONE) { policy.sliceTable().pin() }
+
+    internal fun service(local: CpuLocal): ULong {
+        val sequence = bridge.fast_handoff_service()
+        val queue = local.scheduler.queue
+        if (queue.pointed.device_pending != 0.toUByte()) {
+            val flags = saveInterrupts()
+            try {
+                queue.pointed.device_pending = 0u
+                if (LocalApic.serviceDevices()) queue.pointed.device_pending = 1u
+            } finally {
+                restoreInterrupts(flags)
+            }
+        }
+        if (!bridge.fast_handoff_needs_balance()) return sequence
+        policy.distribute(local, { bridge.fast_handoff_load(it.scheduler.queue) }) { target ->
+            bridge.fast_handoff_transfer(queue, target.scheduler.queue)
+        }
+        return sequence
+    }
+
     fun initialize(): Boolean {
-        if (!initializeCurrentCpu(ProcessManager.getBootstrapThread(), true)) return false
+        val budgets = slices.addressOf(0)
+        for (local in policy.processors) local.scheduler.initialize(local, policy.levels, budgets)
+        if (!initializeCurrentCpu(ProcessManager.getBootstrapThread())) return false
         bridge.fast_handoff_yield()
 
         val applicationProcessors = policy.processors.filterNot(CpuLocal::isBsp)
@@ -91,18 +139,19 @@ object Scheduler {
         val affinity = checkNotNull(thread.nativeTask.affinity())
         val target = policy.nextProcessor(
             eligible = { CpuAffinity.contains(affinity, it.cpuid.toInt()) },
-            load = { bridge.fast_handoff_queue_size(it.lapicId.toULong()) },
+            load = { bridge.fast_handoff_load(it.scheduler.queue) },
         )
         enqueueThreadOn(thread, target.lapicId.toUInt())
     }
 
     fun enqueueThreadOn(thread: Thread, targetLapicId: UInt): Boolean {
-        if (SMProcessor.locals[targetLapicId] == null) {
+        val local = SMProcessor.locals[targetLapicId]
+        if (local == null) {
             println("Scheduler: target core $targetLapicId is unavailable")
             return false
         }
         val accepted = thread.nativeTask.access {
-            bridge.fast_handoff_enqueue(it, targetLapicId.toULong())
+            bridge.fast_handoff_enqueue(it, local.scheduler.queue)
         }
         if (accepted) SignalRouter.requestDelivery(thread)
         return accepted
@@ -129,35 +178,26 @@ object Scheduler {
 
     fun apInitialize(): Boolean {
         val thread = SMProcessor.currentLocal().scheduler.bootstrapThread
-        return initializeCurrentCpu(thread, false) && finishBootstrap()
+        return initializeCurrentCpu(thread) && finishBootstrap()
     }
 
-    fun finishBootstrap(): Boolean {
-        val local = SMProcessor.currentLocal()
-        val thread = local.scheduler.bootstrapThread ?: return false
-        return thread.nativeTask.access { bridge.fast_handoff_finish_bootstrap(it) }
-    }
+    fun finishBootstrap(): Boolean = bridge.fast_handoff_finish_bootstrap()
 
-    private fun initializeCurrentCpu(bootstrapThread: Thread?, isBsp: Boolean): Boolean {
+    private fun initializeCurrentCpu(bootstrapThread: Thread?): Boolean {
         val local = SMProcessor.currentLocal()
         val localScheduler = local.scheduler
         val thread = bootstrapThread ?: run {
             println("Scheduler: core ${local.lapicId} has no bootstrap thread")
             return false
         }
-        val lapicId = local.lapicId.toULong()
-        val bootstrap = if (isBsp) 1u.toUByte() else 0u.toUByte()
-        val cpuId = local.cpuid.toUInt()
-        val bound = thread.nativeTask.access {
-            bridge.fast_handoff_bind_current(it, lapicId, bootstrap, cpuId)
-        }
+        val bound = thread.nativeTask.access { bridge.fast_handoff_bind_current(it, localScheduler.queue) }
         if (!bound) {
             println("Scheduler: cannot bind bootstrap thread on core ${local.lapicId}")
             return false
         }
         localScheduler.bootstrapThread = thread
 
-        if (isBsp) {
+        if (local.isBsp) {
             println("Scheduler: initialized policy=weighted-fair core=${local.lapicId}")
         }
         return true

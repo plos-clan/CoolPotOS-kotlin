@@ -37,7 +37,7 @@ uint64_t read_tsc(void) {
     return ((uint64_t)high << 32) | low;
 }
 
-static uint64_t scale(uint64_t value) {
+uint64_t runtime_clock_duration(uint64_t value) {
     const uint128_t result =
         ((uint128_t)value * tsc.multiplier) >> vdso_tsc_to_ns_shift;
     return result > UINT64_MAX ? UINT64_MAX : (uint64_t)result;
@@ -62,7 +62,7 @@ uint64_t runtime_clock_frequency(void) {
 
 uint64_t runtime_clock_nanos(void) {
     if (!runtime_clock_frequency()) return 0;
-    return scale(read_tsc() - tsc.epoch);
+    return runtime_clock_duration(read_tsc() - tsc.epoch);
 }
 
 bool runtime_vdso_initialize(vdso_image_t *image) {

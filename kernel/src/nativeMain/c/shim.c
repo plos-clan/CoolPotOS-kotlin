@@ -133,10 +133,12 @@ __attribute__((used)) uint64_t enter_kernel_tls(void) {
     const uint64_t user = rdmsr(ia32_fs_base_msr);
     const uint64_t kernel = CPOS_CPU_STATE->kernel_fs_base;
     if (user != kernel) wrmsr(ia32_fs_base_msr, kernel);
+    fast_handoff_account_mode(false);
     return user;
 }
 
 __attribute__((used)) void leave_kernel_tls(uint64_t user) {
+    fast_handoff_account_mode(true);
     if (user != CPOS_CPU_STATE->kernel_fs_base) wrmsr(ia32_fs_base_msr, user);
 }
 
@@ -198,14 +200,10 @@ void asm_syscall_handle(void) {
         "movq %rax, 120(%rsp)\n"
         "movq %rsp, %rdi\n"
         "call enter_syscall\n"
-        "xorl %edi, %edi\n"
-        "call fast_handoff_account_mode\n"
         "movq %rsp, %rdi\n"
         "sti\n"
         "call syscall_handler\n"
         "cli\n"
-        "movl $1, %edi\n"
-        "call fast_handoff_account_mode\n"
         "movq %rsp, %r13\n"
         ".Lrestore_user:\n"
         CPOS_LOAD_USER_FS

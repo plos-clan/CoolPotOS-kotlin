@@ -19,6 +19,7 @@ import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.tasks.TaskReaper
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
+import org.plos_clan.cpos.tasks.SMProcessor
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
@@ -119,8 +120,9 @@ object KernelCoroutines {
 
     private fun runUntil(completed: () -> Boolean) {
         val dispatcher = dispatcher
+        val local = SMProcessor.currentLocal()
         while (!completed()) {
-            val wakeSequence = bridge.fast_handoff_service()
+            val wakeSequence = Scheduler.service(local)
             val pendingSwitch = TaskReaper.reapRuntime()
             dispatcher.runReadyBatch()
             if (completed()) return

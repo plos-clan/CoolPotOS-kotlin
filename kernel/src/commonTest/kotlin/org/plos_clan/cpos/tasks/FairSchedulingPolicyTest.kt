@@ -32,14 +32,32 @@ class FairSchedulingPolicyTest {
     }
 
     @Test
-    fun separatesWeightFromExecutionQuantum() {
+    @OptIn(ExperimentalUnsignedTypes::class)
+    fun normalizesEveryRoundAgainstItsStrongestRunnablePriority() {
         val policy = FairSchedulingPolicy(listOf(0), 1_000_000_000uL, 1_000u)
-        for (nice in NicePriority.MIN until NicePriority.MAX) {
-            assertTrue(policy.weight(nice) > policy.weight(nice + 1))
+        val levels = policy.levels
+        val slices = policy.sliceTable()
+        for (best in 0 until levels) {
+            assertEquals(policy.quantumCycles, slices[best * levels + best])
+            for (rank in best + 1 until levels) {
+                val budget = slices[rank * levels + best]
+                assertTrue(budget in 1uL until slices[(rank - 1) * levels + best])
+            }
         }
-        assertEquals(1024u, policy.weight(0))
-        assertEquals(1_000_000uL, policy.quantumCycles)
-        assertEquals(15u, policy.weight(NicePriority.MAX))
+        val normal = policy.rank(0)
+        val lowest = policy.rank(NicePriority.MAX)
+        assertEquals(1_000_000uL * 15u / 1024u, slices[lowest * levels + normal])
+    }
+
+    @Test
+    fun triesAnotherReceiverWhenTheIdlestProcessorIsOutsideAffinity() {
+        val policy = FairSchedulingPolicy(listOf(0, 1, 2, 3), 10uL, 1u)
+        val attempted = mutableListOf<Int>()
+        assertTrue(policy.distribute(2, Int::toULong) {
+            attempted += it
+            it == 1
+        })
+        assertEquals(listOf(0, 1), attempted)
     }
 
     @Test
