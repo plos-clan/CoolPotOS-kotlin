@@ -1,9 +1,9 @@
 [versions]
-kotlin = "2.4.20"
+kotlin = "2.4.21"
 kotlinx-benchmark = "0.5.0"
 kotlinx-coroutines = "1.11.0"
-kotlinx-io = "0.9.1"
-kotlinx-serialization = "1.11.0"
+kotlinx-io = "0.9.3"
+kotlinx-serialization = "1.13.0"
 
 [libraries]
 kotlinx-benchmark-runtime = { module = "org.jetbrains.kotlinx:kotlinx-benchmark-runtime", version.ref = "kotlinx-benchmark" }
