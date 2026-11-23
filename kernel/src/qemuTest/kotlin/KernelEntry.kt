@@ -16,7 +16,7 @@ fun kernelMain() = KernelBoot.start {
             suite.testCases.values.filter { filter.containsMatchIn("${suite.name}.${it.name}") }
         }.filterValues { it.isNotEmpty() }
         val report = VerificationReport("test", { TscClock.nanoTime().toLong() }) { record ->
-            val bytes = record.encodeToByteArray()
+            val bytes = "\n$record".encodeToByteArray()
             bytes.usePinned { serialPrint(it.addressOf(0), bytes.size.toULong()) }
         }
         val success = report.run(suites.values.sumOf { it.size }) {

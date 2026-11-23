@@ -77,7 +77,6 @@ void kt_ap_start(void);
 bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num);
 void fast_handoff_account_mode(bool user);
 bool tlb_handle_nmi(void);
-bool fast_handoff_prepare_runtime(uint64_t stack, uint64_t tls);
 void fast_handoff_publish_runtime(uint64_t task);
 void kernel_clone_thread_entry(void);
 void set_kernel_runtime_fs_base(uint64_t pointer);

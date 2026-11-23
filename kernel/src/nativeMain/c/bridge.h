@@ -62,7 +62,8 @@ bool fast_handoff_transfer(fast_cpu_t *donor, fast_cpu_t *target);
 bool fast_handoff_needs_balance(void);
 uint64_t fast_handoff_load(fast_cpu_t *cpu);
 uint64_t fast_handoff_service(void);
-void fast_handoff_wake_bsp(void);
+void fast_handoff_wake_worker(fast_cpu_t *cpu);
+fast_task_t *fast_handoff_open_runtime(fast_cpu_t **cpus, size_t count);
 void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence, bool may_sleep);
 uint64_t fast_handoff_create_task(
     uint32_t id,

@@ -7,6 +7,7 @@ import org.plos_clan.cpos.drivers.MemoryDevice
 import org.plos_clan.cpos.drivers.RealtimeClock
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.acpi.Acpi
+import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.drivers.char.SerialConsole
 import org.plos_clan.cpos.drivers.char.tty.TtyManager
 import org.plos_clan.cpos.drivers.usb.Usb
@@ -52,7 +53,7 @@ object KernelBoot {
         if (!TscClock.initialize()) {
             return
         }
-        if (!Acpi.initialize()) {
+        if (!Acpi.initialize() || !LocalApic.isBspDeadlineTimerReady) {
             return
         }
         RealtimeClock.initialize()
@@ -72,9 +73,6 @@ object KernelBoot {
         KernelRandom.initialize()
         BootIdentity.initialize(KernelRandom.uuidV4())
         if (!FileSystemManager.initialize()) {
-            return
-        }
-        if (!KernelCoroutines.initialize()) {
             return
         }
         Acpi.enumerateDevices()

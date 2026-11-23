@@ -25,7 +25,7 @@ class KernelCoroutineQueueBenchmark {
 
     @Benchmark
     fun rescheduleReadyTask(): Runnable {
-        val ready = queue.claimReady(deadline, 1).single()
+        val ready = checkNotNull(queue.poll { deadline })
         deadline++
         queue.scheduleAt(deadline, ready)
         return ready

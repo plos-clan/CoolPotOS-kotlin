@@ -1,31 +1,31 @@
 package org.plos_clan.cpos.coroutines
 
-import kotlinx.coroutines.Runnable
+import org.plos_clan.cpos.time.MonotonicClock
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class KernelCoroutineQueueTest {
     @Test
-    fun claimsImmediateTasksInFifoBatches() {
+    fun pollsImmediateTasksInFifoOrder() {
         val queue = KernelCoroutineQueue()
         val executed = mutableListOf<String>()
+        val noTimer = { error("Ready work must not read the clock") }
         queue.enqueue { executed += "first" }
         queue.enqueue { executed += "second" }
         queue.enqueue { executed += "third" }
 
-        assertTrue(queue.hasImmediateWork())
-        queue.claimReady(0uL, 2).forEach { it.run() }
+        assertEquals(3, queue.readyCount)
+        repeat(2) { checkNotNull(queue.poll(noTimer)).run() }
         assertEquals(listOf("first", "second"), executed)
-        assertTrue(queue.hasImmediateWork())
+        assertEquals(1, queue.readyCount)
 
-        queue.claimReady(0uL, 2).forEach { it.run() }
+        checkNotNull(queue.poll(noTimer)).run()
         assertEquals(listOf("first", "second", "third"), executed)
-        assertFalse(queue.hasImmediateWork())
+        assertNull(queue.poll(noTimer))
     }
 
     @Test
@@ -37,8 +37,8 @@ class KernelCoroutineQueueTest {
         val second = queue.scheduleAt(10uL) { executed += "second" }
 
         assertEquals(10uL, queue.nextDeadline())
-        assertTrue(queue.claimReady(9uL, 3).isEmpty())
-        queue.claimReady(10uL, 3).forEach { it.run() }
+        assertNull(queue.poll { 9uL })
+        repeat(2) { checkNotNull(queue.poll { 10uL }).run() }
 
         assertEquals(listOf("first", "second"), executed)
         assertFalse(queue.dispose(first))
@@ -56,7 +56,7 @@ class KernelCoroutineQueueTest {
         assertTrue(queue.dispose(discarded))
         assertFalse(queue.dispose(discarded))
         assertEquals(20uL, queue.nextDeadline())
-        queue.claimReady(20uL, 1).forEach { it.run() }
+        checkNotNull(queue.poll { 20uL }).run()
 
         assertEquals(listOf("retained"), executed)
         assertFalse(queue.dispose(retained))
@@ -78,11 +78,11 @@ class KernelCoroutineQueueTest {
                 .sortedWith(compareBy({ tasks[it].deadlineNanos }, { it }))
             for (id in retained) {
                 assertEquals(tasks[id].deadlineNanos, queue.nextDeadline())
-                queue.claimReady(ULong.MAX_VALUE, 1).single().run()
+                checkNotNull(queue.poll { ULong.MAX_VALUE }).run()
             }
             assertEquals(retained, executed)
             assertNull(queue.nextDeadline())
-            assertTrue(queue.claimReady(ULong.MAX_VALUE, 1).isEmpty())
+            assertNull(queue.poll { ULong.MAX_VALUE })
         }
     }
 
@@ -100,26 +100,19 @@ class KernelCoroutineQueueTest {
 
         var fired = false
         queue.scheduleAt(ULong.MAX_VALUE) { fired = true }
-        assertTrue(queue.claimReady(ULong.MAX_VALUE - 1u, 1).isEmpty())
-        queue.claimReady(ULong.MAX_VALUE, 1).single().run()
+        assertNull(queue.poll { ULong.MAX_VALUE - 1u })
+        checkNotNull(queue.poll { ULong.MAX_VALUE }).run()
         assertTrue(fired)
         assertNull(queue.nextDeadline())
     }
 
     @Test
-    fun saturatesDeadlinesAndValidatesBatchSize() {
-        val queue = KernelCoroutineQueue()
-        val noop = Runnable {}
-
-        assertEquals(42uL, queue.schedule(42uL, 0, noop).deadlineNanos)
-        assertEquals(
-            ULong.MAX_VALUE,
-            queue.schedule(ULong.MAX_VALUE - 500_000uL, 1, noop).deadlineNanos,
-        )
-        assertEquals(
-            ULong.MAX_VALUE,
-            queue.schedule(1uL, Long.MAX_VALUE, noop).deadlineNanos,
-        )
-        assertFailsWith<IllegalArgumentException> { queue.claimReady(0uL, 0) }
+    fun saturatesDeadlines() {
+        var now = 42uL
+        val clock = MonotonicClock { now }
+        assertEquals(now, clock.deadlineAfterMillis(0))
+        assertEquals(ULong.MAX_VALUE, clock.deadlineAfterMillis(Long.MAX_VALUE))
+        now = ULong.MAX_VALUE - 500_000uL
+        assertEquals(ULong.MAX_VALUE, clock.deadlineAfterMillis(1))
     }
 }

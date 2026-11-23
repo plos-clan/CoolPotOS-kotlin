@@ -1,5 +1,8 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package org.plos_clan.cpos.drivers.usb.adapt.msc
 
+import kotlin.concurrent.atomics.AtomicBoolean
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.NonCancellable
@@ -79,30 +82,27 @@ private constructor(
         command.copyInto(iu, 16)
         memory.copyFrom(0, iu, 0, iu.size)
         val stream = if (streamCount == 0) 0 else slot.tag
-        var status =
-            async(start = CoroutineStart.UNDISPATCHED) {
-                slot.transfer(endpoints[1], memory, 512, STATUS_SIZE, stream)
-            }
         var data: Deferred<TransferResult>? = null
-        var finished = false
+        val finished = AtomicBoolean(false)
+        var ready = false
         val endpoint = endpoints[if (direction == ScsiDirection.IN) 2 else 3]
-        if (streamCount != 0 && length != 0) {
-            data =
-                async(start = CoroutineStart.UNDISPATCHED) {
-                    slot
-                        .data(endpoint, direction, checkNotNull(buffer), offset, length, stream)
-                        .also {
-                            if (!it.successful && !finished) stop()
-                        }
-                }
+        suspend fun sendCommand() {
+            val sent = slot.transfer(endpoints[0], memory, 0, iu.size)
+            if (!sent.successful || sent.actualLength != iu.size.toUInt()) stop()
         }
-        val sent = slot.transfer(endpoints[0], memory, 0, iu.size)
-        if (!sent.successful || sent.actualLength != iu.size.toUInt()) {
-            stop()
-            return@coroutineScope unavailable
+        suspend fun submitPhase() {
+            if (length == 0 || stream == 0 && !ready) return sendCommand()
+            val payload = checkNotNull(buffer)
+            val command = if (ready) null else ::sendCommand
+            data = async(start = CoroutineStart.UNDISPATCHED) {
+                val result = slot.data(endpoint, direction, payload, offset, length, stream, command)
+                if (!result.successful && !finished.load()) stop()
+                result
+            }
         }
         while (true) {
-            val received = status.await()
+            val received = slot.transfer(endpoints[1], memory, 512, STATUS_SIZE, stream, ::submitPhase)
+            if (!connected) return@coroutineScope unavailable
             if (!received.successful || received.actualLength < 4u) {
                 stop()
                 return@coroutineScope unavailable
@@ -127,16 +127,7 @@ private constructor(
                     stop()
                     return@coroutineScope unavailable
                 }
-                status =
-                    async(start = CoroutineStart.UNDISPATCHED) {
-                        slot.transfer(endpoints[1], memory, 512, STATUS_SIZE)
-                    }
-                data =
-                    async(start = CoroutineStart.UNDISPATCHED) {
-                        slot.data(endpoint, direction, checkNotNull(buffer), offset, length).also {
-                            if (!it.successful && !finished) stop()
-                        }
-                    }
+                ready = true
                 continue
             }
             if (id != 3 || response.size < 16) {
@@ -149,7 +140,7 @@ private constructor(
                 return@coroutineScope unavailable
             }
             val code = response[6].toUByte().toInt()
-            finished = true
+            finished.store(true)
             if (code != 0 && data?.isCompleted == false) {
                 if (
                     !iface.device.host.cancel(

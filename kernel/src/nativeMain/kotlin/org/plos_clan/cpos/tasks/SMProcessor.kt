@@ -10,6 +10,7 @@ import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.get
 import kotlinx.cinterop.pointed
 import kotlinx.cinterop.toLong
+import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.syscall.Syscall
 import org.plos_clan.cpos.utils.CpuID
@@ -55,10 +56,7 @@ fun apStart() {
     scheduler.completeBind(initialized)
     if (!initialized || !scheduler.waitUntilEnabled()) return
     bridge.enable_interrupt()
-    while (true) {
-        val sequence = Scheduler.service(local)
-        bridge.fast_handoff_park_kotlin(0uL, sequence, true)
-    }
+    KernelCoroutines.runEventLoop()
 }
 
 object SMProcessor {

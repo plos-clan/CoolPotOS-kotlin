@@ -63,7 +63,7 @@ internal class FairSchedulingPolicy<T>(
         return false
     }
 
-    fun nextProcessor(eligible: (T) -> Boolean = { true }, load: (T) -> ULong): T {
+    inline fun nextProcessor(eligible: (T) -> Boolean = { true }, load: (T) -> ULong): T {
         if (processors.size == 1) {
             val processor = processors[0]
             require(eligible(processor))

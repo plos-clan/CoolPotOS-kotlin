@@ -23,10 +23,6 @@ internal class KernelCoroutineQueue {
         immediate.addLast(runnable)
     }
 
-    fun schedule(nowNanos: ULong, delayMillis: Long, runnable: Runnable): DelayedCoroutineTask {
-        return scheduleAt(deadlineNanos(nowNanos, delayMillis), runnable)
-    }
-
     fun scheduleAt(deadlineNanos: ULong, runnable: Runnable): DelayedCoroutineTask {
         if (delayed.size == 0) {
             nextSequence = 0uL
@@ -44,52 +40,19 @@ internal class KernelCoroutineQueue {
 
     fun dispose(task: DelayedCoroutineTask): Boolean = delayed.remove(task.entry)
 
-    fun claimReady(nowNanos: ULong, limit: Int): List<Runnable> {
-        require(limit > 0) { "limit must be positive" }
-
-        while (immediate.size < limit && delayed.size != 0) {
-            val next = checkNotNull(delayed.peek())
-            if (next.deadlineNanos > nowNanos) {
-                break
-            }
-
-            val ready = checkNotNull(delayed.removeFirst())
-            immediate.addLast(ready.runnable)
+    inline fun poll(now: () -> ULong): Runnable? {
+        val next = delayed.peek()
+        if (next != null && next.deadlineNanos <= now()) {
+            delayed.remove(next.entry)
+            if (immediate.isEmpty()) return next.runnable
+            immediate.addLast(next.runnable)
         }
-
-        if (immediate.isEmpty()) {
-            return emptyList()
-        }
-        val claimed = ArrayList<Runnable>(minOf(limit, immediate.size))
-        while (claimed.size < limit && immediate.isNotEmpty()) {
-            claimed += immediate.removeFirst()
-        }
-        return claimed
+        return immediate.removeFirstOrNull()
     }
 
-    fun hasImmediateWork(): Boolean = immediate.isNotEmpty()
+    val readyCount: Int get() = immediate.size
+
+    fun steal(): Runnable? = immediate.removeLastOrNull()
 
     fun nextDeadline(): ULong? = delayed.peek()?.deadlineNanos
-
-    private fun deadlineNanos(nowNanos: ULong, delayMillis: Long): ULong {
-        if (delayMillis <= 0) {
-            return nowNanos
-        }
-
-        val millis = delayMillis.toULong()
-        val delayNanos = if (millis > ULong.MAX_VALUE / NANOS_PER_MILLISECOND) {
-            ULong.MAX_VALUE
-        } else {
-            millis * NANOS_PER_MILLISECOND
-        }
-        return if (delayNanos > ULong.MAX_VALUE - nowNanos) {
-            ULong.MAX_VALUE
-        } else {
-            nowNanos + delayNanos
-        }
-    }
-
-    private companion object {
-        const val NANOS_PER_MILLISECOND = 1_000_000uL
-    }
 }

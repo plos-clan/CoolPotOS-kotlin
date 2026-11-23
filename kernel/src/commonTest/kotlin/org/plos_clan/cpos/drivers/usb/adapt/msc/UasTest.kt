@@ -21,6 +21,40 @@ import org.plos_clan.cpos.utils.BigEndianBuffer
 
 class UasTest {
     @Test
+    fun commandWaitsForBothStreamAdmissions() = runBlocking {
+        val host = StorageHost()
+        val status = CompletableDeferred<Unit>()
+        val data = CompletableDeferred<Unit>()
+        val postingData = CompletableDeferred<Unit>()
+        host.onSubmit = { request ->
+            when (request.endpointAddress.toInt()) {
+                0x82 -> status.await()
+                0x83 -> {
+                    postingData.complete(Unit)
+                    data.await()
+                }
+                1 -> {
+                    host.complete(request)
+                    host.complete(host.requests[1])
+                    host.status(1)
+                }
+            }
+        }
+        val transport = assertNotNull(UasTransport.create(host.interfaceFor(true), host::allocate))
+        val buffer = ByteArrayBuffer(ByteArray(512))
+        val operation = async(start = CoroutineStart.UNDISPATCHED) {
+            transport.execute(0uL, byteArrayOf(0x28), ScsiDirection.IN, buffer, 0, 512)
+        }
+        assertEquals(listOf(0x82), host.requests.map { it.endpointAddress.toInt() })
+        status.complete(Unit)
+        postingData.await()
+        assertEquals(listOf(0x82, 0x83), host.requests.map { it.endpointAddress.toInt() })
+        data.complete(Unit)
+        assertEquals(ScsiStatus.GOOD, operation.await().status)
+        transport.close()
+    }
+
+    @Test
     fun streamsCompleteOutOfOrderWithoutMixingBuffers() = runBlocking {
         val host = StorageHost()
         host.onSubmit = { if (it.endpointAddress == 1u.toUByte()) host.complete(it) }

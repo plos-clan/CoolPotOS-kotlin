@@ -3,8 +3,11 @@
 package org.plos_clan.cpos.tasks
 
 import kotlinx.cinterop.*
+import org.plos_clan.cpos.coroutines.KernelWorker
+import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
 import org.plos_clan.cpos.tasks.cgroup.Cgroups
+import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.restoreInterrupts
 import org.plos_clan.cpos.utils.saveInterrupts
 import platform.posix.memset
@@ -20,6 +23,9 @@ private enum class SchedulerStartupState {
 }
 
 class PerCpuScheduler {
+    internal val worker = KernelWorker(TscClock, IrqSpinLock()) {
+        bridge.fast_handoff_wake_worker(queue)
+    }
     var bootstrapThread: Thread? = null
     private val startupState = AtomicReference(SchedulerStartupState.WAITING)
     internal lateinit var queue: CPointer<bridge.fast_cpu_t>
@@ -118,11 +124,15 @@ object Scheduler {
 
     fun initialize(): Boolean {
         val budgets = slices.addressOf(0)
-        for (local in policy.processors) local.scheduler.initialize(local, policy.levels, budgets)
+        val processors = policy.processors
+        val queues = nativeHeap.allocArray<CPointerVar<bridge.fast_cpu_t>>(processors.size)
+        processors.forEachIndexed { index, local ->
+            local.scheduler.initialize(local, policy.levels, budgets)
+            queues[index] = local.scheduler.queue
+        }
         if (!initializeCurrentCpu(ProcessManager.getBootstrapThread())) return false
-        bridge.fast_handoff_yield()
 
-        val applicationProcessors = policy.processors.filterNot(CpuLocal::isBsp)
+        val applicationProcessors = processors.filterNot(CpuLocal::isBsp)
         applicationProcessors.forEach { local ->
             if (local.scheduler.bootstrapThread == null) {
                 local.scheduler.bootstrapThread = ProcessManager.getNewApIdleThread()
@@ -132,6 +142,13 @@ object Scheduler {
         if (applicationProcessors.any { !it.scheduler.waitUntilBound() }) return false
 
         applicationProcessors.forEach { it.scheduler.enable() }
+        var pending = bridge.fast_handoff_open_runtime(queues, processors.size.toULong())
+        while (pending != null) {
+            val task = pending
+            pending = task.pointed.next
+            bridge.fast_handoff_publish_runtime(task.toLong().toULong())
+        }
+        bridge.fast_handoff_yield()
         return true
     }
 

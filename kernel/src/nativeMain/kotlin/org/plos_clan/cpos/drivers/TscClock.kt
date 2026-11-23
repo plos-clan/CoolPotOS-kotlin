@@ -1,11 +1,18 @@
-@file:OptIn(ExperimentalForeignApi::class)
+@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+@file:OptIn(ExperimentalForeignApi::class, InternalForKotlinNative::class)
 
 package org.plos_clan.cpos.drivers
 
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.pointed
+import org.plos_clan.cpos.time.MonotonicClock
+import kotlin.native.internal.GCUnsafeCall
+import kotlin.native.internal.InternalForKotlinNative
 
-object TscClock : org.plos_clan.cpos.time.MonotonicClock {
+@GCUnsafeCall("runtime_clock_nanos")
+private external fun clockNanos(): ULong
+
+object TscClock : MonotonicClock {
     val isReady: Boolean
         get() = bridge.runtime_clock_frequency() != 0uL
 
@@ -25,5 +32,5 @@ object TscClock : org.plos_clan.cpos.time.MonotonicClock {
         return true
     }
 
-    override fun nanoTime(): ULong = bridge.runtime_clock_nanos()
+    override fun nanoTime(): ULong = clockNanos()
 }

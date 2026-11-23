@@ -49,13 +49,17 @@ long runtime_thread_prepare(void *stack, int *parent_tid, void *tls) {
     if (!stack || !parent_tid || !tls) return -EINVAL;
     const int tid = TCB(tls, int, tid);
     if (tid <= 0) return -EAGAIN;
-    *parent_tid = tid;
-    const bool use_runtime = can_use_runtime();
-    if (use_runtime) set_runtime_use_mask(false);
-    const bool started = fast_handoff_prepare_runtime((uintptr_t)stack, (uintptr_t)tls);
-    if (use_runtime) set_runtime_use_mask(true);
-    if (!started) *parent_tid = 0;
-    return started ? (long)tid : -ENOMEM;
+    const bool enabled = runtime_enabled;
+    runtime_enabled = false;
+    const uint64_t handle = fast_handoff_create_task(UINT32_MAX, 0, (uintptr_t)stack, (uintptr_t)tls, 0);
+    runtime_enabled = enabled;
+    *parent_tid = handle ? tid : 0;
+    if (!handle) return -ENOMEM;
+    switch_frame_t *frame = (switch_frame_t *)stack - 1;
+    *frame = (switch_frame_t){.rip = (uintptr_t)kernel_clone_thread_entry};
+    ((fast_task_t *)(uintptr_t)handle)->rsp = (uintptr_t)frame;
+    runtime_tls_owner((uintptr_t)tls)->task = handle;
+    return tid;
 }
 
 int runtime_thread_id(void) {
@@ -82,13 +86,13 @@ int __wrap_pthread_join(pthread_t thread, void **value) {
         while (!fast_handoff_task_has_exited(runtime_tls_owner((uintptr_t)thread)->task)) fast_handoff_yield();
         __atomic_store_n(&TCB(thread, int, isJoinable), 0, __ATOMIC_RELEASE);
     }
-    fast_handoff_wake_bsp();
+    fast_handoff_wake_worker(NULL);
     return result;
 }
 
 int __wrap_pthread_detach(pthread_t thread) {
     const int result = __real_pthread_detach(thread);
-    fast_handoff_wake_bsp();
+    fast_handoff_wake_worker(NULL);
     return result;
 }
 

@@ -37,14 +37,20 @@ interface HostController {
     suspend fun disableDevice(slotId: UByte)
 }
 
-suspend fun UsbDevice.transfer(request: UsbTransfer, timeoutMillis: Long): TransferResult {
+suspend fun UsbDevice.transfer(
+    request: UsbTransfer,
+    timeoutMillis: Long,
+    onSubmitted: (suspend () -> Unit)? = null,
+): TransferResult {
     require(timeoutMillis > 0)
     var submitted = false
     try {
         val result =
             withTimeoutOrNull(timeoutMillis) {
                 submitted = host.submit(slotId, request)
-                if (submitted) request.await() else TransferResult(TransferStatus.DRIVER_ERROR, 0u)
+                if (!submitted) return@withTimeoutOrNull TransferResult(TransferStatus.DRIVER_ERROR, 0u)
+                onSubmitted?.invoke()
+                request.await()
             }
         if (result != null) return result
         if (submitted)

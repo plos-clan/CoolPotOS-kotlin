@@ -83,8 +83,9 @@ abstract class StorageTransport(
             offset: Int,
             length: Int,
             stream: Int = 0,
+            onSubmitted: (suspend () -> Unit)? = null,
         ): TransferResult {
-            if (buffer is DmaBuffer) return transfer(endpoint, buffer, offset, length, stream)
+            if (buffer is DmaBuffer) return transfer(endpoint, buffer, offset, length, stream, onSubmitted)
             var memory = staging
             if (memory == null || memory.size < length) {
                 val replacement =
@@ -99,7 +100,7 @@ abstract class StorageTransport(
             ) {
                 return TransferResult(TransferStatus.DRIVER_ERROR, 0u)
             }
-            val result = transfer(endpoint, memory, 0, length, stream)
+            val result = transfer(endpoint, memory, 0, length, stream, onSubmitted)
             if (direction == ScsiDirection.IN && result.actualLength != 0u) {
                 val count = result.actualLength.toInt()
                 if (buffer.copyFrom(offset, memory, 0, count) != count) {
@@ -115,6 +116,7 @@ abstract class StorageTransport(
             offset: Int,
             length: Int,
             stream: Int = 0,
+            onSubmitted: (suspend () -> Unit)? = null,
         ): TransferResult {
             if (!connected) return TransferResult(TransferStatus.DISCONNECTED, 0u)
             val request =
@@ -129,7 +131,7 @@ abstract class StorageTransport(
                     ),
                     stream.toUShort(),
                 )
-            return iface.device.transfer(request, 30_000)
+            return iface.device.transfer(request, 30_000, onSubmitted)
         }
 
         fun close() {

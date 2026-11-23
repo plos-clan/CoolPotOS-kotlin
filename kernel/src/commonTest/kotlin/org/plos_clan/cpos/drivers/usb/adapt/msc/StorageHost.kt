@@ -35,7 +35,7 @@ internal class StorageHost : HostController {
     val cleared = mutableListOf<UByte>()
     val cancelled = mutableListOf<UByte>()
     var streams = 4
-    var onSubmit: (UsbTransfer) -> Unit = {}
+    var onSubmit: suspend (UsbTransfer) -> Unit = {}
 
     fun allocate(size: Int): DmaBuffer =
         Memory(ByteArray(size), (memory.size + 1).toULong() shl 32).also(memory::add)

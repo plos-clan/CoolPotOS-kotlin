@@ -1,20 +1,28 @@
 package org.plos_clan.cpos.coroutines
 
+import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Runnable
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.plos_clan.cpos.utils.CriticalSection
-import kotlin.coroutines.Continuation
+import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.resume
 
 class KernelEvent internal constructor(
     private val lock: CriticalSection,
-    private val wakeup: () -> Unit,
-) {
+    private val dispatcher: CoroutineDispatcher,
+) : Runnable {
     private var pending = false
-    private var waiter: Continuation<Unit>? = null
+    private var waiter: CancellableContinuation<Unit>? = null
 
     fun signal() {
-        lock.withLock { pending = true }
-        wakeup()
+        val notify = lock.withLock {
+            if (pending) return
+            pending = true
+            waiter != null
+        }
+        if (notify) dispatcher.dispatch(EmptyCoroutineContext, this)
     }
 
     suspend fun await() {
@@ -40,18 +48,15 @@ class KernelEvent internal constructor(
         }
     }
 
-    internal fun dispatchPending(): Boolean {
+    @OptIn(ExperimentalCoroutinesApi::class)
+    override fun run() {
         val continuation = lock.withLock {
-            if (!pending) {
-                return@withLock null
-            }
-            val current = waiter ?: return@withLock null
+            if (!pending) return
+            val current = waiter ?: return
             pending = false
             waiter = null
             current
-        } ?: return false
-
-        continuation.resume(Unit)
-        return true
+        }
+        with(continuation) { dispatcher.resumeUndispatched(Unit) }
     }
 }

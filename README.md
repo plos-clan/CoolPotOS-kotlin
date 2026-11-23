@@ -101,17 +101,17 @@ value for a build.
 
 ## Kernel coroutines
 
-Launch structured kernel work through `KernelCoroutines.scope` or child scopes
-derived from it. The kernel dispatcher supports `launch`, `async`, cancellation,
-timeouts, and non-blocking `delay`; continuations execute on the BSP bootstrap
-thread.
+Launch named kernel jobs with `KernelCoroutines.launch`. Children inherit a
+multicore dispatcher with one worker, ready queue and deadline heap per CPU.
+A continuation can resume on a different CPU after suspension.
+Events wake a waiter without polling an event registry,
+and timer insertion wakes only the owner of an earlier deadline.
 
 ```kotlin
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 
-KernelCoroutines.scope.launch {
+KernelCoroutines.launch("example") {
     delay(10)
     println("Kernel coroutine resumed")
 }
