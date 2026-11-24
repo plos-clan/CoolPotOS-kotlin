@@ -2,7 +2,7 @@
 
 package org.plos_clan.cpos.drivers.drm
 
-import kotlinx.cinterop.plus
+import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.TtyGraphicsDevice
 import org.plos_clan.cpos.fs.sysfs.Sysfs
 import org.plos_clan.cpos.fs.sysfs.SysfsBindings
@@ -24,19 +24,12 @@ internal class BootDisplay private constructor(
         Unit
     }
 
-    override fun present(scanout: DrmScanout) = device.presentGraphics { target ->
-        val framebuffer = scanout.framebuffer
-        val pixelBytes = format.bitsPerPixel / 8u
-        val rowBytes = mode.width * pixelBytes.toInt()
-        val sourceStart = framebuffer.offset.toULong() +
-            scanout.y.toULong() * framebuffer.pitch + scanout.x.toULong() * pixelBytes
-        for (row in 0 until mode.height) {
-            val sourceOffset = sourceStart + row.toULong() * framebuffer.pitch
-            val targetOffset = (row.toULong() * device.pitch).toInt()
-            val destination = checkNotNull(target + targetOffset)
-            framebuffer.buffer.copyTo(sourceOffset, destination, rowBytes)
+    override fun present(scanout: DrmScanout, damage: List<DrmClip>) =
+        device.presentGraphics(replace = damage.isEmpty()) { target ->
+            val pitch = device.pitch.toInt()
+            if (damage.isEmpty()) scanout.copyTo(target, pitch)
+            else for (clip in damage) scanout.copyTo(target, pitch, clip)
         }
-    }
 
     fun register(index: Int, clock: MonotonicClock) {
         val uevent = SysfsTextAttribute.constant("uevent", "DRIVER=cpos-boot\nMODALIAS=platform:cpos-boot\n")
@@ -51,7 +44,7 @@ internal class BootDisplay private constructor(
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return
         }
-        val drm = DrmDevice(this, clock)
+        val drm = DrmDevice(this, clock, KernelCoroutines.dispatcher::scheduleAt)
         drm.register(index, parent)
     }
 

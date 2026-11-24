@@ -1,5 +1,8 @@
 package org.plos_clan.cpos.drivers.drm
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Runnable
+import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceBackend
 import org.plos_clan.cpos.drivers.DeviceIoEvent
@@ -35,13 +38,57 @@ import org.plos_clan.cpos.utils.LittleEndianBuffer
 internal class DrmDevice(
     private val output: DrmOutput,
     private val clock: MonotonicClock,
+    private val scheduleAt: (ULong, Runnable) -> Unit,
 ) : PositionlessDeviceBackend {
     private val lock = KernelMutex()
     private var master: Client? = null
     private var scanout: DrmScanout? = null
+    private var pending: PageFlip? = null
     private var power = DrmPower.ON
     private var nextFramebuffer = DrmProperty.entries.maxOf { it.id } + 1u
     private val framebuffers = mutableMapOf<UInt, DrmFramebuffer>()
+
+    private inner class PageFlip(
+        private val next: DrmScanout,
+        private val event: DrmEvents.Flip?,
+    ) : Runnable {
+        var waiter: CompletableDeferred<Unit>? = null
+
+        override fun run(): Unit = lock.withLock {
+            if (pending !== this) return
+            try {
+                present(next)
+                val period = output.mode.periodNanos
+                val sequence = clock.nanoTime() / period
+                event?.complete(sequence * period, sequence.toUInt())
+            } finally {
+                pending = null
+                waiter?.complete(Unit)
+            }
+        }
+    }
+
+    private fun present(next: DrmScanout) {
+        try {
+            output.present(next)
+        } catch (failure: Throwable) {
+            next.close()
+            throw failure
+        }
+        scanout?.close()
+        scanout = next
+    }
+
+    private inline fun <T> withScanout(waitForFlip: Boolean = true, block: () -> T): T {
+        while (true) {
+            val waiter = lock.withLock {
+                val flip = pending
+                if (flip == null || !waitForFlip) return block()
+                flip.waiter ?: CompletableDeferred<Unit>().also { flip.waiter = it }
+            }
+            KernelCoroutines.await { waiter.await() }
+        }
+    }
 
     fun register(index: Int, parent: SysfsObjectHandle) {
         val directory = SysfsObjectSpec(name = "drm", parent = SysfsParent.Object(parent))
@@ -97,7 +144,7 @@ internal class DrmDevice(
         private var magic = 0u
         private var universalPlanes = false
         private val buffers = DrmFileBuffers()
-        private val events = DrmEvents(clock)
+        private val events = DrmEvents()
         private val ownedFramebuffers = mutableSetOf<UInt>()
 
         override fun subscribe(device: Device, subscription: PollSubscription) = events.subscribe(subscription)
@@ -114,7 +161,7 @@ internal class DrmDevice(
         override fun await(device: Device, event: DeviceIoEvent, count: Int): Boolean =
             event != DeviceIoEvent.READABLE || events.await()
 
-        override fun close(device: Device) = lock.withLock {
+        override fun close(device: Device) = withScanout {
             authority.revoke(magic)
             val current = scanout
             if (current != null && current.framebufferId in ownedFramebuffers) disable()
@@ -148,7 +195,7 @@ internal class DrmDevice(
                 process.fdTable.acquire(descriptor) ?: return -Errno.EBADF.toLong()
             } else null
             val result = try {
-                lock.withLock { dispatch(operation, argument, imported) }
+                withScanout(operation.waitForFlip) { dispatch(operation, argument, imported) }
             } catch (_: OutOfMemoryError) {
                 return -Errno.ENOMEM.toLong()
             } finally {
@@ -273,8 +320,8 @@ internal class DrmDevice(
             argument.bytes.fill(0, 16)
             val current = scanout ?: return 0
             data.writeU32(16, current.framebufferId)
-            data.writeU32(20, current.x)
-            data.writeU32(24, current.y)
+            data.writeU32(20, current.viewport.left)
+            data.writeU32(24, current.viewport.top)
             data.writeU32(32, 1u)
             output.mode.bytes.copyInto(argument.bytes, 36)
             return 0
@@ -298,12 +345,11 @@ internal class DrmDevice(
             if (!mode.contentEquals(output.mode.bytes.copyOfRange(0, 32))) return -Errno.EINVAL.toLong()
             val id = data.readU32(16)
             val framebuffer = framebuffer(id) ?: return -Errno.ENOENT.toLong()
-            val current = DrmScanout.create(framebuffer, id, data.readU32(20), data.readU32(24), output.mode)
+            val viewport = DrmClip(data.readU32(20), data.readU32(24), output.mode)
+            val current = DrmScanout.create(framebuffer, id, viewport)
                 ?: return -Errno.ENOSPC.toLong()
-            output.present(current)
+            present(current)
             power = DrmPower.ON
-            scanout?.close()
-            scanout = current
             return 0
         }
 
@@ -313,16 +359,24 @@ internal class DrmDevice(
             val flags = data.readU32(8)
             if (flags and 1u.inv() != 0u || data.readU32(12) != 0u) return -Errno.EINVAL.toLong()
             val previous = scanout ?: return -Errno.EBUSY.toLong()
+            if (pending != null) return -Errno.EBUSY.toLong()
+            if (power != DrmPower.ON) return -Errno.EINVAL.toLong()
             val id = data.readU32(4)
             val framebuffer = framebuffer(id) ?: return -Errno.ENOENT.toLong()
             val event = if (flags == 0u) null else events.prepare(data.readU64(16), CRTC)
             if (flags != 0u && event == null) return -Errno.EBUSY.toLong()
-            val current = DrmScanout.create(framebuffer, id, previous.x, previous.y, output.mode)
+            val current = DrmScanout.create(framebuffer, id, previous.viewport)
                 ?: return -Errno.ENOSPC.toLong()
-            if (power == DrmPower.ON) output.present(current)
-            scanout = current
-            previous.close()
-            if (event != null) events.complete(event)
+            try {
+                val flip = PageFlip(current, event)
+                val period = output.mode.periodNanos
+                val now = clock.nanoTime()
+                scheduleAt(now - now % period + period, flip)
+                pending = flip
+            } catch (error: OutOfMemoryError) {
+                current.close()
+                throw error
+            }
             return 0
         }
 
@@ -398,24 +452,14 @@ internal class DrmDevice(
             val framebuffer = framebuffer(id) ?: return -Errno.ENOENT.toLong()
             val count = data.readU32(12)
             if (data.readU32(4) != 0u || count > 256u) return -Errno.EINVAL.toLong()
-            if (count != 0u) {
+            val damage = if (count == 0u) emptyList() else {
                 val process = ProcessManager.currentProcess() ?: return -Errno.EFAULT.toLong()
                 val memory = UserMemory(process.addressSpace, data.readU64(16))
                 val clips = memory.copyFromUser(count.toInt() * 8) ?: return -Errno.EFAULT.toLong()
-                val rectangles = LittleEndianBuffer(clips)
-                for (index in 0 until count.toInt()) {
-                    val start = index * 8
-                    val x1 = rectangles.readU16(start).toUInt()
-                    val y1 = rectangles.readU16(start + 2).toUInt()
-                    val x2 = rectangles.readU16(start + 4).toUInt()
-                    val y2 = rectangles.readU16(start + 6).toUInt()
-                    if (x1 >= x2 || y1 >= y2 || x2 > framebuffer.width || y2 > framebuffer.height) {
-                        return -Errno.EINVAL.toLong()
-                    }
-                }
+                framebuffer.damage(clips) ?: return -Errno.EINVAL.toLong()
             }
             val current = scanout
-            if (current?.framebufferId == id && power == DrmPower.ON) output.present(current)
+            if (current?.framebufferId == id && power == DrmPower.ON) output.present(current, damage)
             return 0
         }
 

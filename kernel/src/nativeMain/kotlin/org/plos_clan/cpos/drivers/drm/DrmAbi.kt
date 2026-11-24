@@ -4,7 +4,12 @@ import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 
-internal enum class DrmCommand(val number: Int, val size: Int, val direction: Int = 3) {
+internal enum class DrmCommand(
+    val number: Int,
+    val size: Int,
+    val direction: Int = 3,
+    val waitForFlip: Boolean = false,
+) {
     VERSION(0x00, 64),
     GET_UNIQUE(0x01, 16),
     GET_MAGIC(0x02, 4, 2),
@@ -18,17 +23,17 @@ internal enum class DrmCommand(val number: Int, val size: Int, val direction: In
     PRIME_FD_TO_HANDLE(0x2e, 12),
     GET_RESOURCES(0xa0, 64),
     GET_CRTC(0xa1, 104),
-    SET_CRTC(0xa2, 104),
+    SET_CRTC(0xa2, 104, waitForFlip = true),
     CURSOR(0xa3, 28),
     GET_GAMMA(0xa4, 32),
     SET_GAMMA(0xa5, 32),
     GET_ENCODER(0xa6, 20),
     GET_CONNECTOR(0xa7, 80),
     GET_PROPERTY(0xaa, 64),
-    SET_CONNECTOR_PROPERTY(0xab, 16),
+    SET_CONNECTOR_PROPERTY(0xab, 16, waitForFlip = true),
     GET_FRAMEBUFFER(0xad, 28),
     ADD_FRAMEBUFFER(0xae, 28),
-    REMOVE_FRAMEBUFFER(0xaf, 4),
+    REMOVE_FRAMEBUFFER(0xaf, 4, waitForFlip = true),
     PAGE_FLIP(0xb0, 24),
     DIRTY_FRAMEBUFFER(0xb1, 24),
     CREATE_DUMB(0xb2, 32),
@@ -38,7 +43,7 @@ internal enum class DrmCommand(val number: Int, val size: Int, val direction: In
     GET_PLANE(0xb6, 32),
     ADD_FRAMEBUFFER2(0xb8, 104),
     GET_OBJECT_PROPERTIES(0xb9, 32),
-    SET_OBJECT_PROPERTY(0xba, 24),
+    SET_OBJECT_PROPERTY(0xba, 24, waitForFlip = true),
     CURSOR2(0xbb, 36),
     CREATE_LEASE(0xc6, 24),
     CLOSE_FRAMEBUFFER(0xd0, 8);

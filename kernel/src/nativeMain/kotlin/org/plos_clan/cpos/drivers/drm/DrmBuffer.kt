@@ -1,6 +1,12 @@
+@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+
 package org.plos_clan.cpos.drivers.drm
 
+import kotlinx.cinterop.CPointer
+import kotlinx.cinterop.UByteVar
+import kotlinx.cinterop.plus
 import org.plos_clan.cpos.mem.dmabuf.DmaBuffer
+import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.alignUp
 
@@ -19,6 +25,14 @@ internal class DumbLayout private constructor(val pitch: UInt, val size: ULong) 
     }
 }
 
+internal class DrmClip(val left: UInt, val top: UInt, val right: UInt, val bottom: UInt) {
+    constructor(left: UInt, top: UInt, mode: DrmMode) :
+        this(left, top, left + mode.width.toUInt(), top + mode.height.toUInt())
+
+    fun fits(framebuffer: DrmFramebuffer): Boolean =
+        left < right && top < bottom && right <= framebuffer.width && bottom <= framebuffer.height
+}
+
 internal class DrmFramebuffer private constructor(
     val buffer: DmaBuffer,
     val width: UInt,
@@ -32,6 +46,21 @@ internal class DrmFramebuffer private constructor(
     }
 
     fun close() = buffer.release()
+
+    fun damage(bytes: ByteArray): List<DrmClip>? {
+        if (bytes.size % 8 != 0) return null
+        val data = LittleEndianBuffer(bytes)
+        return List(bytes.size / 8) { index ->
+            val start = index * 8
+            val left = data.readU16(start).toUInt()
+            val top = data.readU16(start + 2).toUInt()
+            val right = data.readU16(start + 4).toUInt()
+            val bottom = data.readU16(start + 6).toUInt()
+            val clip = DrmClip(left, top, right, bottom)
+            if (!clip.fits(this)) return null
+            clip
+        }
+    }
 
     companion object {
         fun create(
@@ -55,8 +84,7 @@ internal class DrmFramebuffer private constructor(
 internal class DrmScanout private constructor(
     val framebuffer: DrmFramebuffer,
     val framebufferId: UInt,
-    val x: UInt,
-    val y: UInt,
+    val viewport: DrmClip,
 ) {
     init {
         check(framebuffer.buffer.retain())
@@ -64,12 +92,37 @@ internal class DrmScanout private constructor(
 
     fun close() = framebuffer.buffer.release()
 
+    fun copyTo(target: CPointer<UByteVar>, pitch: Int, clip: DrmClip = viewport) {
+        val left = maxOf(viewport.left, clip.left)
+        val top = maxOf(viewport.top, clip.top)
+        val right = minOf(viewport.right, clip.right)
+        val bottom = minOf(viewport.bottom, clip.bottom)
+        if (left >= right || top >= bottom) return
+
+        val pixelBytes = framebuffer.format.bitsPerPixel / 8u
+        val rowBytes = ((right - left) * pixelBytes).toInt()
+        val rows = (bottom - top).toInt()
+        val sourceRow = framebuffer.offset + top.toULong() * framebuffer.pitch
+        val targetRow = (top - viewport.top).toInt() * pitch
+        var source = sourceRow + left.toULong() * pixelBytes
+        var offset = targetRow + ((left - viewport.left) * pixelBytes).toInt()
+        if (rowBytes == pitch && rowBytes.toUInt() == framebuffer.pitch) {
+            val destination = checkNotNull(target + offset)
+            framebuffer.buffer.copyTo(source, destination, rows * rowBytes)
+            return
+        }
+        repeat(rows) {
+            val destination = checkNotNull(target + offset)
+            framebuffer.buffer.copyTo(source, destination, rowBytes)
+            source += framebuffer.pitch
+            offset += pitch
+        }
+    }
+
     companion object {
-        fun create(framebuffer: DrmFramebuffer, id: UInt, x: UInt, y: UInt, mode: DrmMode): DrmScanout? {
-            val fits = x.toULong() + mode.width.toUInt() <= framebuffer.width.toULong() &&
-                y.toULong() + mode.height.toUInt() <= framebuffer.height.toULong()
-            if (!fits) return null
-            return DrmScanout(framebuffer, id, x, y)
+        fun create(framebuffer: DrmFramebuffer, id: UInt, viewport: DrmClip): DrmScanout? {
+            if (!viewport.fits(framebuffer)) return null
+            return DrmScanout(framebuffer, id, viewport)
         }
     }
 }

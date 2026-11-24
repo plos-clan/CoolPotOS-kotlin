@@ -27,18 +27,21 @@ internal enum class DrmFormat(val fourcc: UInt, val layout: DrmPixelLayout, val 
     }
 }
 
-internal class DrmMode(val width: Int, val height: Int) {
+internal class DrmMode(val width: Int, val height: Int, refreshHz: UInt = 60u) {
     val name = "${width}x$height"
     val bytes = ByteArray(68)
+    val periodNanos: ULong
 
     init {
         require(width in 1..UShort.MAX_VALUE.toInt() && height in 1..UShort.MAX_VALUE.toInt())
+        require(refreshHz in 1u..1_000_000_000u)
+        periodNanos = (1_000_000_000uL + refreshHz / 2u) / refreshHz
         val data = LittleEndianBuffer(bytes)
-        val clock = width.toLong() * height * 60 / 1000
+        val clock = width.toULong() * height.toUInt() * refreshHz / 1000u
         data.writeU32(0, clock.toUInt())
         for (offset in intArrayOf(4, 6, 8, 10)) data.writeU16(offset, width.toUShort())
         for (offset in intArrayOf(14, 16, 18, 20)) data.writeU16(offset, height.toUShort())
-        data.writeU32(24, 60u)
+        data.writeU32(24, refreshHz)
         data.writeU32(32, 0x48u)
         name.encodeToByteArray().copyInto(bytes, 36)
     }
@@ -47,7 +50,7 @@ internal class DrmMode(val width: Int, val height: Int) {
 internal abstract class DrmOutput(val mode: DrmMode, val format: DrmFormat) {
     val formats = DrmFormat.entries.filter { it.layout == format.layout }
 
-    abstract fun present(scanout: DrmScanout)
+    abstract fun present(scanout: DrmScanout, damage: List<DrmClip> = emptyList())
     abstract fun blank()
     abstract fun disable()
 }

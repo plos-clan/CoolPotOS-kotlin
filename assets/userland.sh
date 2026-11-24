@@ -113,16 +113,15 @@ install -Dm644 /dev/stdin "$rootfs/etc/xdg/umbriel/config.toml" <<'EOF'
 autostart = ["noctalia"]
 
 [keybinds]
-"Mod+Q" = "window-close"
-"Mod+Return" = "spawn:noctalia msg panel-toggle launcher"
-"Mod+BackSlash" = "spawn:foot"
-"Mod+BackSpace" = "spawn:nemo"
-"Mod+C" = "spawn:noctalia msg panel-toggle clipboard"
+"Mod+Return" = "spawn noctalia msg panel-toggle launcher"
+"Mod+BackSlash" = "spawn foot"
+"Mod+BackSpace" = "spawn nemo"
+"Mod+V" = "spawn noctalia msg panel-toggle clipboard"
 "Mod+F" = "window-toggle-maximize"
 "Mod+Shift+F" = "window-toggle-fullscreen"
-"Mod+V" = "window-toggle-floating"
-"Print" = "spawn:noctalia msg screenshot-region"
-"Ctrl+Print" = "spawn:noctalia msg screenshot-fullscreen"
+"Print" = "spawn noctalia msg screenshot-region"
+"Ctrl+Print" = "spawn noctalia msg screenshot-fullscreen"
+"Alt+Tab" = { action = "window-focus-last", repeat = false }
 
 [include]
 files = ["/usr/share/umbriel/config.toml"]

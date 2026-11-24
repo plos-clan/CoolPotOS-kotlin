@@ -12,10 +12,11 @@ import org.plos_clan.cpos.mem.MmioRegion
 import org.plos_clan.cpos.utils.toPointer
 
 internal abstract class FramebufferSurface {
-    abstract fun present(draw: (CPointer<UByteVar>) -> Unit)
+    abstract fun present(replace: Boolean = true, draw: (CPointer<UByteVar>) -> Unit)
 
     private class Linear(private val device: TtyGraphicsDevice) : FramebufferSurface() {
-        override fun present(draw: (CPointer<UByteVar>) -> Unit) = draw(checkNotNull(device.address).reinterpret())
+        override fun present(replace: Boolean, draw: (CPointer<UByteVar>) -> Unit) =
+            draw(checkNotNull(device.address).reinterpret())
     }
 
     private class Bochs(
@@ -26,11 +27,12 @@ internal abstract class FramebufferSurface {
     ) : FramebufferSurface() {
         private var front = 0
 
-        override fun present(draw: (CPointer<UByteVar>) -> Unit) {
-            val next = front xor 1
+        override fun present(replace: Boolean, draw: (CPointer<UByteVar>) -> Unit) {
+            val next = if (replace) front xor 1 else front
             val offset = next.toULong() * stride
             val target = checkNotNull(memory.addressAt(offset)).value
             draw(checkNotNull(target.toPointer()))
+            if (!replace) return
             val yOffset = checkNotNull(registers.addressAt(0x512u, 2))
             yOffset.writeU16(if (next == 0) 0u else height)
             front = next

@@ -42,9 +42,9 @@ class TtyGraphicsDevice(
         true
     }
 
-    internal fun presentGraphics(draw: (CPointer<UByteVar>) -> Unit) = lock.withLock {
+    internal fun presentGraphics(replace: Boolean = true, draw: (CPointer<UByteVar>) -> Unit) = lock.withLock {
         graphicsOwned = true
-        surface.present(draw)
+        surface.present(replace, draw)
     }
 
     internal fun releaseGraphics() = lock.withLock { graphicsOwned = false }
