@@ -141,8 +141,6 @@ class VfsName private constructor(private val bytes: ByteArray) {
 }
 
 class VfsPathname private constructor(private val bytes: ByteArray) {
-    private val hash = bytes.contentHashCode()
-
     val isAbsolute: Boolean
         get() = bytes.firstOrNull() == '/'.code.toByte()
 
@@ -157,12 +155,12 @@ class VfsPathname private constructor(private val bytes: ByteArray) {
 
     fun copyBytes(): ByteArray = bytes.copyOf()
 
-    internal fun components(): VfsResult<List<VfsName>> {
+    internal fun components(): VfsResult<ArrayDeque<VfsName>> {
         if (bytes.any { it == 0.toByte() }) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
 
-        val components = mutableListOf<VfsName>()
+        val components = ArrayDeque<VfsName>()
         var cursor = 0
         while (cursor < bytes.size) {
             while (cursor < bytes.size && bytes[cursor] == '/'.code.toByte()) {
@@ -187,7 +185,7 @@ class VfsPathname private constructor(private val bytes: ByteArray) {
     override fun equals(other: Any?): Boolean =
         this === other || other is VfsPathname && bytes.contentEquals(other.bytes)
 
-    override fun hashCode(): Int = hash
+    override fun hashCode(): Int = bytes.contentHashCode()
 
     override fun toString(): String = bytes.decodeToString()
 

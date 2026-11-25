@@ -1,22 +1,24 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package org.plos_clan.cpos.fs.vfs
 
-import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.update
 
 internal class VfsMountManager(
     private val paths: VfsPathResolver,
 ) {
-    private val lock = IrqSpinLock()
-    private val fileSystems = mutableMapOf<String, FileSystemType>()
+    private val fileSystems = AtomicReference(emptyMap<String, FileSystemType>())
 
     fun snapshotFileSystems(): List<FileSystemType> =
-        lock.withLock { fileSystems.values.toList() }
+        fileSystems.load().values.toList()
 
-    fun register(fileSystem: FileSystemType): VfsResult<Unit> = lock.withLock {
-        if (fileSystems.containsKey(fileSystem.name)) {
-            return@withLock VfsResult.Err(VfsError.ALREADY_EXISTS)
+    fun register(fileSystem: FileSystemType): VfsResult<Unit> {
+        fileSystems.update { current ->
+            if (fileSystem.name in current) return VfsResult.Err(VfsError.ALREADY_EXISTS)
+            current + (fileSystem.name to fileSystem)
         }
-        fileSystems[fileSystem.name] = fileSystem
-        VfsResult.Ok(Unit)
+        return VfsResult.Ok(Unit)
     }
 
     fun createContext(
@@ -195,9 +197,8 @@ internal class VfsMountManager(
     }
 
     private fun findFileSystem(name: String): FileSystemType? {
-        lock.withLock { fileSystems[name] }?.let { return it }
-        val candidates = lock.withLock { fileSystems.values.toList() }
-        return candidates.singleOrNull { it.accepts(name) }
+        val snapshot = fileSystems.load()
+        return snapshot[name] ?: snapshot.values.singleOrNull { it.accepts(name) }
     }
 
     fun unmount(

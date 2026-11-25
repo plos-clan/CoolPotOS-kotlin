@@ -2,40 +2,22 @@
 
 package org.plos_clan.cpos.tasks
 
-import kotlin.concurrent.atomics.AtomicBoolean
+import org.plos_clan.cpos.utils.SnapshotSet
 import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.update
 
 class PollSource {
-    private companion object {
-        val EMPTY = emptyArray<PollSubscription>()
-    }
+    private val listeners = SnapshotSet<PollSubscription>()
 
-    private val listeners = AtomicReference(EMPTY)
+    internal fun attach(subscription: PollSubscription) = listeners.add(subscription)
 
-    internal fun attach(subscription: PollSubscription) {
-        while (true) {
-            val previous = listeners.load()
-            if (subscription in previous) return
-            val replacement = previous + subscription
-            if (listeners.compareAndSet(previous, replacement)) return
-        }
-    }
-
-    internal fun detach(subscription: PollSubscription) {
-        while (true) {
-            val previous = listeners.load()
-            val index = previous.indexOf(subscription)
-            if (index < 0) return
-            val replacement = if (previous.size == 1) EMPTY else Array(previous.size - 1) { position ->
-                previous[if (position < index) position else position + 1]
-            }
-            if (listeners.compareAndSet(previous, replacement)) return
-        }
-    }
+    internal fun detach(subscription: PollSubscription) = listeners.remove(subscription)
 
     fun signal() {
         var exclusive = false
-        for (listener in listeners.load()) {
+        val snapshot = listeners.snapshot
+        for (index in snapshot.indices) {
+            val listener = snapshot[index]
             if (listener.exclusive && exclusive) continue
             if (listener.notify() && listener.exclusive) exclusive = true
         }
@@ -43,26 +25,38 @@ class PollSource {
 }
 
 abstract class PollSubscription(val exclusive: Boolean = false) : AutoCloseable {
-    private val active = AtomicBoolean(true)
-    private val sources = LinkedHashSet<PollSource>()
+    private sealed interface Sources {
+        data object Closed : Sources
+        class Link(val source: PollSource, val previous: Link?) : Sources
+    }
+
+    private val sources = AtomicReference<Sources?>(null)
 
     open val events: Int get() = -1
 
     fun watch(source: PollSource, events: Int = -1) {
-        if (!active.load() || this.events and events == 0) return
-        if (sources.add(source)) source.attach(this)
+        if (sources.load() === Sources.Closed || this.events and events == 0) return
+        if (!source.attach(this)) return
+        sources.update { head ->
+            if (head === Sources.Closed) return source.detach(this)
+            Sources.Link(source, head as Sources.Link?)
+        }
     }
 
-    internal fun notify(): Boolean = active.load() && changed()
+    internal fun notify(): Boolean = sources.load() !== Sources.Closed && changed()
 
     protected abstract fun changed(): Boolean
 
     protected open fun onClosed() {}
 
     final override fun close() {
-        if (!active.exchange(false)) return
-        for (source in sources) source.detach(this)
-        sources.clear()
+        val head = sources.exchange(Sources.Closed)
+        if (head === Sources.Closed) return
+        var link = head as Sources.Link?
+        while (link != null) {
+            link.source.detach(this)
+            link = link.previous
+        }
         onClosed()
     }
 }

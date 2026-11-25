@@ -2,14 +2,12 @@ package org.plos_clan.cpos.drivers.usb.xhci.core
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import org.plos_clan.cpos.coroutines.KernelCoroutines
-import org.plos_clan.cpos.coroutines.KernelSemaphore
 import org.plos_clan.cpos.drivers.usb.bus.HostController
 import org.plos_clan.cpos.drivers.usb.bus.TransferResult
 import org.plos_clan.cpos.drivers.usb.bus.TransferStatus
@@ -37,9 +35,9 @@ class Xhci(baseAddress: MmioAddress, private val disableDma: () -> Unit) {
     internal lateinit var eventRing: EventRing
     internal val slots = Array(MAX_SLOTS) { Slot() }
 
-    internal val portSemaphore = KernelSemaphore(0)
+    internal val portChanges = KernelCoroutines.dispatcher.createEvent()
     internal val eventLock = IrqSpinLock()
-    private val commandSpace = Channel<Unit>(Channel.CONFLATED)
+    private val commandSpace = RingSpace()
     private val commands = mutableSetOf<CompletableDeferred<Trb>>()
     internal val completions = ArrayDeque<Pair<PendingTransfer, TransferResult>>()
     private val completionMutex = Mutex()
@@ -110,16 +108,14 @@ class Xhci(baseAddress: MmioAddress, private val disableDma: () -> Unit) {
             val event =
                 withTimeoutOrNull(5_000) {
                     while (true) {
-                        val submitted =
-                            eventLock.withLock {
-                                if (failed) return@withLock null
-                                if (!commandRing.enqueue(entry)) return@withLock false
-                                commands.add(promise)
-                                doorbell.ring(0u, 0u)
-                                true
-                            } ?: return@withTimeoutOrNull null
-                        if (submitted) break
-                        commandSpace.receive()
+                        val waiting = eventLock.withLock {
+                            if (failed) return@withTimeoutOrNull null
+                            if (!commandRing.enqueue(entry)) return@withLock commandSpace.nextChange()
+                            commands.add(promise)
+                            doorbell.ring(0u, 0u)
+                            null
+                        } ?: break
+                        if (!waiting.await()) return@withTimeoutOrNull null
                     }
                     promise.await()
                 }
@@ -142,7 +138,7 @@ class Xhci(baseAddress: MmioAddress, private val disableDma: () -> Unit) {
             commands.forEach { it.complete(Trb()) }
             commands.clear()
             commandRing.queue.discard()
-            commandSpace.trySend(Unit)
+            commandSpace.signal(false)
         }
         slots.forEach { it.usbDevice?.quiesce() }
         completeTransfers()
@@ -170,12 +166,12 @@ class Xhci(baseAddress: MmioAddress, private val disableDma: () -> Unit) {
                 endpoint.complete(event)
             }
             TRB_PORT_STATUS_CHANGE -> {
-                portSemaphore.release()
+                portChanges.signal()
             }
             TRB_CMD_COMPLETION -> {
                 val index = commandRing.indexOf(event.parameter, 0) ?: return
                 commandRing.queue.complete(index, event)
-                commandSpace.trySend(Unit)
+                commandSpace.signal(true)
             }
             else -> {
                 println("xHCI: Ignored event type ${event.type}")

@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class, kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.drivers.usb.adapt.unet
 
@@ -9,8 +9,13 @@ import kotlinx.cinterop.readBytes
 import kotlinx.cinterop.usePinned
 import kotlinx.coroutines.delay
 import org.plos_clan.cpos.coroutines.KernelCoroutines
-import org.plos_clan.cpos.coroutines.KernelOneShot
-import org.plos_clan.cpos.coroutines.KernelSemaphore
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlin.concurrent.Volatile
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.fetchAndUpdate
 import org.plos_clan.cpos.drivers.usb.bus.CompletionEvent
 import org.plos_clan.cpos.drivers.usb.bus.ControlTransferArgs
 import org.plos_clan.cpos.drivers.usb.bus.GeneralTransferArgs
@@ -35,27 +40,21 @@ internal class RndisControlChannel private constructor(
     private val commandBuffer: MmioRegion,
     private val notificationBuffer: MmioRegion,
 ) {
-    private enum class NotificationState {
-        NOT_STARTED,
-        RUNNING,
-        STOPPING,
-        STOPPED,
-    }
-
     private sealed interface PollResult {
         data object Retry : PollResult
         data object Failed : PollResult
         data class Complete(val response: RndisResponse) : PollResult
     }
 
-    private val lock = KernelSemaphore(1)
-    private val notificationCompletion = KernelOneShot<CompletionEvent>()
-    private val notificationStopped = KernelOneShot<Unit>()
-    private var acceptingCommands = true
-    private var notificationState = NotificationState.NOT_STARTED
-    private var nextRequestId = 1u
+    private val lock = Mutex()
+    private val notificationCompletion = Channel<CompletionEvent>(1)
+    @Volatile private var acceptingCommands = true
+    private val notifications = KernelCoroutines.launch(
+        "rndis-status-${controlInterface.device.slotId}", CoroutineStart.LAZY,
+    ) { notificationLoop() }
+    private val nextRequestId = AtomicInt(1)
 
-    var mediaConnected = false
+    @Volatile var mediaConnected = false
         private set
 
     suspend fun initialize(maximumTransferSize: UInt): RndisResponse.Initialize? =
@@ -103,27 +102,13 @@ internal class RndisControlChannel private constructor(
         (exchange(RndisCommand.KeepAlive(requestId())) as? RndisResponse.KeepAlive)
             ?.status == RndisStatus.SUCCESS
 
-    suspend fun halt() {
-        lock.acquire()
-        try {
-            if (acceptingCommands) sendEncapsulated(RndisCommand.Halt(requestId()).encode())
-            acceptingCommands = false
-        } finally {
-            lock.release()
-        }
+    suspend fun halt() = lock.withLock {
+        if (acceptingCommands) sendEncapsulated(RndisCommand.Halt(requestId()).encode())
+        acceptingCommands = false
     }
 
     fun startNotifications() {
-        check(notificationState == NotificationState.NOT_STARTED)
-        notificationState = NotificationState.RUNNING
-        KernelCoroutines.launch("rndis-status-${controlInterface.device.slotId}") {
-            try {
-                notificationLoop()
-            } finally {
-                notificationState = NotificationState.STOPPED
-                notificationStopped.trySend(Unit)
-            }
-        }
+        notifications.start()
     }
 
     fun handleCompletion(event: CompletionEvent): Boolean {
@@ -134,22 +119,18 @@ internal class RndisControlChannel private constructor(
 
     fun quiesce() {
         acceptingCommands = false
-        if (notificationState != NotificationState.RUNNING) return
-        notificationState = NotificationState.STOPPING
         notificationCompletion.trySend(DRIVER_STOPPED_EVENT)
     }
 
     suspend fun close() {
         quiesce()
-        if (notificationState == NotificationState.STOPPING) notificationStopped.recv()
-        lock.acquire()
-        lock.release()
-        commandBuffer.free()
+        notifications.join()
+        lock.withLock { commandBuffer.free() }
         notificationBuffer.free()
     }
 
     private suspend fun notificationLoop() {
-        while (notificationState == NotificationState.RUNNING) {
+        while (acceptingCommands) {
             memset(notificationBuffer.view<UByteVar>(), 0, RESPONSE_AVAILABLE_SIZE.toULong())
             controlInterface.device.submitTransfer(
                 GeneralTransferArgs(
@@ -159,8 +140,8 @@ internal class RndisControlChannel private constructor(
                 ),
             ) ?: return
 
-            val event = notificationCompletion.recv()
-            if (notificationState != NotificationState.RUNNING) return
+            val event = notificationCompletion.receive()
+            if (!acceptingCommands) return
             if (!isResponseAvailable(event)) {
                 println("USB: RNDIS: invalid response notification (${event.status})")
                 return
@@ -177,8 +158,7 @@ internal class RndisControlChannel private constructor(
     }
 
     private suspend fun drainUnsolicitedResponses() {
-        lock.acquire()
-        try {
+        lock.withLock {
             while (acceptingCommands) {
                 when (val parsed = receiveEncapsulated()) {
                     RndisParseResult.Empty -> return
@@ -191,14 +171,11 @@ internal class RndisControlChannel private constructor(
                     }
                 }
             }
-        } finally {
-            lock.release()
         }
     }
 
     private suspend fun exchange(command: RndisCommand): RndisResponse? {
-        lock.acquire()
-        try {
+        lock.withLock {
             if (!acceptingCommands || !sendEncapsulated(command.encode())) return null
             repeat(RESPONSE_POLL_ATTEMPTS) { attempt ->
                 if (!acceptingCommands) return null
@@ -212,8 +189,6 @@ internal class RndisControlChannel private constructor(
             }
             println("USB: RNDIS: ${command.type} response timed out")
             return null
-        } finally {
-            lock.release()
         }
     }
 
@@ -294,12 +269,7 @@ internal class RndisControlChannel private constructor(
         return RndisControlCodec.decode(pointer.readBytes(messageLength.toInt()))
     }
 
-    private fun requestId(): UInt {
-        val current = nextRequestId
-        nextRequestId++
-        if (nextRequestId == 0u) nextRequestId = 1u
-        return current
-    }
+    private fun requestId(): UInt = nextRequestId.fetchAndUpdate { if (it == -1) 1 else it + 1 }.toUInt()
 
     companion object {
         private const val SEND_ENCAPSULATED_COMMAND: UByte = 0x00u

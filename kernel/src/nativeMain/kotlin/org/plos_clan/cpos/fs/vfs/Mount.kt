@@ -4,6 +4,7 @@ package org.plos_clan.cpos.fs.vfs
 
 import org.plos_clan.cpos.tasks.PollSource
 import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlin.concurrent.Volatile
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.AtomicReference
@@ -146,7 +147,7 @@ data class VfsPath(val mount: Mount, val dentry: Dentry) {
 
 class MountNamespace internal constructor(val root: Mount) {
     private val lock = IrqSpinLock()
-    private val mounts = mutableMapOf<VfsPath, Mount>()
+    @Volatile private var mounts = emptyMap<VfsPath, Mount>()
     private val references = AtomicInt(0)
     internal val events = PollSource()
     private val changes = AtomicInt(0)
@@ -176,8 +177,7 @@ class MountNamespace internal constructor(val root: Mount) {
         }
     }
 
-    internal fun mountedAt(path: VfsPath): Mount? =
-        lock.withLock { mounts[path] }
+    internal fun mountedAt(path: VfsPath): Mount? = mounts[path]
 
     internal fun attach(
         target: VfsPath,
@@ -189,13 +189,14 @@ class MountNamespace internal constructor(val root: Mount) {
         if (!contains(target.mount)) return@withLock VfsResult.Err(VfsError.NOT_FOUND)
         if (mounts.containsKey(target)) return@withLock VfsResult.Err(VfsError.BUSY)
 
-        mounts[target] = Mount(
+        val mount = Mount(
             superBlock = superBlock,
             fileSystemName = fileSystemName,
             source = source,
             flags = flags,
             attachment = target,
         )
+        mounts += target to mount
         changes.fetchAndAdd(1)
         events.signal()
         VfsResult.Ok(Unit)
@@ -212,7 +213,7 @@ class MountNamespace internal constructor(val root: Mount) {
             mount.release()
             return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
-        mounts[target] = mount
+        mounts += target to mount
         changes.fetchAndAdd(1)
         events.signal()
         VfsResult.Ok(Unit)
@@ -254,7 +255,7 @@ class MountNamespace internal constructor(val root: Mount) {
                 pending.add(childSource to childTarget)
             }
         }
-        mounts.putAll(copies)
+        mounts += copies
         changes.fetchAndAdd(1)
         events.signal()
         VfsResult.Ok(Unit)
@@ -264,7 +265,7 @@ class MountNamespace internal constructor(val root: Mount) {
         val detached = lock.withLock {
             val target = attachedAt(mount) ?: return@withLock false
             if (!mount.tryBeginUnmount()) return@withLock false
-            mounts.remove(target)
+            mounts -= target
             changes.fetchAndAdd(1)
             events.signal()
             true
@@ -288,8 +289,10 @@ class MountNamespace internal constructor(val root: Mount) {
 
             val attachment = mount.moveTo(target)
                 ?: return@withLock VfsResult.Err(VfsError.NOT_FOUND)
-            mounts.remove(source)
-            mounts[target] = mount
+            mounts = mounts.toMutableMap().apply {
+                remove(source)
+                put(target, mount)
+            }
             changes.fetchAndAdd(1)
             events.signal()
             VfsResult.Ok(attachment)
@@ -323,18 +326,11 @@ class MountNamespace internal constructor(val root: Mount) {
     internal fun detach(mount: Mount): VfsResult<Unit> {
         val subtree = lock.withLock {
             attachedAt(mount) ?: return@withLock null
-            buildList<Mount> {
-                val iterator = mounts.entries.iterator()
-                while (iterator.hasNext()) {
-                    val candidate = iterator.next().value
-                    if (!candidate.isDescendantOf(mount)) continue
-                    add(candidate)
-                    iterator.remove()
-                }
-            }.also {
-                changes.fetchAndAdd(1)
-                events.signal()
-            }
+            val removed = mounts.filterValues { it.isDescendantOf(mount) }
+            mounts -= removed.keys
+            changes.fetchAndAdd(1)
+            events.signal()
+            removed.values
         } ?: return VfsResult.Err(VfsError.BUSY)
         mount.detachFromParent()
         mount.release()
@@ -359,12 +355,7 @@ class MountNamespace internal constructor(val root: Mount) {
         return result
     }
 
-    internal fun snapshotMounts(): Map<VfsPath, Mount> = lock.withLock {
-        LinkedHashMap<VfsPath, Mount>(mounts.size + 1).apply {
-            put(VfsPath(root, root.root), root)
-            putAll(mounts)
-        }
-    }
+    internal fun snapshotMounts(): Map<VfsPath, Mount> = mapOf(VfsPath(root, root.root) to root) + mounts
 
     private fun contains(mount: Mount): Boolean = mount === root || attachedAt(mount) != null
 
@@ -373,7 +364,7 @@ class MountNamespace internal constructor(val root: Mount) {
 
     private fun releaseResources() {
         val detached = lock.withLock {
-            mounts.values.toList().also { mounts.clear() }
+            mounts.values.also { mounts = emptyMap() }
         }
         detached.forEach(Mount::release)
         root.release()
@@ -396,8 +387,8 @@ class FileSystemContext internal constructor(
     workingDirectory: VfsPath = root,
 ) {
     private val lock = IrqSpinLock()
-    private var currentRoot: VfsPath? = root
-    private var currentWorkingDirectory: VfsPath? = workingDirectory
+    @Volatile private var currentRoot: VfsPath? = root
+    @Volatile private var currentWorkingDirectory: VfsPath? = workingDirectory
 
     init {
         check(namespace.retain())
@@ -406,10 +397,10 @@ class FileSystemContext internal constructor(
     }
 
     val root: VfsPath
-        get() = lock.withLock { checkNotNull(currentRoot) }
+        get() = checkNotNull(currentRoot)
 
     val workingDirectory: VfsPath
-        get() = lock.withLock { checkNotNull(currentWorkingDirectory) }
+        get() = checkNotNull(currentWorkingDirectory)
 
     internal fun changeRoot(path: VfsPath): Boolean {
         if (!path.mount.retain()) return false

@@ -103,7 +103,7 @@ private class Mouse(
             val sync = InputEvent(timestamp, InputEventType.SYNCHRONIZATION, InputEvent.SYN_REPORT, 0)
             input.receive(sync)
         } finally {
-            hid.transferCompletion.release()
+            hid.transferCompletion.signal()
         }
     }
 

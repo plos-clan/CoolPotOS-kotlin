@@ -83,7 +83,7 @@ internal class VfsPathResolver(
         initial: VfsPath,
         allowUnreachable: Boolean = false,
     ): VfsResult<ByteArray> {
-        val components = mutableListOf<ByteArray>()
+        val components = mutableListOf<VfsName>()
         var current = initial
         while (current != context.root) {
             if (current.dentry === current.mount.root) {
@@ -98,9 +98,9 @@ internal class VfsPathResolver(
                 }
             }
 
-            components += current.dentry.name.copyBytes()
-            val parent = current.dentry.parent
-                ?: return VfsResult.Err(VfsError.NOT_FOUND)
+            val snapshot = current.dentry.snapshot
+            val parent = snapshot.parent ?: return VfsResult.Err(VfsError.NOT_FOUND)
+            components += snapshot.name
             current = VfsPath(current.mount, parent)
         }
 
@@ -122,7 +122,7 @@ internal class VfsPathResolver(
             if (index != 0) {
                 result[offset++] = '/'.code.toByte()
             }
-            component.copyInto(result, destinationOffset = offset)
+            component.copyInto(result, offset)
             offset += component.size
         }
         return VfsResult.Ok(result)
@@ -152,7 +152,7 @@ internal class VfsPathResolver(
         ) {
             return VfsResult.Err(VfsError.CROSS_DEVICE)
         }
-        val name = components.last()
+        val name = components.removeLast()
         val boundary = directory.takeUnless {
             resolution.boundary == PathResolutionBoundary.NONE
         }
@@ -169,7 +169,7 @@ internal class VfsPathResolver(
                 caller,
                 context,
                 start,
-                components.dropLast(1),
+                components,
                 followFinalSymlink = true,
                 resolution = resolution,
                 boundary = boundary,
@@ -189,7 +189,7 @@ internal class VfsPathResolver(
         caller: VfsOperationContext,
         context: FileSystemContext,
         start: VfsPath,
-        components: List<VfsName>,
+        remaining: ArrayDeque<VfsName>,
         followFinalSymlink: Boolean,
         followFinalMount: Boolean = true,
         resolution: PathResolution = PathResolution.DEFAULT,
@@ -210,33 +210,17 @@ internal class VfsPathResolver(
         }
         var symlinkDepth = 0
         var requireDirectory = false
-        val remaining = ArrayDeque(components)
-
         while (remaining.isNotEmpty()) {
             val name = remaining.removeFirst()
-            when {
-                name.isDot -> {
-                    when (val access = current.requireSearch(caller, resolution.cachedOnly)) {
-                        is VfsResult.Ok -> continue
-                        is VfsResult.Err -> return access
-                    }
+            if (name.isDot || name.isDotDot) {
+                val access = current.requireSearch(caller, resolution.cachedOnly)
+                if (access is VfsResult.Err) return access
+                if (name.isDot) continue
+                current = when (val result = walkUp(context, current, boundary, resolution)) {
+                    is VfsResult.Ok -> result.value
+                    is VfsResult.Err -> return result
                 }
-                name.isDotDot -> {
-                    when (val access = current.requireSearch(caller, resolution.cachedOnly)) {
-                        is VfsResult.Ok -> Unit
-                        is VfsResult.Err -> return access
-                    }
-                    current = when (val result = walkUp(
-                        context,
-                        current,
-                        boundary,
-                        resolution,
-                    )) {
-                        is VfsResult.Ok -> result.value
-                        is VfsResult.Err -> return result
-                    }
-                    continue
-                }
+                continue
             }
 
             val parent = current
@@ -366,15 +350,6 @@ internal class VfsPathResolver(
             if (!allowMountCrossing) return VfsResult.Err(VfsError.CROSS_DEVICE)
             current = VfsPath(mounted, mounted.root)
         }
-    }
-
-    fun isDescendant(candidate: Dentry, ancestor: Dentry): Boolean {
-        var current: Dentry? = candidate
-        while (current != null) {
-            if (current === ancestor) return true
-            current = current.parent
-        }
-        return false
     }
 
     private fun VfsPath.requireSearch(

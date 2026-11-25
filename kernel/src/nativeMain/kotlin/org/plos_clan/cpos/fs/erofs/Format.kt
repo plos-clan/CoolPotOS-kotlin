@@ -7,8 +7,10 @@ import org.plos_clan.cpos.fs.vfs.InodeTimestamps
 import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.time.Instant
 import org.plos_clan.cpos.block.ByteSource
-import org.plos_clan.cpos.utils.KernelMutex
+import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
+import org.plos_clan.cpos.utils.alignDown
+import kotlin.concurrent.Volatile
 
 internal data class DiskInode(
     val location: ULong,
@@ -177,9 +179,9 @@ internal class Image(private val data: ByteSource) : AutoCloseable {
     var size: ULong = data.size
         private set
 
-    private val lock = KernelMutex()
-    private var pageOffset = ULong.MAX_VALUE
-    private var page = ByteArray(0)
+    private class Page(val offset: ULong, val fields: LittleEndianBuffer)
+
+    @Volatile private var cachedPage: Page? = null
 
     override fun close() = data.close()
 
@@ -200,21 +202,25 @@ internal class Image(private val data: ByteSource) : AutoCloseable {
     fun u32(offset: ULong): ULong = scalar(offset, 4)
     fun u64(offset: ULong): ULong = scalar(offset, 8)
 
-    private fun scalar(offset: ULong, width: Int): ULong = lock.withLock {
+    private fun page(base: ULong): LittleEndianBuffer {
+        val cached = cachedPage
+        if (cached != null && cached.offset == base) return cached.fields
+        val bytes = ByteArray(minOf(PAGE_SIZE_BYTES, size - base).toInt())
+        check(data.read(base, bytes)) { "EROFS read failed" }
+        val fields = LittleEndianBuffer(bytes)
+        cachedPage = Page(base, fields)
+        return fields
+    }
+
+    private fun scalar(offset: ULong, width: Int): ULong {
         check(contains(offset, width)) { "EROFS field outside image" }
-        var result = 0uL
-        for (index in 0 until width) {
-            val position = offset + index.toUInt()
-            val base = position - position % PAGE_SIZE_BYTES
-            if (base != pageOffset) {
-                val loaded = ByteArray(minOf(PAGE_SIZE_BYTES, size - base).toInt())
-                check(data.read(base, loaded)) { "EROFS read failed" }
-                page = loaded
-                pageOffset = base
-            }
-            result = result or ((page[(position - base).toInt()].toULong() and 255uL) shl (index * 8))
-        }
-        result
+        val base = offset.alignDown(PAGE_SIZE_BYTES)
+        val index = (offset - base).toInt()
+        val first = minOf(width, PAGE_SIZE_BYTES.toInt() - index)
+        val low = page(base).readUnsigned(index, first)
+        if (first == width) return low
+        val high = page(base + PAGE_SIZE_BYTES).readUnsigned(0, width - first)
+        return low or (high shl (first * Byte.SIZE_BITS))
     }
 
     fun bytes(offset: ULong, count: Int): ByteArray? {

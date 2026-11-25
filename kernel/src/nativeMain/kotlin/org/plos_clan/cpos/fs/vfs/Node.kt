@@ -2,12 +2,15 @@
 
 package org.plos_clan.cpos.fs.vfs
 
+import kotlinx.collections.immutable.PersistentMap
+import kotlinx.collections.immutable.persistentHashMapOf
 import org.plos_clan.cpos.drivers.RealtimeClock
-
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlin.concurrent.Volatile
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import kotlin.concurrent.atomics.update
 import kotlin.native.ref.createCleaner
 
 class Inode internal constructor(
@@ -21,8 +24,8 @@ class Inode internal constructor(
 ) {
     private val cleanup = resource?.let { createCleaner(it) { resource -> resource.close() } }
     private val lock = IrqSpinLock()
-    private var currentMetadata = initialAttributes.attributes.metadata
-    private var attributeSnapshot: InodeAttributeSnapshot? = initialAttributes
+    @Volatile private var attributeSnapshot = initialAttributes
+    private val currentMetadata get() = attributeSnapshot.attributes.metadata
     private var attributeGeneration = 0uL
     private var extendedAttributes: MutableMap<ExtendedAttributeName, ByteArray>? = null
     private var accessAcl: PosixAcl? = null
@@ -36,64 +39,42 @@ class Inode internal constructor(
     internal fun sameIdentity(other: Inode): Boolean =
         superBlock === other.superBlock && id == other.id && generation == other.generation
 
-    fun metadata(): InodeMetadata = lock.withLock { currentMetadata }
+    fun metadata(): InodeMetadata = currentMetadata
 
     fun attributes(
         caller: VfsOperationContext,
         forceRefresh: Boolean = false,
         cachedOnly: Boolean = false,
-    ): VfsResult<InodeAttributes> = when (
-        val result = attributeSnapshot(caller, forceRefresh, cachedOnly)
-    ) {
-        is VfsResult.Ok -> VfsResult.Ok(result.value.attributes)
-        is VfsResult.Err -> result
-    }
-
-    internal fun attributeSnapshot(
-        caller: VfsOperationContext,
-        forceRefresh: Boolean = false,
-        cachedOnly: Boolean = false,
-    ): VfsResult<InodeAttributeSnapshot> {
+    ): VfsResult<InodeAttributes> {
+        val cached = attributeSnapshot
+        if (!forceRefresh && cached.validity.isValid(TscClock)) return cached.result
+        if (cachedOnly) return VfsResult.Err(VfsError.WOULD_BLOCK)
         val request = lock.withLock {
-            if (!forceRefresh) {
-                attributeSnapshot?.takeIf {
-                    it.validity.isValid(TscClock.nanoTime())
-                }?.let { return VfsResult.Ok(it) }
-            }
-            if (cachedOnly) return VfsResult.Err(VfsError.WOULD_BLOCK)
             ++attributeGeneration to currentMetadata
         }
         val loaded = when (val result = backend.loadAttributes(caller, this)) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        val snapshot = lock.withLock {
+        return lock.withLock {
             if (evicted || currentMetadata != request.second) {
-                InodeAttributeSnapshot(
-                    loaded.attributes.copy(metadata = currentMetadata),
-                    CacheValidity.Volatile,
-                )
-            } else {
-                if (request.first == attributeGeneration) {
-                    currentMetadata = loaded.attributes.metadata
-                    attributeSnapshot = loaded
-                }
-                loaded
+                val merged = loaded.attributes.copy(metadata = currentMetadata)
+                return@withLock VfsResult.Ok(merged)
             }
+            if (request.first == attributeGeneration) attributeSnapshot = loaded
+            loaded.result
         }
-        return VfsResult.Ok(snapshot)
     }
 
     internal fun installAttributeSnapshot(snapshot: InodeAttributeSnapshot) = lock.withLock {
         if (evicted) return@withLock
-        currentMetadata = snapshot.attributes.metadata
         attributeSnapshot = snapshot
         attributeGeneration++
     }
 
     internal fun invalidateAttributes() = lock.withLock {
         if (evicted) return@withLock
-        attributeSnapshot = null
+        attributeSnapshot = attributeSnapshot.copy(validity = CacheValidity.Volatile)
         attributeGeneration++
     }
 
@@ -101,12 +82,8 @@ class Inode internal constructor(
         if (evicted || !update.requiresCurrentTime) return@withLock
         val timestamps = update.apply(currentMetadata.timestamps, RealtimeClock.now())
         if (timestamps == currentMetadata.timestamps) return@withLock
-        currentMetadata = currentMetadata.copy(timestamps = timestamps)
-        attributeSnapshot = attributeSnapshot?.let { snapshot ->
-            snapshot.copy(
-                attributes = snapshot.attributes.copy(metadata = currentMetadata),
-            )
-        }
+        val updated = currentMetadata.copy(timestamps = timestamps)
+        attributeSnapshot = attributeSnapshot.withMetadata(updated)
         attributeGeneration++
     }
 
@@ -116,12 +93,8 @@ class Inode internal constructor(
         if (evicted || attributeGeneration != expectedVersion || size >= currentMetadata.size) {
             return@withLock
         }
-        currentMetadata = currentMetadata.copy(size = size)
-        attributeSnapshot = attributeSnapshot?.let { snapshot ->
-            snapshot.copy(
-                attributes = snapshot.attributes.copy(metadata = currentMetadata),
-            )
-        }
+        val updated = currentMetadata.copy(size = size)
+        attributeSnapshot = attributeSnapshot.withMetadata(updated)
         attributeGeneration++
     }
 
@@ -134,8 +107,8 @@ class Inode internal constructor(
         lock.withLock {
             if (!evicted) {
                 val previousLinks = currentMetadata.linkCount
-                currentMetadata = updateMetadataLocked(timestamps, update)
-                attributeSnapshot = null
+                val updated = updateMetadataLocked(timestamps, update = update)
+                attributeSnapshot = attributeSnapshot.withMetadata(updated, CacheValidity.Volatile)
                 attributeGeneration++
                 lostLastLink = previousLinks != 0u && currentMetadata.linkCount == 0u
                 if (currentMetadata.linkCount == 0u && openReferences == 0) {
@@ -205,12 +178,12 @@ class Inode internal constructor(
             extendedAttributes = it
         }
         destination[name] = value.copyOf()
-        if (acl != null) {
+        val base = if (acl != null) {
             accessAcl = acl
-            currentMetadata = currentMetadata.copy(mode = acl.mode(currentMetadata.mode))
-        }
-        currentMetadata = updateMetadataLocked(InodeTimestampEvent.STATUS_CHANGED)
-        attributeSnapshot = null
+            currentMetadata.copy(mode = acl.mode(currentMetadata.mode))
+        } else currentMetadata
+        val updated = updateMetadataLocked(InodeTimestampEvent.STATUS_CHANGED, base)
+        attributeSnapshot = attributeSnapshot.withMetadata(updated, CacheValidity.Volatile)
         attributeGeneration++
         VfsResult.Ok(Unit)
     }
@@ -223,19 +196,20 @@ class Inode internal constructor(
             }
             if (name == PosixAcl.ACCESS) accessAcl = null
             if (attributes.isEmpty()) extendedAttributes = null
-            currentMetadata = updateMetadataLocked(InodeTimestampEvent.STATUS_CHANGED)
-            attributeSnapshot = null
+            val updated = updateMetadataLocked(InodeTimestampEvent.STATUS_CHANGED)
+            attributeSnapshot = attributeSnapshot.withMetadata(updated, CacheValidity.Volatile)
             attributeGeneration++
             VfsResult.Ok(Unit)
         }
 
     private fun updateMetadataLocked(
         timestamps: InodeTimestampUpdate,
+        base: InodeMetadata = currentMetadata,
         update: (InodeMetadata) -> InodeMetadata = { it },
     ): InodeMetadata {
-        val metadata = update(currentMetadata)
+        val metadata = update(base)
         val acl = accessAcl
-        if (acl != null && metadata.mode != currentMetadata.mode) {
+        if (acl != null && metadata.mode != base.mode) {
             val updated = acl.chmod(metadata.mode)
             accessAcl = updated
             extendedAttributes?.set(PosixAcl.ACCESS, updated.bytes())
@@ -344,22 +318,38 @@ class Dentry internal constructor(
 ) {
     private class CachedChild(
         val dentry: Dentry,
-        var validity: CacheValidity,
-        var reference: DentryReference?,
-    )
+        val validity: CacheValidity,
+        val reference: DentryReference?,
+    ) {
+        val result = if (dentry.inode() == null) VfsResult.Err(VfsError.NOT_FOUND)
+            else VfsResult.Ok(dentry)
+
+        fun release() {
+            reference?.release()
+            dentry.releaseCachedChildren()
+        }
+    }
 
     private val lock = IrqSpinLock()
-    private var currentName = name
-    private var currentParent = parent
-    private var currentInode = inode
-    private var unlinked = false
-    private val children = mutableMapOf<VfsName, CachedChild>()
+    internal data class Snapshot(
+        val name: VfsName,
+        val parent: Dentry?,
+        val inode: Inode?,
+        val unlinked: Boolean = false,
+    )
+
+    private val state = AtomicReference(Snapshot(name, parent, inode))
+    internal val snapshot: Snapshot get() = state.load()
+    @Volatile private var publishedChildren: PersistentMap<VfsName, CachedChild>? = persistentHashMapOf()
+    private var children: PersistentMap<VfsName, CachedChild>
+        get() = publishedChildren ?: lock.withLock { checkNotNull(publishedChildren) }
+        set(value) { publishedChildren = value }
 
     val name: VfsName
-        get() = lock.withLock { currentName }
+        get() = snapshot.name
 
     val parent: Dentry?
-        get() = lock.withLock { currentParent }
+        get() = snapshot.parent
 
     internal fun isDescendantOf(ancestor: Dentry): Boolean {
         var current: Dentry? = this
@@ -370,10 +360,10 @@ class Dentry internal constructor(
         return false
     }
 
-    fun inode(): Inode? = lock.withLock { currentInode }
+    fun inode(): Inode? = snapshot.inode
 
     val isUnlinked: Boolean
-        get() = lock.withLock { unlinked }
+        get() = snapshot.unlinked
 
     internal fun lookupChild(
         caller: VfsOperationContext,
@@ -392,13 +382,8 @@ class Dentry internal constructor(
             is VfsResult.Ok -> Unit
             is VfsResult.Err -> return access
         }
-        val cached = lock.withLock {
-            children[name]?.takeIf { it.validity.isValid(TscClock.nanoTime()) }?.dentry
-        }
-        if (cached != null) {
-            return if (cached.inode() != null) VfsResult.Ok(cached)
-            else VfsResult.Err(VfsError.NOT_FOUND)
-        }
+        val cached = children[name]
+        if (cached != null && cached.validity.isValid(TscClock)) return cached.result
         if (cachedOnly) return VfsResult.Err(VfsError.WOULD_BLOCK)
         val lookup = when (val result = backend.lookup(caller, directory, name)) {
             is VfsResult.Ok -> result.value
@@ -421,11 +406,11 @@ class Dentry internal constructor(
                     current != null && inode != null && current.sameIdentity(inode)
                 if (sameInode) {
                     if (current !== inode) cached.dentry.install(inode)
-                    if (cached.reference !== lookup.reference) {
-                        retiredReference = cached.reference
+                    if (cached.reference !== lookup.reference) retiredReference = cached.reference
+                    if (cached.reference !== lookup.reference || cached.validity !== lookup.validity) {
+                        val updated = CachedChild(cached.dentry, lookup.validity, lookup.reference)
+                        children = children.putting(name, updated)
                     }
-                    cached.validity = lookup.validity
-                    cached.reference = lookup.reference
                     return@withLock cached.dentry
                 }
                 retiredReference = cached.reference
@@ -433,7 +418,8 @@ class Dentry internal constructor(
                 cached.dentry.detach()
             }
             val child = Dentry(superBlock, name, this, inode)
-            children[name] = CachedChild(child, lookup.validity, lookup.reference)
+            val entry = CachedChild(child, lookup.validity, lookup.reference)
+            children = children.putting(name, entry)
             child
         }
         retiredReference?.release()
@@ -442,45 +428,34 @@ class Dentry internal constructor(
     }
 
     internal fun markChildNegative(name: VfsName, expected: Dentry) {
-        var reference: DentryReference? = null
-        var invalidated = false
-        lock.withLock {
-            val child = children[name]?.takeIf { it.dentry === expected } ?: return@withLock
-            reference = child.reference
-            child.dentry.detach()
-            children[name] = CachedChild(
-                Dentry(superBlock, name, this, null),
-                CacheValidity.Persistent,
-                null,
-            )
-            invalidated = true
+        val retired = lock.withLock {
+            val child = children[name] ?: return
+            if (child.dentry !== expected) return
+            val negative = Dentry(superBlock, name, this, null)
+            val entry = CachedChild(negative, CacheValidity.Persistent, null)
+            val updated = children.putting(name, entry)
+            expected.detach()
+            children = updated
+            child
         }
-        reference?.release()
-        if (invalidated) expected.releaseCachedChildren()
+        retired.release()
     }
 
     internal fun invalidateNegativeChild(name: VfsName) {
         lock.withLock {
             val child = children[name] ?: return@withLock
-            if (child.dentry.inode() == null) children.remove(name)
+            if (child.dentry.inode() == null) children = children.removing(name)
         }
     }
 
     internal fun notifyParent(subject: Inode, event: FileSystemEvent, cookie: UInt) {
-        var eventName: VfsName? = null
-        var eventUnlinked = false
-        val eventParent = lock.withLock {
-            val parent = currentParent ?: return
-            eventName = currentName
-            eventUnlinked = unlinked || currentInode?.sameIdentity(subject) != true
-            parent
-        }
-        eventParent.inode()?.notify(
+        val snapshot = this.snapshot
+        snapshot.parent?.inode()?.notify(
             event = event,
-            name = checkNotNull(eventName),
+            name = snapshot.name,
             cookie = cookie,
             subject = subject,
-            unlinked = eventUnlinked,
+            unlinked = snapshot.unlinked || snapshot.inode?.sameIdentity(subject) != true,
         )
     }
 
@@ -490,22 +465,10 @@ class Dentry internal constructor(
         targetName: VfsName,
         exchange: Dentry?,
     ) {
-        var retired: CachedChild? = null
-        renameLock.withLock {
-            if (this === targetParent) {
-                lock.withLock {
-                    retired = renameChildLocked(source, targetParent, targetName, exchange)
-                }
-            } else {
-                lock.withLock {
-                    targetParent.lock.withLock {
-                        retired = renameChildLocked(source, targetParent, targetName, exchange)
-                    }
-                }
-            }
+        val retired = lock.withLock(targetParent.lock) {
+            renameChildLocked(source, targetParent, targetName, exchange)
         }
-        retired?.reference?.release()
-        retired?.dentry?.releaseCachedChildren()
+        retired?.release()
     }
 
     private fun renameChildLocked(
@@ -514,38 +477,41 @@ class Dentry internal constructor(
         targetName: VfsName,
         exchange: Dentry?,
     ): CachedChild? {
-        val sourceName = source.currentName
-        val sourceChild = children[sourceName]?.takeIf { it.dentry === source }
+        val sourceName = source.name
+        val original = children
+        val target = targetParent.children
+        val previous = original[sourceName]
+        val sourceChild = previous?.takeIf { it.dentry === source }
             ?: CachedChild(source, CacheValidity.Persistent, null)
-        if (children[sourceName]?.dentry === source) children.remove(sourceName)
-        if (exchange == null) {
-            val retired = targetParent.children.put(targetName, sourceChild)
-            retired?.dentry?.detach()
-            source.relocate(targetParent, targetName)
-            return retired
-        } else {
-            val exchangeChild = targetParent.children[targetName]
-                ?.takeIf { it.dentry === exchange }
+        val replaced = target[targetName]
+        val from = if (exchange != null) {
+            val exchangeChild = replaced?.takeIf { it.dentry === exchange }
                 ?: CachedChild(exchange, CacheValidity.Persistent, null)
-            targetParent.children[targetName] = sourceChild
-            children[sourceName] = exchangeChild
-            exchange.relocate(this, sourceName)
-        }
+            original.putting(sourceName, exchangeChild)
+        } else if (previous === sourceChild) original.removing(sourceName) else original
+        val destination = if (this === targetParent) from else target
+        val moved = destination.putting(targetName, sourceChild)
+        val retired = replaced.takeIf { exchange == null && it !== sourceChild }
+        retired?.dentry?.detach()
+        exchange?.relocate(this, sourceName)
         source.relocate(targetParent, targetName)
-        return null
+        if (this !== targetParent) {
+            targetParent.publishedChildren = null
+            children = from
+        }
+        targetParent.children = moved
+        return retired
     }
 
-    private fun relocate(parent: Dentry, name: VfsName) = lock.withLock {
-        currentParent = parent
-        currentName = name
-    }
+    private fun relocate(parent: Dentry, name: VfsName) =
+        state.update { it.copy(parent = parent, name = name) }
 
     private fun install(inode: Inode?) {
-        lock.withLock { currentInode = inode }
+        state.update { it.copy(inode = inode) }
     }
 
     private fun detach() {
-        lock.withLock { unlinked = true }
+        state.update { it.copy(unlinked = true) }
     }
 
     internal fun releaseCachedChildren() {
@@ -554,16 +520,13 @@ class Dentry internal constructor(
         while (pending.isNotEmpty()) {
             val parent = pending.removeLast()
             val cached = parent.lock.withLock {
-                parent.children.values.toList().also { parent.children.clear() }
+                parent.children.also { parent.children = it.cleared() }
             }
-            cached.forEach { child ->
+            cached.values.forEach { child ->
                 child.reference?.release()
                 pending.addLast(child.dentry)
             }
         }
     }
 
-    private companion object {
-        val renameLock = IrqSpinLock()
-    }
 }

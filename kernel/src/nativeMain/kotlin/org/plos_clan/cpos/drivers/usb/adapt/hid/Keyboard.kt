@@ -144,7 +144,7 @@ class Keyboard(
             }
             if (hasKeyboardFields) report.commit()
         } finally {
-            hid.transferCompletion.release()
+            hid.transferCompletion.signal()
         }
     }
 

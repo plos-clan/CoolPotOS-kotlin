@@ -4,7 +4,6 @@ package org.plos_clan.cpos.drivers.usb.adapt.hid
 
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.coroutines.KernelCoroutines
-import org.plos_clan.cpos.coroutines.KernelSemaphore
 import org.plos_clan.cpos.drivers.usb.bus.ControlTransferArgs
 import org.plos_clan.cpos.drivers.usb.bus.GeneralTransferArgs
 import org.plos_clan.cpos.drivers.usb.bus.UsbDriver
@@ -32,12 +31,12 @@ class HidDevice(
     var buffer: MmioRegion? = null
     var maxReportSize: UShort = 0u
     var descriptor = HidDescriptor()
-    internal val transferCompletion = KernelSemaphore(0)
+    internal val transferCompletion = KernelCoroutines.dispatcher.createEvent()
 
     fun free() {
         buffer?.free()
         buffer = null
-        transferCompletion.release()
+        transferCompletion.signal()
 
         reportDescriptorBuffer?.free()
         reportDescriptorBuffer = null
@@ -48,7 +47,7 @@ class HidDevice(
         KernelCoroutines.launch("usb-hid") {
             while (buffer != null) {
                 submitTransfer()
-                transferCompletion.acquire()
+                transferCompletion.await()
             }
         }
     }

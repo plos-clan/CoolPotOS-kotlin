@@ -709,6 +709,7 @@ kotlin {
 
     sourceSets.named("nativeMain") {
         dependsOn(commonMain)
+        dependencies { implementation(libs.kotlinx.collections.immutable) }
         kotlin.srcDir("src/kernelMain/kotlin")
         kotlin.srcDir(files(runtimeLayout).builtBy(generateRuntimeLayout))
     }

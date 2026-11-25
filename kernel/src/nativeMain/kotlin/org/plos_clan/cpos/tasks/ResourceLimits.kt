@@ -1,6 +1,9 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package org.plos_clan.cpos.tasks
 
-import org.plos_clan.cpos.utils.IrqSpinLock
+import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.fetchAndUpdate
 
 private val INFINITY = ULong.MAX_VALUE
 
@@ -41,21 +44,23 @@ data class ResourceLimit(val soft: ULong, val hard: ULong) {
 }
 
 class ProcessLimits {
-    private val lock = IrqSpinLock()
-    private val values = Array(ProcessResource.entries.size) {
-        ProcessResource.entries[it].initial
+    private companion object {
+        val defaults = ProcessResource.entries.map(ProcessResource::initial).toTypedArray()
     }
 
-    fun get(resource: ProcessResource): ResourceLimit = lock.withLock {
-        values[resource.ordinal]
-    }
+    private val values = AtomicReference(defaults)
 
-    fun replace(resource: ProcessResource, limit: ResourceLimit) = lock.withLock {
-        values[resource.ordinal].also { values[resource.ordinal] = limit }
+    fun get(resource: ProcessResource): ResourceLimit = values.load()[resource.ordinal]
+
+    fun replace(resource: ProcessResource, limit: ResourceLimit): ResourceLimit {
+        val index = resource.ordinal
+        val previous = values.fetchAndUpdate { current ->
+            current.copyOf().also { it[index] = limit }
+        }
+        return previous[index]
     }
 
     internal fun inherit(source: ProcessLimits) {
-        val inherited = source.lock.withLock { source.values.copyOf() }
-        lock.withLock { inherited.copyInto(values) }
+        values.store(source.values.load())
     }
 }

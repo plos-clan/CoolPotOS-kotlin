@@ -283,7 +283,7 @@ internal class VfsNodeOperations(
             return VfsResult.Err(VfsError.NOT_DIRECTORY)
         }
         if (sourceInode.type == InodeType.DIRECTORY &&
-            paths.isDescendant(targetParent.path.dentry, sourcePath.dentry)
+            targetParent.path.dentry.isDescendantOf(sourcePath.dentry)
         ) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }
@@ -314,7 +314,7 @@ internal class VfsNodeOperations(
             return VfsResult.Err(VfsError.ALREADY_EXISTS)
         }
         if (mode == RenameMode.EXCHANGE && targetPath?.inode?.type == InodeType.DIRECTORY &&
-            paths.isDescendant(sourceParent.path.dentry, targetPath.dentry)
+            sourceParent.path.dentry.isDescendantOf(targetPath.dentry)
         ) {
             return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         }

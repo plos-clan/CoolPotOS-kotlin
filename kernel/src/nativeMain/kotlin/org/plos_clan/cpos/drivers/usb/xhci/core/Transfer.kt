@@ -5,8 +5,8 @@ package org.plos_clan.cpos.drivers.usb.xhci.core
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.set
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -15,6 +15,7 @@ import org.plos_clan.cpos.drivers.usb.bus.TransferStatus
 import org.plos_clan.cpos.drivers.usb.bus.UsbTransfer
 import org.plos_clan.cpos.mem.MmioRegion
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
+import kotlin.concurrent.Volatile
 
 class Endpoint
 internal constructor(
@@ -34,14 +35,15 @@ internal constructor(
     private class Queue(memory: DmaMemory) {
         var ring = ProducerRing(memory)
         val pending = mutableSetOf<PendingTransfer>()
+        val space = RingSpace()
+        var minimumCapacity = 0
     }
 
     private val mutex = Mutex()
-    private val space = Channel<Unit>(Channel.CONFLATED)
     private val queues = mutableListOf<Queue>()
     private val pages = mutableMapOf<ULong, Pair<Queue, Int>>()
     private var streamContexts: MmioRegion? = null
-    private var state = State.READY
+    @Volatile private var state = State.READY
 
     val contextEntries: Int
         get() =
@@ -78,88 +80,104 @@ internal constructor(
         }
     }
 
-    suspend fun submit(request: UsbTransfer): Boolean = mutex.withLock {
-        if (state == State.CLOSED || state == State.PAUSED || !slot.active || request.isCompleted) {
-            return@withLock false
-        }
+    suspend fun submit(request: UsbTransfer): Boolean {
         val stream = request.streamId.toInt()
-        if (streamCount == 0 && stream != 0 || streamCount != 0 && stream !in 1..streamCount) {
-            return@withLock false
-        }
         val index = if (streamCount == 0) 0 else stream - 1
-        if (
-            state == State.HALTED &&
-                (dci != 1 || !withContext(NonCancellable) { reset(TransferStatus.CANCELLED) })
-        ) {
-            return@withLock false
+        if (streamCount == 0 && stream != 0 || (request.setup != null) != (dci == 1)) return false
+        val queue = queues.getOrNull(index) ?: return false
+        if (!slot.active || request.isCompleted) return false
+        if (state == State.CLOSED || state == State.PAUSED) return false
+        val pending = try {
+            PendingTransfer(request, controller.memory, packetSize)
+        } catch (_: DmaMemory.AllocationFailure) {
+            return false
         }
-        if (request.setup != null && dci != 1 || request.setup == null && dci == 1)
-            return@withLock false
-        val pending =
-            try {
-                PendingTransfer(request, controller.memory, packetSize)
-            } catch (_: DmaMemory.AllocationFailure) {
-                return@withLock false
-            }
         var submitted = false
-        try {
-            val descriptor = pending.descriptor
-            val queue = queues[index]
-            if (
-                descriptor.trbs.size > queue.ring.capacity &&
-                    !grow(queue, descriptor.trbs.size, stream)
-            ) {
-                return@withLock false
-            }
-            var shortLength: UInt? = null
-            val entry =
-                RingEntry(descriptor.trbs) { position, event ->
-                    val code = event.completionCode
-                    if (code in 26u..28u) return@RingEntry false
-                    val status =
-                        when (code) {
-                            1u -> TransferStatus.COMPLETED
-                            13u -> TransferStatus.SHORT_PACKET
-                            2u,
-                            3u -> TransferStatus.DATA_ERROR
-                            4u -> TransferStatus.BABBLE
-                            5u -> TransferStatus.TRB_ERROR
-                            6u -> TransferStatus.STALL
-                            36u -> TransferStatus.SPLIT_ERROR
-                            else -> TransferStatus.UNKNOWN
-                        }
-                    if (code == 13u && request.setup != null) {
-                        shortLength = descriptor.actualLength(position, event.transferLength)
-                        return@RingEntry false
-                    }
-                    val actual =
-                        shortLength
-                            ?: if (code == 1u && event.transferLength == 0u) descriptor.length
-                            else descriptor.actualLength(position, event.transferLength)
-                    val finalStatus =
-                        if (code == 1u && actual < descriptor.length) TransferStatus.SHORT_PACKET
-                        else status
-                    if (!status.successful && state == State.READY) state = State.HALTED
-                    queue.pending.remove(pending)
-                    controller.completions.addLast(pending to TransferResult(finalStatus, actual))
-                    status.successful
-                }
-            while (true) {
-                val queued =
-                    controller.eventLock.withLock {
-                        if (state != State.READY || !slot.active) return@withLock null
-                        if (!queue.ring.enqueue(entry)) return@withLock false
-                        queue.pending.add(pending)
-                        submitted = true
-                        controller.doorbell.ring(slot.id, dci.toUInt(), stream)
-                        true
-                    } ?: return@withLock false
-                if (queued) return@withLock true
-                space.receive()
-            }
-            @Suppress("UNREACHABLE_CODE") false
+        return try {
+            val entry = transferEntry(queue, pending)
+            submitted = enqueue(queue, entry, pending, stream)
+            submitted
         } finally {
             if (!submitted) pending.free()
+        }
+    }
+
+    private suspend fun enqueue(
+        queue: Queue,
+        entry: RingEntry,
+        pending: PendingTransfer,
+        stream: Int,
+    ): Boolean {
+        while (true) {
+            val waiting = mutex.withLock {
+                if (state == State.HALTED && dci == 1) {
+                    val reset = withContext(NonCancellable) { reset(TransferStatus.CANCELLED) }
+                    if (!reset) return false
+                }
+                if (state != State.READY || !slot.active) return false
+                val capacity = maxOf(queue.minimumCapacity, entry.trbs.size)
+                if (capacity > queue.ring.capacity) {
+                    val drain = drainBeforeGrowth(queue, capacity)
+                    if (drain != null) return@withLock drain
+                    if (state != State.READY || !grow(queue, capacity, stream)) return false
+                }
+                controller.eventLock.withLock submit@{
+                    if (state != State.READY || !slot.active) return false
+                    if (!queue.ring.enqueue(entry)) return@submit queue.space.nextChange()
+                    queue.pending.add(pending)
+                    controller.doorbell.ring(slot.id, dci.toUInt(), stream)
+                    return true
+                }
+            }
+            if (!waiting.await()) return false
+        }
+    }
+
+    private fun drainBeforeGrowth(
+        queue: Queue,
+        capacity: Int,
+    ): Deferred<Boolean>? = controller.eventLock.withLock {
+        if (state != State.READY || queue.ring.queue.used == 0) {
+            queue.minimumCapacity = 0
+            return@withLock null
+        }
+        queue.minimumCapacity = capacity
+        queue.space.nextChange()
+    }
+
+    private fun transferEntry(queue: Queue, pending: PendingTransfer): RingEntry {
+        val descriptor = pending.descriptor
+        var shortLength: UInt? = null
+        return RingEntry(descriptor.trbs) { position, event ->
+            val code = event.completionCode
+            if (code in 26u..28u) return@RingEntry false
+            if (code == 13u && pending.request.setup != null) {
+                shortLength = descriptor.actualLength(position, event.transferLength)
+                return@RingEntry false
+            }
+            val actual = when {
+                code == 1u && event.transferLength == 0u -> shortLength ?: descriptor.length
+                else -> shortLength ?: descriptor.actualLength(position, event.transferLength)
+            }
+            val status = when (code) {
+                1u -> if (actual < descriptor.length) TransferStatus.SHORT_PACKET
+                    else TransferStatus.COMPLETED
+                13u -> TransferStatus.SHORT_PACKET
+                2u, 3u -> TransferStatus.DATA_ERROR
+                4u -> TransferStatus.BABBLE
+                5u -> TransferStatus.TRB_ERROR
+                6u -> TransferStatus.STALL
+                36u -> TransferStatus.SPLIT_ERROR
+                else -> TransferStatus.UNKNOWN
+            }
+            if (!status.successful && state == State.READY) {
+                state = State.HALTED
+                queues.forEach { it.space.signal(false) }
+            }
+            queue.pending.remove(pending)
+            val result = TransferResult(status, actual)
+            controller.completions.addLast(pending to result)
+            status.successful
         }
     }
 
@@ -167,8 +185,10 @@ internal constructor(
         val target = pages[event.parameter and (PAGE_SIZE_BYTES - 1uL).inv()] ?: return
         val (queue, segment) = target
         val index = queue.ring.indexOf(event.parameter, segment) ?: return
-        queue.ring.queue.complete(index, event)
-        space.trySend(Unit)
+        val ring = queue.ring.queue
+        val used = ring.used
+        ring.complete(index, event)
+        if (ring.used < used) queue.space.signal(state == State.READY)
     }
 
     suspend fun cancel(status: TransferStatus, stream: Int? = null): Boolean {
@@ -186,7 +206,7 @@ internal constructor(
     suspend fun quiesce(status: TransferStatus, stream: Int? = null): Boolean {
         controller.eventLock.withLock {
             if (state != State.CLOSED) state = State.PAUSED
-            space.trySend(Unit)
+            queues.forEach { it.space.signal(false) }
         }
         return mutex.withLock { reset(status, stream) }
     }
@@ -246,17 +266,12 @@ internal constructor(
                 queue.pending.clear()
             }
             if (state == State.HALTED) state = State.READY
-            space.trySend(Unit)
         }
         controller.completeTransfers()
         return true
     }
 
     private suspend fun grow(queue: Queue, capacity: Int, stream: Int): Boolean {
-        while (controller.eventLock.withLock { queue.ring.queue.used != 0 }) {
-            if (state != State.READY) return false
-            space.receive()
-        }
         val ring =
             try {
                 ProducerRing(controller.memory, capacity)
@@ -303,8 +318,8 @@ internal constructor(
             }
             queue.pending.clear()
             queue.ring.queue.discard()
+            queue.space.signal(false)
         }
-        space.trySend(Unit)
     }
 
     suspend fun dispose() {

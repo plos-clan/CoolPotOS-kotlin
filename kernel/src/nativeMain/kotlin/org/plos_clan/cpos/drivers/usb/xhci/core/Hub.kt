@@ -12,7 +12,7 @@ suspend fun Xhci.xhciHubThread() {
     checkPorts()
 
     while (true) {
-        portSemaphore.acquire()
+        portChanges.await()
         checkPorts()
     }
 }

@@ -1,5 +1,9 @@
 package org.plos_clan.cpos.utils
 
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
+import org.plos_clan.cpos.coroutines.KernelCoroutines
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -7,6 +11,32 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class IrqSpinLockTest {
+    @Test
+    fun pairedLocksHandleAliasingReversedOrderAndExceptions() {
+        val left = IrqSpinLock()
+        val right = IrqSpinLock()
+        assertEquals(1, left.withLock(left) { 1 })
+        assertFailsWith<IllegalStateException> { right.withLock(left) { error("abort") } }
+        var completed = 0
+        suspend fun count(first: IrqSpinLock, second: IrqSpinLock) {
+            repeat(32) {
+                first.withLock(second) {
+                    assertFalse(first.tryWithLock {})
+                    assertFalse(second.tryWithLock {})
+                    completed++
+                }
+                yield()
+            }
+        }
+        KernelCoroutines.await {
+            coroutineScope {
+                launch { count(left, right) }
+                launch { count(right, left) }
+            }
+        }
+        assertEquals(64, completed)
+    }
+
     @Test
     fun preservesInterruptStateAcrossNestedAndFailedAcquisitions() {
         val outer = IrqSpinLock()

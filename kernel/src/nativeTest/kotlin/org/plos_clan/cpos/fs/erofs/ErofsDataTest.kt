@@ -3,8 +3,10 @@ package org.plos_clan.cpos.fs.erofs
 import org.plos_clan.cpos.block.ByteSource
 import org.plos_clan.cpos.time.Instant
 import org.plos_clan.cpos.utils.LittleEndianBuffer
+import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -55,6 +57,26 @@ class ErofsDataTest {
             val cache = ExtentCache<Extent.Stored>(8192)
             return CompressedData.open(image, header, inode, cache, packed)
         }
+    }
+
+    @Test
+    fun metadataPageSurvivesAnotherReadDuringRefill() {
+        lateinit var image: Image
+        val reads = mutableListOf<ULong>()
+        val source = object : ByteSource {
+            override val size = PAGE_SIZE_BYTES + 3uL
+            override fun close() = Unit
+            override fun read(position: ULong, destination: ByteArray): Boolean {
+                reads.add(position)
+                if (position == 0uL) assertEquals(0x22, image.u8(PAGE_SIZE_BYTES))
+                destination.fill(if (position == 0uL) 0x11 else 0x22)
+                return true
+            }
+        }
+        image = Image(source)
+        assertEquals(0x22222211uL, image.u32(PAGE_SIZE_BYTES - 1uL))
+        assertEquals(0x22, image.u8(source.size - 1uL))
+        assertEquals(listOf(0uL, PAGE_SIZE_BYTES, PAGE_SIZE_BYTES), reads)
     }
 
     @Test

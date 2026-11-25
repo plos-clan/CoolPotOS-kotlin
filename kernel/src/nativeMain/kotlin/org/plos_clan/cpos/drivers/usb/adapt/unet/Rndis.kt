@@ -3,25 +3,32 @@
 package org.plos_clan.cpos.drivers.usb.adapt.unet
 
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.UByteVar
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.plos_clan.cpos.coroutines.KernelCoroutines
-import org.plos_clan.cpos.coroutines.KernelOneShot
-import org.plos_clan.cpos.coroutines.KernelSemaphore
 import org.plos_clan.cpos.drivers.net.EthernetDevice
 import org.plos_clan.cpos.drivers.net.EthernetDevices
 import org.plos_clan.cpos.drivers.net.MacAddress
 import org.plos_clan.cpos.drivers.usb.bus.CompletionEvent
 import org.plos_clan.cpos.drivers.usb.bus.GeneralTransferArgs
 import org.plos_clan.cpos.drivers.usb.bus.TransferStatus
+import org.plos_clan.cpos.drivers.usb.bus.UsbBuffer
 import org.plos_clan.cpos.drivers.usb.bus.UsbDriver
 import org.plos_clan.cpos.drivers.usb.bus.UsbInterface
+import org.plos_clan.cpos.drivers.usb.bus.UsbTransfer
 import org.plos_clan.cpos.drivers.usb.bus.submitTransfer
+import org.plos_clan.cpos.drivers.usb.bus.transfer
 import org.plos_clan.cpos.drivers.usb.defs.CLASS_COMM
 import org.plos_clan.cpos.drivers.usb.defs.CLASS_DATA
 import org.plos_clan.cpos.drivers.usb.defs.CLASS_WIRELESS
 import org.plos_clan.cpos.drivers.usb.defs.EP_TYPE_BULK
 import org.plos_clan.cpos.drivers.usb.defs.EP_TYPE_INT
 import org.plos_clan.cpos.mem.MmioRegion
+import kotlin.concurrent.Volatile
 
 internal data class RndisUsbFunction(
     val controlInterface: UsbInterface,
@@ -49,13 +56,13 @@ class RndisDevice private constructor(
         DISCONNECTED,
     }
 
-    private val transmitLock = KernelSemaphore(1)
-    private val receiveCompletion = KernelOneShot<CompletionEvent>()
-    private val receiveStopped = KernelOneShot<Unit>()
-    private val transmitCompletion = KernelOneShot<CompletionEvent>()
+    private val transmitLock = Mutex()
+    private val receiveCompletion = Channel<CompletionEvent>(1)
+    private val receiver = KernelCoroutines.launch("rndis-rx-${function.controlInterface.device.slotId}", CoroutineStart.LAZY) {
+        receiveLoop()
+    }
     private lateinit var transfer: RndisTransferParameters
-    private var receiveActive = false
-    private var state = State.NEW
+    @Volatile private var state = State.NEW
 
     override var macAddress = MacAddress.ZERO
         private set
@@ -106,7 +113,7 @@ class RndisDevice private constructor(
         state = State.RUNNING
         EthernetDevices.register(this)
         control.startNotifications()
-        launchReceiveLoop()
+        receiver.start()
         launchKeepAliveLoop()
         println(
             "USB: RNDIS: $macAddress, frame $maximumFrameSize, " +
@@ -121,8 +128,7 @@ class RndisDevice private constructor(
             length < HEADER_SIZE.toUInt() || length > maximumFrameSize
         ) return false
 
-        transmitLock.acquire()
-        try {
+        return transmitLock.withLock {
             if (state != State.RUNNING) return false
             val messageLength = RndisPacketCodec.encode(
                 transmitBuffer.view(),
@@ -130,19 +136,13 @@ class RndisDevice private constructor(
                 frame,
                 transfer.alignmentFactor,
             ) ?: return false
-            function.dataInterface.device.submitTransfer(
-                GeneralTransferArgs(
-                    endpointAddress = function.bulkOutEndpoint,
-                    bufferPhysicalAddress = transmitBuffer.physicalAddress,
-                    length = messageLength,
-                ),
-            ) ?: return false
-
-            val event = transmitCompletion.recv()
-            return state == State.RUNNING &&
-                event.status == TransferStatus.COMPLETED && event.residualLength == 0u
-        } finally {
-            transmitLock.release()
+            val buffer = UsbBuffer(
+                transmitBuffer.physicalAddress, messageLength, transmitBuffer.virtualAddress,
+            )
+            val request = UsbTransfer(function.bulkOutEndpoint, listOf(buffer))
+            val result = function.dataInterface.device.transfer(request, TRANSMIT_TIMEOUT_MILLIS)
+            val complete = result.status == TransferStatus.COMPLETED && result.actualLength == messageLength
+            state == State.RUNNING && complete
         }
     }
 
@@ -166,67 +166,45 @@ class RndisDevice private constructor(
         control.quiesce()
         val stopped = CompletionEvent(0u, TransferStatus.DRIVER_ERROR, 0u)
         receiveCompletion.trySend(stopped)
-        transmitCompletion.trySend(stopped)
     }
 
     override suspend fun disconnect() {
         if (state == State.DISCONNECTED) return
         quiesce()
-        if (receiveActive) receiveStopped.recv()
-        transmitLock.acquire()
-        transmitLock.release()
+        receiver.join()
         control.close()
         receiveBuffer.free()
-        transmitBuffer.free()
+        transmitLock.withLock { transmitBuffer.free() }
         state = State.DISCONNECTED
         println("USB: RNDIS: disconnected")
     }
 
     override fun handleCompletion(event: CompletionEvent) {
         if (control.handleCompletion(event)) return
-        when (event.endpointAddress) {
-            function.bulkInEndpoint -> receiveCompletion.trySend(event)
-            function.bulkOutEndpoint -> transmitCompletion.trySend(event)
-            else -> {}
-        }
+        if (event.endpointAddress == function.bulkInEndpoint) receiveCompletion.trySend(event)
     }
 
-    private fun launchReceiveLoop() {
-        receiveActive = true
-        KernelCoroutines.launch("rndis-rx-${function.controlInterface.device.slotId}") {
-            try {
-                while (state == State.RUNNING) {
-                    function.dataInterface.device.submitTransfer(
-                        GeneralTransferArgs(
-                            endpointAddress = function.bulkInEndpoint,
-                            bufferPhysicalAddress = receiveBuffer.physicalAddress,
-                            length = transfer.transferSize,
-                        ),
-                    ) ?: run {
-                        println("USB: RNDIS: failed to submit receive transfer")
-                        return@launch
-                    }
-
-                    val event = receiveCompletion.recv()
-                    if (state != State.RUNNING) return@launch
-                    if (!event.status.successful) {
-                        println("USB: RNDIS: receive transfer failed (${event.status})")
-                        continue
-                    }
-
-                    val received = transfer.transferSize -
-                        minOf(event.residualLength, transfer.transferSize)
-                    if (received != 0u && !RndisPacketCodec.consume(
-                            receiveBuffer.view(),
-                            received,
-                            maximumFrameSize,
-                        ) { frame, length -> receive(frame, length) }
-                    ) println("USB: RNDIS: malformed packet message")
-                }
-            } finally {
-                receiveActive = false
-                receiveStopped.trySend(Unit)
+    private suspend fun receiveLoop() {
+        if (state != State.RUNNING) return
+        val endpoint = GeneralTransferArgs(
+            function.bulkInEndpoint, receiveBuffer.physicalAddress, transfer.transferSize,
+        )
+        while (state == State.RUNNING) {
+            if (function.dataInterface.device.submitTransfer(endpoint) == null) {
+                println("USB: RNDIS: failed to submit receive transfer")
+                return
             }
+            val event = receiveCompletion.receive()
+            if (state != State.RUNNING) return
+            if (!event.status.successful) {
+                println("USB: RNDIS: receive transfer failed (${event.status})")
+                continue
+            }
+            val received = transfer.transferSize - minOf(event.residualLength, transfer.transferSize)
+            if (received == 0u) continue
+            val data = receiveBuffer.view<UByteVar>()
+            val valid = RndisPacketCodec.consume(data, received, maximumFrameSize, ::receive)
+            if (!valid) println("USB: RNDIS: malformed packet message")
         }
     }
 
@@ -242,6 +220,7 @@ class RndisDevice private constructor(
     }
 
     companion object {
+        private const val TRANSMIT_TIMEOUT_MILLIS = 5_000L
         private const val TRANSFER_BUFFER_PAGES = 4uL
         private const val KEEP_ALIVE_INTERVAL_MILLIS = 5_000L
 

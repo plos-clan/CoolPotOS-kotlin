@@ -15,6 +15,9 @@ import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PollEvents
 
+private val accessGranted = VfsResult.Ok(Unit)
+private val accessDenied = VfsResult.Err(VfsError.PERMISSION_DENIED)
+
 abstract class FileSystemType(
     val name: String,
     val magic: ULong,
@@ -244,32 +247,27 @@ interface InodeBackend : InodeOwner {
         requested: AccessPermissions,
         cachedOnly: Boolean = false,
     ): VfsResult<Unit> {
-        if (requested == AccessPermissions.NONE) return VfsResult.Ok(Unit)
+        if (requested == AccessPermissions.NONE) return accessGranted
         val metadata = when (val result = inode.attributes(caller, cachedOnly = cachedOnly)) {
             is VfsResult.Ok -> result.value.metadata
             is VfsResult.Err -> return result
         }
         if (caller.privileged) {
             val executable = metadata.mode.bits and 0x49u != 0u
-            return if (AccessPermission.EXECUTE !in requested ||
+            val allowed = AccessPermission.EXECUTE !in requested ||
                 inode.type == InodeType.DIRECTORY || executable
-            ) {
-                VfsResult.Ok(Unit)
-            } else {
-                VfsResult.Err(VfsError.PERMISSION_DENIED)
-            }
+            return if (allowed) accessGranted else accessDenied
         }
 
         val acl = inode.aclAccess(caller, requested)
-        if (acl != null) return if (acl) VfsResult.Ok(Unit) else VfsResult.Err(VfsError.PERMISSION_DENIED)
+        if (acl != null) return if (acl) accessGranted else accessDenied
         val shift = when {
             caller.uid == metadata.uid -> 6
             caller.belongsToGroup(metadata.gid) -> 3
             else -> 0
         }
         val allowed = metadata.mode.bits shr shift and 0x7u
-        return if (allowed and requested.bits == requested.bits) VfsResult.Ok(Unit)
-        else VfsResult.Err(VfsError.PERMISSION_DENIED)
+        return if (allowed and requested.bits == requested.bits) accessGranted else accessDenied
     }
 
     fun access(

@@ -113,7 +113,7 @@ internal class TmpfsDirectory(
             ?: return VfsResult.Err(VfsError.CROSS_DEVICE)
         if (targetBackend.fileSystem !== fileSystem) return VfsResult.Err(VfsError.CROSS_DEVICE)
         return fileSystem.mutate {
-            withLocks(sourceDirectory, targetDirectory, targetBackend) {
+            lock.withLock(targetBackend.lock) {
                 renameLocked(
                     sourceDirectory,
                     sourceName,
@@ -394,19 +394,6 @@ internal class TmpfsDirectory(
         return false
     }
 
-    private fun <T> withLocks(
-        source: Inode,
-        target: Inode,
-        targetBackend: TmpfsDirectory,
-        operation: () -> T,
-    ): T {
-        if (this === targetBackend) return lock.withLock(operation)
-        return if (source.id.value < target.id.value) {
-            lock.withLock { targetBackend.lock.withLock(operation) }
-        } else {
-            targetBackend.lock.withLock { lock.withLock(operation) }
-        }
-    }
 }
 
 private class TmpfsDirectoryHandle(private val directory: TmpfsDirectory) : OpenFileBackend {

@@ -1,11 +1,8 @@
-@file:OptIn(ExperimentalAtomicApi::class)
-
 package org.plos_clan.cpos.network
 
 import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.Inode
-import kotlin.concurrent.atomics.AtomicReference
 import org.plos_clan.cpos.drivers.net.MacAddress
 import org.plos_clan.cpos.fs.sock.SocketAddress
 import org.plos_clan.cpos.fs.sock.SocketDomain
@@ -20,39 +17,26 @@ import org.plos_clan.cpos.tasks.IoWaitQueue
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.PollEvents
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import org.plos_clan.cpos.utils.SnapshotSet
 
 internal class PacketSocketProtocol(val network: NetworkStack) {
-    private val sockets = AtomicReference<List<PacketSocket>>(emptyList())
+    private val sockets = SnapshotSet<PacketSocket>()
 
     fun createSocket(protocol: Int): PacketSocket = PacketSocket(
         this,
         protocol,
         ((protocol and 0xFF) shl 8 or (protocol ushr 8 and 0xFF)).toUShort(),
-    ).also(::register)
+    ).also(sockets::add)
 
     fun receive(
         intfc: NetworkInterface,
         frame: ByteArray,
         ethernet: EthernetHeader,
     ) {
-        sockets.load().forEach { it.enqueue(intfc, frame, ethernet) }
+        sockets.snapshot.forEach { it.enqueue(intfc, frame, ethernet) }
     }
 
-    fun unregister(socket: PacketSocket) {
-        while (true) {
-            val current = sockets.load()
-            val updated = current.filterNot { it === socket }
-            if (current.size == updated.size || sockets.compareAndSet(current, updated)) return
-        }
-    }
-
-    private fun register(socket: PacketSocket) {
-        while (true) {
-            val current = sockets.load()
-            if (sockets.compareAndSet(current, current + socket)) return
-        }
-    }
+    fun unregister(socket: PacketSocket) = sockets.remove(socket)
 }
 
 internal class PacketSocket internal constructor(

@@ -6,8 +6,9 @@ import bridge.cp_zstd_decompress
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
+import kotlinx.coroutines.CompletableDeferred
+import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.utils.IrqSpinLock
-import org.plos_clan.cpos.utils.KernelMutex
 import org.plos_clan.cpos.utils.alignUp
 
 internal class CompactIndex private constructor(
@@ -264,43 +265,45 @@ internal sealed class Extent(val logicalStart: ULong, val logicalEnd: ULong) {
 }
 
 internal class ExtentCache<K : Any>(private val capacity: Int) {
-    private class Entry {
-        val loading = KernelMutex()
-        var result: Result<ByteArray?>? = null
-    }
-
     private val lock = IrqSpinLock()
-    private val entries = linkedMapOf<K, Entry>()
+    private val entries = linkedMapOf<K, ByteArray>()
+    private val loading = mutableMapOf<K, CompletableDeferred<ByteArray?>>()
     private var used = 0
 
     fun getOrLoad(key: K, load: () -> ByteArray?): ByteArray? {
-        val entry = lock.withLock {
-            val existing = entries.remove(key) ?: Entry()
-            entries[key] = existing
-            existing.result?.let { return it.getOrThrow() }
-            existing
+        var owner = false
+        val flight = lock.withLock {
+            val cached = entries.remove(key)
+            if (cached != null) {
+                entries[key] = cached
+                return cached
+            }
+            loading.getOrPut(key) {
+                owner = true
+                CompletableDeferred()
+            }
         }
-        return entry.loading.withLock {
-            entry.result?.let { return@withLock it.getOrThrow() }
-            val result = runCatching(load)
-            publish(key, entry, result)
-            result.getOrThrow()
+        if (!owner) return KernelCoroutines.await(flight)
+        try {
+            val loaded = load()
+            if (loaded != null && loaded.size <= capacity) publish(key, loaded)
+            flight.complete(loaded)
+            return loaded
+        } catch (failure: Throwable) {
+            flight.completeExceptionally(failure)
+            throw failure
+        } finally {
+            lock.withLock { loading.remove(key) }
         }
     }
 
-    private fun publish(key: K, entry: Entry, result: Result<ByteArray?>) = lock.withLock {
-        entry.result = result
-        entries.remove(key)
-        val loaded = result.getOrNull() ?: return@withLock
-        if (loaded.size > capacity) return@withLock
-        val iterator = entries.iterator()
-        while (used > capacity - loaded.size && iterator.hasNext()) {
-            val evicted = iterator.next().value.result?.getOrNull() ?: continue
-            used -= evicted.size
+    private fun publish(key: K, loaded: ByteArray) = lock.withLock {
+        val iterator = entries.values.iterator()
+        while (used > capacity - loaded.size) {
+            used -= iterator.next().size
             iterator.remove()
         }
-        entries[key] = entry
+        entries[key] = loaded
         used += loaded.size
     }
-
 }

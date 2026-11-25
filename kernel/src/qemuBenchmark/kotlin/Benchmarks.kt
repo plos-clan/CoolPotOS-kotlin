@@ -1,17 +1,30 @@
-@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class)
+@file:OptIn(kotlinx.cinterop.ExperimentalForeignApi::class, kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
 
 import kotlinx.cinterop.alloc
+import kotlinx.cinterop.allocArray
+import kotlinx.cinterop.asStableRef
+import kotlinx.cinterop.COpaquePointer
+import kotlinx.cinterop.get
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
+import kotlinx.cinterop.plus
+import kotlinx.cinterop.StableRef
+import kotlinx.cinterop.staticCFunction
 import kotlinx.io.buffered
 import kotlinx.io.files.Path
 import kotlinx.io.files.SystemFileSystem
 import kotlinx.io.readString
 import platform.posix.CLOCK_BOOTTIME
+import platform.posix.F_OK
+import platform.posix.access
 import platform.posix.clock_gettime
 import platform.posix.getpid
+import platform.posix.pthread_create
+import platform.posix.pthread_join
+import platform.posix.pthread_tVar
 import platform.posix.system
 import platform.posix.timespec
+import kotlin.concurrent.atomics.AtomicLong
 import kotlin.time.Duration
 import kotlin.time.TimeSource
 
@@ -65,21 +78,67 @@ abstract class TimedBenchmark(name: String, unit: String) : Benchmark(name, unit
     }
 }
 
-object GetPidBenchmark : TimedBenchmark("syscall.getpid", "ns/op") {
-    private const val BATCH_SIZE = 1024
+abstract class SyscallBenchmark(name: String) : TimedBenchmark(name, "ns/op") {
+    protected abstract fun invoke(): Int
 
     override fun sample(duration: Duration): Double {
-        val expected = getpid().also { check(it > 0) { "getpid failed: $it" } }
-        var observed = 0
+        val start = TimeSource.Monotonic.markNow()
+        val operations = count(duration)
+        return start.elapsedNow().inWholeNanoseconds.toDouble() / operations
+    }
+
+    internal fun count(duration: Duration): Long {
+        val expected = invoke()
+        check(expected >= 0) { "$name failed: $expected" }
         var operations = 0L
         val start = TimeSource.Monotonic.markNow()
         do {
-            repeat(BATCH_SIZE) { observed = getpid() }
+            repeat(BATCH_SIZE) { check(invoke() == expected) }
             operations += BATCH_SIZE
         } while (start.elapsedNow() < duration)
-        val elapsed = start.elapsedNow().inWholeNanoseconds
-        check(observed == expected)
-        return elapsed.toDouble() / operations
+        return operations
+    }
+
+    private companion object {
+        const val BATCH_SIZE = 1024
+    }
+}
+
+object GetPidBenchmark : SyscallBenchmark("syscall.getpid") {
+    override fun invoke(): Int = getpid()
+}
+
+object PathLookupBenchmark : SyscallBenchmark("vfs.cachedAccess") {
+    override fun invoke(): Int = access("/usr/bin/bash", F_OK)
+}
+
+class ParallelSyscallBenchmark(private val syscall: SyscallBenchmark, private val workers: Int) :
+    TimedBenchmark("${syscall.name}[workers=$workers]", "ops/s") {
+    private class Batch(val syscall: SyscallBenchmark, val duration: Duration) {
+        val operations = AtomicLong(0)
+    }
+
+    override fun sample(duration: Duration): Double = memScoped {
+        val threads = allocArray<pthread_tVar>(workers)
+        val batch = Batch(syscall, duration)
+        val reference = StableRef.create(batch)
+        var started = 0
+        val start = TimeSource.Monotonic.markNow()
+        try {
+            val run = staticCFunction { pointer: COpaquePointer? ->
+                val work = checkNotNull(pointer).asStableRef<Batch>().get()
+                work.operations.fetchAndAdd(work.syscall.count(work.duration))
+                null as COpaquePointer?
+            }
+            repeat(workers) {
+                check(pthread_create(threads + it, null, run, reference.asCPointer()) == 0)
+                started++
+            }
+        } finally {
+            repeat(started) { check(pthread_join(threads[it], null) == 0) }
+            reference.dispose()
+        }
+        batch.operations.load() * 1e9 / start.elapsedNow().inWholeNanoseconds
     }
 }
 

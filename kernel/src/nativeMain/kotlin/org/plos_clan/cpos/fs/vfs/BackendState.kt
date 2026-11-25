@@ -3,31 +3,30 @@
 package org.plos_clan.cpos.fs.vfs
 
 import org.plos_clan.cpos.time.Instant
+import org.plos_clan.cpos.time.MonotonicClock
 
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 sealed interface CacheValidity {
-    fun isValid(nowNanoseconds: ULong): Boolean
+    fun isValid(clock: MonotonicClock): Boolean
 
     data object Persistent : CacheValidity {
-        override fun isValid(nowNanoseconds: ULong): Boolean = true
+        override fun isValid(clock: MonotonicClock): Boolean = true
     }
 
     data object Volatile : CacheValidity {
-        override fun isValid(nowNanoseconds: ULong): Boolean = false
+        override fun isValid(clock: MonotonicClock): Boolean = false
     }
 
     data class Until(val deadlineNanoseconds: ULong) : CacheValidity {
-        override fun isValid(nowNanoseconds: ULong): Boolean =
-            nowNanoseconds < deadlineNanoseconds
+        override fun isValid(clock: MonotonicClock): Boolean = clock.nanoTime() < deadlineNanoseconds
     }
 
     class Invalidatable(private val validity: CacheValidity) : CacheValidity {
         private val valid = AtomicBoolean(true)
 
-        override fun isValid(nowNanoseconds: ULong): Boolean =
-            valid.load() && validity.isValid(nowNanoseconds)
+        override fun isValid(clock: MonotonicClock): Boolean = valid.load() && validity.isValid(clock)
 
         fun invalidate() = valid.store(false)
     }
@@ -66,7 +65,17 @@ data class InodeAttributes(
 data class InodeAttributeSnapshot(
     val attributes: InodeAttributes,
     val validity: CacheValidity,
-)
+) {
+    internal val result = VfsResult.Ok(attributes)
+
+    internal fun withMetadata(
+        metadata: InodeMetadata,
+        validity: CacheValidity = this.validity,
+    ): InodeAttributeSnapshot {
+        val updated = attributes.copy(metadata = metadata)
+        return InodeAttributeSnapshot(updated, validity)
+    }
+}
 
 fun interface DentryReference {
     fun release()

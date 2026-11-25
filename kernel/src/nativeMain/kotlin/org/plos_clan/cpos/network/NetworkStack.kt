@@ -20,10 +20,13 @@ import org.plos_clan.cpos.drivers.net.MacAddress
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.SnapshotSet
 import kotlin.native.ref.WeakReference
 import org.plos_clan.cpos.fs.sock.UnixSocketNamespace
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.update
 
 internal data class NetworkInterfaceAddress(
     val address: Ipv4Address,
@@ -309,7 +312,6 @@ internal class NetworkStack : EthernetProtocol {
     }
 
     private val lock = IrqSpinLock()
-    private val listenerLock = IrqSpinLock()
     private val fragmentLock = IrqSpinLock()
     private val interfaces = mutableMapOf<Int, NetworkInterface>()
     private val deviceInterfaces = mutableMapOf<EthernetDevice, NetworkInterface>()
@@ -318,9 +320,9 @@ internal class NetworkStack : EthernetProtocol {
     private var routingTable: List<NetworkRoute>? = null
     private val neighbors = mutableMapOf<NeighborKey, NeighborEntry>()
     private val pendingNeighbors = mutableMapOf<NeighborKey, PendingNeighbor>()
-    private val handlers = mutableMapOf<UByte, IpProtocolHandler>()
+    private val handlers = AtomicReference(emptyMap<UByte, IpProtocolHandler>())
     private val fragments = mutableMapOf<FragmentKey, FragmentAssembly>()
-    private val listeners = mutableSetOf<NetworkConfigurationListener>()
+    private val listeners = SnapshotSet<NetworkConfigurationListener>()
     private val nextInterfaceIndex = AtomicInt(2)
     private val nextIdentification = AtomicInt(0)
     val tcp = TcpProtocol(this)
@@ -334,19 +336,21 @@ internal class NetworkStack : EthernetProtocol {
         val loopback = NetworkInterface(LOOPBACK_INDEX, "lo", NetworkInterfaceKind.LOOPBACK, null)
         interfaces[loopback.index] = loopback
         val reference = WeakReference(this)
-        namespacesLock.withLock { namespaces.add(reference) }
+        namespaces.update { it + reference }
     }
 
     fun registerHandler(handler: IpProtocolHandler) {
-        lock.withLock {
-            check(handlers.put(handler.protocol.number, handler) == null) {
+        handlers.update { current ->
+            val number = handler.protocol.number
+            check(number !in current) {
                 "IP protocol ${handler.protocol} is already registered"
             }
+            current + (number to handler)
         }
     }
 
     fun addListener(listener: NetworkConfigurationListener) {
-        listenerLock.withLock { listeners.add(listener) }
+        listeners.add(listener)
     }
 
     fun snapshotInterfaces(): List<NetworkInterface> =
@@ -827,7 +831,7 @@ internal class NetworkStack : EthernetProtocol {
             receiveIcmp(packet)
             return
         }
-        val handler = lock.withLock { handlers[protocol] }
+        val handler = handlers.load()[protocol]
         if (handler == null) {
             sendIcmpError(packet, ICMP_DESTINATION_UNREACHABLE, ICMP_PROTOCOL_UNREACHABLE)
         } else {
@@ -878,7 +882,7 @@ internal class NetworkStack : EthernetProtocol {
         val quotedOffset = packet.payloadOffset + ICMP_HEADER_SIZE
         val quotedLength = packet.payloadLength - ICMP_HEADER_SIZE
         val quoted = Ipv4Codec.decode(packet.bytes, quotedOffset, quotedLength) ?: return
-        val handler = lock.withLock { handlers[quoted.protocol] } ?: return
+        val handler = handlers.load()[quoted.protocol] ?: return
         handler.receiveError(
             IpPacketContext(
                 packet.intfc,
@@ -1174,12 +1178,11 @@ internal class NetworkStack : EthernetProtocol {
     }
 
     private inline fun notifyListeners(notification: (NetworkConfigurationListener) -> Unit) {
-        listenerLock.withLock { listeners.toList() }.forEach(notification)
+        listeners.snapshot.forEach(notification)
     }
 
     companion object {
-        private val namespacesLock = IrqSpinLock()
-        private val namespaces = mutableListOf<WeakReference<NetworkStack>>()
+        private val namespaces = AtomicReference(emptyList<WeakReference<NetworkStack>>())
         val initial = NetworkStack()
 
         fun initialize() {
@@ -1207,14 +1210,14 @@ internal class NetworkStack : EthernetProtocol {
         }
 
         internal fun snapshot(): List<NetworkStack> {
-            val references = namespacesLock.withLock { namespaces.toList() }
+            val references = namespaces.load()
             val active = ArrayList<NetworkStack>(references.size)
             val expired = HashSet<WeakReference<NetworkStack>>()
             for (reference in references) {
                 val network = reference.get()
                 if (network == null) expired.add(reference) else active.add(network)
             }
-            if (expired.isNotEmpty()) namespacesLock.withLock { namespaces.removeAll(expired) }
+            if (expired.isNotEmpty()) namespaces.update { it - expired }
             return active
         }
 

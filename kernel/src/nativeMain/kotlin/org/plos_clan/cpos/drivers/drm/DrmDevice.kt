@@ -86,7 +86,7 @@ internal class DrmDevice(
                 if (flip == null || !waitForFlip) return block()
                 flip.waiter ?: CompletableDeferred<Unit>().also { flip.waiter = it }
             }
-            KernelCoroutines.await { waiter.await() }
+            KernelCoroutines.await(waiter)
         }
     }
 

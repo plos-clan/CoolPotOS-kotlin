@@ -76,9 +76,8 @@ class KernelDispatcher internal constructor(
     private val clock: MonotonicClock,
     private val nextWorker: () -> KernelWorker,
     private val currentWorker: () -> KernelWorker?,
-    private val newLock: () -> CriticalSection,
 ) : CoroutineDispatcher(), Delay {
-    internal fun createEvent(): KernelEvent = KernelEvent(newLock(), this)
+    internal fun createEvent(): KernelEvent = KernelEvent(this)
 
     private fun selectWorker(): KernelWorker {
         val local = currentWorker() ?: return nextWorker()

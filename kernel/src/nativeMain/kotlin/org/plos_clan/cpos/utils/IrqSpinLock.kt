@@ -18,6 +18,10 @@ internal external fun saveInterrupts(): ULong
 internal external fun restoreInterrupts(flags: ULong)
 
 class IrqSpinLock : CriticalSection() {
+    private companion object {
+        val hashCollision = IrqSpinLock()
+    }
+
     @PublishedApi
     internal val held = AtomicBoolean(false)
 
@@ -32,6 +36,19 @@ class IrqSpinLock : CriticalSection() {
     override fun release(state: ULong) {
         held.store(false)
         restoreInterrupts(state)
+    }
+
+    internal fun <T> withLock(peer: IrqSpinLock, block: () -> T): T {
+        if (this === peer) return withLock(block)
+        fun acquireBoth(first: IrqSpinLock, second: IrqSpinLock): T =
+            first.withLock { second.withLock(block) }
+
+        val order = hashCode().compareTo(peer.hashCode())
+        return when {
+            order < 0 -> acquireBoth(this, peer)
+            order > 0 -> acquireBoth(peer, this)
+            else -> hashCollision.withLock { acquireBoth(this, peer) }
+        }
     }
 
     inline fun tryWithLock(block: () -> Unit): Boolean {

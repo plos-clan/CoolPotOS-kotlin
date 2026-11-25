@@ -7,6 +7,7 @@ import kotlin.concurrent.atomics.AtomicLong
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.SnapshotSet
 
 internal value class Signal private constructor(val number: Int) {
     val bit: ULong
@@ -403,7 +404,7 @@ internal class ProcessSignalState(uid: () -> Int, limit: () -> ULong) {
     private val actions = Array(Signal.MAX) { SignalAction.DEFAULT }
     private val actionable = AtomicLong(DEFAULT_ACTIONABLE_MASK.toLong())
     private val quota = PendingSignalQuota(uid, limit)
-    private val signalFdWaiters = AtomicReference<List<Thread>>(emptyList())
+    private val signalFdWaiters = SnapshotSet<Thread>()
     private val stopLock = IrqSpinLock()
     private val stoppedThreads = mutableListOf<Thread>()
 
@@ -461,30 +462,12 @@ internal class ProcessSignalState(uid: () -> Int, limit: () -> ULong) {
     fun hasActionable(pending: ULong): Boolean =
         pending and actionable.load().toULong() != 0uL
 
-    fun registerSignalFdWaiter(thread: Thread) {
-        while (true) {
-            val observed = signalFdWaiters.load()
-            if (thread in observed ||
-                signalFdWaiters.compareAndSet(observed, observed + thread)
-            ) {
-                return
-            }
-        }
-    }
+    fun registerSignalFdWaiter(thread: Thread) = signalFdWaiters.add(thread)
 
-    fun unregisterSignalFdWaiter(thread: Thread) {
-        while (true) {
-            val observed = signalFdWaiters.load()
-            if (thread !in observed ||
-                signalFdWaiters.compareAndSet(observed, observed - thread)
-            ) {
-                return
-            }
-        }
-    }
+    fun unregisterSignalFdWaiter(thread: Thread) = signalFdWaiters.remove(thread)
 
     fun notifySignalFdWaiters() {
-        for (waiter in signalFdWaiters.load()) Scheduler.wake(waiter)
+        for (waiter in signalFdWaiters.snapshot) Scheduler.wake(waiter)
     }
 
     fun inherit(source: ProcessSignalState) {

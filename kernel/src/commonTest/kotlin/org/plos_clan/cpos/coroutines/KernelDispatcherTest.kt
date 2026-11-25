@@ -34,7 +34,7 @@ class KernelDispatcherTest {
     fun keepsTimersLocalAndSpillsOnlyToALighterWorker() {
         val local = Harness()
         val peer = Harness()
-        val dispatcher = KernelDispatcher(local, { peer.worker }, { local.worker }, { local })
+        val dispatcher = KernelDispatcher(local, { peer.worker }) { local.worker }
         repeat(4) { dispatcher.dispatch(EmptyCoroutineContext) {} }
         assertEquals(3, local.worker.load)
         assertEquals(1, peer.worker.load)
@@ -120,6 +120,24 @@ class KernelDispatcherTest {
     }
 
     @Test
+    fun cancellationAfterSignalPreservesThePendingWakeup() {
+        val harness = Harness()
+        val event = harness.dispatcher.createEvent()
+        val first = harness.scope.launch { event.await() }
+        harness.runReady()
+        event.signal()
+        first.cancel()
+        var received = 0
+        harness.scope.launch { repeat(2) { event.await(); received++ } }
+        harness.runReady()
+        assertEquals(1, received)
+        event.signal()
+        harness.runReady()
+        assertEquals(2, received)
+        harness.scope.cancel()
+    }
+
+    @Test
     fun cancellationReleasesTheEventWaiter() {
         val harness = Harness()
         val event = harness.dispatcher.createEvent()
@@ -144,7 +162,7 @@ class KernelDispatcherTest {
         var wakeups = 0
         private var held = false
         val worker = KernelWorker(this, this) { wakeups++ }
-        val dispatcher = KernelDispatcher(this, { worker }, { null }, { this })
+        val dispatcher = KernelDispatcher(this, { worker }) { null }
         fun runReady(): Boolean = worker.runReadyBatch({ null }) { throw it }
         val scope = CoroutineScope(SupervisorJob() + dispatcher)
 

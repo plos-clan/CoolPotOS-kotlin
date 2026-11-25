@@ -7,6 +7,7 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.Runnable
@@ -22,7 +23,7 @@ import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.TaskReaper
-import org.plos_clan.cpos.utils.IrqSpinLock
+import org.plos_clan.cpos.utils.SnapshotSet
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.native.concurrent.ThreadLocal
@@ -36,7 +37,7 @@ data class CoroutineEntry(val id: Int, val name: String, val job: Job)
 
 object KernelCoroutines {
     private val nextId = AtomicInt(0)
-    val dispatcher = KernelDispatcher(TscClock, ::nextWorker, { currentWorker }, ::IrqSpinLock)
+    val dispatcher = KernelDispatcher(TscClock, ::nextWorker) { currentWorker }
     private val handler = CoroutineExceptionHandler { _, failure -> reportFailure(failure) }
     private val scope = CoroutineScope(SupervisorJob() + dispatcher + CoroutineName("kernel") + handler)
 
@@ -45,28 +46,32 @@ object KernelCoroutines {
         return local.scheduler.worker
     }
 
-    private val jobLock = IrqSpinLock()
-    private val jobs = mutableListOf<CoroutineEntry>()
+    private val jobs = SnapshotSet<CoroutineEntry>()
 
-    fun snapshotJobs(): List<CoroutineEntry> = jobLock.withLock {
-        jobs.toList()
-    }
+    fun snapshotJobs(): List<CoroutineEntry> = jobs.snapshot
 
     fun launch(
         name: String,
         start: CoroutineStart = CoroutineStart.DEFAULT,
         block: suspend CoroutineScope.() -> Unit,
-    ) {
+    ): Job {
         val job = scope.launch(CoroutineName(name), start, block)
         val entry = CoroutineEntry(nextId.fetchAndAdd(1), name, job)
-        jobLock.withLock { jobs += entry }
+        jobs.add(entry)
+        job.invokeOnCompletion { jobs.remove(entry) }
+        return job
+    }
+
+    fun <T> await(block: suspend () -> T): T {
+        val work = scope.async(CoroutineName("kernel-io")) { block() }
+        return await(work)
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    fun <T> await(block: suspend () -> T): T {
+    internal fun <T> await(work: Deferred<T>): T {
+        if (work.isCompleted) return work.getCompleted()
         val thread = checkNotNull(ProcessManager.currentThread())
         val local = SMProcessor.currentLocal().takeIf { it.scheduler.bootstrapThread === thread }
-        val work = scope.async(CoroutineName("kernel-io")) { block() }
         work.invokeOnCompletion {
             if (local == null) Scheduler.wake(thread) else local.scheduler.worker.wake()
         }

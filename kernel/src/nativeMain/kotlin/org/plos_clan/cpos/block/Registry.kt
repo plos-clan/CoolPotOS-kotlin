@@ -6,7 +6,9 @@ import kotlin.concurrent.atomics.AtomicInt
 import kotlin.uuid.Uuid
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withTimeoutOrNull
 import org.plos_clan.cpos.drivers.Device
 import org.plos_clan.cpos.drivers.DeviceBackend
@@ -25,7 +27,6 @@ import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.utils.Errno
-import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
 
@@ -118,9 +119,7 @@ class BlockDeviceBackend(val volume: BlockVolume) : DeviceBackend {
 
 object BlockDevices {
     private val sequence = AtomicInt(0)
-    private val lock = IrqSpinLock()
-    private val devices = mutableListOf<Device>()
-    private val changes = MutableStateFlow(0uL)
+    private val devices = MutableStateFlow(emptyList<Device>())
 
     suspend fun register(block: BlockDevice): Device? {
         val partitions = Gpt(block).read().orEmpty()
@@ -143,30 +142,27 @@ object BlockDevices {
         return disk
     }
 
-    fun find(source: String): Device? {
+    fun find(source: String): Device? = find(source, devices.value)
+
+    private fun find(source: String, snapshot: List<Device>): Device? {
         val id = if (source.startsWith("PARTUUID=", true)) {
             Uuid.parseOrNull(source.substringAfter('=')) ?: return null
         } else null
         val name = source.removePrefix("/dev/")
-        return lock.withLock {
-            devices.singleOrNull { device ->
-                val volume = (device.backend as BlockDeviceBackend).volume
-                val matches = if (id != null) volume.partition?.id == id else device.name == name
-                volume.cache.connected && matches
-            }
+        return snapshot.singleOrNull { device ->
+            val volume = (device.backend as BlockDeviceBackend).volume
+            val matches = if (id != null) volume.partition?.id == id else device.name == name
+            volume.cache.connected && matches
         }
     }
 
     suspend fun await(source: String, timeoutMillis: Long = 30_000): Device? =
         withTimeoutOrNull(timeoutMillis) {
-            changes.mapNotNull { find(source) }.first()
+            devices.mapNotNull { find(source, it) }.first()
         }
 
     fun flush(): BlockStatus {
-        val caches =
-            lock.withLock {
-                devices.map { (it.backend as BlockDeviceBackend).volume.cache }.distinct()
-            }
+        val caches = devices.value.map { (it.backend as BlockDeviceBackend).volume.cache }.distinct()
         var status = BlockStatus.SUCCESS
         for (cache in caches) {
             val result = cache.flush()
@@ -177,17 +173,11 @@ object BlockDevices {
 
     fun unregister(device: Device) {
         val backend = device.backend as? BlockDeviceBackend ?: return
-        backend.volume.cache.detach()
-        val removed =
-            lock.withLock {
-                val matches = devices.filter {
-                    (it.backend as BlockDeviceBackend).volume.cache === backend.volume.cache
-                }
-                devices.removeAll(matches.toSet())
-                changes.value++
-                matches
-            }
-        removed.asReversed().forEach(DeviceManager::unregister)
+        val cache = backend.volume.cache
+        cache.detach()
+        fun matches(candidate: Device) = (candidate.backend as BlockDeviceBackend).volume.cache === cache
+        val previous = devices.getAndUpdate { it.filterNot(::matches) }
+        for (candidate in previous.asReversed()) if (matches(candidate)) DeviceManager.unregister(candidate)
     }
 
     private fun publish(name: String, volume: BlockVolume, parent: Device? = null): Device? {
@@ -211,9 +201,12 @@ object BlockDevices {
             name, DeviceType.BLOCK, 259u, backend = backend, sysfs = publication,
         )
         val device = DeviceManager.register(registration) ?: return null
-        lock.withLock {
-            devices.add(device)
-            changes.value++
+        devices.update { current ->
+            if (!volume.cache.connected) {
+                DeviceManager.unregister(device)
+                return null
+            }
+            current + device
         }
         volume.partition?.let { println("Block: /dev/$name PARTUUID=${it.id}") }
         return device

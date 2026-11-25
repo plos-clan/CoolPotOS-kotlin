@@ -36,6 +36,8 @@ fun main() {
             Snapshot("boot.toBenchmarkService", "ns") { boot.toDouble() },
             Snapshot("boot.usedMemory", "bytes", Snapshot::usedMemory),
             GetPidBenchmark,
+            PathLookupBenchmark,
+            ParallelSyscallBenchmark(PathLookupBenchmark, 4),
             ThreadWakeupBenchmark(),
             CommandBenchmark(
                 "pipe.yesDd[bytes=$transferBytes]",
