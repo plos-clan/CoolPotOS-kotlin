@@ -53,9 +53,7 @@ static void dispatch_kotlin_handler(
     uint64_t fault_address
 ) {
     xstate_t xstate;
-    initialize_xstate_header(&xstate);
-    save_xstate(&xstate);
-    restore_xstate(&initial_xstate);
+    enter_kernel_xstate(&xstate);
 
     const bool from_user = (frame->cs & 3u) != 0;
     uint64_t user_fs_base = 0;

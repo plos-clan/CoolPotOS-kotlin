@@ -71,12 +71,11 @@ static vm_allocate_fn runtime_vm_allocate;
 static struct vm_block *runtime_vm_released;
 static uint8_t vm_lock;
 static struct futex_bucket futex_buckets[futex_bucket_count];
-void cpu_relax(void) { __asm__ volatile("pause" : : : "memory"); }
 
 static void spin_lock(uint8_t *lock) {
     while (__atomic_test_and_set(lock, __ATOMIC_ACQUIRE))
         while (__atomic_load_n(lock, __ATOMIC_RELAXED))
-            if (!fast_handoff_yield()) cpu_relax();
+            if (!fast_handoff_yield()) asm_pause();
 }
 
 static void spin_unlock(uint8_t *lock) { __atomic_clear(lock, __ATOMIC_RELEASE); }
@@ -246,7 +245,7 @@ static long futex_wait(
 
         const bool waiting = state == futex_waiting && waiter.task;
         const bool parked = waiting && fast_handoff_park_current(deadline, sequence);
-        if (!parked && !fast_handoff_yield()) cpu_relax();
+        if (!parked && !fast_handoff_yield()) asm_pause();
     }
 }
 
@@ -445,7 +444,7 @@ long syscall(long number, ...) {
         break;
     }
     case SYS_sched_yield:
-        fast_handoff_yield();
+        fast_handoff_runtime_yield();
         ret = 0;
         break;
     case SYS_gettid:

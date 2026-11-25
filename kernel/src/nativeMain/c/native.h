@@ -49,32 +49,29 @@ typedef struct cpu_local {
 extern cpu_local_t locals[cpu_slot_count];
 extern uint64_t kernel_runtime_fs_bases[cpu_slot_count];
 
-static inline void initialize_xstate_header(xstate_t *state) {
-    __builtin_memset(&state->header, 0, sizeof(state->header));
-}
-
 static inline void save_xstate(xstate_t *state) {
-    __asm__ volatile(
-        "xsave64 %0"
-        : "+m"(*state)
-        : "a"(xstate_mask), "d"(0)
-        : "memory"
-    );
+    __asm__ volatile("xsave64 %0" : "+m"(*state)
+                     : "a"(xstate_mask), "d"(0) : "memory");
 }
 
 static inline void restore_xstate(const xstate_t *state) {
-    __asm__ volatile(
-        "xrstor64 %0"
-        :
-        : "m"(*state), "a"(xstate_mask), "d"(0)
-        : "memory"
-    );
+    __asm__ volatile("xrstor64 %0"
+                     : : "m"(*state), "a"(xstate_mask), "d"(0) : "memory");
+}
+
+static inline void enter_kernel_xstate(xstate_t *state) {
+    __builtin_memset(&state->header, 0, sizeof(state->header));
+    save_xstate(state);
+    restore_xstate(&initial_xstate);
 }
 
 void setup_xstate(void);
 void idt_load(void);
 void kt_ap_start(void);
 bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num);
+bool runtime_thread_registered(void);
+bool runtime_rendezvous_requested(void);
+void fast_handoff_runtime_yield(void);
 void fast_handoff_account_mode(bool user);
 bool tlb_handle_nmi(void);
 void fast_handoff_publish_runtime(uint64_t task);

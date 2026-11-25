@@ -125,6 +125,7 @@ struct fast_cpu {
     uint64_t timer_deadline, quantum_deadline, worker_deadline;
     uint32_t levels, strongest, logical_id;
     uint8_t state, lock, reschedule, worker_pending, device_pending, balance, is_bsp;
+    uint8_t mutator_pending;
 } __attribute__((aligned(64)));
 
 typedef struct {
@@ -146,8 +147,8 @@ struct fast_task {
     uint8_t on_cpu;
     uint8_t *affinity;
     size_t affinity_size;
-    uint8_t state;
-    uint8_t queued;
+    uint8_t state, queued;
+    bool mutator_turn;
     uint64_t wake_sequence;
     uint8_t user_interrupt_pending;
     cpu_times_t clock;

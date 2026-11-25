@@ -1,6 +1,7 @@
 @file:OptIn(
     kotlinx.cinterop.ExperimentalForeignApi::class,
     kotlin.concurrent.atomics.ExperimentalAtomicApi::class,
+    kotlin.native.runtime.NativeRuntimeApi::class,
 )
 
 package org.plos_clan.cpos.tasks
@@ -22,6 +23,7 @@ import platform.posix.pthread_join
 import platform.posix.pthread_tVar
 import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicLong
+import kotlin.native.runtime.GC
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -53,6 +55,7 @@ class WakeSequenceTest {
             }
             assertEquals(TaskState.BLOCKED.ordinal, bridge.fast_handoff_task_state(task).toInt())
             val before = bridge.fast_handoff_clock(task).useContents { system }
+            GC.collect()
             repeat(32) { bridge.fast_handoff_yield() }
             bridge.fast_handoff_clock(task).useContents {
                 assertEquals(0uL, user)

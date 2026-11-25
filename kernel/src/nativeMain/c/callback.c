@@ -4,6 +4,8 @@
 
 extern void Kotlin_initRuntimeIfNeeded(void);
 extern bool Kotlin_Debugging_isThreadStateRunnable(void);
+extern bool registered_thread(void) __asm__("_ZN6kotlin2mm25IsCurrentThreadRegisteredEv");
+extern const char *suspension_reason __asm__("_ZN6kotlin2mm8internal24gSuspensionRequestReasonE");
 extern void Kotlin_mm_switchThreadStateRunnable(void);
 extern void Kotlin_mm_switchThreadStateNative(void);
 extern void *kotlin_runtime_allocate(size_t);
@@ -11,6 +13,14 @@ extern void kotlin_serial_print(const char *, size_t);
 extern void kotlin_syscall_handler(void *);
 extern void set_runtime_use_mask(bool);
 extern void kotlin_handle_exception(void *, uint64_t, uint64_t, uint64_t, int32_t);
+
+__attribute__((used, retain)) bool runtime_thread_registered(void) {
+    return registered_thread();
+}
+
+__attribute__((used, retain)) bool runtime_rendezvous_requested(void) {
+    return __atomic_load_n(&suspension_reason, __ATOMIC_ACQUIRE) != NULL;
+}
 
 #define CALLBACK(type, name, parameters, invoke, result) \
     __attribute__((used, retain)) type name parameters { \
