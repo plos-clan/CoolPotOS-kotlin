@@ -1,5 +1,9 @@
 package org.plos_clan.cpos.fs.vfs
 
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.fs.sysfs.Sysfs
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.tasks.PollSubscription
@@ -118,6 +122,30 @@ class EpollReadinessTest {
     }
 
     @Test
+    fun rearmingAQueuedInterestNotifiesObserversAndDeliversOnlyTheLatestData() {
+        Fixture().use { fixture ->
+            val mask = PollEvents.POLLIN.toUInt()
+            val file = fixture.event(mask)
+            fixture.write(file)
+            var notifications = 0
+            val observer = object : PollSubscription() {
+                override fun changed(): Boolean {
+                    notifications++
+                    return true
+                }
+            }
+            observer.use {
+                fixture.epoll.subscribe(fixture.caller, file.inode, observer)
+                fixture.watch(1, file, mask, 2uL, EpollControlOperation.MODIFY)
+                fixture.watch(1, file, mask, 3uL, EpollControlOperation.MODIFY)
+                assertEquals(2, notifications)
+                val expected = EpollEvent(mask, 3uL)
+                assertEquals(listOf(expected), fixture.collect())
+            }
+        }
+    }
+
+    @Test
     fun pipeWritesAndFinalWriterClosePublishReadiness() {
         Fixture().use { fixture ->
             val (reader, writer) = fixture.pipe()
@@ -202,6 +230,38 @@ class EpollReadinessTest {
                 fixture.epoll.collect(fixture.caller, 1, fixture.events)
                 assertEquals((index % 3 + 1).toULong(), fixture.events.single().data)
             }
+        }
+    }
+
+    @Test
+    fun oppositeNestedAddsPublishOnlyOneEdge() {
+        Fixture().use { fixture ->
+            val files = List(2) {
+                val opened = fixture.vfs.createEpoll(fixture.caller, fixture.context)
+                assertIs<VfsResult.Ok<OpenFileDescription>>(opened).value
+            }
+            fixture.files += files
+            val event = EpollEvent(PollEvents.POLLIN.toUInt(), 0uL)
+            val results = KernelCoroutines.await {
+                coroutineScope {
+                    files.mapIndexed { index, file ->
+                        async {
+                            val owner = file.backend as Epoll
+                            owner.control(1, files[1 - index], EpollControlOperation.ADD, event)
+                        }
+                    }.awaitAll()
+                }
+            }
+            val winner = results.indexOfFirst { it is VfsResult.Ok }
+            assertTrue(winner >= 0)
+            val rejected = assertIs<VfsResult.Err>(results[1 - winner])
+            assertEquals(VfsError.TOO_MANY_SYMLINKS, rejected.error)
+            val owner = files[winner].backend as Epoll
+            val peer = files[1 - winner]
+            assertIs<VfsResult.Ok<Unit>>(owner.control(1, peer, EpollControlOperation.DELETE, null))
+            val reverse = peer.backend as Epoll
+            val added = reverse.control(1, files[winner], EpollControlOperation.ADD, event)
+            assertIs<VfsResult.Ok<Unit>>(added)
         }
     }
 

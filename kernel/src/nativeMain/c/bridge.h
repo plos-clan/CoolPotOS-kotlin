@@ -45,6 +45,8 @@ void set_runtime_use_mask(bool enabled);
 extern void (*const syscall_entry)(void);
 void wait_for_interrupt(void);
 void asm_pause(void);
+static inline void smp_mb(void) { __atomic_thread_fence(__ATOMIC_SEQ_CST); }
+static inline int futex_load(const int *word) { return __atomic_load_n(word, __ATOMIC_ACQUIRE); }
 void fast_handoff_configure_lapic(uint8_t x2apic, uint64_t mmio_base);
 void fast_handoff_set_user_interrupt_handler(void (*handler)(void *frame));
 void fast_handoff_request_user_interrupt(uint64_t task);

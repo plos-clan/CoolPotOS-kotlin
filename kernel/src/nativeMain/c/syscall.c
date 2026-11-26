@@ -6,7 +6,6 @@
 #include <sys/mman.h>
 #include <time.h>
 #include "bridge.h"
-#include "native.h"
 #include "syscall.h"
 
 #define SYS_gettid 186
@@ -161,7 +160,7 @@ static long futex_wait(
     };
     uint64_t interrupt_flags = irq_save();
     spin_lock(&bucket->lock);
-    if (__atomic_load_n(pointer, __ATOMIC_ACQUIRE) != expected) {
+    if (futex_load(pointer) != expected) {
         spin_unlock(&bucket->lock);
         irq_restore(interrupt_flags);
         return -EAGAIN;

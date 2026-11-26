@@ -2,22 +2,31 @@
 
 package org.plos_clan.cpos.syscall
 
+import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.IntVar
+import kotlinx.collections.immutable.persistentHashMapOf
 import org.plos_clan.cpos.drivers.RealtimeClock
 import org.plos_clan.cpos.drivers.TscClock
+import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.mem.page.USER_VIRTUAL_ADDRESS_LIMIT
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
+import org.plos_clan.cpos.tasks.SMProcessor
 import org.plos_clan.cpos.tasks.Scheduler
 import org.plos_clan.cpos.tasks.Thread
 import org.plos_clan.cpos.utils.Errno
+import org.plos_clan.cpos.utils.HashBuckets
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PtraceRegisters
+import kotlin.concurrent.Volatile
 
 private const val FUTEX_PRIVATE_FLAG = 0x80
 private const val FUTEX_CLOCK_REALTIME = 0x100
 private const val FUTEX_COMMAND_MASK = 0x7f
-private const val FUTEX_SUPPORTED_FLAGS = FUTEX_PRIVATE_FLAG or FUTEX_CLOCK_REALTIME
+private const val FUTEX_SUPPORTED_BITS =
+    FUTEX_COMMAND_MASK or FUTEX_PRIVATE_FLAG or FUTEX_CLOCK_REALTIME
 private const val FUTEX_MATCH_ANY = UInt.MAX_VALUE
 
 private enum class FutexOperation(val code: Int) {
@@ -30,15 +39,11 @@ private enum class FutexOperation(val code: Int) {
     ;
 
     companion object {
-        fun from(code: Int): FutexOperation? = when (code) {
-            WAIT.code -> WAIT
-            WAKE.code -> WAKE
-            REQUEUE.code -> REQUEUE
-            COMPARE_REQUEUE.code -> COMPARE_REQUEUE
-            WAIT_BITSET.code -> WAIT_BITSET
-            WAKE_BITSET.code -> WAKE_BITSET
-            else -> null
+        private val codes = arrayOfNulls<FutexOperation>(entries.maxOf { it.code } + 1).apply {
+            for (operation in entries) this[operation.code] = operation
         }
+
+        fun from(code: Int): FutexOperation? = codes.getOrNull(code)
     }
 }
 
@@ -48,41 +53,104 @@ private data class FutexKey(
     val private: Boolean,
 )
 
-private data class FutexAddress(
-    val key: FutexKey,
-    val userAddress: ULong,
-)
-
-private enum class FutexWaitState {
-    WAITING,
-    WOKEN,
+private class FutexWaiter(key: FutexKey, val thread: Thread, val bitset: UInt) {
+    @Volatile var key: FutexKey? = key
 }
 
-private class FutexWaiter(
-    var key: FutexKey,
-    val thread: Thread,
-    val bitset: UInt,
-) {
-    var state = FutexWaitState.WAITING
+private class FutexBucket {
+    val lock = IrqSpinLock()
+    @Volatile private var queues = persistentHashMapOf<FutexKey, LinkedHashSet<FutexWaiter>>()
+
+    fun enqueue(
+        key: FutexKey,
+        waiter: FutexWaiter,
+        word: CPointer<IntVar>,
+        expected: UInt,
+        expiresAt: ULong?,
+    ): Long = lock.withLock {
+        val queue = queue(key)
+        bridge.smp_mb()
+        val failure = when {
+            bridge.futex_load(word).toUInt() != expected -> Errno.EAGAIN
+            expiresAt != null && expiresAt <= TscClock.nanoTime() -> Errno.ETIMEDOUT
+            else -> {
+                queue.add(waiter)
+                return@withLock 0L
+            }
+        }
+        prune(key)
+        Syscall.errno(failure)
+    }
+
+    private fun queue(key: FutexKey): LinkedHashSet<FutexWaiter> {
+        queues[key]?.let { return it }
+        val waiters = LinkedHashSet<FutexWaiter>()
+        queues = queues.putting(key, waiters)
+        return waiters
+    }
+
+    private fun prune(key: FutexKey) {
+        if (queues[key]?.isEmpty() == true) queues = queues.removing(key)
+    }
+
+    fun cancel(key: FutexKey, waiter: FutexWaiter) {
+        check(queues[key]?.remove(waiter) == true)
+        prune(key)
+    }
+
+    fun wake(key: FutexKey, count: Int, bitset: UInt): List<Thread> {
+        if (count == 0) return emptyList()
+        bridge.smp_mb()
+        if (key !in queues) return emptyList()
+        return lock.withLock { select(key, count, bitset) }
+    }
+
+    fun select(key: FutexKey, count: Int, bitset: UInt): List<Thread> {
+        if (count == 0) return emptyList()
+        val queue = queues[key] ?: return emptyList()
+        val selected = ArrayList<Thread>(minOf(count, queue.size))
+        val iterator = queue.iterator()
+        while (selected.size < count && iterator.hasNext()) {
+            val waiter = iterator.next()
+            if (waiter.bitset and bitset == 0u) continue
+            iterator.remove()
+            waiter.key = null
+            selected.add(waiter.thread)
+        }
+        prune(key)
+        return selected
+    }
+
+    fun move(source: FutexKey, destination: FutexKey, target: FutexBucket, count: Int): Int {
+        if (count == 0) return 0
+        val queue = queues[source] ?: return 0
+        val receiving = target.queue(destination)
+        val moved = minOf(count, queue.size)
+        val iterator = queue.iterator()
+        repeat(moved) {
+            val waiter = iterator.next()
+            iterator.remove()
+            receiving.add(waiter)
+            waiter.key = destination
+        }
+        prune(source)
+        return moved
+    }
 }
 
 object Futex {
-    private val lock = IrqSpinLock()
-    private val queues = mutableMapOf<FutexKey, ArrayDeque<FutexWaiter>>()
+    private val buckets = HashBuckets(SMProcessor.cpu_count.toInt(), ::FutexBucket)
 
     fun wake(process: Process, address: ULong): Long {
-        val futex = resolveAddress(process, address, false) ?: return error(Errno.EFAULT)
-        return wake(futex.key, 1, FUTEX_MATCH_ANY)
+        val futex = resolveKey(process, address, false) ?: return error(Errno.EFAULT)
+        return wake(futex, 1, FUTEX_MATCH_ANY)
     }
 
     fun handle(regs: PtraceRegisters, process: Process): Long {
         val rawOperation = regs[PtraceRegisters.IDX_RSI]
-        if (rawOperation > Int.MAX_VALUE.toULong()) return error(Errno.EINVAL)
-
+        val unsupported = rawOperation and FUTEX_SUPPORTED_BITS.toULong().inv()
+        if (unsupported != 0uL) return error(Errno.EINVAL)
         val encoded = rawOperation.toInt()
-        if (encoded and (FUTEX_COMMAND_MASK or FUTEX_SUPPORTED_FLAGS).inv() != 0) {
-            return error(Errno.EINVAL)
-        }
         val operation = FutexOperation.from(encoded and FUTEX_COMMAND_MASK)
             ?: return error(Errno.ENOSYS)
         val private = encoded and FUTEX_PRIVATE_FLAG != 0
@@ -92,235 +160,159 @@ object Futex {
         }
 
         val address = regs[PtraceRegisters.IDX_RDI]
-        val primary = resolveAddress(process, address, private)
-            ?: return addressError(address)
+        val key = resolveKey(process, address, private) ?: return addressError(address)
+        val value = regs[PtraceRegisters.IDX_RDX]
+        val maskOrComparison = regs[PtraceRegisters.IDX_R9].toUInt()
+        val masked = operation == FutexOperation.WAIT_BITSET ||
+            operation == FutexOperation.WAKE_BITSET
+        val bitset = if (masked) maskOrComparison else FUTEX_MATCH_ANY
+        if (bitset == 0u) return error(Errno.EINVAL)
+
+        val timeoutOrCount = regs[PtraceRegisters.IDX_R10]
         return when (operation) {
-            FutexOperation.WAIT -> wait(
-                process = process,
-                address = primary,
-                expected = regs[PtraceRegisters.IDX_RDX].toUInt(),
-                timeoutAddress = regs[PtraceRegisters.IDX_R10],
-                absoluteTimeout = false,
-                realtime = false,
-                bitset = FUTEX_MATCH_ANY,
-            )
-            FutexOperation.WAIT_BITSET -> {
-                val bitset = regs[PtraceRegisters.IDX_R9].toUInt()
-                if (bitset == 0u) error(Errno.EINVAL) else wait(
-                    process = process,
-                    address = primary,
-                    expected = regs[PtraceRegisters.IDX_RDX].toUInt(),
-                    timeoutAddress = regs[PtraceRegisters.IDX_R10],
-                    absoluteTimeout = true,
-                    realtime = realtime,
-                    bitset = bitset,
-                )
+            FutexOperation.WAIT, FutexOperation.WAIT_BITSET -> {
+                val deadline = timeoutDeadline(process, timeoutOrCount, masked, realtime) { errno ->
+                    return error(errno)
+                }
+                wait(process, address, key, value.toUInt(), deadline, bitset)
             }
-            FutexOperation.WAKE -> wake(
-                primary.key,
-                wakeCount(regs[PtraceRegisters.IDX_RDX]) ?: return error(Errno.EINVAL),
-                FUTEX_MATCH_ANY,
-            )
-            FutexOperation.WAKE_BITSET -> {
-                val bitset = regs[PtraceRegisters.IDX_R9].toUInt()
-                if (bitset == 0u) error(Errno.EINVAL) else wake(
-                    primary.key,
-                    wakeCount(regs[PtraceRegisters.IDX_RDX]) ?: return error(Errno.EINVAL),
-                    bitset,
-                )
+            FutexOperation.WAKE, FutexOperation.WAKE_BITSET -> {
+                val count = wakeCount(value) ?: return error(Errno.EINVAL)
+                wake(key, count, bitset)
             }
-            FutexOperation.REQUEUE,
-            FutexOperation.COMPARE_REQUEUE,
-            -> requeue(
-                process = process,
-                source = primary,
-                destinationAddress = regs[PtraceRegisters.IDX_R8],
-                private = private,
-                wakeCount = wakeCount(regs[PtraceRegisters.IDX_RDX])
-                    ?: return error(Errno.EINVAL),
-                requeueCount = wakeCount(regs[PtraceRegisters.IDX_R10])
-                    ?: return error(Errno.EINVAL),
-                comparison = regs[PtraceRegisters.IDX_R9].toUInt()
-                    .takeIf { operation == FutexOperation.COMPARE_REQUEUE },
-            )
+            FutexOperation.REQUEUE, FutexOperation.COMPARE_REQUEUE -> {
+                val wake = wakeCount(value) ?: return error(Errno.EINVAL)
+                val move = wakeCount(timeoutOrCount) ?: return error(Errno.EINVAL)
+                val other = regs[PtraceRegisters.IDX_R8]
+                val target = resolveKey(process, other, private) ?: return addressError(other)
+                val compare = operation == FutexOperation.COMPARE_REQUEUE
+                val comparison = if (compare) maskOrComparison else null
+                requeue(process, address, key, target, wake, move, comparison)
+            }
         }
+    }
+
+    private inline fun withWord(
+        process: Process,
+        address: ULong,
+        action: (CPointer<IntVar>) -> Long,
+    ): Long {
+        val space = process.addressSpace
+        space.accessUserPage(address, writable = false, pin = false) { physical ->
+            val word = checkNotNull(Hhdm.toVirtualPointer<IntVar>(physical))
+            return action(word)
+        }
+        return error(Errno.EFAULT)
     }
 
     private fun wait(
         process: Process,
-        address: FutexAddress,
+        address: ULong,
+        key: FutexKey,
         expected: UInt,
-        timeoutAddress: ULong,
-        absoluteTimeout: Boolean,
-        realtime: Boolean,
+        expiresAt: ULong?,
         bitset: UInt,
     ): Long {
-        val expiresAt = when (
-            val result = timeoutDeadline(process, timeoutAddress, absoluteTimeout, realtime)
-        ) {
-            is TimeoutResult.Value -> result.deadline
-            is TimeoutResult.Error -> return error(result.errno)
-        }
         val thread = ProcessManager.currentThread() ?: return error(Errno.ESRCH)
-        val waiter = FutexWaiter(address.key, thread, bitset)
-
-        var validationError = 0
-        lock.withLock {
-            val current = readWord(process, address.userAddress)
-            when {
-                current == null -> validationError = Errno.EFAULT
-                current != expected -> validationError = Errno.EAGAIN
-                expiresAt != null && expiresAt <= TscClock.nanoTime() ->
-                    validationError = Errno.ETIMEDOUT
-                else -> queues.getOrPut(address.key) { ArrayDeque() }.addLast(waiter)
-            }
+        val waiter = FutexWaiter(key, thread, bitset)
+        val bucket = buckets[key]
+        val registered = withWord(process, address) { word ->
+            bucket.enqueue(key, waiter, word, expected, expiresAt)
         }
-        if (validationError != 0) return error(validationError)
+        if (registered != 0L) return registered
 
         while (true) {
             val sequence = Scheduler.preparePark()
-            val expired = expiresAt != null && TscClock.nanoTime() >= expiresAt
-            val interrupted = thread.hasPendingSignal()
-            var result: Long? = null
-            lock.withLock {
-                when {
-                    waiter.state == FutexWaitState.WOKEN -> result = 0L
-                    expired -> {
-                        removeLocked(waiter)
-                        result = error(Errno.ETIMEDOUT)
-                    }
-                    interrupted -> {
-                        removeLocked(waiter)
-                        result = error(Errno.EINTR)
-                    }
-                }
+            if (waiter.key == null) return 0L
+            if (expiresAt != null && TscClock.nanoTime() >= expiresAt) {
+                return cancel(waiter, Errno.ETIMEDOUT)
             }
-            result?.let { return it }
-
+            if (thread.hasPendingSignal()) return cancel(waiter, Errno.EINTR)
             val parked = if (expiresAt == null) Scheduler.parkCurrent(sequence)
             else Scheduler.parkCurrentUntil(expiresAt, sequence)
-            if (parked) continue
+            if (!parked) return cancel(waiter, Errno.ESRCH)
+        }
+    }
 
-            val woken = lock.withLock {
-                if (waiter.state == FutexWaitState.WOKEN) true
-                else {
-                    removeLocked(waiter)
-                    false
-                }
+    private fun cancel(waiter: FutexWaiter, errno: Int): Long {
+        while (true) {
+            val key = waiter.key ?: return 0L
+            val bucket = buckets[key]
+            bucket.lock.withLock {
+                if (waiter.key !== key) return@withLock
+                bucket.cancel(key, waiter)
+                return error(errno)
             }
-            return if (woken) 0L else error(Errno.ESRCH)
         }
     }
 
     private fun wake(key: FutexKey, count: Int, bitset: UInt): Long {
-        if (count == 0) return 0L
-        val selected = lock.withLock { selectLocked(key, count, bitset) }
-        selected.forEach { Scheduler.wake(it.thread) }
+        val selected = buckets[key].wake(key, count, bitset)
+        selected.forEach(Scheduler::wake)
         return selected.size.toLong()
     }
 
     private fun requeue(
         process: Process,
-        source: FutexAddress,
-        destinationAddress: ULong,
-        private: Boolean,
+        address: ULong,
+        source: FutexKey,
+        destination: FutexKey,
         wakeCount: Int,
         requeueCount: Int,
         comparison: UInt?,
     ): Long {
-        val destination = resolveAddress(process, destinationAddress, private)
-            ?: return addressError(destinationAddress)
-        if (source.key == destination.key) return error(Errno.EINVAL)
-
-        var mismatch = false
-        var moved = 0
-        val selected = lock.withLock {
-            if (comparison != null && readWord(process, source.userAddress) != comparison) {
-                mismatch = true
-                return@withLock emptyList()
+        if (source == destination) return error(Errno.EINVAL)
+        val from = buckets[source]
+        val to = buckets[destination]
+        var selected = emptyList<Thread>()
+        fun transfer(word: CPointer<IntVar>?): Long = from.lock.withLock(to.lock) {
+            if (word != null && bridge.futex_load(word).toUInt() != comparison) {
+                return@withLock error(Errno.EAGAIN)
             }
-            val woken = selectLocked(source.key, wakeCount, FUTEX_MATCH_ANY)
-            val sourceQueue = queues[source.key]
-            if (sourceQueue != null && requeueCount != 0) {
-                val destinationQueue = queues.getOrPut(destination.key) { ArrayDeque() }
-                moved = minOf(requeueCount, sourceQueue.size)
-                repeat(moved) {
-                    sourceQueue.removeFirst().also { waiter ->
-                        waiter.key = destination.key
-                        destinationQueue.addLast(waiter)
-                    }
-                }
-                if (sourceQueue.isEmpty()) queues.remove(source.key)
-            }
-            woken
+            selected = from.select(source, wakeCount, FUTEX_MATCH_ANY)
+            val moved = from.move(source, destination, to, requeueCount)
+            selected.size.toLong() + moved
         }
-        if (mismatch) return error(Errno.EAGAIN)
-        selected.forEach { Scheduler.wake(it.thread) }
-        return (selected.size + moved).toLong()
+        val result = if (comparison == null) transfer(null)
+        else withWord(process, address, ::transfer)
+        selected.forEach(Scheduler::wake)
+        return result
     }
 
-    private fun selectLocked(key: FutexKey, count: Int, bitset: UInt): List<FutexWaiter> {
-        val queue = queues[key] ?: return emptyList()
-        val selected = ArrayList<FutexWaiter>(minOf(count, queue.size))
-        repeat(queue.size) {
-            val waiter = queue.removeFirst()
-            if (selected.size < count && waiter.bitset and bitset != 0u) {
-                waiter.state = FutexWaitState.WOKEN
-                selected += waiter
-            } else {
-                queue.addLast(waiter)
-            }
+    private fun resolveKey(process: Process, address: ULong, private: Boolean): FutexKey? {
+        val size = Int.SIZE_BYTES.toULong()
+        if (address and (size - 1uL) != 0uL) return null
+        if (address >= USER_VIRTUAL_ADDRESS_LIMIT) return null
+        val space = process.addressSpace
+        val location = if (private) null else {
+            val accessible = space.accessUserPage(address, writable = false, pin = false) { 1 }
+            if (accessible == 0) return null
+            space.sharedMemoryLocation(address, size)
         }
-        if (queue.isEmpty()) queues.remove(key)
-        return selected
+        return FutexKey(location?.identity ?: space, location?.offset ?: address, private)
     }
 
-    private fun removeLocked(waiter: FutexWaiter): Boolean {
-        if (waiter.state != FutexWaitState.WAITING) return false
-        val queue = queues[waiter.key] ?: return false
-        repeat(queue.size) {
-            val candidate = queue.removeFirst()
-            if (candidate !== waiter) queue.addLast(candidate)
-        }
-        if (queue.isEmpty()) queues.remove(waiter.key)
-        return true
-    }
-
-    private fun resolveAddress(process: Process, address: ULong, private: Boolean): FutexAddress? {
-        if (address and (Int.SIZE_BYTES - 1).toULong() != 0uL) return null
-        readWord(process, address) ?: return null
-        val location = if (private) null else process.addressSpace.sharedMemoryLocation(address, Int.SIZE_BYTES.toULong())
-        val key = FutexKey(location?.identity ?: process.addressSpace, location?.offset ?: address, private)
-        return FutexAddress(key, address)
-    }
-
-    private fun readWord(process: Process, address: ULong): UInt? =
-        UserMemory(process.addressSpace, address).readUIntLE()
-
-    private fun timeoutDeadline(
+    private inline fun timeoutDeadline(
         process: Process,
         address: ULong,
         absolute: Boolean,
         realtime: Boolean,
-    ): TimeoutResult {
-        if (address == 0uL) return TimeoutResult.Value(null)
+        fail: (Int) -> Nothing,
+    ): ULong? {
+        if (address == 0uL) return null
         val bytes = UserMemory(process.addressSpace, address).copyFromUser(TimeSpec.NATIVE_SIZE)
-            ?: return TimeoutResult.Error(Errno.EFAULT)
+            ?: fail(Errno.EFAULT)
         val time = TimeSpec(0, 0)
         if (!time.updateFromNativeBytes(bytes) || !time.isValidDuration) {
-            return TimeoutResult.Error(Errno.EINVAL)
+            fail(Errno.EINVAL)
         }
         if (absolute && realtime) {
             val now = TscClock.nanoTime()
             val remaining = RealtimeClock.atMonotonic(now)
                 .durationUntil(time.sec, time.nsec.toUInt())
-            return TimeoutResult.Value(
-                if (remaining > ULong.MAX_VALUE - now) ULong.MAX_VALUE else now + remaining,
-            )
+            return if (remaining > ULong.MAX_VALUE - now) ULong.MAX_VALUE else now + remaining
         }
-        if (absolute) return TimeoutResult.Value(time.durationNanos)
-
-        return TimeoutResult.Value(time.deadlineFrom(TscClock.nanoTime()))
+        return if (absolute) time.durationNanos else time.deadlineFrom(TscClock.nanoTime())
     }
 
     private fun wakeCount(value: ULong): Int? = value.toInt().takeIf { it >= 0 }
@@ -329,9 +321,4 @@ object Futex {
         error(if (address and (Int.SIZE_BYTES - 1).toULong() == 0uL) Errno.EFAULT else Errno.EINVAL)
 
     private fun error(errno: Int): Long = Syscall.errno(errno)
-
-    private sealed interface TimeoutResult {
-        data class Value(val deadline: ULong?) : TimeoutResult
-        data class Error(val errno: Int) : TimeoutResult
-    }
 }

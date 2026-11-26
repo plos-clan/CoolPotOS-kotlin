@@ -383,7 +383,7 @@ internal fun prctl(regs: PtraceRegisters, process: Process): Long {
                 0uL -> null
                 else -> Signal.from(argument) ?: return errno(Errno.EINVAL)
             }
-            ProcessManager.setParentDeathSignal(thread, signal)
+            thread.parentDeathSignal = signal
             0L
         }
 

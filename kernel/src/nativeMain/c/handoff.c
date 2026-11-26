@@ -1,5 +1,4 @@
 #include "bridge.h"
-#include "native.h"
 #include <stdlib.h>
 
 enum {
@@ -183,7 +182,7 @@ void tlb_invalidate(vm_space_t *vm, uint64_t address, uint64_t pages, const int6
     const uint64_t flags = irq_save();
     const int self = current_cpu_index();
     size_t sent = 0;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    smp_mb();
     for (size_t base = 0; base < count; base += 64) {
         uint64_t mask = (int64_t)address < 0 ? UINT64_MAX :
             __atomic_load_n(&vm->active[base / 64], __ATOMIC_ACQUIRE);

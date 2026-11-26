@@ -6,6 +6,8 @@ package org.plos_clan.cpos.drivers
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.pointed
 import org.plos_clan.cpos.time.MonotonicClock
+import org.plos_clan.cpos.utils.CpuFeature
+import org.plos_clan.cpos.utils.CpuID
 import kotlin.native.internal.GCUnsafeCall
 import kotlin.native.internal.InternalForKotlinNative
 
@@ -23,12 +25,12 @@ object TscClock : MonotonicClock {
             println("TSC: Limine did not provide a frequency")
             return false
         }
-        val frequency = bridge.runtime_clock_initialize(bootFrequency)
-        if (frequency == 0uL) {
+        val supported = CpuID.has(CpuFeature.TSC_DEADLINE_TIMER)
+        if (!supported || !bridge.runtime_clock_initialize(bootFrequency)) {
             println("TSC: TSC-deadline is unavailable")
             return false
         }
-        println("TSC: clocksource=tsc frequency=${frequency / 1_000_000uL}MHz")
+        println("TSC: clocksource=tsc frequency=${bootFrequency / 1_000_000uL}MHz")
         return true
     }
 

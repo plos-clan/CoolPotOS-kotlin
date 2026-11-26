@@ -1,7 +1,6 @@
 #include "native.h"
 
 enum {
-    cpuid_tsc_deadline_bit = 24,
     nanoseconds_per_second = 1000000000u,
 };
 
@@ -18,42 +17,23 @@ static struct tsc_clock tsc;
 extern uint8_t _binary_vdso_so_start[];
 extern uint8_t _binary_vdso_so_end[];
 
-static bool supports_tsc_deadline(void) {
-    uint32_t eax = 1;
-    uint32_t ecx = 0;
-    __asm__ volatile(
-        "cpuid"
-        : "+a"(eax), "+c"(ecx)
-        :
-        : "rbx", "rdx", "memory"
-    );
-    return (ecx & (1u << cpuid_tsc_deadline_bit)) != 0;
-}
-
-uint64_t read_tsc(void) {
-    uint32_t low;
-    uint32_t high;
-    __asm__ volatile("lfence; rdtsc" : "=a"(low), "=d"(high) : : "memory");
-    return ((uint64_t)high << 32) | low;
-}
-
 uint64_t runtime_clock_duration(uint64_t value) {
     const uint128_t result =
         ((uint128_t)value * tsc.multiplier) >> vdso_tsc_to_ns_shift;
     return result > UINT64_MAX ? UINT64_MAX : (uint64_t)result;
 }
 
-uint64_t runtime_clock_initialize(uint64_t frequency) {
-    if (!frequency || !supports_tsc_deadline()) return 0;
+bool runtime_clock_initialize(uint64_t frequency) {
+    if (!frequency) return false;
 
     const uint64_t multiplier =
         ((uint64_t)nanoseconds_per_second << vdso_tsc_to_ns_shift) / frequency;
-    if (!multiplier) return 0;
+    if (!multiplier) return false;
 
     tsc.epoch = read_tsc();
     tsc.multiplier = multiplier;
     __atomic_store_n(&tsc.frequency, frequency, __ATOMIC_RELEASE);
-    return frequency;
+    return true;
 }
 
 uint64_t runtime_clock_frequency(void) {

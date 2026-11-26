@@ -2,15 +2,9 @@
 
 package org.plos_clan.cpos.tasks
 
-import kotlin.concurrent.atomics.AtomicInt
-import kotlin.concurrent.atomics.AtomicReference
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
-import kotlin.experimental.ExperimentalNativeApi
-import kotlin.native.concurrent.ThreadLocal
-import kotlin.native.ref.WeakReference
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.pointed
-import org.plos_clan.cpos.utils.toPointer
+import kotlinx.collections.immutable.persistentHashMapOf
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.char.tty.TtySession
 import org.plos_clan.cpos.fs.FileDescriptorTable
@@ -29,6 +23,15 @@ import org.plos_clan.cpos.tasks.keys.KeyStore
 import org.plos_clan.cpos.tasks.keys.Keys
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PtraceRegisters
+import org.plos_clan.cpos.utils.toPointer
+import kotlin.concurrent.Volatile
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import kotlin.concurrent.atomics.update
+import kotlin.experimental.ExperimentalNativeApi
+import kotlin.native.concurrent.ThreadLocal
+import kotlin.native.ref.WeakReference
 
 private const val DEFAULT_THREAD_STACK_PAGES = 64uL
 
@@ -262,7 +265,7 @@ class Thread internal constructor(
     internal val parentThread: Thread?
         get() = parent?.get()
 
-    private val parentDeathSignalNumber = AtomicInt(0)
+    private var deathSubscribers = persistentHashMapOf<Thread, Signal>()
     internal val priority = NicePriority(nice)
 
     internal var network = org.plos_clan.cpos.network.NetworkStack.initial
@@ -273,9 +276,35 @@ class Thread internal constructor(
         get() = !process.isKernelProcess && process.state != ProcessState.DEAD &&
             (id == process.id || state != TaskState.ZOMBIE)
 
-    internal var parentDeathSignal: Signal?
-        get() = Signal.from(parentDeathSignalNumber.load())
-        set(value) = parentDeathSignalNumber.store(value?.number ?: 0)
+    @Volatile internal var parentDeathSignal: Signal? = null
+        set(value) {
+            val owner = parentThread
+            if (owner == null) {
+                field = value
+                return
+            }
+            owner.nativeTask.access { handle ->
+                field = value
+                val subscribers = owner.deathSubscribers
+                val state = bridge.fast_handoff_task_state(handle).toInt()
+                owner.deathSubscribers = if (value == null || state == TaskState.ZOMBIE.ordinal) {
+                    subscribers.removing(this)
+                } else subscribers.putting(this, value)
+            }
+        }
+
+    internal fun notifyDeathSubscribers() {
+        if (parentDeathSignal != null) parentDeathSignal = null
+        val subscribers = nativeTask.access {
+            val pending = deathSubscribers
+            deathSubscribers = persistentHashMapOf()
+            pending
+        }
+        for ((child, signal) in subscribers) {
+            val info = SignalInfo.fromSender(signal, process, SignalInfo.KERNEL)
+            SignalRouter.sendProcess(null, child.process, info)
+        }
+    }
 
     internal fun setPriority(requested: Int, limit: ULong, privileged: Boolean): Boolean = nativeTask.access { handle ->
         if (!priority.set(requested, limit, privileged)) return@access false
@@ -349,7 +378,7 @@ class Thread internal constructor(
             Keys.updateIdentity(this)
         }
         if (identityChanged && parentDeathSignal != null) {
-            ProcessManager.setParentDeathSignal(this, null)
+            parentDeathSignal = null
         }
         return result
     }
@@ -359,7 +388,7 @@ class Thread internal constructor(
         updateCredentials { commitExec(execution) }
         capabilities.applyExec(execution)
         if (execution.privileged && parentDeathSignal != null) {
-            ProcessManager.setParentDeathSignal(this, null)
+            parentDeathSignal = null
         }
     }
 }
@@ -594,19 +623,15 @@ private var currentThreadContext: Thread? = null
 
 object ProcessManager {
     private val nextTaskId = AtomicInt(2)
-    private val processes = mutableMapOf<Int, Process>()
+    @Volatile private var processes = persistentHashMapOf<Int, Process>()
     private val processLock = IrqSpinLock()
-    private val threadTable = mutableMapOf<Int, Thread>()
-    private val parentDeathSubscribers = mutableMapOf<Thread, MutableSet<Thread>>()
-    private val threadTableLock = IrqSpinLock()
+    private val threadTable = AtomicReference(persistentHashMapOf<Int, Thread>())
     private var bootstrapThread: Thread? = null
 
     private var kernelProcess: Process? = null
 
     fun initialize() {
-        if (processLock.withLock { processes.isNotEmpty() }) {
-            return
-        }
+        if (processes.isNotEmpty()) return
 
         val systemProcess = newProcess(
             name = "{system}",
@@ -750,8 +775,10 @@ object ProcessManager {
 
     fun discardUserProcess(process: Process): Boolean {
         if (process.isKernelProcess || process.threads.isNotEmpty()) return false
-        val removed = processLock.withLock { processes.remove(process.id) === process }
-        if (!removed) return false
+        processLock.withLock {
+            if (processes[process.id] !== process) return false
+            processes = processes.removing(process.id)
+        }
 
         if (process.id == process.sessionId) process.controllingTerminal?.hangup()
         process.releaseOwnedResources()
@@ -777,41 +804,22 @@ object ProcessManager {
         return true
     }
 
-    fun findProcess(pid: Int): Process? {
-        return processLock.withLock { processes[pid] }
-    }
+    fun findProcess(pid: Int): Process? = processes[pid]
 
-    fun findThread(tid: Int): Thread? = threadTableLock.withLock { threadTable[tid] }
+    fun findThread(tid: Int): Thread? = threadTable.load()[tid]
 
     internal fun forEachThread(scope: TaskScope, id: Int, action: (Thread) -> Unit) {
-        threadTableLock.withLock {
-            if (scope == TaskScope.PROCESS) {
-                threadTable[id]?.takeIf { it.hasTaskId }?.let(action)
-                return@withLock
-            }
-            for (thread in threadTable.values) {
-                val matches = when (scope) {
-                    TaskScope.PROCESS_GROUP -> thread.process.processGroupId == id
-                    TaskScope.USER -> thread.process.credentials.userIds.real == id
-                    TaskScope.PROCESS -> false
-                }
-                if (matches && thread.hasTaskId) action(thread)
-            }
+        val snapshot = threadTable.load()
+        if (scope == TaskScope.PROCESS) {
+            val thread = snapshot[id] ?: return
+            if (thread.hasTaskId) action(thread)
+            return
         }
-    }
-
-    internal fun setParentDeathSignal(thread: Thread, signal: Signal?) {
-        threadTableLock.withLock {
-            thread.parentDeathSignal = signal
-            val parent = thread.parentThread ?: return@withLock
-            if (signal != null && parent.state != TaskState.ZOMBIE) {
-                parentDeathSubscribers.getOrPut(parent, ::mutableSetOf) += thread
-                return@withLock
-            }
-            parentDeathSubscribers[parent]?.let { subscribers ->
-                subscribers.remove(thread)
-                if (subscribers.isEmpty()) parentDeathSubscribers.remove(parent)
-            }
+        for (thread in snapshot.values) {
+            val owner = thread.process
+            val matches = if (scope == TaskScope.USER) owner.credentials.userIds.real == id
+            else owner.processGroupId == id
+            if (matches && thread.hasTaskId) action(thread)
         }
     }
 
@@ -820,39 +828,20 @@ object ProcessManager {
         thread.nativeTask.close()
         Keys.exit(thread)
         Cgroups.exit(thread)
-        val deliveries = threadTableLock.withLock {
-            if (thread.id != thread.process.id) threadTable.remove(thread.id)
-            thread.parentThread?.let { parent ->
-                parentDeathSubscribers[parent]?.let { subscribers ->
-                    subscribers.remove(thread)
-                    if (subscribers.isEmpty()) parentDeathSubscribers.remove(parent)
-                }
-            }
-            parentDeathSubscribers.remove(thread).orEmpty().map { child ->
-                child.process to checkNotNull(child.parentDeathSignal)
-            }
-        }
-        for ((target, signal) in deliveries) {
-            SignalRouter.sendProcess(
-                sender = null,
-                target = target,
-                info = SignalInfo.fromSender(signal, thread.process, SignalInfo.KERNEL),
-            )
-        }
+        if (thread.id != thread.process.id) threadTable.update { it.removing(thread.id) }
+        thread.notifyDeathSubscribers()
         val process = thread.process
         if (process.completeThreadExit(thread, waitStatus)) finishExited(process)
     }
 
-    fun snapshotProcesses(): List<Process> = processLock.withLock {
+    fun snapshotProcesses(): List<Process> =
         processes.values.filterNot(Process::isKernelProcess).sortedBy(Process::id)
-    }
 
-    fun processesInGroup(groupId: Int): List<Process> = processLock.withLock {
+    fun processesInGroup(groupId: Int): List<Process> =
         processes.values.filter { !it.isKernelProcess && it.processGroupId == groupId }
-    }
 
     fun childrenOf(parentId: Int): List<Process> =
-        processLock.withLock { processes.values.filter { it.parentId == parentId } }
+        processes.values.filter { it.parentId == parentId }
 
     internal fun createSession(process: Process): Boolean = processLock.withLock {
         if (processes.values.any { it.processGroupId == process.id }) {
@@ -965,14 +954,14 @@ object ProcessManager {
         val reaped = processLock.withLock {
             val waitable = child.parentId == parentId && child.state == ProcessState.ZOMBIE
             if (!waitable) return@withLock false
-            val removed = processes.remove(child.id)
-            if (removed !== child) return@withLock false
+            if (processes[child.id] !== child) return@withLock false
+            processes = processes.removing(child.id)
             check(child.transitionState(ProcessState.ZOMBIE, ProcessState.DEAD))
             parent = processes[parentId]
             true
         }
         if (reaped) {
-            threadTableLock.withLock { threadTable.remove(child.id) }
+            threadTable.update { it.removing(child.id) }
             parent?.childEvents?.apply {
                 discard(child)
                 notifyChange()
@@ -986,9 +975,7 @@ object ProcessManager {
         kind: ChildEventKind,
         waitStatus: Int,
     ) {
-        val parent = processLock.withLock {
-            processes[process.parentId]
-        } ?: return
+        val parent = processes[process.parentId] ?: return
         val event = ChildWaitEvent(process, kind, waitStatus)
         parent.childEvents.publish(event)
         val action = parent.signals.action(Signal.CHILD)
@@ -1023,8 +1010,8 @@ object ProcessManager {
     ).also { created ->
         inherit?.let(created::inherit)
         processLock.withLock {
-            val previous = processes.put(created.id, created)
-            check(previous == null)
+            check(created.id !in processes)
+            processes = processes.putting(created.id, created)
         }
     }
 
@@ -1059,7 +1046,7 @@ object ProcessManager {
                 return null
             }
             pidHandle?.attach(thread)
-            threadTableLock.withLock { threadTable[thread.id] = thread }
+            threadTable.update { it.putting(thread.id, thread) }
             return thread
         } catch (failure: Throwable) {
             task.close()

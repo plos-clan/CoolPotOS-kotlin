@@ -1,13 +1,12 @@
+#include <elf.h>
 #include <limine.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include "bridge.h"
-#include "native.h"
 
-typedef __UINTPTR_TYPE__ boot_uptr_t;
 void _start(void) __attribute__((noreturn));
 extern void kernel_main(void);
-extern void __dlapi_enter(boot_uptr_t *entry_stack);
+extern void __dlapi_enter(uintptr_t *entry_stack);
 
 #define LIMINE_ITEM(section_name) __attribute__((used, section(section_name)))
 #define LIMINE_REQUEST(type, name, ...) \
@@ -43,45 +42,6 @@ const xstate_t initial_xstate = {
 static char boot_argv0[] = "kernel";
 
 static uint8_t boot_random[16] = "ARny-MLIBC-TLS!";
-
-enum {
-    at_null = 0,
-    at_phdr = 3,
-    at_phent = 4,
-    at_phnum = 5,
-    at_pagesz = 6,
-    at_entry = 9,
-    at_secure = 23,
-    at_random = 25,
-    at_execfn = 31
-};
-
-enum {
-    elf_ident_mag0 = 0x7f,
-    elf_ident_mag1 = 'E',
-    elf_ident_mag2 = 'L',
-    elf_ident_mag3 = 'F',
-    elf_ident_class = 4,
-    elf_class_64 = 2,
-    elf_type_dyn = 3
-};
-
-struct elf64_ehdr {
-    uint8_t e_ident[16];
-    uint16_t e_type;
-    uint16_t e_machine;
-    uint32_t e_version;
-    uint64_t e_entry;
-    uint64_t e_phoff;
-    uint64_t e_shoff;
-    uint32_t e_flags;
-    uint16_t e_ehsize;
-    uint16_t e_phentsize;
-    uint16_t e_phnum;
-    uint16_t e_shentsize;
-    uint16_t e_shnum;
-    uint16_t e_shstrndx;
-};
 
 void setup_xstate(void) {
     uint64_t cr0, cr4;
@@ -121,55 +81,42 @@ static __attribute__((noreturn)) void halt_forever(void) {
     for (;;) __asm__ volatile("hlt");
 }
 
-static bool setup_entry_stack(boot_uptr_t *entry_stack) {
+void wait_for_interrupt(void) { __asm__ volatile("hlt" : : : "memory"); }
+
+void _start(void) {
+    if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision)) halt_forever();
     struct limine_executable_file_response *response = executable_file_request.response;
     struct limine_file *file = response ? response->executable_file : NULL;
-    if (!file || !file->address || file->size < sizeof(struct elf64_ehdr)) return false;
+    if (!file || !file->address || file->size < sizeof(Elf64_Ehdr)) halt_forever();
 
-    boot_uptr_t elf_base = (boot_uptr_t)file->address;
-    const struct elf64_ehdr *ehdr = (const struct elf64_ehdr *)elf_base;
+    uintptr_t elf_base = (uintptr_t)file->address;
+    const Elf64_Ehdr *ehdr = (const Elf64_Ehdr *)elf_base;
 
-    if (ehdr->e_ident[0] != elf_ident_mag0 || ehdr->e_ident[1] != elf_ident_mag1 ||
-        ehdr->e_ident[2] != elf_ident_mag2 || ehdr->e_ident[3] != elf_ident_mag3 ||
-        ehdr->e_ident[elf_ident_class] != elf_class_64) {
-        return false;
-    }
+    if (__builtin_memcmp(ehdr->e_ident, ELFMAG, SELFMAG) != 0 ||
+        ehdr->e_ident[EI_CLASS] != ELFCLASS64) halt_forever();
 
     const uint64_t phdr_size = (uint64_t)ehdr->e_phentsize * ehdr->e_phnum;
     if (!ehdr->e_phoff || !phdr_size || ehdr->e_phoff > file->size ||
         phdr_size > file->size - ehdr->e_phoff ||
-        (boot_uptr_t)ehdr->e_phoff > UINTPTR_MAX - elf_base) {
-        return false;
+        (uintptr_t)ehdr->e_phoff > UINTPTR_MAX - elf_base) {
+        halt_forever();
     }
 
-    boot_uptr_t phdr_val = elf_base + (boot_uptr_t)ehdr->e_phoff;
-    boot_uptr_t entry_val = (boot_uptr_t)ehdr->e_entry;
+    uintptr_t phdr_val = elf_base + (uintptr_t)ehdr->e_phoff;
+    uintptr_t entry_val = (uintptr_t)ehdr->e_entry;
 
-    if (ehdr->e_type == elf_type_dyn) {
-        if (entry_val > UINTPTR_MAX - elf_base) return false;
+    if (ehdr->e_type == ET_DYN) {
+        if (entry_val > UINTPTR_MAX - elf_base) halt_forever();
         entry_val += elf_base;
     }
 
-    const boot_uptr_t initial_stack[] = {
-        1, (boot_uptr_t)boot_argv0, 0, 0,
-        at_phdr, phdr_val, at_phent, ehdr->e_phentsize, at_phnum, ehdr->e_phnum,
-        at_pagesz, 0x1000, at_entry, entry_val, at_secure, 0,
-        at_random, (boot_uptr_t)boot_random,
-        at_execfn, (boot_uptr_t)boot_argv0, at_null, 0,
+    uintptr_t entry_stack[] __attribute__((aligned(16))) = {
+        1, (uintptr_t)boot_argv0, 0, 0,
+        AT_PHDR, phdr_val, AT_PHENT, ehdr->e_phentsize, AT_PHNUM, ehdr->e_phnum,
+        AT_PAGESZ, 0x1000, AT_ENTRY, entry_val, AT_SECURE, 0,
+        AT_RANDOM, (uintptr_t)boot_random,
+        AT_EXECFN, (uintptr_t)boot_argv0, AT_NULL, 0,
     };
-    __builtin_memcpy(entry_stack, initial_stack, sizeof(initial_stack));
-    return true;
-}
-
-void wait_for_interrupt(void) { __asm__ volatile("hlt" : : : "memory"); }
-
-void _start(void) {
-    boot_uptr_t entry_stack[22] __attribute__((aligned(16)));
-
-    if (!LIMINE_BASE_REVISION_SUPPORTED(limine_base_revision) ||
-        !setup_entry_stack(entry_stack)) {
-        halt_forever();
-    }
 
     setup_xstate();
     __dlapi_enter(entry_stack);

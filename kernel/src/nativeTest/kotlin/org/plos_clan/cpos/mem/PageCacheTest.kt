@@ -124,6 +124,73 @@ class PageCacheTest {
     }
 
     @Test
+    fun lateCompletionCannotReplaceTheNewGeneration() {
+        val source = Source()
+        source.duringRead = {
+            source.duringRead = null
+            PageCache.invalidate(source.identity)
+            source.value = 2
+            assertEquals(2.toByte(), source.byte(0uL))
+        }
+        try {
+            assertEquals(1.toByte(), source.byte(0uL))
+            assertEquals(2.toByte(), source.byte(0uL))
+            assertEquals(2, source.reads)
+        } finally {
+            PageCache.invalidate(source.identity)
+        }
+    }
+
+    @Test
+    fun failedConcurrentMissLeavesTheOtherLoadPublishable() {
+        val source = Source()
+        val failing = object : PageCacheSource {
+            override val identity = source.identity
+            override fun read(offset: ULong, destination: ByteArray) = PageCacheSource.READ_ERROR
+        }
+        source.duringRead = {
+            val scratch = ByteArray(PAGE_SIZE_BYTES.toInt())
+            val failed = PageCache.acquire(failing, 0uL, scratch)
+            assertEquals(PageCacheFailure.IO_ERROR, failed.failure)
+        }
+        try {
+            repeat(2) { assertEquals(1.toByte(), source.byte(0uL)) }
+            assertEquals(1, source.reads)
+        } finally {
+            PageCache.invalidate(source.identity)
+        }
+    }
+
+    @Test
+    fun invalidatedPageStaysPinnedUntilTheCopyFinishes() {
+        val backing = Source()
+        val bytes = ByteArray(1)
+        val buffer = ByteArrayBuffer(bytes)
+        val destination = object : BufferDestination by buffer {
+            override fun copyFrom(
+                destinationOffset: Int,
+                source: BufferSource,
+                sourceOffset: Int,
+                count: Int,
+            ): Int {
+                PageCache.invalidate(backing.identity)
+                backing.value = 2
+                assertEquals(2.toByte(), backing.byte(0uL))
+                return buffer.copyFrom(destinationOffset, source, sourceOffset, count)
+            }
+        }
+        try {
+            assertEquals(1.toByte(), backing.byte(0uL))
+            val output = PreparedBufferDestination(destination)
+            val read = PageCache.read(backing, 0uL, output, 0, 1)
+            assertEquals(1, read.bytes)
+            assertEquals(1.toByte(), bytes.single())
+        } finally {
+            PageCache.invalidate(backing.identity)
+        }
+    }
+
+    @Test
     fun reclamationKeepsAcquiredFramesAlive() {
         val source = Source()
         val scratch = ByteArray(PAGE_SIZE_BYTES.toInt())

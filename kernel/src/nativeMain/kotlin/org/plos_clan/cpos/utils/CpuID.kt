@@ -94,6 +94,13 @@ enum class CpuFeature(
         "popcnt"
     ),
 
+    TSC_DEADLINE_TIMER(
+        1u, 0u,
+        CpuidRegister.ECX,
+        24,
+        "tsc_deadline_timer"
+    ),
+
     AES(
         1u, 0u,
         CpuidRegister.ECX,

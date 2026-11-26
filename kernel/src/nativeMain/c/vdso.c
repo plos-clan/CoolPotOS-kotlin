@@ -32,10 +32,7 @@ int __vdso_clock_gettime(int clock, struct timespec *time) {
         return (int)result;
     }
 
-    uint32_t low;
-    uint32_t high;
-    __asm__ volatile("lfence; rdtsc" : "=a"(low), "=d"(high) : : "memory");
-    const uint64_t cycles = (((uint64_t)high << 32) | low) - __vdso_clock_data.tsc_epoch;
+    const uint64_t cycles = read_tsc() - __vdso_clock_data.tsc_epoch;
     __extension__ typedef unsigned __int128 uint128_t;
     uint64_t nanos = ((uint128_t)cycles * __vdso_clock_data.tsc_to_ns_multiplier) >>
         vdso_tsc_to_ns_shift;

@@ -5,6 +5,7 @@ import kotlinx.cinterop.allocArray
 import kotlinx.cinterop.asStableRef
 import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.get
+import kotlinx.cinterop.MemScope
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
 import kotlinx.cinterop.plus
@@ -79,7 +80,7 @@ abstract class TimedBenchmark(name: String, unit: String) : Benchmark(name, unit
 }
 
 abstract class SyscallBenchmark(name: String) : TimedBenchmark(name, "ns/op") {
-    protected abstract fun invoke(): Int
+    protected abstract fun MemScope.operation(): () -> Int
 
     override fun sample(duration: Duration): Double {
         val start = TimeSource.Monotonic.markNow()
@@ -87,7 +88,8 @@ abstract class SyscallBenchmark(name: String) : TimedBenchmark(name, "ns/op") {
         return start.elapsedNow().inWholeNanoseconds.toDouble() / operations
     }
 
-    internal fun count(duration: Duration): Long {
+    internal fun count(duration: Duration): Long = memScoped {
+        val invoke = operation()
         val expected = invoke()
         check(expected >= 0) { "$name failed: $expected" }
         var operations = 0L
@@ -96,7 +98,7 @@ abstract class SyscallBenchmark(name: String) : TimedBenchmark(name, "ns/op") {
             repeat(BATCH_SIZE) { check(invoke() == expected) }
             operations += BATCH_SIZE
         } while (start.elapsedNow() < duration)
-        return operations
+        operations
     }
 
     private companion object {
@@ -105,11 +107,11 @@ abstract class SyscallBenchmark(name: String) : TimedBenchmark(name, "ns/op") {
 }
 
 object GetPidBenchmark : SyscallBenchmark("syscall.getpid") {
-    override fun invoke(): Int = getpid()
+    override fun MemScope.operation() = ::getpid
 }
 
 object PathLookupBenchmark : SyscallBenchmark("vfs.cachedAccess") {
-    override fun invoke(): Int = access("/usr/bin/bash", F_OK)
+    override fun MemScope.operation() = { access("/usr/bin/bash", F_OK) }
 }
 
 class ParallelSyscallBenchmark(private val syscall: SyscallBenchmark, private val workers: Int) :

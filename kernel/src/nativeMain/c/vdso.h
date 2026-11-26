@@ -18,3 +18,10 @@ typedef struct vdso_image {
     const uint8_t *data;
     size_t size;
 } vdso_image_t;
+
+static inline uint64_t read_tsc(void) {
+    uint32_t low;
+    uint32_t high;
+    __asm__ volatile("lfence; rdtsc" : "=a"(low), "=d"(high) : : "memory");
+    return ((uint64_t)high << 32) | low;
+}

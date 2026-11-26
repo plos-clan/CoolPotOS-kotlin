@@ -1,5 +1,3 @@
-@file:OptIn(ExperimentalAtomicApi::class)
-
 package org.plos_clan.cpos.fs.vfs
 
 import org.plos_clan.cpos.tasks.PollSource
@@ -7,7 +5,6 @@ import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.utils.KernelMutex
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PollEvents
-import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
 internal enum class EpollControlOperation {
     ADD,
@@ -38,7 +35,7 @@ internal class Epoll : AnonymousFileBackend(InodeType.EPOLL, "eventpoll"),
     PositionlessOpenFileBackend {
     private data class RegistrationKey(val descriptor: Int, val file: OpenFileDescription)
 
-    private inner class Registration(val key: RegistrationKey, val event: EpollEvent) :
+    private inner class Registration(val key: RegistrationKey, var event: EpollEvent) :
         PollSubscription(event.events and EpollEvents.EXCLUSIVE != 0u) {
         override val events: Int = if (event.ioEvents == 0u) -1 else event.events.toInt()
         var queued = false
@@ -46,17 +43,23 @@ internal class Epoll : AnonymousFileBackend(InodeType.EPOLL, "eventpoll"),
         private var enabled = true
         private var removed = false
 
-        override fun changed(): Boolean {
-            val accepted = lock.withLock {
-                if (removed || !enabled && key.file.isOpen) return@withLock false
+        override fun changed(): Boolean = schedule()
+
+        fun schedule(rearm: EpollEvent? = null): Boolean {
+            lock.withLock {
+                if (removed) return false
+                if (rearm != null) {
+                    event = rearm
+                    enabled = true
+                }
+                if (!enabled && key.file.isOpen) return false
                 generation++
-                if (queued) return@withLock false
+                if (queued && rearm == null) return false
+                if (!queued) ready.addLast(this)
                 queued = true
-                ready.addLast(this)
-                true
             }
-            if (accepted) changes.signal()
-            return accepted
+            changes.signal()
+            return true
         }
 
         override fun onClosed() = lock.withLock {
@@ -144,36 +147,55 @@ internal class Epoll : AnonymousFileBackend(InodeType.EPOLL, "eventpoll"),
         0L
     }
 
-    fun control(descriptor: Int, file: OpenFileDescription, operation: EpollControlOperation,
-        event: EpollEvent?): VfsResult<Unit> = topologyLock.withLock {
-        val target = file.backend as? Epoll
-        if (operation == EpollControlOperation.ADD && target != null && target.reaches(this)) {
-            return@withLock VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
+    fun control(
+        descriptor: Int,
+        file: OpenFileDescription,
+        operation: EpollControlOperation,
+        event: EpollEvent?,
+    ): VfsResult<Unit> {
+        val key = RegistrationKey(descriptor, file)
+        val target = file.backend
+        if (operation != EpollControlOperation.ADD || target !is Epoll) {
+            return update(key, operation, event)
         }
-        operations.withLock operation@{
-            val key = RegistrationKey(descriptor, file)
-            val previous = registrations[key]
-            if (operation == EpollControlOperation.ADD && previous != null) {
-                return@operation VfsResult.Err(VfsError.ALREADY_EXISTS)
-            }
-            if (operation != EpollControlOperation.ADD && previous == null) {
-                return@operation VfsResult.Err(VfsError.NOT_FOUND)
-            }
-            if (operation == EpollControlOperation.DELETE) {
-                remove(checkNotNull(previous))
-                return@operation VfsResult.Ok(Unit)
-            }
-            val replacement = checkNotNull(event)
-            val combined = (previous?.event?.events ?: 0u) or replacement.events
-            if (previous != null && combined and EpollEvents.EXCLUSIVE != 0u) {
-                return@operation VfsResult.Err(VfsError.INVALID_ARGUMENT)
-            }
-            if (previous != null) remove(previous)
-            val registration = Registration(key, replacement)
-            registrations[key] = registration
-            registration.notify()
-            VfsResult.Ok(Unit)
+        return topologyLock.withLock {
+            if (target.reaches(this)) VfsResult.Err(VfsError.TOO_MANY_SYMLINKS)
+            else update(key, operation, event)
         }
+    }
+
+    private fun update(
+        key: RegistrationKey,
+        operation: EpollControlOperation,
+        event: EpollEvent?,
+    ): VfsResult<Unit> = operations.withLock {
+        val previous = registrations[key]
+        when (operation) {
+            EpollControlOperation.ADD -> if (previous != null) {
+                return@withLock VfsResult.Err(VfsError.ALREADY_EXISTS)
+            }
+            EpollControlOperation.DELETE -> {
+                remove(previous ?: return@withLock VfsResult.Err(VfsError.NOT_FOUND))
+                return@withLock VfsResult.Ok(Unit)
+            }
+            EpollControlOperation.MODIFY -> {
+                if (previous == null) return@withLock VfsResult.Err(VfsError.NOT_FOUND)
+                val combined = previous.event.events or checkNotNull(event).events
+                if (combined and EpollEvents.EXCLUSIVE != 0u) {
+                    return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
+                }
+                if (previous.event.events == event.events) {
+                    previous.schedule(event)
+                    return@withLock VfsResult.Ok(Unit)
+                }
+            }
+        }
+        val interest = checkNotNull(event)
+        val registration = Registration(key, interest)
+        registrations[key] = registration
+        previous?.close()
+        registration.notify()
+        VfsResult.Ok(Unit)
     }
 
     fun collect(
