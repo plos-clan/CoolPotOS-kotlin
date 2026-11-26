@@ -99,6 +99,10 @@ EOF
 install -Dm644 /dev/stdin "$rootfs/etc/environment" <<'EOF'
 WLR_RENDERER_ALLOW_SOFTWARE=1
 EOF
+install -Dm644 /dev/stdin "$rootfs/usr/lib/systemd/user/umbriel.service.d/llvmpipe.conf" <<'EOF'
+[Service]
+Environment=LP_NUM_THREADS=0
+EOF
 install -Dm644 /dev/stdin "$rootfs/etc/greetd/config.toml" <<'EOF'
 [terminal]
 vt = 1
