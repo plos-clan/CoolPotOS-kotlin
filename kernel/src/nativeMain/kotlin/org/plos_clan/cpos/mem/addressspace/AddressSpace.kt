@@ -25,7 +25,7 @@ import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 
-private const val MMIO_VIRTUAL_BASE = 0xffff_ff00_0000_0000uL
+internal const val MMIO_VIRTUAL_BASE = 0xffff_ff00_0000_0000uL
 private const val MMIO_VIRTUAL_END = 0xffff_ff80_0000_0000uL
 
 private const val EINTR = 4

@@ -62,7 +62,6 @@ internal class KeyboardReport(
 }
 
 internal class KeyboardInputDevice(
-    private val eventIndex: Int,
     deviceName: String,
     physicalPath: String,
     id: InputId,
@@ -73,6 +72,7 @@ internal class KeyboardInputDevice(
     private val pressed = BooleanArray(KeyCode.stateSize)
     private val report = KeyboardReport(this)
     private val console = ConsoleKeyboard()
+    private val eventIndex = EvdevDevice.allocateIndex()
     private val evdev = EvdevDevice(
         name = deviceName,
         physicalPath = physicalPath,
@@ -240,33 +240,6 @@ internal class KeyboardInputDevice(
         const val DEFAULT_REPEAT_DELAY_MILLIS = 250
         const val DEFAULT_REPEAT_PERIOD_MILLIS = 33
         const val MAX_REPEAT_MILLIS = 60_000
-    }
-}
-
-internal object InputManager {
-    private val lock = IrqSpinLock()
-    private val keyboards = mutableMapOf<Any, KeyboardInputDevice>()
-
-    fun findKeyboard(source: Any): KeyboardInputDevice? =
-        lock.withLock { keyboards[source] }
-
-    fun unregisterKeyboard(source: Any): Boolean = lock.withLock {
-        val keyboard = keyboards.remove(source) ?: return@withLock false
-        keyboard.uninstall()
-    }
-
-    fun registerKeyboard(
-        source: Any,
-        name: String,
-        physicalPath: String,
-        id: InputId,
-    ): KeyboardInputDevice? = lock.withLock {
-        keyboards[source]?.let { return@withLock it }
-        val eventIndex = EvdevDevice.allocateIndex()
-        val keyboard = KeyboardInputDevice(eventIndex, name, physicalPath, id)
-        if (!keyboard.install()) return@withLock null
-        keyboards[source] = keyboard
-        keyboard
     }
 }
 

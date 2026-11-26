@@ -35,7 +35,6 @@ import org.plos_clan.cpos.syscall.fs.FsConstants.POLL_FD_SIZE
 import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
-import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
@@ -71,8 +70,7 @@ internal fun lseek(regs: PtraceRegisters, process: Process): Long {
 
 internal fun dup(regs: PtraceRegisters, process: Process): Long {
     val oldFd = regs[PtraceRegisters.IDX_RDI].toInt()
-    val limit = process.resourceLimits.get(ProcessResource.OPEN_FILES).soft
-    return when (val result = process.fdTable.duplicate(oldFd, 0, 0uL, limit)) {
+    return when (val result = process.fdTable.duplicate(oldFd, 0, 0uL)) {
         is VfsResult.Ok -> result.value.toLong()
         is VfsResult.Err -> errno(result.error.errno)
     }
@@ -81,9 +79,8 @@ internal fun dup(regs: PtraceRegisters, process: Process): Long {
 internal fun dup2(regs: PtraceRegisters, process: Process): Long {
     val oldFd = regs[PtraceRegisters.IDX_RDI].toInt()
     val newFd = regs[PtraceRegisters.IDX_RSI].toInt()
-    val limit = process.resourceLimits.get(ProcessResource.OPEN_FILES).soft
     return when (val result = process.fdTable.duplicateTo(
-        process.vfsOperationContext, oldFd, newFd, limit = limit,
+        process.vfsOperationContext, oldFd, newFd,
     )) {
         is VfsResult.Ok -> result.value.toLong()
         is VfsResult.Err -> errno(result.error.errno)
@@ -98,9 +95,8 @@ internal fun dup3(regs: PtraceRegisters, process: Process): Long {
         return errno(Errno.EINVAL)
     }
     val descriptorFlags = if (flags and OpenFlags.O_CLOEXEC != 0) FileDescriptorFlags.FD_CLOEXEC else 0uL
-    val limit = process.resourceLimits.get(ProcessResource.OPEN_FILES).soft
     return when (val result = process.fdTable.duplicateTo(
-        process.vfsOperationContext, oldFd, newFd, descriptorFlags, limit,
+        process.vfsOperationContext, oldFd, newFd, descriptorFlags,
     )) {
         is VfsResult.Ok -> result.value.toLong()
         is VfsResult.Err -> errno(result.error.errno)
@@ -161,12 +157,12 @@ internal fun fcntl(regs: PtraceRegisters, process: Process): Long {
         F_DUPFD_CLOEXEC,
         -> {
             if (!process.fdTable.contains(fd)) return errno(Errno.EBADF)
-            val limit = process.resourceLimits.get(ProcessResource.OPEN_FILES).soft
+            val limit = process.fdTable.limit.toULong()
             if (argument > Int.MAX_VALUE.toULong() || argument >= limit) {
                 return errno(Errno.EINVAL)
             }
             val flags = if (command.toInt() == F_DUPFD_CLOEXEC) F_GETFD_FLAGS else 0uL
-            when (val result = process.fdTable.duplicate(fd, argument.toInt(), flags, limit)) {
+            when (val result = process.fdTable.duplicate(fd, argument.toInt(), flags)) {
                 is VfsResult.Ok -> result.value.toLong()
                 is VfsResult.Err -> errno(result.error.errno)
             }

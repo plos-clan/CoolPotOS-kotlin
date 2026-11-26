@@ -22,6 +22,24 @@ import kotlin.test.assertSame
 
 class RecursiveMountTest {
     @Test
+    fun mountpointSurvivesLossOfTheCoveredDirectoryCache() {
+        val tree = Tree()
+        try {
+            tree.mkdir("/parent", "/parent/child")
+            val parent = tree.path("/parent")
+            val underlying = tree.path("/parent/child")
+            tree.mount("/parent/child")
+            val mounted = tree.path("/parent/child")
+            parent.dentry.releaseCachedChildren()
+            assertSame(mounted.mount, tree.path("/parent/child").mount)
+            tree.unmount("/parent/child")
+            assertSame(underlying.inode, tree.path("/parent/child").inode)
+        } finally {
+            tree.context.release()
+        }
+    }
+
+    @Test
     fun preservesRuntimeSubmountsAcrossRootReplacement() {
         val tree = Tree()
         try {

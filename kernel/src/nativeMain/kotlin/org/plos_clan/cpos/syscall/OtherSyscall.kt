@@ -12,6 +12,7 @@ import org.plos_clan.cpos.mem.IoScratch
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.partialOrError
 import org.plos_clan.cpos.syscall.Syscall.userMemory
+import org.plos_clan.cpos.tasks.CapEnum
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
@@ -23,20 +24,10 @@ import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.PtraceRegisters
 
-private const val REBOOT_MAGIC1 = 0xfee1deadUL
-private const val REBOOT_MAGIC2 = 672274793UL
-private const val REBOOT_MAGIC2A = 85072278UL
-private const val REBOOT_MAGIC2B = 369367448UL
-private const val REBOOT_MAGIC2C = 537993216UL
-
-private const val REBOOT_CMD_RESTART = 0x01234567UL
-private const val REBOOT_CMD_HALT = 0xCDEF0123UL
-private const val REBOOT_CMD_CAD_ON = 0x89ABCDEFUL
-private const val REBOOT_CMD_CAD_OFF = 0x00000000UL
-private const val REBOOT_CMD_POWER_OFF = 0x4321FEDCUL
-private const val REBOOT_CMD_RESTART2 = 0xA1B2C3D4UL
-private const val REBOOT_CMD_SW_SUSPEND = 0xD000FCE2UL
-private const val REBOOT_CMD_KEXEC = 0x45584543UL
+private const val REBOOT_MAGIC1 = 0xfee1deadu
+private const val REBOOT_CMD_RESTART = 0x01234567u
+private const val REBOOT_CMD_POWER_OFF = 0x4321fedcu
+private const val REBOOT_CMD_RESTART2 = 0xa1b2c3d4u
 
 private const val GETRANDOM_MAX = 0x1ff_ffffuL
 private const val GETRANDOM_FLAGS = 0x7uL
@@ -146,28 +137,22 @@ private data class SysInfo(
 }
 
 internal fun reboot(regs: PtraceRegisters, process: Process): Long {
-    val magic1 = regs[PtraceRegisters.IDX_RDI]
-    val magic2 = regs[PtraceRegisters.IDX_RSI]
-    val command = regs[PtraceRegisters.IDX_RDX]
-
-    if (magic1 != REBOOT_MAGIC1 || magic2 != REBOOT_MAGIC2) {
-        return errno(Errno.EINVAL)
+    val capabilities = ProcessManager.currentThread()?.capabilities
+    if (capabilities?.hasEffective(CapEnum.SYS_BOOT) != true) return errno(Errno.EPERM)
+    val magic1 = regs[PtraceRegisters.IDX_RDI].toUInt()
+    val magic2 = regs[PtraceRegisters.IDX_RSI].toUInt()
+    if (magic1 != REBOOT_MAGIC1) return errno(Errno.EINVAL)
+    when (magic2) {
+        672274793u, 85072278u, 369367448u, 537993216u -> Unit
+        else -> return errno(Errno.EINVAL)
     }
-
-    return when (command) {
-        REBOOT_CMD_POWER_OFF -> {
-            Fadt.shutdown()
-            errno(Errno.EOK)
-        }
-
-        REBOOT_CMD_RESTART2 or REBOOT_CMD_RESTART -> {
-            Fadt.reboot()
-            errno(Errno.EOK)
-        }
-
-        REBOOT_CMD_CAD_OFF or REBOOT_CMD_CAD_ON -> errno(Errno.ENOSYS)
-        else -> errno(Errno.EINVAL)
+    val accepted = when (regs[PtraceRegisters.IDX_RDX].toUInt()) {
+        REBOOT_CMD_RESTART, REBOOT_CMD_RESTART2 -> Fadt.reboot()
+        REBOOT_CMD_POWER_OFF -> Fadt.shutdown()
+        0u, 0x89abcdefu -> return errno(Errno.ENOSYS)
+        else -> return errno(Errno.EINVAL)
     }
+    return if (accepted) 0L else errno(Errno.EIO)
 }
 
 internal fun time(regs: PtraceRegisters, process: Process): Long {

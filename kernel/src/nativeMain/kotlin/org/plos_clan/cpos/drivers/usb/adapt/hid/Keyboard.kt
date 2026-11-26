@@ -5,8 +5,7 @@ package org.plos_clan.cpos.drivers.usb.adapt.hid
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.get
-import org.plos_clan.cpos.drivers.input.InputId
-import org.plos_clan.cpos.drivers.input.InputManager
+import org.plos_clan.cpos.drivers.input.KeyboardInputDevice
 import org.plos_clan.cpos.drivers.usb.bus.CompletionEvent
 import org.plos_clan.cpos.drivers.usb.bus.TransferStatus
 import org.plos_clan.cpos.drivers.usb.bus.UsbDriver
@@ -14,16 +13,18 @@ import org.plos_clan.cpos.drivers.usb.bus.UsbInterface
 import org.plos_clan.cpos.drivers.usb.defs.CLASS_HID
 import org.plos_clan.cpos.drivers.usb.defs.EP_TYPE_INT
 
-class KeyLayout {
+private class KeyLayout {
     val modifiers = mutableListOf<HidField>()
     val arrays = mutableListOf<HidField>()
     val bitmaps = mutableListOf<HidField>()
 }
 
-class Keyboard(
-    val hid: HidDevice,
-    val layout: KeyLayout,
+private class Keyboard(
+    private val hid: HidDevice,
+    private val input: KeyboardInputDevice,
 ) : UsbDriver {
+    private val layout = KeyLayout()
+
     private fun scanLayout() {
         for (report in hid.descriptor.reports.values) {
             if (report.sizeBytes(HidKind.INPUT) == 0u) {
@@ -56,7 +57,7 @@ class Keyboard(
 
     override suspend fun disconnect() {
         println("USB: KBD: disconnected")
-        InputManager.unregisterKeyboard(hid)
+        input.uninstall()
         hid.free()
     }
 
@@ -81,21 +82,6 @@ class Keyboard(
             val data = buffer.view<UByteVar>()
             val numbered = hid.descriptor.reports.keys.any { it != 0u.toUByte() }
             val reportId = if (numbered) data[0] else 0u.toUByte()
-            val input = InputManager.findKeyboard(hid) ?: run {
-                val descriptor = hid.iface.device.desc
-                InputManager.registerKeyboard(
-                    source = hid,
-                    name = "USB HID keyboard",
-                    physicalPath =
-                        "usb-${hid.iface.device.slotId}/input${hid.iface.desc.interfaceNumber}",
-                    id = InputId(
-                        bus = InputId.BUS_USB,
-                        vendor = descriptor?.idVendor ?: 0u,
-                        product = descriptor?.idProduct ?: 0u,
-                        version = descriptor?.bcdDevice ?: 0u,
-                    ),
-                )
-            } ?: return
             val report = input.beginReport()
             val availableBits = length.toULong() * Byte.SIZE_BITS.toULong()
             var hasKeyboardFields = false
@@ -151,7 +137,12 @@ class Keyboard(
     companion object {
         suspend fun create(iface: UsbInterface, endpointAddress: UByte): Keyboard? {
             val hid = HidDevice.create(iface, endpointAddress) ?: return null
-            val keyboard = Keyboard(hid = hid, layout = KeyLayout())
+            val input = KeyboardInputDevice("USB HID keyboard", hid.inputPath, hid.inputId)
+            if (!input.install()) {
+                hid.free()
+                return null
+            }
+            val keyboard = Keyboard(hid, input)
             keyboard.scanLayout()
             hid.bind(keyboard)
             return keyboard

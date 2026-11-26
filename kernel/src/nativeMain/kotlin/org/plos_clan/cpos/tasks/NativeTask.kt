@@ -5,10 +5,8 @@ package org.plos_clan.cpos.tasks
 
 import kotlinx.cinterop.*
 import org.plos_clan.cpos.tasks.cgroup.CpuTime
-import org.plos_clan.cpos.mem.BuddyFrameAllocator
+import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.mem.page.PageDirectory
-import org.plos_clan.cpos.mem.Hhdm
-import org.plos_clan.cpos.mem.INVALID_FRAME
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.toPointer
@@ -168,20 +166,20 @@ internal class NativeTask private constructor(
     }
 
     private class KernelStack private constructor(
-        private val physicalBase: ULong,
+        private val address: ULong,
         private val pages: ULong,
     ) : AutoCloseable {
         val top: ULong
-            get() = Hhdm.toVirtual(physicalBase + pages * PAGE_SIZE_BYTES)
+            get() = address + pages * PAGE_SIZE_BYTES
 
         override fun close() {
-            check(BuddyFrameAllocator.free(physicalBase, pages))
+            KernelPageDirectory.pages.release(address, pages)
         }
 
         companion object {
             fun allocate(pages: ULong): KernelStack? {
-                val physicalBase = BuddyFrameAllocator.allocate(pages)
-                return if (physicalBase == INVALID_FRAME) null else KernelStack(physicalBase, pages)
+                val address = KernelPageDirectory.pages.allocate(pages)
+                return if (address == 0uL) null else KernelStack(address, pages)
             }
         }
     }

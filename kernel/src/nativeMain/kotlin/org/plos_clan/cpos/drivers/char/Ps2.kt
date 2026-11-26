@@ -12,7 +12,6 @@ import org.plos_clan.cpos.drivers.acpi.aml.AcpiIoResource
 import org.plos_clan.cpos.drivers.acpi.aml.AcpiIrqResource
 import org.plos_clan.cpos.drivers.acpi.aml.AmlDeviceInfo
 import org.plos_clan.cpos.drivers.input.InputId
-import org.plos_clan.cpos.drivers.input.InputManager
 import org.plos_clan.cpos.drivers.input.KeyCode
 import org.plos_clan.cpos.drivers.input.KeyboardInputDevice
 import org.plos_clan.cpos.fault.IRQ_BASE_VECTOR
@@ -107,15 +106,13 @@ object Ps2Keyboard {
             irqResource?.levelTriggered ?: false,
             irqResource?.activeLow ?: false,
         )
-        val keyboard = InputManager.registerKeyboard(
-            source = this,
-            name = "AT Translated Set 2 keyboard",
-            physicalPath = PHYSICAL_PATH,
-            id = InputId(InputId.BUS_I8042, product = 1u, version = 1u),
-        ) ?: return false
+        val id = InputId(InputId.BUS_I8042, product = 1u, version = 1u)
+        val keyboard = KeyboardInputDevice("AT Translated Set 2 keyboard", PHYSICAL_PATH, id)
+        if (!keyboard.install()) return false
 
         configuration = config
-        startEventWorker(Ps2Set1Decoder(keyboard))
+        val decoder = Ps2Set1Decoder(keyboard)
+        startEventWorker(decoder)
         val vector = irq + IRQ_BASE_VECTOR
         IrqController.registerIoApic(
             irq = irq,

@@ -12,7 +12,6 @@ import org.plos_clan.cpos.mem.dmabuf.DmaBufferFile
 import org.plos_clan.cpos.mem.dmabuf.DmaBufferMapping
 import org.plos_clan.cpos.mem.dmabuf.ResidentDmaBuffer
 import org.plos_clan.cpos.tasks.Process
-import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -109,9 +108,8 @@ internal class DrmFileBuffers {
         }
         val closeOnExec = flags and OpenFlags.O_CLOEXEC.toUInt() != 0u
         val descriptorFlags = if (closeOnExec) FileDescriptorFlags.FD_CLOEXEC else 0uL
-        val limit = process.resourceLimits.get(ProcessResource.OPEN_FILES).soft
         check(file.retain())
-        val reservation = process.fdTable.reserve(file, descriptorFlags, limit) ?: run {
+        val reservation = process.fdTable.reserve(descriptorFlags, file) ?: run {
             file.release()
             return -Errno.EMFILE.toLong()
         }

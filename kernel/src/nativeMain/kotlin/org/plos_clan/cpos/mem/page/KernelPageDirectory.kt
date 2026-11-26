@@ -11,6 +11,9 @@ import org.plos_clan.cpos.utils.hex
 object KernelPageDirectory {
     private var activeDirectory: PageDirectory? = null
 
+    internal lateinit var pages: KernelPageArena
+        private set
+
     val addressSpace: AddressSpace by lazy {
         AddressSpace.kernel(getDirectory())
     }
@@ -29,6 +32,7 @@ object KernelPageDirectory {
         }
 
         return PageDirectory(pml4PhysicalAddress).also { directory ->
+            pages = KernelPageArena(directory)
             activeDirectory = directory
             println("Paging: active PML4=${pml4PhysicalAddress.hex()}")
         }

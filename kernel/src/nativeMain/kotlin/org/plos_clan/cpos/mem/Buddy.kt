@@ -103,14 +103,59 @@ private class OrderBitmap(blockCount: Int) {
     }
 }
 
+internal class BuddyBlocks(val maxOrder: Int) {
+    private val freeBlocks = Array(maxOrder + 1) { order ->
+        OrderBitmap(1 shl (maxOrder - order))
+    }
+
+    init {
+        freeBlocks[maxOrder].add(0)
+    }
+
+    fun take(order: Int): Int {
+        var sourceOrder = order
+        var block = -1
+        while (sourceOrder <= maxOrder) {
+            block = freeBlocks[sourceOrder].takeFirst()
+            if (block >= 0) {
+                break
+            }
+            sourceOrder++
+        }
+        if (block < 0) {
+            return -1
+        }
+
+        while (sourceOrder > order) {
+            sourceOrder--
+            block *= 2
+            freeBlocks[sourceOrder].add(block + 1)
+        }
+
+        return block shl order
+    }
+
+    fun put(offset: Int, order: Int) {
+        var block = offset shr order
+        var mergedOrder = order
+        while (mergedOrder < maxOrder) {
+            val buddy = block xor 1
+            if (!freeBlocks[mergedOrder].remove(buddy)) {
+                break
+            }
+            block = block shr 1
+            mergedOrder++
+        }
+        freeBlocks[mergedOrder].add(block)
+    }
+}
+
 private class BuddyZone(
     private val baseFrame: ULong,
     private val maxOrder: Int,
 ) {
     private val frameCount = 1 shl maxOrder
-    private val freeBlocks = Array(maxOrder + 1) { order ->
-        OrderBitmap(frameCount shr order)
-    }
+    private val blocks = BuddyBlocks(maxOrder)
     private val allocated = AtomicLongArray((frameCount - 1) / (BITS_PER_WORD / 2) + 1)
     private val sectionSize = minOf(frameCount, (PAGE_SIZE_BYTES / Int.SIZE_BYTES.toUInt()).toInt())
     private val sections = AtomicArray<AtomicIntArray?>(frameCount / sectionSize) { null }
@@ -140,47 +185,15 @@ private class BuddyZone(
         return (previous and mask == 0L) == inUse
     }
 
-    init {
-        freeBlocks[maxOrder].add(0)
-    }
-
     fun allocate(order: Int): ULong {
-        var sourceOrder = order
-        var block = -1
-        while (sourceOrder <= maxOrder) {
-            block = freeBlocks[sourceOrder].takeFirst()
-            if (block >= 0) {
-                break
-            }
-            sourceOrder++
-        }
-        if (block < 0) {
-            return INVALID_FRAME
-        }
-
-        while (sourceOrder > order) {
-            sourceOrder--
-            block *= 2
-            freeBlocks[sourceOrder].add(block + 1)
-        }
-
-        val relativeFrame = block shl order
-        return (baseFrame + relativeFrame.toULong()) * PAGE_SIZE_BYTES
+        val offset = blocks.take(order)
+        if (offset < 0) return INVALID_FRAME
+        return (baseFrame + offset.toUInt()) * PAGE_SIZE_BYTES
     }
 
-    fun recycle(physicalAddress: ULong, order: Int) {
-        val relative = physicalAddress / PAGE_SIZE_BYTES - baseFrame
-        var block = relative.toInt() shr order
-        var mergedOrder = order
-        while (mergedOrder < maxOrder) {
-            val buddy = block xor 1
-            if (!freeBlocks[mergedOrder].remove(buddy)) {
-                break
-            }
-            block = block shr 1
-            mergedOrder++
-        }
-        freeBlocks[mergedOrder].add(block)
+    fun recycle(address: ULong, order: Int) {
+        val offset = address / PAGE_SIZE_BYTES - baseFrame
+        blocks.put(offset.toInt(), order)
     }
 }
 
@@ -196,7 +209,8 @@ internal class BuddyPool(
     private val lock = IrqSpinLock()
     private val zones = buildZones(ranges)
     private val managedFrames = ranges.sumOf { it.frameCount }
-    private var usableFrames = managedFrames
+    @Volatile var globalFreeFrames = managedFrames
+        private set
     private val reclaimers = AtomicReference(emptyArray<FrameReclaimer>())
     private val caches = Array(processors) { LocalPages() }
 
@@ -235,7 +249,7 @@ internal class BuddyPool(
                 }
                 if (size == BATCH_SIZE) break
             }
-            usableFrames -= size.toUInt()
+            globalFreeFrames -= size.toUInt()
         }
 
         private fun drain(count: Int) = this@BuddyPool.lock.withLock {
@@ -244,16 +258,16 @@ internal class BuddyPool(
                 val zone = checkNotNull(zoneOf(address))
                 zone.recycle(address, 0)
             }
-            usableFrames += count.toUInt()
+            globalFreeFrames += count.toUInt()
         }
     }
 
-    fun allocate(count: ULong): ULong {
+    fun allocate(count: ULong, reclaim: Boolean = true): ULong {
         val order = requiredOrder(count)
         if (order !in 0..MAX_ZONE_ORDER) return INVALID_FRAME
         val local = if (order == 0) caches.getOrNull(cpu.current()) else null
         var address = local?.take() ?: lock.withLock { allocateLocked(order) }
-        if (address == INVALID_FRAME) address = allocateUnderPressure(order)
+        if (address == INVALID_FRAME && reclaim) address = allocateUnderPressure(order)
         if (address != INVALID_FRAME) {
             val zone = checkNotNull(zoneOf(address))
             check(zone.mark(address, order, true))
@@ -291,7 +305,7 @@ internal class BuddyPool(
         for (zone in zones) {
             val address = zone.allocate(order)
             if (address == INVALID_FRAME) continue
-            usableFrames -= 1uL shl order
+            globalFreeFrames -= 1uL shl order
             return address
         }
         return INVALID_FRAME
@@ -306,7 +320,7 @@ internal class BuddyPool(
         if (local != null) local.put(address)
         else lock.withLock {
             zone.recycle(address, order)
-            usableFrames += 1uL shl order
+            globalFreeFrames += 1uL shl order
         }
         return true
     }
@@ -336,7 +350,7 @@ internal class BuddyPool(
         lock.withLock {
             totalBytes = managedFrames * PAGE_SIZE_BYTES
             val cached = caches.sumOf { it.size.toULong() }
-            freeBytes = (usableFrames + cached) * PAGE_SIZE_BYTES
+            freeBytes = (globalFreeFrames + cached) * PAGE_SIZE_BYTES
         }
         return PhysicalMemoryStatistics(totalBytes, freeBytes)
     }
@@ -374,6 +388,7 @@ object BuddyFrameAllocator {
     @Volatile private var active: BuddyPool? = null
 
     val isReady: Boolean get() = active != null
+    internal val globalFreeFrames get() = active?.globalFreeFrames ?: 0uL
 
     fun initialize(): Boolean = lock.withLock {
         if (active != null) return@withLock true
@@ -385,9 +400,9 @@ object BuddyFrameAllocator {
         true
     }
 
-    fun allocate(count: ULong): ULong {
+    fun allocate(count: ULong, reclaim: Boolean = true): ULong {
         val pool = active ?: return INVALID_FRAME
-        return pool.allocate(count)
+        return pool.allocate(count, reclaim)
     }
 
     fun free(address: ULong, count: ULong): Boolean {

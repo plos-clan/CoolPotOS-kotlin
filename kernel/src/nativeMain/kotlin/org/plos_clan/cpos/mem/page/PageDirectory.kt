@@ -32,7 +32,6 @@ private const val INDEX_BITS = 9
 private val INDEX_MASK = (PTE_COUNT - 1).toULong()
 internal const val KERNEL_PML4_START_INDEX = PTE_COUNT / 2
 internal const val USER_VIRTUAL_ADDRESS_LIMIT = 0x0000_8000_0000_0000uL
-private val PTE_PARENT_FLAGS = PTE_PRESENT or PTE_WRITABLE or PTE_USER
 internal val MMIO_PTE_FLAGS = PTE_PRESENT or PTE_WRITABLE or PTE_NO_CACHE or PTE_NO_EXECUTE
 
 internal enum class PageTableLevel(val shift: Int) {
@@ -205,20 +204,28 @@ class PageDirectory(val pml4PhysicalAddress: ULong) {
     internal fun userPageTable(address: ULong) =
         leafTable(address, PTE_PRESENT or PTE_USER) { _, _ -> }
 
+    internal fun kernelDirectory(address: ULong): CPointer<ULongVar> {
+        val level = PageTableLevel.PDPT
+        val table = leafTable(address, PTE_PRESENT, create = true, last = level) { _, _ -> }
+        return checkNotNull(table)
+    }
+
     private inline fun leafTable(
         address: ULong,
         required: ULong,
         create: Boolean = false,
+        last: PageTableLevel = PageTableLevel.PD,
         huge: (ULong, Int) -> Unit,
     ): CPointer<ULongVar>? {
         var table = root
-        for (shift in PageTableLevel.PML4.shift downTo PageTableLevel.PD.shift step INDEX_BITS) {
+        for (shift in PageTableLevel.PML4.shift downTo last.shift step INDEX_BITS) {
             val index = ((address shr shift) and INDEX_MASK).toInt()
             var entry = table[index]
             if (create && entry and PTE_PRESENT == 0uL) {
                 val frame = allocateTable()
                 if (frame == INVALID_FRAME) return null
-                entry = frame or PTE_PARENT_FLAGS
+                val user = if (address < USER_VIRTUAL_ADDRESS_LIMIT) PTE_USER else 0uL
+                entry = frame or PTE_PRESENT or PTE_WRITABLE or user
                 table[index] = entry
             }
             if (entry and required != required) return null

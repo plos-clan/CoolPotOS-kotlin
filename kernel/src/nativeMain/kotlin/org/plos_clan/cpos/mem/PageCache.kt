@@ -44,7 +44,9 @@ private class CachedPage private constructor(
     override val size: Int,
 ) : NativeMemorySource(), PageResult {
     private val pins = AtomicInt(1)
-    @Volatile var referenced = true
+    @Volatile private var referenced = true
+    var clockIndex = 0
+    val resident get() = pins.load() != 0
 
     init {
         require(size in 0..PAGE_SIZE_BYTES.toInt())
@@ -71,6 +73,10 @@ private class CachedPage private constructor(
     val reclaimable get() = pins.load() == 1 && UserFrameReferences.isExclusive(frame)
 
     fun reclaim(): Boolean {
+        if (referenced) {
+            referenced = false
+            return false
+        }
         if (!pins.compareAndSet(1, 0)) return false
         if (UserFrameReferences.releaseExclusive(frame)) return true
         pins.store(1)
@@ -358,8 +364,8 @@ internal object PageCache : FrameReclaimer {
 
     override fun reclaim(target: ULong): ULong {
         var reclaimed = 0uL
-        for (shard in shards) {
-            if (reclaimed == target) break
+        shards.forEach { shard ->
+            if (reclaimed >= target) return reclaimed
             reclaimed += shard.reclaim(target - reclaimed)
         }
         return reclaimed
@@ -369,7 +375,7 @@ internal object PageCache : FrameReclaimer {
         var files = 0uL
         var blocks = 0uL
         var reclaimable = 0uL
-        for (shard in shards) {
+        shards.forEach { shard ->
             shard.forEachPage { page ->
                 if (page.key.kind == PageCacheKind.BLOCK) blocks += PAGE_SIZE_BYTES
                 else files += PAGE_SIZE_BYTES
@@ -380,12 +386,63 @@ internal object PageCache : FrameReclaimer {
     }
 }
 
+private class PageClock {
+    private val pages = ArrayList<CachedPage>()
+    private var resident = 0
+    private var hand = 0
+
+    fun add(page: CachedPage) {
+        page.clockIndex = pages.size
+        pages.add(page)
+        resident++
+    }
+
+    fun remove(page: CachedPage) {
+        retire(page)
+        pages.removeAt(resident)
+    }
+
+    private fun retire(page: CachedPage) {
+        val last = pages[--resident]
+        val index = page.clockIndex
+        pages[index] = last
+        last.clockIndex = index
+        pages[resident] = page
+        page.clockIndex = resident
+    }
+
+    fun reclaim(target: ULong): ULong {
+        var remaining = resident.toLong() * 2
+        var reclaimed = 0uL
+        while (remaining > 0 && reclaimed < target && resident > 0) {
+            remaining--
+            if (hand >= resident) hand = 0
+            val page = pages[hand]
+            if (!page.reclaim()) {
+                hand++
+                continue
+            }
+            retire(page)
+            reclaimed++
+        }
+        return reclaimed
+    }
+
+    inline fun drainRetired(discard: (CachedPage) -> Unit) {
+        while (pages.size > resident) {
+            val index = pages.lastIndex
+            discard(pages[index])
+            pages.removeAt(index)
+        }
+    }
+}
+
 private class PageCacheShard {
     private val lock = IrqSpinLock()
     @Volatile private var sources = persistentHashMapOf<Any, CachedSource>()
-    private val clock = linkedSetOf<CachedPage>()
+    private val clock = PageClock()
 
-    fun contains(key: PageCacheKey) = sources[key.identity]?.pages?.containsKey(key) == true
+    fun contains(key: PageCacheKey) = sources[key.identity]?.pages?.get(key)?.resident == true
 
     inline fun pin(
         source: PageCacheSource,
@@ -396,7 +453,7 @@ private class PageCacheShard {
         val cached = sources[key.identity]?.pages?.get(key)
         if (cached != null && cached.pin()) return cached
         val maximum = source.readAheadSize
-        val batch = lock.withLock {
+        val batch = update {
             val current = sources[key.identity] ?: CachedSource().also {
                 sources = sources.putting(key.identity, it)
             }
@@ -429,7 +486,7 @@ private class PageCacheShard {
     }
 
     fun invalidate(identity: Any, offset: ULong, end: ULong?) {
-        val retired = lock.withLock {
+        val retired = update {
             val source = sources[identity] ?: return
             val pages = source.invalidate(identity, offset, end)
             pages.forEach(clock::remove)
@@ -440,7 +497,9 @@ private class PageCacheShard {
     }
 
     inline fun forEachPage(visit: (CachedPage) -> Unit) {
-        for (source in sources.values) source.pages.values.forEach(visit)
+        for (source in sources.values) {
+            for (page in source.pages.values) if (page.resident) visit(page)
+        }
     }
 
     private fun load(
@@ -488,22 +547,22 @@ private class PageCacheShard {
         val key = load.key
         val candidate = CachedPage.copyOf(key, bytes, valid)
         if (candidate !is CachedPage) return candidate
-        val existing = lock.withLock {
-            val source = load.source
-            if (!source.contains(load)) return candidate
-            val page = source.pages[key]
-            if (page != null) {
-                check(page.pin())
-                return@withLock page
-            }
-            try {
+        val existing = try {
+            update {
+                val source = load.source
+                if (!source.contains(load)) return candidate
+                val page = source.pages[key]
+                if (page != null) {
+                    check(page.pin())
+                    return@update page
+                }
                 val updated = source.pages.putting(key, candidate)
                 clock.add(candidate)
                 check(candidate.pin())
                 source.pages = updated
-            } catch (_: OutOfMemoryError) {
                 return candidate
             }
+        } catch (_: OutOfMemoryError) {
             return candidate
         }
         candidate.unpin()
@@ -517,34 +576,17 @@ private class PageCacheShard {
 
     fun reclaim(target: ULong): ULong {
         var reclaimed = 0uL
-        lock.tryWithLock {
-            var remaining = clock.size.toLong() * 2
-            while (remaining-- > 0 && reclaimed < target) {
-                val iterator = clock.iterator()
-                if (!iterator.hasNext()) break
-                val page = iterator.next()
-                val evicted = evict(page)
-                iterator.remove()
-                if (evicted) reclaimed++ else clock.add(page)
-            }
-        }
+        lock.tryWithLock { reclaimed = clock.reclaim(target) }
         return reclaimed
     }
 
-    private fun evict(page: CachedPage): Boolean {
-        if (page.referenced) {
-            page.referenced = false
-            return false
+    private inline fun <T> update(action: () -> T): T = lock.withLock {
+        clock.drainRetired { page ->
+            val key = page.key
+            val source = sources[key.identity] ?: return@drainRetired
+            source.pages = source.pages.removing(key)
+            removeEmptySource(key.identity, source)
         }
-        if (!page.reclaimable) return false
-        val key = page.key
-        val source = sources.getValue(key.identity)
-        val remaining = source.pages.removing(key)
-        val empty = remaining.isEmpty() && source.idle
-        val directory = if (empty) sources.removing(key.identity) else sources
-        if (!page.reclaim()) return false
-        source.pages = remaining
-        if (empty) sources = directory
-        return true
+        action()
     }
 }

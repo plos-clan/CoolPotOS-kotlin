@@ -13,7 +13,6 @@ import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.tasks.PidHandle
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
-import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
 
@@ -54,11 +53,7 @@ internal object PidFdSyscalls {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        val reservation = process.fdTable.reserve(
-            file,
-            FileDescriptorFlags.FD_CLOEXEC,
-            process.resourceLimits.get(ProcessResource.OPEN_FILES).soft,
-        ) ?: run {
+        val reservation = process.fdTable.reserve(FileDescriptorFlags.FD_CLOEXEC, file) ?: run {
             file.release()
             return VfsResult.Err(VfsError.fromErrno(Errno.EMFILE))
         }

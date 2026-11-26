@@ -33,7 +33,6 @@ import org.plos_clan.cpos.syscall.fs.FsPathResolver.resolveAt
 import org.plos_clan.cpos.tasks.CapEnum
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
-import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -203,11 +202,7 @@ internal object NewMountSyscalls {
         } else {
             0uL
         }
-        val reservation = process.fdTable.reserve(
-            opened,
-            descriptorFlags,
-            process.resourceLimits.get(ProcessResource.OPEN_FILES).soft,
-        ) ?: run {
+        val reservation = process.fdTable.reserve(descriptorFlags, opened) ?: run {
             opened.release()
             return errno(Errno.EMFILE)
         }
@@ -289,10 +284,7 @@ internal object NewMountSyscalls {
             } else {
                 0uL
             }
-            val reservation = process.fdTable.reserve(
-                descriptorFlags,
-                process.resourceLimits.get(ProcessResource.OPEN_FILES).soft,
-            ) ?: return errno(Errno.EMFILE)
+            val reservation = process.fdTable.reserve(descriptorFlags) ?: return errno(Errno.EMFILE)
             reservation.use {
                 val mountedFile = when (val result = configuration.mount(
                     caller = process.vfsOperationContext,

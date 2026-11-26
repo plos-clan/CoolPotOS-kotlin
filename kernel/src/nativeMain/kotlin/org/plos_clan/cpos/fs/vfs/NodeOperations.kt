@@ -72,7 +72,8 @@ internal class VfsNodeOperations(
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        return createChild(caller, parent.path, parent.name, node, pathname.requiresDirectory)
+        val covered = context.namespace.coveredChild(parent.path, parent.name)
+        return createChild(caller, parent.path, parent.name, node, pathname.requiresDirectory, covered)
     }
 
     fun createNode(
@@ -588,11 +589,12 @@ internal class VfsNodeOperations(
         name: VfsName,
         node: NodeCreation,
         requiresDirectory: Boolean = false,
+        covered: VfsPath? = null,
     ): VfsResult<VfsPath> {
         if (name.isDot || name.isDotDot) {
             return VfsResult.Err(VfsError.ALREADY_EXISTS)
         }
-        when (val existing = directory.dentry.lookupChild(caller, name)) {
+        when (val existing = directory.dentry.lookupChild(caller, name, covered = covered?.dentry)) {
             is VfsResult.Ok -> return VfsResult.Err(VfsError.ALREADY_EXISTS)
             is VfsResult.Err -> if (existing.error != VfsError.NOT_FOUND) return existing
         }

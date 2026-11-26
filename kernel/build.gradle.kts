@@ -490,7 +490,7 @@ private class BuildConfig(private val project: Project) {
         flags = listOf(
             "-m", setting("qemuMemory", "QEMU_MEMORY", "2g"),
             "-M", "q35", "-cpu", "host", "-enable-kvm",
-            "-no-reboot", "-smp", setting("qemuSmp", "QEMU_SMP", "4"),
+            "-smp", setting("qemuSmp", "QEMU_SMP", "4"),
             "-device", "qemu-xhci,id=xhci",
             "-device", "usb-kbd,bus=xhci.0,port=2", "-device", "usb-mouse,bus=xhci.0,port=3",
             "-display", setting("qemuDisplay", "QEMU_DISPLAY", "gtk"),

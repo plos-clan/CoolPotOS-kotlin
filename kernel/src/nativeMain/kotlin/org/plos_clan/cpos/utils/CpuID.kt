@@ -1,4 +1,4 @@
-@file:OptIn(ExperimentalForeignApi::class)
+@file:OptIn(ExperimentalForeignApi::class, ExperimentalAtomicApi::class)
 
 package org.plos_clan.cpos.utils
 
@@ -8,6 +8,9 @@ import kotlinx.cinterop.alloc
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
 import org.plos_clan.cpos.tasks.CpuLocal
+import kotlin.concurrent.atomics.AtomicInt
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import kotlin.concurrent.atomics.fetchAndUpdate
 
 private data class CpuidResult(
     val eax: UInt,
@@ -290,6 +293,8 @@ enum class CpuFeature(
 }
 
 object CpuID {
+    private val commonMxcsrMask = AtomicInt(-1)
+    val mxcsrMask: UInt get() = commonMxcsrMask.load().toUInt()
     val xsaveFeatures: UInt get() = cpuid(0xdu, 1u).eax
 
     private fun cpuid(
@@ -370,6 +375,12 @@ object CpuID {
     }
 
     fun apInit(local: CpuLocal) {
+        val mxcsrMask = memScoped {
+            val state = alloc<bridge.xstate_t>()
+            bridge.save_xstate(state.ptr)
+            state.legacy.mxcsr_mask.takeUnless { it == 0u } ?: 0xffbfu
+        }
+        commonMxcsrMask.fetchAndUpdate { it and mxcsrMask.toInt() }
         local.features = CpuFeature.entries.filter(::has).toSet()
         var controlFlags = 0uL
         for (feature in local.features) {

@@ -22,6 +22,7 @@ enum class CapEnum(val id: Int) {
     IPC_LOCK(14),
     SYS_PTRACE(19),
     SYS_ADMIN(21),
+    SYS_BOOT(22),
     SYS_NICE(23),
     SYS_RESOURCE(24),
     SYS_TTY_CONFIG(26),

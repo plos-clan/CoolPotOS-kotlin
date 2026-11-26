@@ -19,7 +19,6 @@ import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.ProcessManager
-import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.utils.KernelMutex
 
 enum class SeekOrigin {
@@ -579,7 +578,7 @@ class OpenFileDescription private constructor(
             noControllingTerminal = flags.toInt() and OpenFlags.O_NOCTTY != 0)
         val process = ProcessManager.currentProcess() ?: return -VfsError.NO_SUCH_PROCESS.errno.toLong()
         val descriptorFlags = if (flags.toInt() and OpenFlags.O_CLOEXEC != 0) FileDescriptorFlags.FD_CLOEXEC else 0uL
-        val reservation = process.fdTable.reserve(descriptorFlags, process.resourceLimits.get(ProcessResource.OPEN_FILES).soft)
+        val reservation = process.fdTable.reserve(descriptorFlags)
             ?: return -VfsError.TOO_MANY_OPEN_FILES.errno.toLong()
         return reservation.use {
             when (val opened = open(caller, VfsPath(path.mount, entry), peerInode, options)) {

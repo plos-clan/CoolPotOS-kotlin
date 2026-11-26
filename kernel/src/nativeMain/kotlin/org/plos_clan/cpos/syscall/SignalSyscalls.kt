@@ -32,6 +32,7 @@ import org.plos_clan.cpos.tasks.SignalRouter
 import org.plos_clan.cpos.tasks.SignalSendResult
 import org.plos_clan.cpos.tasks.SignalStack
 import org.plos_clan.cpos.tasks.Thread
+import org.plos_clan.cpos.utils.CpuID
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PtraceRegisters
@@ -796,7 +797,6 @@ private object SignalFrame {
     private const val XSTATE_HEADER_OFFSET = 512
     private const val XSTATE_SIGNAL_SIZE = PtraceRegisters.EXTENDED_STATE_SIZE + UInt.SIZE_BYTES
     private const val SUPPORTED_XFEATURES = 0x7uL
-    private const val VALID_MXCSR_BITS = 0x0000_ffbfu
     private const val RESTORABLE_FLAGS = 0x0005_0dd5uL
 
     fun install(
@@ -1019,7 +1019,7 @@ private object SignalFrame {
 
     private fun sanitizeExtendedState(bytes: ByteArray, magic2: UInt): Boolean {
         val state = LittleEndianBuffer(bytes)
-        if (state.readU32(24) and VALID_MXCSR_BITS.inv() != 0u) return false
+        if (state.readU32(24) and CpuID.mxcsrMask.inv() != 0u) return false
         val magic1 = state.readU32(XSTATE_MAGIC_OFFSET)
         if (magic1 == 0u) {
             bytes.fill(0, XSTATE_MAGIC_OFFSET)

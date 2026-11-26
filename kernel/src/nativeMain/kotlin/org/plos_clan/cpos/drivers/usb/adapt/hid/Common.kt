@@ -20,6 +20,7 @@ import org.plos_clan.cpos.drivers.usb.defs.REQ_SET_PROTOCOL
 import org.plos_clan.cpos.drivers.usb.defs.REQ_TYPE_CLASS
 import org.plos_clan.cpos.drivers.usb.defs.SetupPacket
 import org.plos_clan.cpos.mem.MmioRegion
+import org.plos_clan.cpos.drivers.input.InputId
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 
 class HidDevice(
@@ -32,6 +33,20 @@ class HidDevice(
     var maxReportSize: UShort = 0u
     var descriptor = HidDescriptor()
     internal val transferCompletion = KernelCoroutines.dispatcher.createEvent()
+
+    internal val inputPath: String
+        get() = "usb-${iface.device.slotId}/input${iface.desc.interfaceNumber}"
+
+    internal val inputId: InputId
+        get() {
+            val descriptor = iface.device.desc
+            return InputId(
+                bus = InputId.BUS_USB,
+                vendor = descriptor?.idVendor ?: 0u,
+                product = descriptor?.idProduct ?: 0u,
+                version = descriptor?.bcdDevice ?: 0u,
+            )
+        }
 
     fun free() {
         buffer?.free()

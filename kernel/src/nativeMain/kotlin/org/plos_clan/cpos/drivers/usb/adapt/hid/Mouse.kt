@@ -12,7 +12,6 @@ import org.plos_clan.cpos.drivers.input.AbsoluteAxisInfo
 import org.plos_clan.cpos.drivers.input.EvdevDevice
 import org.plos_clan.cpos.drivers.input.InputEvent
 import org.plos_clan.cpos.drivers.input.InputEventType
-import org.plos_clan.cpos.drivers.input.InputId
 import org.plos_clan.cpos.drivers.input.RelativeAxis
 import org.plos_clan.cpos.drivers.usb.bus.CompletionEvent
 import org.plos_clan.cpos.drivers.usb.bus.TransferStatus
@@ -122,16 +121,8 @@ private class Mouse(
                 val info = AbsoluteAxisInfo(minimum = field.field.logicalMin, maximum = field.field.logicalMax)
                 axis to info
             }
-            val descriptor = iface.device.desc
-            val id = InputId(
-                bus = InputId.BUS_USB,
-                vendor = descriptor?.idVendor ?: 0u,
-                product = descriptor?.idProduct ?: 0u,
-                version = descriptor?.bcdDevice ?: 0u,
-            )
             val input = EvdevDevice(
-                "USB HID mouse", "usb-${iface.device.slotId}/input${iface.desc.interfaceNumber}",
-                id, keys, axes, null, absoluteAxes,
+                "USB HID mouse", hid.inputPath, hid.inputId, keys, axes, null, absoluteAxes,
             )
             if (fields.isEmpty() || !input.install()) {
                 hid.free()

@@ -12,6 +12,35 @@ import kotlin.test.assertTrue
 
 class ProcessLifecycleTest {
     @Test
+    fun pidfdReadinessIncludesTheWaitableExitStatus() {
+        val parent = ProcessManager.createUserProcess("wait-parent")
+        val child = ProcessManager.createUserProcess("wait-child", parent)
+        val created = ProcessManager.createUserThread(child, 0x10000uL, 0x20000uL)
+        val thread = assertIs<VfsResult.Ok<Thread>>(created).value
+        val target = PidHandle(thread, PidHandle.Scope.PROCESS)
+        var observed: ChildWaitEvent? = null
+        val subscription = object : PollSubscription() {
+            override fun changed(): Boolean {
+                if (target.state != PidHandle.State.EXITED) return false
+                observed = parent.childEvents.poll(
+                    setOf(child), exited = true, stopped = false, continued = false, consume = false,
+                )
+                return true
+            }
+        }
+        try {
+            subscription.watch(child.stateChanges)
+            ProcessManager.finishThreadExit(thread, 0)
+            assertSame(child, observed?.child)
+            assertEquals(ChildEventKind.EXITED, observed?.kind)
+        } finally {
+            subscription.close()
+            ProcessManager.reapChild(parent.id, child)
+            ProcessManager.discardUserProcess(parent)
+        }
+    }
+
+    @Test
     fun exitDuringClonePreparationRejectsPublicationAndReleasesMembership() {
         val process = ProcessManager.createUserProcess("clone-exit", terminationSignal = null)
         var threadId = 0

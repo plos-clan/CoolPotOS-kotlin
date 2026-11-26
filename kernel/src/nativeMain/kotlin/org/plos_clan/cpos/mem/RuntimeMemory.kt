@@ -1,6 +1,7 @@
 @file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
 @file:OptIn(
     ExperimentalStdlibApi::class,
+    ExperimentalAtomicApi::class,
     NativeRuntimeApi::class,
     ExperimentalForeignApi::class,
 )
@@ -15,8 +16,11 @@ import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
 import kotlinx.cinterop.reinterpret
+import org.plos_clan.cpos.mem.page.KernelPageDirectory
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.toPointer
+import kotlin.concurrent.atomics.AtomicLong
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.native.internal.ExportForCppRuntime
 import kotlin.native.runtime.GC
 import kotlin.native.runtime.NativeRuntimeApi
@@ -35,18 +39,22 @@ internal data class GarbageCollectionStatistics(
 )
 
 internal object RuntimeMemory : FrameReclaimer {
-    private var initialized = false
+    private var collectionReserve = 0L
+    private val nextCollection = AtomicLong(0L)
 
     fun initialize(): Boolean {
-        if (initialized) return true
+        if (collectionReserve != 0L) return true
         if (!BuddyFrameAllocator.isReady || !Hhdm.isReady) {
             println("Runtime memory: Buddy or HHDM is unavailable")
             return false
         }
 
+        val frames = BuddyFrameAllocator.statistics().totalBytes / PAGE_SIZE_BYTES
+        val headroom = 1.0 - GC.heapTriggerCoefficient
+        collectionReserve = maxOf(1L, (frames.toDouble() * headroom).toLong())
+        nextCollection.store(collectionReserve)
         BuddyFrameAllocator.register(this)
         runtime_vm_enable()
-        initialized = true
         return true
     }
 
@@ -56,11 +64,17 @@ internal object RuntimeMemory : FrameReclaimer {
             return null
         }
         reclaim(frameCount)
+        val available = BuddyFrameAllocator.globalFreeFrames.toLong() - frameCount.toLong()
+        scheduleCollection(available.coerceAtLeast(0L))
+        return KernelPageDirectory.pages.allocate(frameCount).toPointer<UByteVar>()
+    }
 
-        val physicalAddress = BuddyFrameAllocator.allocate(frameCount)
-        if (physicalAddress == INVALID_FRAME) return null
-
-        return Hhdm.toVirtual(physicalAddress).toPointer<UByteVar>()
+    private fun scheduleCollection(available: Long) {
+        val threshold = nextCollection.load()
+        val next = minOf(collectionReserve, available / 2)
+        if (next == threshold || available > threshold && next < threshold) return
+        if (!nextCollection.compareAndSet(threshold, next)) return
+        if (available <= threshold) GC.schedule()
     }
 
     override fun reclaim(target: ULong): ULong {
@@ -69,9 +83,7 @@ internal object RuntimeMemory : FrameReclaimer {
             val pointer = runtime_vm_take_released() ?: return reclaimed
             val frames = pointer.reinterpret<ULongVar>()[0] / PAGE_SIZE_BYTES
             val address = pointer.rawValue.toLong().toULong()
-            check(address >= Hhdm.offset && BuddyFrameAllocator.free(address - Hhdm.offset, frames)) {
-                "Runtime memory provider received an invalid released block"
-            }
+            KernelPageDirectory.pages.release(address, frames)
             reclaimed += frames
         }
         return reclaimed

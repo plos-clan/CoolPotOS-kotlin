@@ -19,7 +19,6 @@ import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.ProcessManager
-import org.plos_clan.cpos.tasks.ProcessResource
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
@@ -50,8 +49,7 @@ internal object UdmabufDevice : PositionlessDeviceBackend {
         }
         val process = ProcessManager.currentProcess() ?: return -Errno.ESRCH.toLong()
         val context = process.context ?: return -Errno.ENOENT.toLong()
-        val limit = process.resourceLimits.get(ProcessResource.OPEN_FILES).soft
-        val reservation = process.fdTable.reserve(request.descriptorFlags, limit)
+        val reservation = process.fdTable.reserve(request.descriptorFlags)
             ?: return -Errno.EMFILE.toLong()
         return reservation.use {
             val buffer = when (val result = request.pin(process.fdTable)) {

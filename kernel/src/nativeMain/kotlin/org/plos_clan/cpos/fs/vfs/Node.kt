@@ -369,6 +369,7 @@ class Dentry internal constructor(
         caller: VfsOperationContext,
         name: VfsName,
         cachedOnly: Boolean = false,
+        covered: Dentry? = null,
     ): VfsResult<Dentry> {
         val directory = inode() ?: return VfsResult.Err(VfsError.NOT_FOUND)
         val backend = directory.backend as? DirectoryBackend
@@ -382,6 +383,7 @@ class Dentry internal constructor(
             is VfsResult.Ok -> Unit
             is VfsResult.Err -> return access
         }
+        if (covered != null) return VfsResult.Ok(covered)
         val cached = children[name]
         if (cached != null && cached.validity.isValid(TscClock)) return cached.result
         if (cachedOnly) return VfsResult.Err(VfsError.WOULD_BLOCK)

@@ -230,6 +230,29 @@ class PageCacheTest {
     }
 
     @Test
+    fun reclaimedPagesDisappearBeforeIndexCleanupAndCanBeReloaded() {
+        val source = Source()
+        val scratch = ByteArray(PAGE_SIZE_BYTES.toInt())
+        val held = PageCache.acquire(source, 0uL, scratch)
+        assertTrue(held.isSuccess)
+        try {
+            val offset = 4uL * PAGE_SIZE_BYTES
+            assertEquals(1.toByte(), source.byte(offset))
+            assertTrue(PageCache.reclaim(ULong.MAX_VALUE) > 0uL)
+            assertFalse(PageCache.contains(source, offset))
+            assertTrue(PageCache.contains(source, 0uL))
+            source.value = 9
+            assertEquals(9.toByte(), source.byte(offset))
+            PageCache.reclaim(ULong.MAX_VALUE)
+            PageCache.invalidate(source.identity, offset, PAGE_SIZE_BYTES)
+            assertTrue(PageCache.contains(source, 0uL))
+        } finally {
+            PageCache.release(held.frame)
+            PageCache.invalidate(source.identity)
+        }
+    }
+
+    @Test
     fun reclamationKeepsAcquiredFramesAlive() {
         val source = Source()
         val scratch = ByteArray(PAGE_SIZE_BYTES.toInt())

@@ -147,7 +147,24 @@ data class VfsPath(val mount: Mount, val dentry: Dentry) {
 
 class MountNamespace internal constructor(val root: Mount) {
     private val lock = IrqSpinLock()
-    @Volatile private var mounts = emptyMap<VfsPath, Mount>()
+    private class Attachments(val paths: Map<VfsPath, Mount>) {
+        val children = HashMap<VfsPath, MutableMap<VfsName, VfsPath>>()
+
+        init {
+            for (path in paths.keys) {
+                if (path.dentry === path.mount.root) continue
+                val entry = path.dentry.snapshot
+                val parent = entry.parent ?: continue
+                val directory = VfsPath(path.mount, parent)
+                children.getOrPut(directory) { HashMap() }[entry.name] = path
+            }
+        }
+    }
+
+    @Volatile private var attachments = Attachments(emptyMap())
+    private var mounts: Map<VfsPath, Mount>
+        get() = attachments.paths
+        set(value) { attachments = Attachments(value) }
     private val references = AtomicInt(0)
     internal val events = PollSource()
     private val changes = AtomicInt(0)
@@ -175,6 +192,12 @@ class MountNamespace internal constructor(val root: Mount) {
             if (updated == CLOSED) releaseResources()
             return
         }
+    }
+
+    internal fun coveredChild(parent: VfsPath, name: VfsName): VfsPath? {
+        val path = attachments.children[parent]?.get(name) ?: return null
+        val entry = path.dentry.snapshot
+        return path.takeIf { !entry.unlinked && entry.parent === parent.dentry && entry.name == name }
     }
 
     internal fun mountedAt(path: VfsPath): Mount? = mounts[path]

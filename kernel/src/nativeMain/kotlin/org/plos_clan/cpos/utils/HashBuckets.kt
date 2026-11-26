@@ -1,6 +1,6 @@
 package org.plos_clan.cpos.utils
 
-internal class HashBuckets<T>(size: Int, create: () -> T) : Iterable<T> {
+internal class HashBuckets<T>(size: Int, create: () -> T) {
     private val buckets = List(size.coerceAtLeast(1)) { create() }
 
     operator fun get(key: Any): T {
@@ -9,5 +9,7 @@ internal class HashBuckets<T>(size: Int, create: () -> T) : Iterable<T> {
         return buckets[index.toInt()]
     }
 
-    override fun iterator(): Iterator<T> = buckets.iterator()
+    inline fun forEach(visit: (T) -> Unit) {
+        for (index in buckets.indices) visit(buckets[index])
+    }
 }

@@ -176,17 +176,18 @@ internal class ChildWaitQueue {
 
     fun sequence(): ULong = lock.withLock { sequence }
 
-    fun publish(event: ChildWaitEvent) {
-        val awakened = lock.withLock {
-            events += event
-            sequence++
-            waiters.toList().also { waiters.clear() }
-        }
-        awakened.forEach(Scheduler::wake)
+    fun publish(event: ChildWaitEvent?, commit: () -> Unit = {}) = change {
+        if (event != null) events += event
+        commit()
     }
 
-    fun notifyChange() {
+    fun restore(event: ChildWaitEvent) = change { events.add(0, event) }
+
+    fun notifyChange() = change {}
+
+    private inline fun change(update: () -> Unit) {
         val awakened = lock.withLock {
+            update()
             sequence++
             waiters.toList().also { waiters.clear() }
         }
@@ -213,15 +214,6 @@ internal class ChildWaitQueue {
             else if (consume) events.removeAt(index)
             else events[index]
         }
-
-    fun restore(event: ChildWaitEvent) {
-        val awakened = lock.withLock {
-            events.add(0, event)
-            sequence++
-            waiters.toList().also { waiters.clear() }
-        }
-        awakened.forEach(Scheduler::wake)
-    }
 
     fun discard(child: Process) {
         lock.withLock { events.removeAll { it.child === child } }
@@ -494,16 +486,13 @@ class Process internal constructor(
     internal val alarm = ProcessAlarm(this)
     internal val childEvents = ChildWaitQueue()
 
-    val fdTable = FileDescriptorTable()
+    val fdTable = FileDescriptorTable { resourceLimits.get(ProcessResource.OPEN_FILES).soft }
 
     internal fun transitionState(expected: ProcessState, replacement: ProcessState): Boolean {
         var observed = lifecycle.load()
         while (observed.state == expected) {
-            if (lifecycle.compareAndSet(observed, observed.copy(state = replacement))) {
-                val exited = replacement == ProcessState.ZOMBIE || replacement == ProcessState.DEAD
-                if (exited) stateChanges.signal()
-                return true
-            }
+            val updated = observed.copy(state = replacement)
+            if (lifecycle.compareAndSet(observed, updated)) return true
             observed = lifecycle.load()
         }
         return false
@@ -604,6 +593,7 @@ class Process internal constructor(
         membershipState.store(parent.membership)
         signals.inherit(parent.signals)
         resourceLimits.inherit(parent.resourceLimits)
+        fdTable.inherit(parent.fdTable)
         oomScoreAdjustment.inherit(parent.oomScoreAdjustment)
     }
 
@@ -690,7 +680,7 @@ object ProcessManager {
             else -> parent.addressSpace.fork()
         }
         val context = parent?.context?.fork() ?: FileSystemManager.kernelContext?.fork()
-        val child = newProcess(
+        return newProcess(
             name = name,
             addressSpace = addressSpace,
             isKernelProcess = false,
@@ -701,10 +691,6 @@ object ProcessManager {
             terminationSignal = terminationSignal,
             pid = pid
         )
-        if (parent == null) return child
-
-        check(parent.fdTable.copyInto(child.fdTable))
-        return child
     }
 
     internal fun createUserThread(
@@ -906,10 +892,13 @@ object ProcessManager {
                 val notification = prepareExitNotification(child) ?: continue
                 pending += notification
             }
-            check(process.transitionState(ProcessState.EXITING, ProcessState.ZOMBIE))
-            prepareExitNotification(process)?.let(pending::add)
+            val notification = prepareExitNotification(process) {
+                check(process.transitionState(ProcessState.EXITING, ProcessState.ZOMBIE))
+            }
+            notification?.let(pending::add)
             pending
         }
+        process.stateChanges.signal()
         process.completeVfork()
         notifications.forEach(ExitNotification::deliver)
     }
@@ -924,15 +913,21 @@ object ProcessManager {
         return processes[1]?.takeIf { it !== process && it.state.canReceiveSignals }
     }
 
-    private fun prepareExitNotification(process: Process): ExitNotification? {
-        val parent = processes[process.parentId] ?: return null
+    private fun prepareExitNotification(
+        process: Process,
+        commit: () -> Unit = {},
+    ): ExitNotification? {
+        val parent = processes[process.parentId] ?: run {
+            commit()
+            return null
+        }
         val event = ChildWaitEvent(process, ChildEventKind.EXITED, process.exitStatus)
         val signal = process.terminationSignal
         val action = if (signal == Signal.CHILD) parent.signals.action(Signal.CHILD) else null
         val ignored = action?.isIgnored == true
         val noChildWait = action?.has(SignalActionFlag.NO_CHILD_WAIT) == true
         val autoReap = ignored || noChildWait
-        if (!autoReap) parent.childEvents.publish(event)
+        parent.childEvents.publish(event.takeUnless { autoReap }, commit)
         val notification = signal.takeUnless { ignored }
         return ExitNotification(parent, event, notification, autoReap)
     }
@@ -961,6 +956,7 @@ object ProcessManager {
             true
         }
         if (reaped) {
+            child.stateChanges.signal()
             threadTable.update { it.removing(child.id) }
             parent?.childEvents?.apply {
                 discard(child)

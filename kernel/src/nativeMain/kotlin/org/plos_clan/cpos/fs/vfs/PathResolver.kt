@@ -326,15 +326,17 @@ internal class VfsPathResolver(
         followMount: Boolean = true,
         resolution: PathResolution = PathResolution.DEFAULT,
     ): VfsResult<VfsPath> {
+        val covered = context.namespace.coveredChild(parent, name)
         val dentry = when (val result = parent.dentry.lookupChild(
             caller,
             name,
             cachedOnly = resolution.cachedOnly,
+            covered = covered?.dentry,
         )) {
             is VfsResult.Ok -> result.value
             is VfsResult.Err -> return result
         }
-        val path = VfsPath(parent.mount, dentry)
+        val path = covered ?: VfsPath(parent.mount, dentry)
         if (!followMount) return VfsResult.Ok(path)
         return followMounts(context.namespace, path, resolution.allowMountCrossing)
     }
