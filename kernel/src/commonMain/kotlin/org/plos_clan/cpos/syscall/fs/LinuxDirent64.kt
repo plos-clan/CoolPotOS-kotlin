@@ -4,26 +4,26 @@ import org.plos_clan.cpos.fs.vfs.InodeType
 import org.plos_clan.cpos.syscall.fs.FsConstants.DIRENT64_ALIGNMENT
 import org.plos_clan.cpos.syscall.fs.FsConstants.DIRENT64_HEADER_SIZE
 import org.plos_clan.cpos.utils.LittleEndianBuffer
-import org.plos_clan.cpos.utils.NativeStruct
 
 internal class LinuxDirent64(
     private val name: org.plos_clan.cpos.fs.vfs.VfsName,
     private val inode: org.plos_clan.cpos.fs.vfs.InodeId,
     private val type: InodeType?,
     private val nextOffset: Long,
-) : NativeStruct {
+) {
     val recordSize: Int =
         (DIRENT64_HEADER_SIZE + name.size + 1 + DIRENT64_ALIGNMENT - 1) /
             DIRENT64_ALIGNMENT * DIRENT64_ALIGNMENT
 
-    override fun toNativeBytes(): ByteArray = ByteArray(recordSize).also { buffer ->
-        LittleEndianBuffer(buffer).apply {
-            writeU64(0, inode.value)
-            writeU64(8, nextOffset.toULong())
-            writeU16(16, recordSize.toUShort())
-        }
-        buffer[18] = type?.directoryEntryType ?: 0
-        name.copyInto(buffer, DIRENT64_HEADER_SIZE)
+    fun writeTo(bytes: ByteArray, offset: Int) {
+        val output = LittleEndianBuffer(bytes)
+        output.writeU64(offset, inode.value)
+        output.writeU64(offset + 8, nextOffset.toULong())
+        output.writeU16(offset + 16, recordSize.toUShort())
+        bytes[offset + 18] = type?.directoryEntryType ?: 0
+        val start = offset + DIRENT64_HEADER_SIZE
+        name.copyInto(bytes, start)
+        bytes.fill(0, start + name.size, offset + recordSize)
     }
 
     private val InodeType.directoryEntryType: Byte

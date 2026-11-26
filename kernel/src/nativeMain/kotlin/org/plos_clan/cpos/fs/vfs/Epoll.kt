@@ -17,6 +17,10 @@ internal data class EpollEvent(
     val data: ULong,
 ) {
     val ioEvents: UInt get() = events and EpollEvents.IO_EVENTS
+
+    fun interface Sink {
+        fun write(index: Int, events: UInt, data: ULong)
+    }
 }
 
 internal object EpollEvents {
@@ -92,20 +96,19 @@ internal class Epoll : AnonymousFileBackend(InodeType.EPOLL, "eventpoll"),
             }
         }
 
-        fun collect(caller: VfsOperationContext, output: MutableList<EpollEvent>): Boolean {
+        fun deliver(caller: VfsOperationContext, index: Int, output: EpollEvent.Sink): Boolean {
             val available = sample(caller, consume = true)
             if (available < 0) remove(this)
             if (available <= 0) return false
-            val delivered = EpollEvent(available.toUInt(), event.data)
-            output.add(delivered)
-            if (event.events and EpollEvents.ONE_SHOT == 0u) {
-                return event.events and EpollEvents.EDGE_TRIGGERED == 0u
+            output.write(index, available.toUInt(), event.data)
+            when {
+                event.events and EpollEvents.ONE_SHOT != 0u -> lock.withLock {
+                    enabled = false
+                    dequeue()
+                }
+                event.events and EpollEvents.EDGE_TRIGGERED == 0u -> notify()
             }
-            lock.withLock {
-                enabled = false
-                dequeue()
-            }
-            return false
+            return true
         }
     }
 
@@ -201,14 +204,18 @@ internal class Epoll : AnonymousFileBackend(InodeType.EPOLL, "eventpoll"),
     fun collect(
         caller: VfsOperationContext,
         maximum: Int,
-        events: MutableList<EpollEvent>,
-    ) = operations.withLock {
-        events.clear()
+        subscription: PollSubscription? = null,
+        output: EpollEvent.Sink,
+    ): Int = operations.withLock {
+        subscription?.watch(changes)
+        var count = 0
         var remaining = lock.withLock { ready.size }
-        while (remaining-- > 0 && events.size < maximum) {
+        while (remaining > 0 && count < maximum) {
             val registration = takeReady() ?: break
-            if (registration.collect(caller, events)) registration.notify()
+            if (registration.deliver(caller, count, output)) count++
+            remaining--
         }
+        count
     }
 
     private fun takeReady(): Registration? = lock.withLock {

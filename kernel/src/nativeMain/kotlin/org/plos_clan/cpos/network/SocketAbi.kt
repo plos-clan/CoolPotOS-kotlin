@@ -26,9 +26,7 @@ internal class SocketAddressMemory private constructor(
         val encoded = SocketAddressAbi.encode(address)
         val copied = minOf(capacity, encoded.size)
         if (copied != 0 && !memory.copyToUser(encoded, size = copied)) return false
-        val length = ByteArray(UInt.SIZE_BYTES)
-        LittleEndianBuffer(length).writeU32(0, encoded.size.toUInt())
-        return checkNotNull(lengthMemory).copyToUser(length)
+        return checkNotNull(lengthMemory).writeUInt(encoded.size.toUInt())
     }
 
     companion object {
@@ -116,42 +114,35 @@ internal data class UserMessageHeader(
         FsConstants.MAX_RW_COUNT.toInt(),
     )
 
-    fun writeResult(nameLength: UInt, controlLength: Int, flags: Int): Boolean {
-        val bytes = memory.copyFromUser(SocketConstants.MESSAGE_HEADER_SIZE) ?: return false
-        LittleEndianBuffer(bytes).apply {
-            writeU32(8, nameLength)
-            writeU64(40, controlLength.toULong())
-            writeU32(48, flags.toUInt())
-        }
-        return memory.copyToUser(bytes)
-    }
+    fun writeResult(nameLength: UInt, controlLength: Int, flags: Int): Boolean =
+        memory.writeUInt(nameLength, 8) && memory.writeULong(controlLength.toULong(), 40) &&
+            memory.writeUInt(flags.toUInt(), 48)
 
     companion object {
         fun read(process: Process, address: ULong, writable: Boolean): VfsResult<UserMessageHeader> {
             val memory = UserMemory(process.addressSpace, address)
-            val bytes = memory.copyFromUser(SocketConstants.MESSAGE_HEADER_SIZE)
-                ?: return VfsResult.Err(VfsError.FAULT)
-            if (writable && !memory.isWritable(SocketConstants.MESSAGE_HEADER_SIZE)) {
-                return VfsResult.Err(VfsError.FAULT)
-            }
-            val input = LittleEndianBuffer(bytes)
-            val vectorCount = input.readU64(24)
-            val controlLength = input.readU64(40)
-            if (vectorCount > FsConstants.MAX_IO_VECTORS.toULong() ||
-                controlLength > SocketConstants.MAX_CONTROL_SIZE.toULong()
-            ) {
-                return VfsResult.Err(VfsError.MESSAGE_TOO_LONG)
-            }
-            val header = UserMessageHeader(
-                memory,
-                input.readU64(0),
-                input.readU32(8),
-                input.readU64(16),
-                vectorCount.toInt(),
-                input.readU64(32),
-                controlLength.toInt(),
-            )
-            return VfsResult.Ok(header)
+            return memory.readRecord(SocketConstants.MESSAGE_HEADER_SIZE) { input ->
+                if (writable && !memory.isWritable(SocketConstants.MESSAGE_HEADER_SIZE)) {
+                    return VfsResult.Err(VfsError.FAULT)
+                }
+                val vectorCount = input.readU64(24)
+                val controlLength = input.readU64(40)
+                if (vectorCount > FsConstants.MAX_IO_VECTORS.toULong() ||
+                    controlLength > SocketConstants.MAX_CONTROL_SIZE.toULong()
+                ) {
+                    return VfsResult.Err(VfsError.MESSAGE_TOO_LONG)
+                }
+                val header = UserMessageHeader(
+                    memory,
+                    input.readU64(0),
+                    input.readU32(8),
+                    input.readU64(16),
+                    vectorCount.toInt(),
+                    input.readU64(32),
+                    controlLength.toInt(),
+                )
+                VfsResult.Ok(header)
+            } ?: VfsResult.Err(VfsError.FAULT)
         }
     }
 }

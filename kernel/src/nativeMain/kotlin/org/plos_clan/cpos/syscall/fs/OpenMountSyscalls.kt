@@ -28,6 +28,7 @@ import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.syscall.Syscall.copyPath
+import org.plos_clan.cpos.syscall.Syscall
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.syscall.fs.FsConstants.AT_FDCWD
@@ -201,9 +202,7 @@ internal class LinuxOpenHow private constructor(
             return decode(flags.toUInt().toULong(), mode, 0uL, strictMode = false)
         }
 
-        fun decode(bytes: ByteArray): LinuxOpenHow? {
-            require(bytes.size >= NATIVE_SIZE)
-            val input = LittleEndianBuffer(bytes)
+        fun decode(input: LittleEndianBuffer): LinuxOpenHow? {
             return decode(
                 input.readU64(0),
                 input.readU64(ULong.SIZE_BYTES),
@@ -293,14 +292,9 @@ internal fun openAt2(regs: PtraceRegisters, process: Process): Long {
     val size = regs[PtraceRegisters.IDX_R10]
     if (size < LinuxOpenHow.NATIVE_SIZE.toULong()) return errno(Errno.EINVAL)
     if (size > PAGE_SIZE_BYTES) return errno(Errno.E2BIG)
-    val bytes = UserMemory(
-        process.addressSpace,
-        regs[PtraceRegisters.IDX_RDX],
-    ).copyFromUser(size.toInt()) ?: return errno(Errno.EFAULT)
-    for (index in LinuxOpenHow.NATIVE_SIZE until bytes.size) {
-        if (bytes[index] != 0.toByte()) return errno(Errno.E2BIG)
-    }
-    val how = LinuxOpenHow.decode(bytes) ?: return errno(Errno.EINVAL)
+    val memory = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDX])
+    val how = Syscall.readArguments(memory, size.toInt(), LinuxOpenHow.NATIVE_SIZE,
+        fail = { return errno(it) }, decode = LinuxOpenHow::decode)
     val pathname = copyPath(process, regs[PtraceRegisters.IDX_RSI])
         ?: return errno(Errno.EFAULT)
     val dirFd = regs[PtraceRegisters.IDX_RDI].toUInt().toInt()
@@ -623,13 +617,12 @@ private fun createPipe(process: Process, outputAddress: ULong, flags: ULong): Lo
     val readFd = descriptors[0]
     val writeFd = descriptors[1]
 
-    val output = ByteArray(Int.SIZE_BYTES * 2).also { bytes ->
-        LittleEndianBuffer(bytes).apply {
-            writeU32(0, readFd.toUInt())
-            writeU32(Int.SIZE_BYTES, writeFd.toUInt())
-        }
+    val output = UserMemory(process.addressSpace, outputAddress)
+    val written = output.writeRecord(2 * Int.SIZE_BYTES) {
+        it.writeU32(0, readFd.toUInt())
+        it.writeU32(Int.SIZE_BYTES, writeFd.toUInt())
     }
-    if (!UserMemory(process.addressSpace, outputAddress).copyToUser(output)) {
+    if (!written) {
         process.fdTable.close(caller, readFd)
         process.fdTable.close(caller, writeFd)
         return errno(Errno.EFAULT)

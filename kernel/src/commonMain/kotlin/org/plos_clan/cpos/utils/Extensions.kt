@@ -142,6 +142,16 @@ value class LittleEndianBuffer(private val bytes: ByteArray) {
         bytes[offset + 7] = (value shr 56).toByte()
     }
 
+    fun copyFrom(offset: Int, source: ByteArray, count: Int = source.size) {
+        requireRange(offset, count)
+        source.copyInto(bytes, offset, endIndex = count)
+    }
+
+    fun copyTo(offset: Int, destination: ByteArray) {
+        requireRange(offset, destination.size)
+        bytes.copyInto(destination, 0, offset, offset + destination.size)
+    }
+
     private fun requireRange(offset: Int, byteCount: Int) {
         require(offset >= 0 && byteCount >= 0 && offset <= bytes.size - byteCount) {
             "$byteCount-byte field at offset $offset exceeds a ${bytes.size}-byte buffer"
@@ -161,6 +171,18 @@ internal fun String.decimalInt(): Int? {
 }
 
 interface NativeStruct {
-    fun toNativeBytes(): ByteArray
-    fun updateFromNativeBytes(buffer: ByteArray): Boolean = false
+    val nativeSize: Int
+    fun writeTo(output: LittleEndianBuffer)
+
+    fun toNativeBytes(): ByteArray = ByteArray(nativeSize).also { writeTo(LittleEndianBuffer(it)) }
+}
+
+interface MutableNativeStruct : NativeStruct {
+    fun readFrom(input: LittleEndianBuffer)
+
+    fun updateFromNativeBytes(bytes: ByteArray): Boolean {
+        if (bytes.size != nativeSize) return false
+        readFrom(LittleEndianBuffer(bytes))
+        return true
+    }
 }

@@ -352,9 +352,12 @@ private fun copyTimestampSet(
     address: ULong,
 ): VfsResult<InodeTimestampSet> {
     if (address == 0uL) return VfsResult.Ok(InodeTimestampSet.NOW)
-    val bytes = UserMemory(process.addressSpace, address).copyFromUser(TimeSpec.NATIVE_SIZE * 2)
-        ?: return VfsResult.Err(VfsError.FAULT)
-    val input = LittleEndianBuffer(bytes)
+    val source = UserMemory(process.addressSpace, address)
+    return source.readRecord(2 * TimeSpec.NATIVE_SIZE, decode = ::timestampSet)
+        ?: VfsResult.Err(VfsError.FAULT)
+}
+
+private fun timestampSet(input: LittleEndianBuffer): VfsResult<InodeTimestampSet> {
     val accessTime = when (val result = timestampValue(input, 0)) {
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return result
@@ -442,9 +445,9 @@ private fun copyStatFs(
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
-    val status = LinuxStatFs(fileSystemMagic, path.mount.flags, statistics).toNativeBytes()
+    val status = LinuxStatFs(fileSystemMagic, path.mount.flags, statistics)
     val destination = UserMemory(process.addressSpace, address)
-    return if (destination.copyToUser(status)) 0L else errno(Errno.EFAULT)
+    return if (destination.writeStruct(status)) 0L else errno(Errno.EFAULT)
 }
 
 internal fun access(regs: PtraceRegisters, process: Process): Long = accessAt(
@@ -577,8 +580,8 @@ internal fun statx(regs: PtraceRegisters, process: Process): Long {
         LinuxFileStatus.snapshot(inode, attributes),
         isMountRoot = target.dentry === target.mount.root,
         mountId = target.mount.id,
-    ).toNativeBytes()
-    return if (UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_R8]).copyToUser(status)) {
+    )
+    return if (UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_R8]).writeStruct(status)) {
         0L
     } else {
         errno(Errno.EFAULT)
@@ -683,12 +686,8 @@ private fun copyStat(
         is VfsResult.Ok -> result.value
         is VfsResult.Err -> return errno(result.error.errno)
     }
-    return if (UserMemory(process.addressSpace, address).copyToUser(
-            LinuxStat(LinuxFileStatus.snapshot(inode, attributes)).toNativeBytes(),
-        )
-    ) {
-        0L
-    } else {
-        errno(Errno.EFAULT)
-    }
+    val snapshot = LinuxFileStatus.snapshot(inode, attributes)
+    val status = LinuxStat(snapshot)
+    val output = UserMemory(process.addressSpace, address)
+    return if (output.writeStruct(status)) 0L else errno(Errno.EFAULT)
 }

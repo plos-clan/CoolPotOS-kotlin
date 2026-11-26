@@ -3,9 +3,8 @@
 
 package org.plos_clan.cpos.fault
 
-import bridge.kotlin_exception_callbacks
+import bridge.idt_setup
 import bridge.read_cr3
-import bridge.register_interrupt_handler
 import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.ULongVar
@@ -273,20 +272,10 @@ fun handleException(
 
 object ErrorHandler {
     fun initialize() {
-        for (exception in UserException.entries) {
-            register_interrupt_handler(
-                exception.vector,
-                kotlin_exception_callbacks[exception.vector.toInt()],
-                0u,
-                if (exception == UserException.BREAKPOINT) 238u else 142u,
-            )
+        val mask = UserException.entries.fold(1u shl PAGE_FAULT_VECTOR.toInt()) { bits, exception ->
+            bits or (1u shl exception.vector.toInt())
         }
-        register_interrupt_handler(
-            PAGE_FAULT_VECTOR,
-            kotlin_exception_callbacks[PAGE_FAULT_VECTOR.toInt()],
-            0u,
-            142u,
-        )
+        idt_setup(mask)
         SignalInterrupt.initialize()
     }
 }

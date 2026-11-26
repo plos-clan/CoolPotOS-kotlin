@@ -5,7 +5,6 @@ import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.PidHandle
-import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
 
 internal class PidFd(
@@ -58,26 +57,24 @@ internal class PidFd(
             return -VfsError.NO_SUCH_PROCESS.errno.toLong()
         }
 
-        val bytes = args.copyFromUser(size) ?: return -VfsError.FAULT.errno.toLong()
-        bytes.fill(0)
         val process = target.thread.process
         val userIds = process.credentials.userIds
         val groupIds = process.credentials.groupIds
-        LittleEndianBuffer(bytes).apply {
-            writeU64(INFO_MASK_OFFSET, (INFO_PID or INFO_CREDS).toULong())
-            writeU32(INFO_PID_OFFSET, target.thread.id.toUInt())
-            writeU32(INFO_TGID_OFFSET, process.id.toUInt())
-            writeU32(INFO_PPID_OFFSET, process.parentId.toUInt())
-            writeU32(INFO_RUID_OFFSET, userIds.real.toUInt())
-            writeU32(INFO_RGID_OFFSET, groupIds.real.toUInt())
-            writeU32(INFO_EUID_OFFSET, userIds.effective.toUInt())
-            writeU32(INFO_EGID_OFFSET, groupIds.effective.toUInt())
-            writeU32(INFO_SUID_OFFSET, userIds.saved.toUInt())
-            writeU32(INFO_SGID_OFFSET, groupIds.saved.toUInt())
-            writeU32(INFO_FSUID_OFFSET, userIds.filesystem.toUInt())
-            writeU32(INFO_FSGID_OFFSET, groupIds.filesystem.toUInt())
+        val written = args.writeRecord(size) { output ->
+            output.writeU64(INFO_MASK_OFFSET, (INFO_PID or INFO_CREDS).toULong())
+            output.writeU32(INFO_PID_OFFSET, target.thread.id.toUInt())
+            output.writeU32(INFO_TGID_OFFSET, process.id.toUInt())
+            output.writeU32(INFO_PPID_OFFSET, process.parentId.toUInt())
+            output.writeU32(INFO_RUID_OFFSET, userIds.real.toUInt())
+            output.writeU32(INFO_RGID_OFFSET, groupIds.real.toUInt())
+            output.writeU32(INFO_EUID_OFFSET, userIds.effective.toUInt())
+            output.writeU32(INFO_EGID_OFFSET, groupIds.effective.toUInt())
+            output.writeU32(INFO_SUID_OFFSET, userIds.saved.toUInt())
+            output.writeU32(INFO_SGID_OFFSET, groupIds.saved.toUInt())
+            output.writeU32(INFO_FSUID_OFFSET, userIds.filesystem.toUInt())
+            output.writeU32(INFO_FSGID_OFFSET, groupIds.filesystem.toUInt())
         }
-        return if (args.copyToUser(bytes)) 0L else -VfsError.FAULT.errno.toLong()
+        return if (written) 0L else -VfsError.FAULT.errno.toLong()
     }
 
     override fun poll(caller: VfsOperationContext, inode: Inode, events: Int): Long {

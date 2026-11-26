@@ -65,6 +65,6 @@ class LinuxOpenHowTest {
             writeU64(ULong.SIZE_BYTES, mode)
             writeU64(ULong.SIZE_BYTES * 2, resolve)
         }
-        return LinuxOpenHow.decode(bytes)
+        return LinuxOpenHow.decode(LittleEndianBuffer(bytes))
     }
 }

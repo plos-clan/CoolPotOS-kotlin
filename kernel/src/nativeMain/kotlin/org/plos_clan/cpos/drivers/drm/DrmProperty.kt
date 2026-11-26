@@ -15,38 +15,43 @@ internal enum class DrmPower(val label: String) {
     }
 }
 
+private const val ENUM_SIZE = 40
+
 internal enum class DrmProperty(
     val id: UInt,
-    private val title: String,
+    title: String,
     private val flags: UInt,
-    private val labels: List<String>,
+    labels: List<String>,
 ) {
     TYPE(5u, "type", 0xcu, listOf("Overlay", "Primary", "Cursor")),
     DPMS(6u, "DPMS", 0x8u, DrmPower.entries.map { it.label });
+
+    private val nameBytes = title.encodeToByteArray()
+    private val values = ByteArray(labels.size * ULong.SIZE_BYTES)
+    private val enums = ByteArray(labels.size * ENUM_SIZE)
+
+    init {
+        val numbers = LittleEndianBuffer(values)
+        val entries = LittleEndianBuffer(enums)
+        labels.forEachIndexed { index, name ->
+            numbers.writeU64(index * ULong.SIZE_BYTES, index.toULong())
+            val offset = index * ENUM_SIZE
+            entries.writeU64(offset, index.toULong())
+            name.encodeToByteArray().copyInto(enums, offset + ULong.SIZE_BYTES)
+        }
+    }
 
     fun query(argument: DrmArgument): Boolean {
         val data = argument.data
         val valueCapacity = data.readU32(56)
         val enumCapacity = data.readU32(60)
-        val count = labels.size.toUInt()
+        val count = (values.size / ULong.SIZE_BYTES).toUInt()
         data.writeU32(20, flags)
         argument.bytes.fill(0, 24, 56)
-        title.encodeToByteArray().copyInto(argument.bytes, 24)
+        nameBytes.copyInto(argument.bytes, 24)
         data.writeU32(56, count)
         data.writeU32(60, count)
-        if (valueCapacity >= count) {
-            val values = ByteArray(labels.size * 8)
-            val output = LittleEndianBuffer(values)
-            labels.indices.forEach { output.writeU64(it * 8, it.toULong()) }
-            if (!argument.copy(data.readU64(0), values)) return false
-        }
-        if (enumCapacity < count) return true
-        val values = ByteArray(labels.size * 40)
-        val output = LittleEndianBuffer(values)
-        labels.forEachIndexed { index, name ->
-            output.writeU64(index * 40, index.toULong())
-            name.encodeToByteArray().copyInto(values, index * 40 + 8)
-        }
-        return argument.copy(data.readU64(8), values)
+        if (valueCapacity >= count && !argument.copy(data.readU64(0), values)) return false
+        return enumCapacity < count || argument.copy(data.readU64(8), enums)
     }
 }

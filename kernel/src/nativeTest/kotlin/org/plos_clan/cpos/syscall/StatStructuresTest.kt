@@ -151,7 +151,8 @@ class StatStructuresTest {
         ).value
         val entry = DirectoryEntry(name, InodeId(42uL), InodeType.DIRECTORY)
         val record = LinuxDirent64(entry.name, entry.inodeId, entry.type, nextOffset = -1)
-        val bytes = record.toNativeBytes()
+        val bytes = ByteArray(record.recordSize) { -1 }
+        record.writeTo(bytes, 0)
         val input = LittleEndianBuffer(bytes)
 
         assertEquals(32, record.recordSize)
@@ -172,8 +173,9 @@ class StatStructuresTest {
             InodeType.SYMLINK to 10,
             InodeType.SOCKET to 12,
         ).forEach { (type, value) ->
-            val encoded = LinuxDirent64(entry.name, entry.inodeId, type, 0).toNativeBytes()
-            assertEquals(value, encoded[18].toInt(), "type=$type")
+            val typed = LinuxDirent64(entry.name, entry.inodeId, type, 0)
+            typed.writeTo(bytes, 0)
+            assertEquals(value, bytes[18].toInt(), "type=$type")
         }
     }
 

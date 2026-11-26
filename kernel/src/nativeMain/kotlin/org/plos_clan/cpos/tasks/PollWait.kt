@@ -8,14 +8,14 @@ internal class PollWait(
     private val thread: Thread,
     private val cleanup: () -> Unit = {},
 ) : PollSubscription() {
+    private val pending = AtomicBoolean(false)
+
     init { check(thread.waitResource.compareAndSet(null, this)) }
 
     override fun onClosed() {
         thread.waitResource.compareAndSet(this, null)
         cleanup()
     }
-
-    private val pending = AtomicBoolean(false)
 
     override fun changed(): Boolean {
         if (!pending.exchange(true)) Scheduler.wake(thread)

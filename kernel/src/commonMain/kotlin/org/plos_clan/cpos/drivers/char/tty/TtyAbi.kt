@@ -1,7 +1,7 @@
 package org.plos_clan.cpos.drivers.char.tty
 
 import org.plos_clan.cpos.utils.LittleEndianBuffer
-import org.plos_clan.cpos.utils.NativeStruct
+import org.plos_clan.cpos.utils.MutableNativeStruct
 import org.plos_clan.cpos.utils.TermiosConstants
 
 private const val NCCS = 19
@@ -102,27 +102,25 @@ data class WinSize(
     var wsCol: Short,
     var wsXpixel: Short,
     var wsYpixel: Short
-) : NativeStruct {
-    override fun toNativeBytes(): ByteArray =
-        ByteArray(8).also { buffer ->
-            LittleEndianBuffer(buffer).apply {
-                writeU16(0, wsRow.toUShort())
-                writeU16(2, wsCol.toUShort())
-                writeU16(4, wsXpixel.toUShort())
-                writeU16(6, wsYpixel.toUShort())
-            }
-        }
+) : MutableNativeStruct {
+    override val nativeSize: Int get() = NATIVE_SIZE
 
-    override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
-        if (buffer.size != 8) {
-            return false
-        }
-        val input = LittleEndianBuffer(buffer)
+    override fun writeTo(output: LittleEndianBuffer) {
+        output.writeU16(0, wsRow.toUShort())
+        output.writeU16(2, wsCol.toUShort())
+        output.writeU16(4, wsXpixel.toUShort())
+        output.writeU16(6, wsYpixel.toUShort())
+    }
+
+    override fun readFrom(input: LittleEndianBuffer) {
         wsRow = input.readU16(0).toShort()
         wsCol = input.readU16(2).toShort()
         wsXpixel = input.readU16(4).toShort()
         wsYpixel = input.readU16(6).toShort()
-        return true
+    }
+
+    companion object {
+        const val NATIVE_SIZE = 4 * Short.SIZE_BYTES
     }
 }
 
@@ -132,50 +130,34 @@ open class Termios(
     var cCflag: Int,    /* control mode flags */
     var cLflag: Int,    /* local mode flags */
     var cLine: Byte,    /* line discipline */
-    var cCc: ByteArray  /* control characters */
-) : NativeStruct {
+    val cCc: ByteArray  /* control characters */
+) : MutableNativeStruct {
     init {
         require(cCc.size == NCCS) { "c_cc length must $NCCS" }
     }
 
-    override fun toNativeBytes(): ByteArray {
-        require(cCc.size == NCCS) { "c_cc length must $NCCS" }
+    override val nativeSize: Int get() = NATIVE_SIZE
 
-        return ByteArray(NATIVE_SIZE).also { buffer ->
-            LittleEndianBuffer(buffer).apply {
-                writeU32(0, cIflag.toUInt())
-                writeU32(4, cOflag.toUInt())
-                writeU32(8, cCflag.toUInt())
-                writeU32(12, cLflag.toUInt())
-            }
-            buffer[LINE_OFFSET] = cLine
-            cCc.copyInto(buffer, destinationOffset = CONTROL_CHARACTERS_OFFSET)
-        }
+    fun writeTermios(output: LittleEndianBuffer) {
+        output.writeU32(0, cIflag.toUInt())
+        output.writeU32(4, cOflag.toUInt())
+        output.writeU32(8, cCflag.toUInt())
+        output.writeU32(12, cLflag.toUInt())
+        output.writeU8(LINE_OFFSET, cLine.toUByte())
+        output.copyFrom(CONTROL_CHARACTERS_OFFSET, cCc)
     }
 
-    override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
-        if (buffer.size != NATIVE_SIZE) {
-            return false
-        }
+    override fun writeTo(output: LittleEndianBuffer) = writeTermios(output)
 
-        val input = LittleEndianBuffer(buffer)
-        val inputFlags = input.readU32(0).toInt()
-        val outputFlags = input.readU32(4).toInt()
-        val controlFlags = input.readU32(8).toInt()
-        val localFlags = input.readU32(12).toInt()
-        val line = buffer[LINE_OFFSET]
-        val controlCharacters = buffer.copyOfRange(
-            CONTROL_CHARACTERS_OFFSET,
-            NATIVE_SIZE,
-        )
+    override fun readFrom(input: LittleEndianBuffer) = readTermios(input)
 
-        cIflag = inputFlags
-        cOflag = outputFlags
-        cCflag = controlFlags
-        cLflag = localFlags
-        cLine = line
-        cCc = controlCharacters
-        return true
+    fun readTermios(input: LittleEndianBuffer) {
+        cIflag = input.readU32(0).toInt()
+        cOflag = input.readU32(4).toInt()
+        cCflag = input.readU32(8).toInt()
+        cLflag = input.readU32(12).toInt()
+        cLine = input.readU8(LINE_OFFSET).toByte()
+        input.copyTo(CONTROL_CHARACTERS_OFFSET, cCc)
     }
 
     fun character(index: Int): Int = cCc[index].toInt() and 0xFF
@@ -224,25 +206,27 @@ class Termios2(
     var cIspeed: Int,
     var cOspeed: Int,
 ) : Termios(cIflag, cOflag, cCflag, cLflag, cLine, cCc) {
+    constructor(inputSpeed: Int = 0, outputSpeed: Int = inputSpeed) : this(
+        0, 0, 0, 0, 0, ByteArray(NCCS), inputSpeed, outputSpeed,
+    )
+
     constructor(termios: Termios, inputSpeed: Int = 0, outputSpeed: Int = inputSpeed) : this(
         termios.cIflag, termios.cOflag, termios.cCflag, termios.cLflag,
         termios.cLine, termios.cCc.copyOf(), inputSpeed, outputSpeed,
     )
 
-    override fun toNativeBytes(): ByteArray = super.toNativeBytes().copyOf(NATIVE_SIZE).also {
-        LittleEndianBuffer(it).apply {
-            writeU32(Termios.NATIVE_SIZE, cIspeed.toUInt())
-            writeU32(Termios.NATIVE_SIZE + Int.SIZE_BYTES, cOspeed.toUInt())
-        }
+    override val nativeSize: Int get() = NATIVE_SIZE
+
+    override fun writeTo(output: LittleEndianBuffer) {
+        writeTermios(output)
+        output.writeU32(Termios.NATIVE_SIZE, cIspeed.toUInt())
+        output.writeU32(Termios.NATIVE_SIZE + Int.SIZE_BYTES, cOspeed.toUInt())
     }
 
-    override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
-        if (buffer.size != NATIVE_SIZE) return false
-        super.updateFromNativeBytes(buffer.copyOf(Termios.NATIVE_SIZE))
-        val input = LittleEndianBuffer(buffer)
+    override fun readFrom(input: LittleEndianBuffer) {
+        super.readFrom(input)
         cIspeed = input.readU32(Termios.NATIVE_SIZE).toInt()
         cOspeed = input.readU32(Termios.NATIVE_SIZE + Int.SIZE_BYTES).toInt()
-        return true
     }
 
     companion object {

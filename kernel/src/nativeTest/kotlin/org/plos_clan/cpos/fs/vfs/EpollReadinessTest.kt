@@ -17,7 +17,6 @@ class EpollReadinessTest {
         val context: FileSystemContext
         val epoll = Epoll()
         val files = ArrayList<OpenFileDescription>()
-        val events = ArrayList<EpollEvent>()
 
         init {
             val registered = vfs.register(Sysfs)
@@ -68,9 +67,8 @@ class EpollReadinessTest {
             assertEquals(count, result.bytesTransferred)
         }
 
-        fun collect(): List<EpollEvent> {
-            epoll.collect(caller, 8, events)
-            return events.toList()
+        fun collect(maximum: Int = 8): List<EpollEvent> = buildList {
+            epoll.collect(caller, maximum) { _, flags, data -> add(EpollEvent(flags, data)) }
         }
 
         override fun close() {
@@ -227,8 +225,8 @@ class EpollReadinessTest {
             files.forEach { fixture.write(it) }
             assertEquals(listOf(1uL, 2uL, 3uL), fixture.collect().map { it.data })
             repeat(6) { index ->
-                fixture.epoll.collect(fixture.caller, 1, fixture.events)
-                assertEquals((index % 3 + 1).toULong(), fixture.events.single().data)
+                val event = fixture.collect(1).single()
+                assertEquals((index % 3 + 1).toULong(), event.data)
             }
         }
     }

@@ -1,7 +1,7 @@
 package org.plos_clan.cpos.tasks
 
 import org.plos_clan.cpos.utils.LittleEndianBuffer
-import org.plos_clan.cpos.utils.NativeStruct
+import org.plos_clan.cpos.utils.MutableNativeStruct
 
 const val LINUX_CAPABILITY_VERSION_1 = 0x19980330U
 const val LINUX_CAPABILITY_VERSION_2 = 0x20071026U
@@ -178,50 +178,27 @@ class CapabilityState(
 data class CapHeader(
     var version: UInt,
     var pid: Int,
-) : NativeStruct {
-    override fun toNativeBytes(): ByteArray = ByteArray(NATIVE_SIZE).also { buffer ->
-        LittleEndianBuffer(buffer).apply {
-            writeU32(0, version)
-            writeU32(4, pid.toUInt())
-        }
+) : MutableNativeStruct {
+    val wordCount: Int get() = when (version) {
+        LINUX_CAPABILITY_VERSION_1 -> 1
+        LINUX_CAPABILITY_VERSION_2, LINUX_CAPABILITY_VERSION_3 -> 2
+        else -> 0
     }
 
-    override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
-        if (buffer.size != NATIVE_SIZE) return false
-        val input = LittleEndianBuffer(buffer)
+    override val nativeSize: Int get() = NATIVE_SIZE
+
+    override fun writeTo(output: LittleEndianBuffer) {
+        output.writeU32(0, version)
+        output.writeU32(4, pid.toUInt())
+    }
+
+    override fun readFrom(input: LittleEndianBuffer) {
         version = input.readU32(0)
         pid = input.readU32(4).toInt()
-        return true
     }
 
     companion object {
+        const val DATA_SIZE = 3 * UInt.SIZE_BYTES
         const val NATIVE_SIZE = 8
-    }
-}
-
-data class Capabilities(
-    var effective: UInt,
-    var permitted: UInt,
-    var inheritable: UInt,
-) : NativeStruct {
-    override fun toNativeBytes(): ByteArray = ByteArray(NATIVE_SIZE).also { buffer ->
-        LittleEndianBuffer(buffer).apply {
-            writeU32(0, effective)
-            writeU32(4, permitted)
-            writeU32(8, inheritable)
-        }
-    }
-
-    override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
-        if (buffer.size != NATIVE_SIZE) return false
-        val input = LittleEndianBuffer(buffer)
-        effective = input.readU32(0)
-        permitted = input.readU32(4)
-        inheritable = input.readU32(8)
-        return true
-    }
-
-    companion object {
-        const val NATIVE_SIZE = 12
     }
 }

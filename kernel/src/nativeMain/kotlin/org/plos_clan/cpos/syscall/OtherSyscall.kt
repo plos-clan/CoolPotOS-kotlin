@@ -8,6 +8,7 @@ import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.drivers.acpi.fadt.Fadt
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.mem.IoScratch
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.partialOrError
 import org.plos_clan.cpos.syscall.Syscall.userMemory
@@ -89,15 +90,6 @@ private sealed interface Clock {
     }
 }
 
-private class LinuxTimeval(val seconds: Long, val microseconds: Long) : NativeStruct {
-    override fun toNativeBytes(): ByteArray = ByteArray(Long.SIZE_BYTES * 2).also { buffer ->
-        LittleEndianBuffer(buffer).apply {
-            writeU64(0, seconds.toULong())
-            writeU64(Long.SIZE_BYTES, microseconds.toULong())
-        }
-    }
-}
-
 private data class SysInfo(
     val uptime: Long,
     val loads: ULongArray,
@@ -116,23 +108,23 @@ private data class SysInfo(
         require(loads.size == LOAD_COUNT) { "sysinfo requires exactly $LOAD_COUNT load averages" }
     }
 
-    override fun toNativeBytes(): ByteArray = ByteArray(NATIVE_SIZE).also { buffer ->
-        LittleEndianBuffer(buffer).apply {
-            writeU64(UPTIME_OFFSET, uptime.toULong())
-            loads.forEachIndexed { index, load ->
-                writeU64(LOADS_OFFSET + index * ULong.SIZE_BYTES, load)
-            }
-            writeU64(TOTAL_RAM_OFFSET, totalRam)
-            writeU64(FREE_RAM_OFFSET, freeRam)
-            writeU64(SHARED_RAM_OFFSET, sharedRam)
-            writeU64(BUFFER_RAM_OFFSET, bufferRam)
-            writeU64(TOTAL_SWAP_OFFSET, totalSwap)
-            writeU64(FREE_SWAP_OFFSET, freeSwap)
-            writeU16(PROCESSES_OFFSET, processes)
-            writeU64(TOTAL_HIGH_OFFSET, totalHigh)
-            writeU64(FREE_HIGH_OFFSET, freeHigh)
-            writeU32(MEMORY_UNIT_OFFSET, memoryUnit)
+    override val nativeSize: Int get() = NATIVE_SIZE
+
+    override fun writeTo(output: LittleEndianBuffer) {
+        output.writeU64(UPTIME_OFFSET, uptime.toULong())
+        loads.forEachIndexed { index, load ->
+            output.writeU64(LOADS_OFFSET + index * ULong.SIZE_BYTES, load)
         }
+        output.writeU64(TOTAL_RAM_OFFSET, totalRam)
+        output.writeU64(FREE_RAM_OFFSET, freeRam)
+        output.writeU64(SHARED_RAM_OFFSET, sharedRam)
+        output.writeU64(BUFFER_RAM_OFFSET, bufferRam)
+        output.writeU64(TOTAL_SWAP_OFFSET, totalSwap)
+        output.writeU64(FREE_SWAP_OFFSET, freeSwap)
+        output.writeU16(PROCESSES_OFFSET, processes)
+        output.writeU64(TOTAL_HIGH_OFFSET, totalHigh)
+        output.writeU64(FREE_HIGH_OFFSET, freeHigh)
+        output.writeU32(MEMORY_UNIT_OFFSET, memoryUnit)
     }
 
     companion object {
@@ -192,33 +184,23 @@ internal fun time(regs: PtraceRegisters, process: Process): Long {
 internal fun clockGetTime(regs: PtraceRegisters, process: Process): Long {
     val clock = Clock.from(regs[PtraceRegisters.IDX_RDI].toInt(), process) ?: return errno(Errno.EINVAL)
     if (!TscClock.isReady) return errno(Errno.EIO)
-    return if (UserMemory(
-            process.addressSpace,
-            regs[PtraceRegisters.IDX_RSI],
-        ).copyToUser(clock.read().toNativeBytes())
-    ) {
-        0L
-    } else {
-        errno(Errno.EFAULT)
-    }
+    val output = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
+    val time = clock.read()
+    return if (output.writeLongPair(time.sec.toULong(), time.nsec.toULong())) 0L else errno(Errno.EFAULT)
 }
 
 internal fun getTimeOfDay(regs: PtraceRegisters, process: Process): Long {
     if (!TscClock.isReady) return errno(Errno.EIO)
     val now = RealtimeClock.now()
-    val time = LinuxTimeval(
-        seconds = now.seconds,
-        microseconds = (now.nanoseconds.toULong() / NANOSECONDS_PER_MICROSECOND).toLong(),
-    )
     val timeAddress = regs[PtraceRegisters.IDX_RDI]
-    if (timeAddress != 0uL &&
-        !UserMemory(process.addressSpace, timeAddress).copyToUser(time.toNativeBytes())
-    ) {
-        return errno(Errno.EFAULT)
+    if (timeAddress != 0uL) {
+        val time = UserMemory(process.addressSpace, timeAddress)
+        val micros = now.nanoseconds.toULong() / NANOSECONDS_PER_MICROSECOND
+        if (!time.writeLongPair(now.seconds.toULong(), micros)) return errno(Errno.EFAULT)
     }
     val timezoneAddress = regs[PtraceRegisters.IDX_RSI]
     return if (timezoneAddress == 0uL ||
-        UserMemory(process.addressSpace, timezoneAddress).copyToUser(ByteArray(8))
+        UserMemory(process.addressSpace, timezoneAddress).writeULong(0uL)
     ) {
         0L
     } else {
@@ -254,10 +236,10 @@ private object ClockSleep {
         remainingAddress: ULong,
     ): Long {
         val thread = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
-        val bytes = UserMemory(process.addressSpace, requestedAddress).copyFromUser(TimeSpec.NATIVE_SIZE)
+        val requested = UserMemory(process.addressSpace, requestedAddress)
+            .readRecord(TimeSpec.NATIVE_SIZE, decode = TimeSpec::readFrom)
             ?: return errno(Errno.EFAULT)
-        val requested = TimeSpec(0, 0)
-        if (!requested.updateFromNativeBytes(bytes) || !requested.isValidDuration) return errno(Errno.EINVAL)
+        if (!requested.isValidDuration) return errno(Errno.EINVAL)
         if (!TscClock.isReady) return errno(Errno.EIO)
         val relativeDeadline = requested.deadlineFrom(TscClock.nanoTime())
         while (true) {
@@ -271,8 +253,8 @@ private object ClockSleep {
             if (thread.hasPendingSignal()) {
                 if (!absolute && remainingAddress != 0uL) {
                     val destination = UserMemory(process.addressSpace, remainingAddress)
-                    val value = TimeSpec.fromDurationNanos(remaining).toNativeBytes()
-                    if (!destination.copyToUser(value)) return errno(Errno.EFAULT)
+                    val value = TimeSpec.fromDurationNanos(remaining)
+                    if (!destination.writeStruct(value)) return errno(Errno.EFAULT)
                 }
                 return errno(Errno.EINTR)
             }
@@ -288,19 +270,21 @@ internal fun getRandom(regs: PtraceRegisters, process: Process): Long {
 
     val requested = minOf(regs[PtraceRegisters.IDX_RSI], GETRANDOM_MAX)
     if (requested == 0uL) return 0L
-    val buffer = ByteArray(minOf(requested, RANDOM_CHUNK_SIZE.toULong()).toInt())
-    var transferred = 0uL
-    while (transferred < requested) {
-        val count = minOf(requested - transferred, buffer.size.toULong()).toInt()
-        val output = userMemory(process, regs[PtraceRegisters.IDX_RDI], transferred)
-            ?: return partialOrError(transferred, Errno.EFAULT)
-        KernelRandom.fill(buffer, size = count, salt = process.id.toULong() xor transferred)
-        if (!output.copyToUser(buffer, size = count)) {
-            return partialOrError(transferred, Errno.EFAULT)
+    val capacity = minOf(requested, RANDOM_CHUNK_SIZE.toULong()).toInt()
+    return IoScratch.use(capacity) { buffer ->
+        var transferred = 0uL
+        while (transferred < requested) {
+            val count = minOf(requested - transferred, capacity.toULong()).toInt()
+            val output = userMemory(process, regs[PtraceRegisters.IDX_RDI], transferred)
+                ?: return partialOrError(transferred, Errno.EFAULT)
+            KernelRandom.fill(buffer, size = count, salt = process.id.toULong() xor transferred)
+            if (!output.copyToUser(buffer, size = count)) {
+                return partialOrError(transferred, Errno.EFAULT)
+            }
+            transferred += count.toULong()
         }
-        transferred += count.toULong()
+        transferred.toLong()
     }
-    return transferred.toLong()
 }
 
 internal fun sysInfo(regs: PtraceRegisters, process: Process): Long {
@@ -323,15 +307,15 @@ internal fun sysInfo(regs: PtraceRegisters, process: Process): Long {
         totalHigh = 0uL,
         freeHigh = 0uL,
         memoryUnit = 1u,
-    ).toNativeBytes()
-    return if (userBuffer.copyToUser(info)) errno(Errno.EOK) else errno(Errno.EFAULT)
+    )
+    return if (userBuffer.writeStruct(info)) errno(Errno.EOK) else errno(Errno.EFAULT)
 }
 
 internal fun clockGetRes(regs: PtraceRegisters, process: Process): Long {
     Clock.from(regs[PtraceRegisters.IDX_RDI].toInt(), process) ?: return errno(Errno.EINVAL)
     val address = regs[PtraceRegisters.IDX_RSI]
     if (address == 0uL) return 0L
-    val resolution = TimeSpec(sec = 0, nsec = 1).toNativeBytes()
-    return if (UserMemory(process.addressSpace, address).copyToUser(resolution)) 0L
+    val output = UserMemory(process.addressSpace, address)
+    return if (output.writeLongPair(0uL, 1uL)) 0L
     else errno(Errno.EFAULT)
 }

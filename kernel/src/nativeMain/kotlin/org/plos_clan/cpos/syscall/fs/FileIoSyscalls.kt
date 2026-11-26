@@ -18,7 +18,6 @@ import org.plos_clan.cpos.syscall.fs.FsConstants.SPLICE_F_NONBLOCK
 import org.plos_clan.cpos.syscall.fs.FsConstants.SPLICE_SUPPORTED_FLAGS
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
-import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PtraceRegisters
 
 internal fun splice(regs: PtraceRegisters, process: Process): Long {
@@ -137,19 +136,14 @@ private class UserFileOffset(
     private val memory: UserMemory,
     val value: ULong,
 ) {
-    fun write(delta: ULong): Boolean {
-        val bytes = ByteArray(ULong.SIZE_BYTES)
-        LittleEndianBuffer(bytes).writeU64(0, value + delta)
-        return memory.copyToUser(bytes)
-    }
+    fun write(delta: ULong): Boolean = memory.writeULong(value + delta)
 }
 
 private fun userFileOffset(process: Process, address: ULong): VfsResult<UserFileOffset?> {
     if (address == 0uL) return VfsResult.Ok(null)
     val memory = UserMemory(process.addressSpace, address)
-    val bytes = memory.copyFromUser(ULong.SIZE_BYTES)
+    val value = memory.readULongLE()
         ?: return VfsResult.Err(VfsError.FAULT)
-    val value = LittleEndianBuffer(bytes).readU64(0)
     if (value > Long.MAX_VALUE.toULong()) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
     if (!memory.isWritable(ULong.SIZE_BYTES)) return VfsResult.Err(VfsError.FAULT)
     return VfsResult.Ok(UserFileOffset(memory, value))

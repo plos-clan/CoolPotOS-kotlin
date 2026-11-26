@@ -16,7 +16,6 @@ import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.tasks.CapEnum
-import org.plos_clan.cpos.tasks.CapManager
 import org.plos_clan.cpos.tasks.IoWaitQueue
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
@@ -218,7 +217,7 @@ internal abstract class NetlinkProtocol(
 
     protected fun hasNetworkAdmin(process: Process): Boolean =
         process.vfsOperationContext.privileged || ProcessManager.currentThread()?.let { thread ->
-            thread.process === process && CapManager.hasAllCapability(thread, CapEnum.NET_ADMIN)
+            thread.process === process && thread.capabilities.hasEffective(CapEnum.NET_ADMIN)
         } == true
 
     private fun senderCredentials(process: Process): UnixCredentials = UnixCredentials(

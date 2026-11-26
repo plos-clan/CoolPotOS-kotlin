@@ -29,7 +29,7 @@ internal abstract class VirtualTerminal : TerminalBackend() {
         }
         return file.control(command) {
             if (command == VTModeConstants.KDGKBTYPE) {
-                return@control if (args.copyToUser(byteArrayOf(2))) 0 else -Errno.EFAULT
+                return@control if (args.writeWord(2uL, Byte.SIZE_BYTES)) 0 else -Errno.EFAULT
             }
             if (command == VTModeConstants.KDGETMODE) return@control copyIntToUser(args, displayMode.value)
             if (command == VTModeConstants.KDGKBMODE) return@control copyIntToUser(args, keyboardMode.value)

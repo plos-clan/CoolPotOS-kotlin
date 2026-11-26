@@ -39,25 +39,8 @@ CALLBACK(void, serial_print, (const char *buffer, size_t size),
 CALLBACK(void, syscall_handler, (void *regs),
     set_runtime_use_mask(true); kotlin_syscall_handler(regs), )
 
-#define EXCEPTION_VECTORS \
-    X(0) X(1) X(2) X(3) X(4) X(5) X(6) X(7) \
-    X(8) X(9) X(10) X(11) X(12) X(13) X(14) X(15) \
-    X(16) X(17) X(18) X(19) X(20) X(21) X(22) X(23) \
-    X(24) X(25) X(26) X(27) X(28) X(29) X(30) X(31)
+CALLBACK(void, exception_handler,
+    (void *frame, uint64_t error, uint64_t rbp, uint64_t address, int32_t vector),
+    kotlin_handle_exception(frame, error, rbp, address, vector), )
 
-#define X(vector) \
-    static CALLBACK(void, kotlin_exception_##vector, \
-        (void *frame, uint64_t error, uint64_t rbp, uint64_t address), \
-        kotlin_handle_exception(frame, error, rbp, address, vector), )
-EXCEPTION_VECTORS
-#undef X
-
-__attribute__((used, retain))
-void (*const kotlin_exception_callbacks[])(void *, uint64_t, uint64_t, uint64_t) = {
-#define X(vector) [vector] = kotlin_exception_##vector,
-    EXCEPTION_VECTORS
-#undef X
-};
-
-#undef EXCEPTION_VECTORS
 #undef CALLBACK

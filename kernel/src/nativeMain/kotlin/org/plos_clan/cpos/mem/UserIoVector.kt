@@ -142,12 +142,21 @@ internal class UserIoVector private constructor(
                 return VfsResult.Err(VfsError.INVALID_ARGUMENT)
             }
             val table = UserMemory(addressSpace, address)
-            val bytes = table.copyFromUser(count * NATIVE_SEGMENT_SIZE)
-                ?: return VfsResult.Err(VfsError.FAULT)
-            val input = LittleEndianBuffer(bytes)
+            val size = count * NATIVE_SEGMENT_SIZE
+            return table.readRecord(size) { import(addressSpace, it, count, maximumSize) }
+                ?: VfsResult.Err(VfsError.FAULT)
+        }
+
+        private fun import(
+            addressSpace: AddressSpace,
+            input: LittleEndianBuffer,
+            count: Int,
+            maximumSize: Int,
+        ): VfsResult<UserIoVector> {
             val segments = ArrayList<Segment>(count)
             var size = 0
-            for (offset in bytes.indices step NATIVE_SEGMENT_SIZE) {
+            for (index in 0 until count) {
+                val offset = index * NATIVE_SEGMENT_SIZE
                 val length = input.readU64(offset + ULong.SIZE_BYTES)
                 if (length.toLong() < 0) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
                 val base = input.readU64(offset)

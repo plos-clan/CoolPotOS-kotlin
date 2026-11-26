@@ -112,6 +112,14 @@ internal class NetworkInterface internal constructor(
     override val kind: NetworkInterfaceKind,
     private val device: EthernetDevice?,
 ) : NetworkInterfaceView {
+    private val nameBytes = name.encodeToByteArray()
+
+    fun copyName(bytes: ByteArray, offset: Int, size: Int) {
+        val length = minOf(size - 1, nameBytes.size)
+        nameBytes.copyInto(bytes, offset, endIndex = length)
+        bytes.fill(0, offset + length, offset + size)
+    }
+
     private val administrativeState = AtomicBoolean(false)
     private val configuredMtu = AtomicInt(
         if (device == null) LOOPBACK_MTU
@@ -314,8 +322,9 @@ internal class NetworkStack : EthernetProtocol {
     private val lock = IrqSpinLock()
     private val fragmentLock = IrqSpinLock()
     private val interfaces = mutableMapOf<Int, NetworkInterface>()
+    private var interfaceSnapshot: List<NetworkInterface>? = null
     private val deviceInterfaces = mutableMapOf<EthernetDevice, NetworkInterface>()
-    private val addresses = mutableMapOf<Int, MutableList<NetworkInterfaceAddress>>()
+    private val addresses = mutableMapOf<Int, List<NetworkInterfaceAddress>>()
     private val routes = mutableListOf<NetworkRoute>()
     private var routingTable: List<NetworkRoute>? = null
     private val neighbors = mutableMapOf<NeighborKey, NeighborEntry>()
@@ -353,8 +362,9 @@ internal class NetworkStack : EthernetProtocol {
         listeners.add(listener)
     }
 
-    fun snapshotInterfaces(): List<NetworkInterface> =
-        lock.withLock { interfaces.values.sortedBy(NetworkInterface::index) }
+    fun snapshotInterfaces(): List<NetworkInterface> = lock.withLock {
+        interfaceSnapshot ?: interfaces.values.sortedBy(NetworkInterface::index).also { interfaceSnapshot = it }
+    }
 
     fun interfaceByIndex(index: Int): NetworkInterface? = lock.withLock { interfaces[index] }
 
@@ -363,7 +373,7 @@ internal class NetworkStack : EthernetProtocol {
     }
 
     fun interfaceAddresses(index: Int): List<NetworkInterfaceAddress> =
-        lock.withLock { addresses[index]?.toList().orEmpty() }
+        lock.withLock { addresses[index].orEmpty() }
 
     fun snapshotRoutes(): List<NetworkRoute> = lock.withLock { allRoutesLocked() }
 
@@ -438,12 +448,12 @@ internal class NetworkStack : EthernetProtocol {
         ) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
         val (intfc, existing) = lock.withLock {
             val selected = interfaces[index] ?: return VfsResult.Err(VfsError.NO_DEVICE)
-            val assigned = addresses.getOrPut(index) { mutableListOf() }
+            val assigned = addresses[index].orEmpty()
             val existing = assigned.firstOrNull {
                 it.address == address.address && it.prefixLength == address.prefixLength
             }
             if (existing != null && !replace) return VfsResult.Err(VfsError.ALREADY_EXISTS)
-            if (existing == null) assigned += address
+            if (existing == null) addresses[index] = assigned + address
             routingTable = null
             selected to existing
         }
@@ -468,7 +478,9 @@ internal class NetworkStack : EthernetProtocol {
             }
             if (position < 0) return VfsResult.Err(VfsError.ADDRESS_NOT_AVAILABLE)
             routingTable = null
-            selected to assigned.removeAt(position)
+            val removed = assigned[position]
+            addresses[index] = assigned - removed
+            selected to removed
         }
         notifyListeners { it.addressChanged(intfc, removed, removed = true) }
         return VfsResult.Ok(removed)
@@ -652,7 +664,7 @@ internal class NetworkStack : EthernetProtocol {
         lock.withLock {
             interfaces[intfc.index] = intfc
             deviceInterfaces[device] = intfc
-            addresses[intfc.index] = mutableListOf()
+            interfaceSnapshot = null
         }
         notifyListeners { it.linkChanged(intfc, removed = false) }
     }
@@ -662,6 +674,7 @@ internal class NetworkStack : EthernetProtocol {
         val intfc = lock.withLock {
             val selected = deviceInterfaces.remove(device) ?: return
             interfaces.remove(selected.index)
+            interfaceSnapshot = null
             addresses.remove(selected.index)
             routingTable = null
             routes.removeAll { route ->

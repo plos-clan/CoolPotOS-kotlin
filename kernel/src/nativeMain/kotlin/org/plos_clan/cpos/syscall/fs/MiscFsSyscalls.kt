@@ -2,6 +2,8 @@
 
 package org.plos_clan.cpos.syscall.fs
 
+import org.plos_clan.cpos.drivers.char.tty.IoctlConstants
+import org.plos_clan.cpos.fs.OpenFlags
 import org.plos_clan.cpos.fs.FileDescriptorFlags
 import org.plos_clan.cpos.fs.vfs.AccessMode
 import org.plos_clan.cpos.fs.FileSystemManager
@@ -31,6 +33,12 @@ internal fun ioctl(regs: PtraceRegisters, process: Process): Long {
             return if (updated) 0L else errno(Errno.EBADF)
         }
         val args = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDX])
+        if (command == IoctlConstants.FIONBIO) {
+            val value = args.readUIntLE() ?: return errno(Errno.EFAULT)
+            val flags = if (value == 0u) 0 else OpenFlags.O_NONBLOCK
+            file.setStatusFlags(flags, OpenFlags.O_NONBLOCK)
+            return 0L
+        }
         file.ioctl(process.vfsOperationContext, command, args)
     } finally {
         file.release()

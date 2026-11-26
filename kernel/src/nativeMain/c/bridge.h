@@ -18,7 +18,7 @@ extern volatile struct limine_executable_cmdline_request cmdline_request;
 extern volatile struct limine_tsc_frequency_request tsc_frequency_request;
 
 void gdt_setup(void);
-void idt_setup(void);
+void idt_setup(uint32_t exception_mask);
 void ap_gdt_setup(uint64_t lapic_id);
 void set_kernel_stack(uint64_t lapic_id, uint64_t rsp, uint8_t is_bsp);
 uint64_t read_cr3(void);
@@ -100,14 +100,6 @@ void free(void *ptr);
 
 int cp_zstd_decompress(void *destination, size_t capacity,
                        const void *source, size_t size);
-
-void register_interrupt_handler(
-    uint16_t vector,
-    void (*handler)(void *, uint64_t, uint64_t, uint64_t),
-    uint8_t ist,
-    uint8_t flags
-);
-extern void (*const kotlin_exception_callbacks[])(void *, uint64_t, uint64_t, uint64_t);
 
 typedef struct {
     uint32_t eax;

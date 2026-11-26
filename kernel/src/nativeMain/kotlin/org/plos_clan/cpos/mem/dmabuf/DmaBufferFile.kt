@@ -20,7 +20,6 @@ import org.plos_clan.cpos.mem.PreparedBufferSource
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.PollSubscription
 import org.plos_clan.cpos.utils.Errno
-import org.plos_clan.cpos.utils.LittleEndianBuffer
 
 internal class DmaBufferFile(
     val buffer: DmaBuffer,
@@ -71,8 +70,7 @@ internal class DmaBufferFile(
 
     override fun ioctl(caller: VfsOperationContext, inode: Inode, command: Int, args: UserMemory): Long {
         if (command != 0x40086200) return -Errno.ENOTTY.toLong()
-        val bytes = args.copyFromUser(8) ?: return -Errno.EFAULT.toLong()
-        val flags = LittleEndianBuffer(bytes).readU64(0)
+        val flags = args.readULongLE() ?: return -Errno.EFAULT.toLong()
         if (flags and 7uL.inv() != 0uL) return -Errno.EINVAL.toLong()
         val accessBits = flags and 3uL
         val access = DmaCpuAccess.entries.firstOrNull { it.bits == accessBits }

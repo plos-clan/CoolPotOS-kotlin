@@ -1,7 +1,6 @@
 package org.plos_clan.cpos.drivers.drm
 
 import org.plos_clan.cpos.mem.UserMemory
-import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 
 internal enum class DrmCommand(
@@ -57,48 +56,51 @@ internal enum class DrmCommand(
     }
 }
 
-internal class DrmArgument(val bytes: ByteArray, private val destination: UserMemory) {
+internal class DrmArgument(
+    val bytes: ByteArray,
+    private val destination: UserMemory,
+    val size: Int,
+) {
     val data = LittleEndianBuffer(bytes)
 
-    fun write(): Boolean = destination.copyToUser(bytes)
+    fun write(): Boolean = destination.writeFrom(bytes, size)
 
-    fun copy(pointer: ULong, bytes: ByteArray): Boolean {
-        if (bytes.isEmpty()) return true
-        val process = ProcessManager.currentProcess() ?: return false
-        val memory = UserMemory(process.addressSpace, pointer)
-        return memory.copyToUser(bytes)
-    }
+    fun copy(pointer: ULong, bytes: ByteArray, count: Int = bytes.size): Boolean =
+        destination.at(pointer).copyToUser(bytes, size = count)
 
-    fun array(pointerOffset: Int, countOffset: Int, values: List<UInt>): Boolean {
+    fun array(pointerOffset: Int, countOffset: Int, item: UInt?): Boolean {
         val capacity = data.readU32(countOffset)
-        data.writeU32(countOffset, values.size.toUInt())
-        if (capacity < values.size.toUInt()) return true
-        val bytes = ByteArray(values.size * UInt.SIZE_BYTES)
-        val output = LittleEndianBuffer(bytes)
-        values.forEachIndexed { index, value -> output.writeU32(index * UInt.SIZE_BYTES, value) }
-        return copy(data.readU64(pointerOffset), bytes)
+        data.writeU32(countOffset, if (item == null) 0u else 1u)
+        if (item == null || capacity == 0u) return true
+        return destination.at(data.readU64(pointerOffset)).writeUInt(item)
     }
 
-    fun properties(
+    inline fun <T> array(
         pointerOffset: Int,
         countOffset: Int,
-        properties: List<Pair<DrmProperty, ULong>>,
+        values: Collection<T>,
+        id: (T) -> UInt,
     ): Boolean {
         val capacity = data.readU32(countOffset)
-        val ids = properties.map { it.first.id }
-        if (!array(pointerOffset, countOffset, ids)) return false
-        if (capacity < properties.size.toUInt() || properties.isEmpty()) return true
-        val values = ByteArray(properties.size * 8)
-        val output = LittleEndianBuffer(values)
-        properties.forEachIndexed { index, property -> output.writeU64(index * 8, property.second) }
-        return copy(data.readU64(pointerOffset + 8), values)
+        data.writeU32(countOffset, values.size.toUInt())
+        if (capacity < values.size.toUInt() || values.isEmpty()) return true
+        val output = destination.at(data.readU64(pointerOffset))
+        return output.writeRecord(values.size * UInt.SIZE_BYTES) { record ->
+            values.forEachIndexed { index, value -> record.writeU32(index * UInt.SIZE_BYTES, id(value)) }
+        }
     }
 
-    fun string(lengthOffset: Int, value: String): Boolean {
-        val bytes = value.encodeToByteArray()
+    fun property(pointerOffset: Int, countOffset: Int, property: DrmProperty?, value: ULong = 0uL): Boolean {
+        val capacity = data.readU32(countOffset)
+        if (!array(pointerOffset, countOffset, property?.id)) return false
+        if (capacity == 0u || property == null) return true
+        return destination.at(data.readU64(pointerOffset + ULong.SIZE_BYTES)).writeULong(value)
+    }
+
+    fun string(lengthOffset: Int, bytes: ByteArray): Boolean {
         val capacity = data.readU64(lengthOffset)
         data.writeU64(lengthOffset, bytes.size.toULong())
         val count = minOf(capacity, bytes.size.toULong()).toInt()
-        return copy(data.readU64(lengthOffset + 8), bytes.copyOf(count))
+        return copy(data.readU64(lengthOffset + 8), bytes, count)
     }
 }

@@ -24,6 +24,7 @@ import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.mem.IoScratch
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.network.IpProtocol
 import org.plos_clan.cpos.network.NetlinkProtocolKind
@@ -51,7 +52,6 @@ import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.syscall.fs.FsConstants
 import org.plos_clan.cpos.tasks.CapEnum
-import org.plos_clan.cpos.tasks.CapManager
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.utils.Errno
@@ -175,17 +175,12 @@ internal object SocketSyscalls {
             files.forEach(OpenFileDescription::release)
             return errno(Errno.EMFILE)
         }
-        val output = ByteArray(Int.SIZE_BYTES * 2).also { bytes ->
-            LittleEndianBuffer(bytes).apply {
-                writeU32(0, descriptors[0].toUInt())
-                writeU32(Int.SIZE_BYTES, descriptors[1].toUInt())
-            }
+        val output = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_R10])
+        val written = output.writeRecord(2 * Int.SIZE_BYTES) {
+            it.writeU32(0, descriptors[0].toUInt())
+            it.writeU32(Int.SIZE_BYTES, descriptors[1].toUInt())
         }
-        if (!UserMemory(
-                process.addressSpace,
-                regs[PtraceRegisters.IDX_R10],
-            ).copyToUser(output)
-        ) {
+        if (!written) {
             descriptors.forEach { descriptor ->
                 process.fdTable.close(caller, descriptor)
             }
@@ -414,9 +409,7 @@ internal object SocketSyscalls {
             }
             val result = sendMessage(process, file, socket, header, flags)
             if (result < 0) return@withSocket if (sent == 0) result else sent.toLong()
-            val length = ByteArray(UInt.SIZE_BYTES)
-            LittleEndianBuffer(length).writeU32(0, result.toUInt())
-            if (!lengthMemory.copyToUser(length)) {
+            if (!lengthMemory.writeUInt(result.toUInt())) {
                 return@withSocket if (sent == 0) errno(Errno.EFAULT) else sent.toLong()
             }
             sent++
@@ -463,9 +456,7 @@ internal object SocketSyscalls {
                     error.takeUnless { timedOut },
                 )
             }
-            val length = ByteArray(UInt.SIZE_BYTES)
-            LittleEndianBuffer(length).writeU32(0, result.toUInt())
-            if (!lengthMemory.copyToUser(length)) {
+            if (!lengthMemory.writeUInt(result.toUInt())) {
                 return@withSocket finishReceiveTimeout(timeout, received, Errno.EFAULT)
             }
             received++
@@ -520,10 +511,22 @@ internal object SocketSyscalls {
         val selected = SetSocketOption.fromAbi(option.toInt())
             ?: return@withSocket errno(Errno.ENOPROTOOPT)
         if (length < selected.size.toULong()) return@withSocket errno(Errno.EINVAL)
-        val bytes = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_R10])
-            .copyFromUser(selected.size) ?: return@withSocket errno(Errno.EFAULT)
-        val value = LittleEndianBuffer(bytes).readU32(0).toInt()
-        val result = when (selected) {
+        val memory = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_R10])
+        val result = memory.readRecord(selected.size) { setOption(socket, selected, it) }
+            ?: return@withSocket errno(Errno.EFAULT)
+        when (result) {
+            is VfsResult.Ok -> 0L
+            is VfsResult.Err -> errno(result.error.errno)
+        }
+    }
+
+    private fun setOption(
+        socket: AbstractSocket,
+        selected: SetSocketOption,
+        input: LittleEndianBuffer,
+    ): VfsResult<Unit> {
+        val value = input.readU32(0).toInt()
+        return when (selected) {
             SetSocketOption.SEND_BUFFER -> if (value < 0) {
                 VfsResult.Err(VfsError.INVALID_ARGUMENT)
             } else {
@@ -541,11 +544,11 @@ internal object SocketSyscalls {
             } else {
                 socket.setReceiveLowWatermark(value)
             }
-            SetSocketOption.RECEIVE_TIMEOUT -> when (val timeout = socketTimeout(bytes)) {
+            SetSocketOption.RECEIVE_TIMEOUT -> when (val timeout = socketTimeout(input)) {
                 is VfsResult.Ok -> socket.setReceiveTimeout(timeout.value)
                 is VfsResult.Err -> timeout
             }
-            SetSocketOption.SEND_TIMEOUT -> when (val timeout = socketTimeout(bytes)) {
+            SetSocketOption.SEND_TIMEOUT -> when (val timeout = socketTimeout(input)) {
                 is VfsResult.Ok -> socket.setSendTimeout(timeout.value)
                 is VfsResult.Err -> timeout
             }
@@ -555,14 +558,10 @@ internal object SocketSyscalls {
             SetSocketOption.LINGER -> socket.setLinger(
                 SocketLinger(
                     value != 0,
-                    LittleEndianBuffer(bytes).readU32(Int.SIZE_BYTES).toInt(),
+                    input.readU32(Int.SIZE_BYTES).toInt(),
                 ),
             )
             SetSocketOption.BIND_INTERFACE -> socket.setBoundInterfaceIndex(value)
-        }
-        when (result) {
-            is VfsResult.Ok -> 0L
-            is VfsResult.Err -> errno(result.error.errno)
         }
     }
 
@@ -575,45 +574,41 @@ internal object SocketSyscalls {
         if (level > Int.MAX_VALUE.toULong() || option > Int.MAX_VALUE.toULong()) {
             return@withSocket errno(Errno.EINVAL)
         }
-        val value = if (level.toInt() != SOL_SOCKET) {
-            when (val result = socket.getProtocolOption(level.toInt(), option.toInt())) {
-                is VfsResult.Ok -> result.value
-                is VfsResult.Err -> return@withSocket errno(result.error.errno)
-            }
-        } else {
-            val options = socket.socketOptions()
-            when (option.toInt()) {
-                SocketConstants.SO_TYPE -> intOption(socket.socketType.abiValue)
-                SocketConstants.SO_ERROR -> intOption(socket.takeError()?.errno ?: 0)
-                SocketConstants.SO_SNDBUF -> intOption(options.sendBufferSize)
-                SocketConstants.SO_RCVBUF -> intOption(options.receiveBufferSize)
-                SocketConstants.SO_PASSCRED -> intOption(if (options.passCredentials) 1 else 0)
-                SocketConstants.SO_TIMESTAMP -> intOption(if (options.receiveTimestamp) 1 else 0)
-                SocketConstants.SO_RCVLOWAT -> intOption(options.receiveLowWatermark)
-                SocketConstants.SO_SNDLOWAT -> intOption(1)
-                SocketConstants.SO_RCVTIMEO -> timevalOption(options.receiveTimeoutNanos)
-                SocketConstants.SO_SNDTIMEO -> timevalOption(options.sendTimeoutNanos)
-                SocketConstants.SO_ACCEPTCONN -> intOption(if (socket.isListening()) 1 else 0)
-                SocketConstants.SO_PROTOCOL -> intOption(socket.protocol)
-                SocketConstants.SO_DOMAIN -> intOption(socket.domain.abiValue)
-                SocketConstants.SO_REUSEADDR -> intOption(if (options.reuseAddress) 1 else 0)
-                SocketConstants.SO_BROADCAST -> intOption(if (options.broadcast) 1 else 0)
-                SocketConstants.SO_KEEPALIVE -> intOption(if (options.keepAlive) 1 else 0)
-                SocketConstants.SO_LINGER -> lingerOption(options.linger)
-                SocketConstants.SO_BINDTOIFINDEX -> intOption(options.boundInterfaceIndex ?: 0)
-                SocketConstants.SO_PEERCRED -> when (val result = socket.peerCredentials()) {
-                    is VfsResult.Ok -> credentialOption(result.value)
-                    is VfsResult.Err -> return@withSocket errno(result.error.errno)
-                }
-                else -> return@withSocket errno(Errno.ENOPROTOOPT)
+        val output = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_R10])
+        val length = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_R8])
+        val target = OptionOutput(output, length)
+        if (level.toInt() != SOL_SOCKET) {
+            return@withSocket when (val result = socket.getProtocolOption(level.toInt(), option.toInt())) {
+                is VfsResult.Ok -> target.write(result.value)
+                is VfsResult.Err -> errno(result.error.errno)
             }
         }
-        copySocketOption(
-            process,
-            regs[PtraceRegisters.IDX_R10],
-            regs[PtraceRegisters.IDX_R8],
-            value,
-        )
+        val options = socket.socketOptions()
+        when (option.toInt()) {
+            SocketConstants.SO_TYPE -> target.integer(socket.socketType.abiValue)
+            SocketConstants.SO_ERROR -> target.integer(socket.takeError()?.errno ?: 0)
+            SocketConstants.SO_SNDBUF -> target.integer(options.sendBufferSize)
+            SocketConstants.SO_RCVBUF -> target.integer(options.receiveBufferSize)
+            SocketConstants.SO_PASSCRED -> target.integer(if (options.passCredentials) 1 else 0)
+            SocketConstants.SO_TIMESTAMP -> target.integer(if (options.receiveTimestamp) 1 else 0)
+            SocketConstants.SO_RCVLOWAT -> target.integer(options.receiveLowWatermark)
+            SocketConstants.SO_SNDLOWAT -> target.integer(1)
+            SocketConstants.SO_RCVTIMEO -> target.timeval(options.receiveTimeoutNanos)
+            SocketConstants.SO_SNDTIMEO -> target.timeval(options.sendTimeoutNanos)
+            SocketConstants.SO_ACCEPTCONN -> target.integer(if (socket.isListening()) 1 else 0)
+            SocketConstants.SO_PROTOCOL -> target.integer(socket.protocol)
+            SocketConstants.SO_DOMAIN -> target.integer(socket.domain.abiValue)
+            SocketConstants.SO_REUSEADDR -> target.integer(if (options.reuseAddress) 1 else 0)
+            SocketConstants.SO_BROADCAST -> target.integer(if (options.broadcast) 1 else 0)
+            SocketConstants.SO_KEEPALIVE -> target.integer(if (options.keepAlive) 1 else 0)
+            SocketConstants.SO_LINGER -> target.linger(options.linger)
+            SocketConstants.SO_BINDTOIFINDEX -> target.integer(options.boundInterfaceIndex ?: 0)
+            SocketConstants.SO_PEERCRED -> when (val result = socket.peerCredentials()) {
+                is VfsResult.Ok -> target.credentials(result.value)
+                is VfsResult.Err -> return@withSocket errno(result.error.errno)
+            }
+            else -> return@withSocket errno(Errno.ENOPROTOOPT)
+        }
     }
 
     private fun accept(process: Process, regs: PtraceRegisters, flagsValue: ULong): Long =
@@ -1010,23 +1005,7 @@ internal object SocketSyscalls {
         process.credentials.groupIds.effective.toUInt(),
     )
 
-    private fun intOption(value: Int): ByteArray = ByteArray(Int.SIZE_BYTES).also { bytes ->
-        LittleEndianBuffer(bytes).writeU32(0, value.toUInt())
-    }
-
-    private fun lingerOption(linger: SocketLinger): ByteArray =
-        ByteArray(Int.SIZE_BYTES * 2).also { bytes ->
-            LittleEndianBuffer(bytes).apply {
-                writeU32(0, if (linger.enabled) 1u else 0u)
-                writeU32(Int.SIZE_BYTES, linger.seconds.toUInt())
-            }
-        }
-
-    private fun socketTimeout(bytes: ByteArray): VfsResult<ULong?> {
-        if (bytes.size < Long.SIZE_BYTES * 2) {
-            return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        }
-        val input = LittleEndianBuffer(bytes)
+    private fun socketTimeout(input: LittleEndianBuffer): VfsResult<ULong?> {
         val seconds = input.readU64(0).toLong()
         val microseconds = input.readU64(Long.SIZE_BYTES).toLong()
         if (seconds < 0 || microseconds !in 0 until MICROSECONDS_PER_SECOND.toLong()) {
@@ -1045,26 +1024,47 @@ internal object SocketSyscalls {
         return VfsResult.Ok(duration)
     }
 
-    private fun timevalOption(timeoutNanos: ULong?): ByteArray =
-        ByteArray(Long.SIZE_BYTES * 2).also { bytes ->
-            val duration = timeoutNanos ?: 0uL
-            LittleEndianBuffer(bytes).apply {
-                writeU64(0, duration / NANOSECONDS_PER_SECOND)
-                writeU64(
-                    Long.SIZE_BYTES,
-                    duration % NANOSECONDS_PER_SECOND / NANOSECONDS_PER_MICROSECOND,
-                )
-            }
+    private class OptionOutput(private val value: UserMemory, private val length: UserMemory) {
+        private inline fun copy(size: Int, write: (Int) -> Boolean): Long {
+            val requested = length.readUIntLE() ?: return errno(Errno.EFAULT)
+            val copied = minOf(requested, size.toUInt()).toInt()
+            if (!length.isWritable(UInt.SIZE_BYTES) || !value.isWritable(copied)) return errno(Errno.EFAULT)
+            if (copied > 0 && !write(copied)) return errno(Errno.EFAULT)
+            return if (length.writeUInt(copied.toUInt())) 0L else errno(Errno.EFAULT)
         }
 
-    private fun credentialOption(credentials: UnixCredentials): ByteArray =
-        ByteArray(SocketConstants.CREDENTIAL_SIZE).also { bytes ->
-            LittleEndianBuffer(bytes).apply {
-                writeU32(0, credentials.processId.toUInt())
-                writeU32(4, credentials.userId)
-                writeU32(8, credentials.groupId)
-            }
+        fun write(bytes: ByteArray): Long = copy(bytes.size) { value.copyToUser(bytes, size = it) }
+
+        fun integer(number: Int): Long = copy(Int.SIZE_BYTES) {
+            value.writeWord(number.toUInt().toULong(), it)
         }
+
+        private inline fun record(size: Int, encode: (LittleEndianBuffer) -> Unit): Long =
+            copy(size) { copied ->
+                IoScratch.use(size) { bytes ->
+                    encode(LittleEndianBuffer(bytes))
+                    value.writeFrom(bytes, copied)
+                }
+            }
+
+        fun linger(option: SocketLinger): Long = record(2 * Int.SIZE_BYTES) {
+            it.writeU32(0, if (option.enabled) 1u else 0u)
+            it.writeU32(Int.SIZE_BYTES, option.seconds.toUInt())
+        }
+
+        fun timeval(timeout: ULong?): Long = record(2 * Long.SIZE_BYTES) {
+            val duration = timeout ?: 0uL
+            val micros = duration % NANOSECONDS_PER_SECOND / NANOSECONDS_PER_MICROSECOND
+            it.writeU64(0, duration / NANOSECONDS_PER_SECOND)
+            it.writeU64(Long.SIZE_BYTES, micros)
+        }
+
+        fun credentials(peer: UnixCredentials): Long = record(SocketConstants.CREDENTIAL_SIZE) {
+            it.writeU32(0, peer.processId.toUInt())
+            it.writeU32(4, peer.userId)
+            it.writeU32(8, peer.groupId)
+        }
+    }
 
     private fun readClassicFilter(
         process: Process,
@@ -1093,26 +1093,7 @@ internal object SocketSyscalls {
     private fun hasRawNetworkAccess(process: Process): Boolean {
         if (process.credentials.userIds.effective == 0) return true
         val thread = ProcessManager.currentThread() ?: return false
-        return thread.process === process && CapManager.hasAllCapability(thread, CapEnum.NET_RAW)
-    }
-
-    private fun copySocketOption(
-        process: Process,
-        outputAddress: ULong,
-        lengthAddress: ULong,
-        value: ByteArray,
-    ): Long {
-        val lengthMemory = UserMemory(process.addressSpace, lengthAddress)
-        val requested = lengthMemory.readUIntLE() ?: return errno(Errno.EFAULT)
-        val copied = minOf(requested.toULong(), value.size.toULong()).toInt()
-        val output = UserMemory(process.addressSpace, outputAddress)
-        if (!lengthMemory.isWritable(UInt.SIZE_BYTES) || !output.isWritable(copied)) {
-            return errno(Errno.EFAULT)
-        }
-        if (copied != 0 && !output.copyToUser(value, size = copied)) return errno(Errno.EFAULT)
-        val actual = ByteArray(UInt.SIZE_BYTES)
-        LittleEndianBuffer(actual).writeU32(0, copied.toUInt())
-        return if (lengthMemory.copyToUser(actual)) 0L else errno(Errno.EFAULT)
+        return thread.process === process && thread.capabilities.hasEffective(CapEnum.NET_RAW)
     }
 
     private class ReceiveTimeout private constructor(
@@ -1123,9 +1104,8 @@ internal object SocketSyscalls {
 
         fun writeRemaining(): Boolean {
             val remaining = deadline.remainingNanos()
-            return memory.copyToUser(
-                TimeSpec.fromDurationNanos(remaining).toNativeBytes(),
-            )
+            val value = TimeSpec.fromDurationNanos(remaining)
+            return memory.writeStruct(value)
         }
 
         companion object {
@@ -1133,13 +1113,13 @@ internal object SocketSyscalls {
                 if (address == 0uL) return VfsResult.Ok(null)
                 if (!TscClock.isReady) return VfsResult.Err(VfsError.IO)
                 val memory = UserMemory(process.addressSpace, address)
-                val bytes = memory.copyFromUser(TimeSpec.NATIVE_SIZE)
+                val value = memory
+                    .readRecord(TimeSpec.NATIVE_SIZE, decode = TimeSpec::readFrom)
                     ?: return VfsResult.Err(VfsError.FAULT)
                 if (!memory.isWritable(TimeSpec.NATIVE_SIZE)) {
                     return VfsResult.Err(VfsError.FAULT)
                 }
-                val value = TimeSpec(0, 0)
-                if (!value.updateFromNativeBytes(bytes) || !value.isValidDuration) {
+                if (!value.isValidDuration) {
                     return VfsResult.Err(VfsError.INVALID_ARGUMENT)
                 }
                 return VfsResult.Ok(

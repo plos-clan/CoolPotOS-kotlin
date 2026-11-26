@@ -21,6 +21,7 @@ import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsPathname
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.syscall.Syscall
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
 import org.plos_clan.cpos.syscall.fs.FsConstants.AT_EMPTY_PATH
@@ -164,8 +165,7 @@ internal object NewMountSyscalls {
             const val SIZE = 32
             private const val PROPAGATION_MASK = FsConstants.MS_PROPAGATION
 
-            fun decode(bytes: ByteArray): MountAttributeArguments {
-                val input = LittleEndianBuffer(bytes)
+            fun decode(input: LittleEndianBuffer): MountAttributeArguments {
                 return MountAttributeArguments(
                     set = input.readU64(0),
                     clear = input.readU64(8),
@@ -409,17 +409,9 @@ internal object NewMountSyscalls {
             return errno(Errno.EPERM)
         }
 
-        val attributeBytes = UserMemory(
-            process.addressSpace,
-            registers[PtraceRegisters.IDX_R10],
-        ).copyFromUser(attributeSize.toInt()) ?: return errno(Errno.EFAULT)
-        if ((MountAttributeArguments.SIZE until attributeBytes.size).any {
-            attributeBytes[it] != 0.toByte()
-        }) {
-            return errno(Errno.E2BIG)
-        }
-
-        val arguments = MountAttributeArguments.decode(attributeBytes)
+        val memory = UserMemory(process.addressSpace, registers[PtraceRegisters.IDX_R10])
+        val arguments = Syscall.readArguments(memory, attributeSize.toInt(), MountAttributeArguments.SIZE,
+            fail = { return errno(it) }, decode = MountAttributeArguments::decode)
         if (arguments.isNoOperation) return 0L
         if (!arguments.hasValidPropagation) return errno(Errno.EINVAL)
         val attributes = MountAttributeCodec.update(

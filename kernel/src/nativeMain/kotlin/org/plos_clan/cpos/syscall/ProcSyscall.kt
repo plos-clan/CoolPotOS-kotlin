@@ -16,9 +16,7 @@ import org.plos_clan.cpos.syscall.Syscall.copyWordToUser
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.tasks.CapHeader
 import org.plos_clan.cpos.tasks.CapEnum
-import org.plos_clan.cpos.tasks.CapManager
 import org.plos_clan.cpos.tasks.CapabilityState
-import org.plos_clan.cpos.tasks.Capabilities
 import org.plos_clan.cpos.tasks.ChildEventKind
 import org.plos_clan.cpos.tasks.ChildWaitEvent
 import org.plos_clan.cpos.tasks.LINUX_CAPABILITY_VERSION_3
@@ -35,7 +33,6 @@ import org.plos_clan.cpos.tasks.SignalStack
 import org.plos_clan.cpos.tasks.Thread
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
-import org.plos_clan.cpos.utils.NativeStruct
 import org.plos_clan.cpos.utils.PtraceRegisters
 import org.plos_clan.cpos.utils.toByteArray
 
@@ -88,19 +85,6 @@ private sealed interface LinuxIdArgument {
             raw <= Int.MAX_VALUE.toULong() -> Value(raw.toInt())
             else -> null
         }
-    }
-}
-
-private class LinuxRLimit(val limit: ResourceLimit) : NativeStruct {
-    override fun toNativeBytes(): ByteArray = ByteArray(NATIVE_SIZE).also { buffer ->
-        LittleEndianBuffer(buffer).apply {
-            writeU64(0, limit.soft)
-            writeU64(ULong.SIZE_BYTES, limit.hard)
-        }
-    }
-
-    companion object {
-        const val NATIVE_SIZE = ULong.SIZE_BYTES * 2
     }
 }
 
@@ -388,13 +372,9 @@ internal fun prctl(regs: PtraceRegisters, process: Process): Long {
         }
 
         PR_GET_PDEATHSIG -> {
-            val output = ByteArray(Int.SIZE_BYTES).also { bytes ->
-                LittleEndianBuffer(bytes).writeU32(
-                    0,
-                    (thread.parentDeathSignal?.number ?: 0).toUInt(),
-                )
-            }
-            if (UserMemory(process.addressSpace, argument).copyToUser(output)) 0L
+            val signal = thread.parentDeathSignal?.number ?: 0
+            val memory = UserMemory(process.addressSpace, argument)
+            if (memory.writeUInt(signal.toUInt())) 0L
             else errno(Errno.EFAULT)
         }
 
@@ -415,11 +395,8 @@ internal fun prctl(regs: PtraceRegisters, process: Process): Long {
         }
 
         PR_GET_CHILD_SUBREAPER -> {
-            val output = ByteArray(Int.SIZE_BYTES)
-            val buffer = LittleEndianBuffer(output)
-            buffer.writeU32(0, if (process.childSubreaper) 1u else 0u)
             val memory = UserMemory(process.addressSpace, argument)
-            if (memory.copyToUser(output)) 0L else errno(Errno.EFAULT)
+            if (memory.writeUInt(if (process.childSubreaper) 1u else 0u)) 0L else errno(Errno.EFAULT)
         }
 
         PR_GET_DUMPABLE -> if (process.dumpable) 1L else 0L
@@ -537,23 +514,20 @@ internal fun prlimit64(regs: PtraceRegisters, process: Process): Long {
     val replacement = if (replacementAddress == 0uL) {
         null
     } else {
-        val bytes = UserMemory(process.addressSpace, replacementAddress)
-            .copyFromUser(LinuxRLimit.NATIVE_SIZE)
-            ?: return errno(Errno.EFAULT)
-        val input = LittleEndianBuffer(bytes)
-        val soft = input.readU64(0)
-        val hard = input.readU64(ULong.SIZE_BYTES)
-        if (soft > hard) return errno(Errno.EINVAL)
-        ResourceLimit(soft, hard)
+        val source = UserMemory(process.addressSpace, replacementAddress)
+        source.readRecord(2 * ULong.SIZE_BYTES) {
+            val soft = it.readU64(0)
+            val hard = it.readU64(ULong.SIZE_BYTES)
+            if (soft > hard) return errno(Errno.EINVAL)
+            ResourceLimit(soft, hard)
+        } ?: return errno(Errno.EFAULT)
     }
 
     val previous = replacement?.let { target.resourceLimits.replace(resource, it) }
         ?: target.resourceLimits.get(resource)
     val previousAddress = regs[PtraceRegisters.IDX_R10]
     if (previousAddress != 0uL &&
-        !UserMemory(process.addressSpace, previousAddress).copyToUser(
-            LinuxRLimit(previous).toNativeBytes(),
-        )
+        !UserMemory(process.addressSpace, previousAddress).writeLongPair(previous.soft, previous.hard)
     ) {
         return errno(Errno.EFAULT)
     }
@@ -569,11 +543,8 @@ private fun copyIds(
     effective: Int,
     saved: Int,
 ): Long {
-    val bytes = ByteArray(Int.SIZE_BYTES)
-    fun copy(address: ULong, value: Int): Boolean {
-        LittleEndianBuffer(bytes).writeU32(0, value.toUInt())
-        return UserMemory(process.addressSpace, address).copyToUser(bytes)
-    }
+    fun copy(address: ULong, value: Int): Boolean =
+        UserMemory(process.addressSpace, address).writeUInt(value.toUInt())
     return if (copy(realAddress, real) && copy(effectiveAddress, effective) && copy(savedAddress, saved)) {
         0L
     } else {
@@ -727,14 +698,13 @@ internal fun wait4(regs: PtraceRegisters, process: Process): Long {
         process = process,
         onEvent = { event ->
             if (statusAddress != 0uL) {
-                val status = ByteArray(Int.SIZE_BYTES)
-                LittleEndianBuffer(status).writeU32(0, event.status.toUInt())
-                if (!UserMemory(process.addressSpace, statusAddress).copyToUser(status)) {
+                val status = UserMemory(process.addressSpace, statusAddress)
+                if (!status.writeUInt(event.status.toUInt())) {
                     return@execute errno(Errno.EFAULT)
                 }
             }
             if (usageAddress != 0uL &&
-                !UserMemory(process.addressSpace, usageAddress).copyToUser(ByteArray(RUSAGE_SIZE))
+                UserMemory(process.addressSpace, usageAddress).fill(0, RUSAGE_SIZE) != RUSAGE_SIZE
             ) return@execute errno(Errno.EFAULT)
             event.child.id.toLong()
         },
@@ -784,19 +754,19 @@ internal fun waitid(regs: PtraceRegisters, process: Process): Long {
         ChildWait(selector, options, nonBlocking).execute(
             process = process,
             onEvent = { event ->
-                if (infoAddress != 0uL &&
-                    !UserMemory(process.addressSpace, infoAddress)
-                        .copyToUser(SignalAbi.infoBytes(event.signalInfo()))
-                ) return@execute errno(Errno.EFAULT)
+                if (infoAddress != 0uL) {
+                    val target = UserMemory(process.addressSpace, infoAddress)
+                    val info = event.signalInfo()
+                    if (!SignalAbi.writeInfo(target, info)) return@execute errno(Errno.EFAULT)
+                }
                 if (usageAddress != 0uL &&
-                    !UserMemory(process.addressSpace, usageAddress)
-                        .copyToUser(ByteArray(RUSAGE_SIZE))
+                    UserMemory(process.addressSpace, usageAddress).fill(0, RUSAGE_SIZE) != RUSAGE_SIZE
                 ) return@execute errno(Errno.EFAULT)
                 0L
             },
             onEmpty = {
                 if (infoAddress == 0uL || UserMemory(process.addressSpace, infoAddress)
-                        .copyToUser(ByteArray(SignalAbi.INFO_SIZE))
+                        .fill(0, SignalAbi.INFO_SIZE) == SignalAbi.INFO_SIZE
                 ) 0L else errno(Errno.EFAULT)
             },
         )
@@ -812,15 +782,12 @@ internal fun getCPU(regs: PtraceRegisters, process: Process): Long {
     if (cpup != 0UL) {
         val userCpup = UserMemory(process.addressSpace, cpup)
         val local = SMProcessor.currentLocal()
-        val bytes = ByteArray(Int.SIZE_BYTES)
-        LittleEndianBuffer(bytes).writeU32(0, local.cpuid.toUInt())
-        if (!userCpup.copyToUser(bytes)) return errno(Errno.EFAULT)
+        if (!userCpup.writeUInt(local.cpuid.toUInt())) return errno(Errno.EFAULT)
     }
 
     if (nodep != 0UL) {
         val userNodep = UserMemory(process.addressSpace, nodep)
-        val bytes = ByteArray(Int.SIZE_BYTES)
-        if (!userNodep.copyToUser(bytes)) return errno(Errno.EFAULT)
+        if (!userNodep.writeUInt(0u)) return errno(Errno.EFAULT)
     }
 
     return errno(Errno.EOK)
@@ -828,77 +795,60 @@ internal fun getCPU(regs: PtraceRegisters, process: Process): Long {
 
 internal fun capGet(regs: PtraceRegisters, process: Process): Long {
     val headMem = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI])
-    val headByte = headMem.copyFromUser(
-        CapHeader.NATIVE_SIZE
-    ) ?: return errno(Errno.EFAULT)
+    val header = CapHeader(0u, 0)
+    if (!headMem.readStruct(header)) return errno(Errno.EFAULT)
     val dataMem = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
 
-    val header = CapHeader(0u, 0).apply { updateFromNativeBytes(headByte) }
     val task = if (header.pid == 0) {
         ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
     } else {
         ProcessManager.findThread(header.pid) ?: return errno(Errno.ESRCH)
     }
-    val count = CapManager.capabilityCount(header.version)
-    if (count == errno(Errno.EINVAL).toInt()) {
+    val count = header.wordCount
+    if (count == 0) {
         header.version = LINUX_CAPABILITY_VERSION_3
-        if (!headMem.copyToUser(header.toNativeBytes())) return errno(Errno.EFAULT)
-        return count.toLong()
+        if (!headMem.writeStruct(header)) return errno(Errno.EFAULT)
+        return errno(Errno.EINVAL)
     }
 
-    val array = Array(count) {
-        Capabilities(0u, 0u, 0u)
+    val caps = task.capabilities
+    val size = count * CapHeader.DATA_SIZE
+    if (!dataMem.isWritable(size)) return errno(Errno.EFAULT)
+    val written = dataMem.writeRecord(size) { output ->
+        for (index in 0 until count) {
+            val shift = index * UInt.SIZE_BITS
+            val offset = index * CapHeader.DATA_SIZE
+            output.writeU32(offset, (caps.effective shr shift).toUInt())
+            output.writeU32(offset + 4, (caps.permitted shr shift).toUInt())
+            output.writeU32(offset + 8, (caps.inheritable shr shift).toUInt())
+        }
     }
-
-    val capabilities = task.capabilities
-    array[0].effective = (capabilities.effective and UInt.MAX_VALUE.toULong()).toUInt()
-    array[0].permitted = (capabilities.permitted and UInt.MAX_VALUE.toULong()).toUInt()
-    array[0].inheritable = (capabilities.inheritable and UInt.MAX_VALUE.toULong()).toUInt()
-
-    if (count > 1) {
-        array[1].effective = (capabilities.effective shr 32).toUInt()
-        array[1].permitted = (capabilities.permitted shr 32).toUInt()
-        array[1].inheritable = (capabilities.inheritable shr 32).toUInt()
-    }
-
-    if (!dataMem.copyNativeStructArrayToUser(array)) return errno(Errno.EFAULT)
-
-    return errno(Errno.EOK)
+    return if (written) 0L else errno(Errno.EFAULT)
 }
 
 internal fun capSet(regs: PtraceRegisters, process: Process): Long {
     val headMem = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDI])
-    val headByte = headMem.copyFromUser(
-        CapHeader.NATIVE_SIZE
-    ) ?: return errno(Errno.EFAULT)
+    val header = CapHeader(0u, 0)
+    if (!headMem.readStruct(header)) return errno(Errno.EFAULT)
     val dataMem = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
 
-    val header = CapHeader(0u, 0).apply { updateFromNativeBytes(headByte) }
     val task = ProcessManager.currentThread() ?: return errno(Errno.ESRCH)
     if (header.pid != 0 && header.pid != task.id) return errno(Errno.EPERM)
-    val count = CapManager.capabilityCount(header.version)
-    if (count == errno(Errno.EINVAL).toInt()) {
+    val count = header.wordCount
+    if (count == 0) {
         header.version = LINUX_CAPABILITY_VERSION_3
-        if (!headMem.copyToUser(header.toNativeBytes())) return errno(Errno.EFAULT)
-        return count.toLong()
+        if (!headMem.writeStruct(header)) return errno(Errno.EFAULT)
+        return errno(Errno.EINVAL)
     }
 
-    val byteCount = count * Capabilities.NATIVE_SIZE
-    val input = dataMem.copyFromUser(byteCount)
-        ?: return errno(Errno.EFAULT)
-
-    val array = Array(count) {
-        Capabilities(0u, 0u, 0u)
-    }
-
-    for (index in array.indices) {
-        val offset = index * Capabilities.NATIVE_SIZE
-        val elementBytes = input.copyOfRange(
-            offset,
-            offset + Capabilities.NATIVE_SIZE,
-        )
-        if (!array[index].updateFromNativeBytes(elementBytes)) return errno(Errno.EINVAL)
-    }
-
-    return CapManager.capabilityApply(array, task)
+    val byteCount = count * CapHeader.DATA_SIZE
+    return dataMem.readRecord(byteCount) { input ->
+        fun mask(offset: Int): ULong {
+            val low = input.readU32(offset).toULong()
+            if (count == 1) return low
+            val high = input.readU32(offset + CapHeader.DATA_SIZE).toULong()
+            return low or (high shl UInt.SIZE_BITS)
+        }
+        if (task.capabilities.apply(mask(0), mask(4), mask(8))) 0L else errno(Errno.EPERM)
+    } ?: errno(Errno.EFAULT)
 }

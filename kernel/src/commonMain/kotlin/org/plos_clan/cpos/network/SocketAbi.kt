@@ -103,11 +103,7 @@ internal object SocketAddressAbi {
     fun encode(address: SocketAddress): ByteArray = when (address) {
         is UnixSocketAddress -> encodeUnix(address)
         is Ipv4SocketAddress -> ByteArray(IPV4_ADDRESS_SIZE).also { bytes ->
-            LittleEndianBuffer(bytes).writeU16(0, SocketConstants.AF_INET.toUShort())
-            NetworkOrderBuffer(bytes).apply {
-                writeU16(2, address.port)
-                writeU32(4, address.address.value)
-            }
+            writeIpv4(bytes, 0, address.address, address.port)
         }
         is NetlinkSocketAddress -> ByteArray(NETLINK_ADDRESS_SIZE).also { bytes ->
             LittleEndianBuffer(bytes).apply {
@@ -134,6 +130,15 @@ internal object SocketAddressAbi {
         }
         UnspecifiedSocketAddress -> ByteArray(UShort.SIZE_BYTES)
         else -> error("Unsupported socket address ${address::class.simpleName}")
+    }
+
+    fun writeIpv4(bytes: ByteArray, offset: Int, address: Ipv4Address, port: UShort = 0u) {
+        val family = SocketConstants.AF_INET.toUShort()
+        LittleEndianBuffer(bytes).writeU16(offset, family)
+        val network = NetworkOrderBuffer(bytes)
+        network.writeU16(offset + 2, port)
+        network.writeU32(offset + 4, address.value)
+        bytes.fill(0, offset + 8, offset + IPV4_ADDRESS_SIZE)
     }
 
     private fun decodeUnix(bytes: ByteArray): VfsResult<SocketAddress> {

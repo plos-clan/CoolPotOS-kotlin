@@ -12,6 +12,7 @@ import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.mem.IoScratch
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.Scheduler
@@ -42,13 +43,11 @@ internal data class InputId(
     val product: UShort = 0u,
     val version: UShort = 0u,
 ) {
-    fun toByteArray(): ByteArray = ByteArray(SIZE_BYTES).also { bytes ->
-        LittleEndianBuffer(bytes).apply {
-            writeU16(0, bus)
-            writeU16(2, vendor)
-            writeU16(4, product)
-            writeU16(6, version)
-        }
+    fun writeTo(output: LittleEndianBuffer) {
+        output.writeU16(0, bus)
+        output.writeU16(2, vendor)
+        output.writeU16(4, product)
+        output.writeU16(6, version)
     }
 
     companion object {
@@ -227,29 +226,26 @@ internal class EvdevDevice(
 
         return when (number) {
             0x01 if direction.hasRead && size >= Int.SIZE_BYTES ->
-                args.copyResult(intBytes(EVDEV_VERSION), fixedSize = true)
+                if (args.writeUInt(EVDEV_VERSION.toUInt())) 0L else -Errno.EFAULT.toLong()
 
             0x02 if direction.hasRead && size >= InputId.SIZE_BYTES ->
-                args.copyResult(id.toByteArray(), fixedSize = true)
+                if (args.writeRecord(InputId.SIZE_BYTES, encode = id::writeTo)) 0L else -Errno.EFAULT.toLong()
 
             0x03 if direction.hasRead && size >= REPEAT_BYTES -> {
                 val repeat = repeatController?.repeatSettings() ?: return -Errno.ENOSYS.toLong()
-                args.copyResult(ByteArray(REPEAT_BYTES).also { bytes ->
-                    LittleEndianBuffer(bytes).apply {
-                        writeU32(0, repeat.delayMillis.toUInt())
-                        writeU32(UInt.SIZE_BYTES, repeat.periodMillis.toUInt())
-                    }
-                }, fixedSize = true)
+                val written = args.writeRecord(REPEAT_BYTES) {
+                    it.writeU32(0, repeat.delayMillis.toUInt())
+                    it.writeU32(UInt.SIZE_BYTES, repeat.periodMillis.toUInt())
+                }
+                if (written) 0L else -Errno.EFAULT.toLong()
             }
 
             0x03 if direction.hasWrite && size >= REPEAT_BYTES -> {
                 if (repeatController == null) return -Errno.ENOSYS.toLong()
-                val bytes = args.copyFromUser(REPEAT_BYTES) ?: return -Errno.EFAULT.toLong()
-                val input = LittleEndianBuffer(bytes)
-                val delay = input.readU32(0).toInt()
-                val period = input.readU32(UInt.SIZE_BYTES).toInt()
-                val settings = RepeatSettings(delay, period)
-                if (delay < 0 || period < 0 ||
+                val settings = args.readRecord(REPEAT_BYTES) {
+                    RepeatSettings(it.readU32(0).toInt(), it.readU32(UInt.SIZE_BYTES).toInt())
+                } ?: return -Errno.EFAULT.toLong()
+                if (settings.delayMillis < 0 || settings.periodMillis < 0 ||
                     !repeatController.configureRepeat(settings)
                 ) -Errno.EINVAL.toLong() else 0L
             }
@@ -257,8 +253,11 @@ internal class EvdevDevice(
             0x06 if direction.hasRead -> args.copyCString(name, size)
             0x07 if direction.hasRead -> args.copyCString(physicalPath, size)
             0x08 if direction.hasRead -> args.copyCString("", size)
-            0x09 if direction.hasRead -> args.copyBitmap(ByteArray(PROPERTY_BITMAP_BYTES), size)
-            0x18 if direction.hasRead -> args.copyBitmap(lock.withLock { keyState.copyOf() }, size)
+            0x09 if direction.hasRead -> args.copyBitmap(EMPTY_EVENT_CAPABILITIES, size)
+            0x18 if direction.hasRead -> IoScratch.use(keyState.size) { snapshot ->
+                lock.withLock { keyState.copyInto(snapshot) }
+                args.copyBitmap(snapshot, minOf(size, keyState.size))
+            }
             in 0x19..0x1b if direction.hasRead -> args.copyBitmap(EMPTY_EVENT_CAPABILITIES, size)
             in 0x20..0x3f if direction.hasRead -> {
                 val bitmap = when (number - 0x20) {
@@ -275,16 +274,23 @@ internal class EvdevDevice(
 
             in 0x40..0x7f if direction == 2 -> {
                 val axes = absoluteAxes ?: return -Errno.EINVAL.toLong()
-                val bytes = lock.withLock { axes[number - 0x40].encode() }
-                args.copyResult(bytes.copyOf(minOf(size, bytes.size)), fixedSize = true)
+                val count = minOf(size, AbsoluteAxisInfo.SIZE_BYTES)
+                IoScratch.use(AbsoluteAxisInfo.SIZE_BYTES) { bytes ->
+                    val output = LittleEndianBuffer(bytes)
+                    lock.withLock { axes[number - 0x40].writeTo(output) }
+                    if (args.writeFrom(bytes, count)) 0L else -Errno.EFAULT.toLong()
+                }
             }
 
             in 0xc0..0xff if direction == 1 -> {
                 val axes = absoluteAxes ?: return -Errno.EINVAL.toLong()
                 if (number - 0xc0 == 0x2f) return -Errno.EINVAL.toLong()
-                val bytes = args.copyFromUser(minOf(size, AbsoluteAxisInfo.SIZE_BYTES))
-                    ?: return -Errno.EFAULT.toLong()
-                val info = AbsoluteAxisInfo.decode(bytes)
+                val count = minOf(size, AbsoluteAxisInfo.SIZE_BYTES)
+                val info = IoScratch.use(AbsoluteAxisInfo.SIZE_BYTES) { bytes ->
+                    if (!args.readInto(bytes, count)) return -Errno.EFAULT.toLong()
+                    bytes.fill(0, count, AbsoluteAxisInfo.SIZE_BYTES)
+                    AbsoluteAxisInfo.decode(LittleEndianBuffer(bytes), count)
+                }
                 lock.withLock { axes[number - 0xc0] = info }
                 0L
             }
@@ -303,7 +309,7 @@ internal class EvdevDevice(
             }
 
             0xa0 if direction.hasWrite && size >= Int.SIZE_BYTES -> {
-                val clockId = args.readInt() ?: return -Errno.EFAULT.toLong()
+                val clockId = args.readUIntLE()?.toInt() ?: return -Errno.EFAULT.toLong()
                 val clock = InputClock.entries.find { it.id == clockId } ?: return -Errno.EINVAL.toLong()
                 client.selectClock(clock)
                 0L
@@ -534,16 +540,11 @@ internal class EvdevDevice(
         private const val KEY_MAX = 0x2ff
         private const val KEY_BITMAP_BYTES = (KEY_MAX + Byte.SIZE_BITS) / Byte.SIZE_BITS
         private const val RELATIVE_BITMAP_BYTES = ULong.SIZE_BYTES
-        private const val PROPERTY_BITMAP_BYTES = ULong.SIZE_BYTES
         private const val EVENT_TYPE_BITMAP_BYTES = ULong.SIZE_BYTES
         private const val REPEAT_BYTES = 8
         private const val QUEUE_EVENTS = 256
         private val EMPTY_EVENT_CAPABILITIES = ByteArray(ULong.SIZE_BYTES)
         private val EMPTY_FORCE_FEEDBACK_CAPABILITIES = ByteArray(ULong.SIZE_BYTES * 2)
-
-        private fun intBytes(value: Int): ByteArray = ByteArray(Int.SIZE_BYTES).also { bytes ->
-            LittleEndianBuffer(bytes).writeU32(0, value.toUInt())
-        }
 
         private fun ByteArray.hasBit(index: Int): Boolean {
             if (index !in 0 until size * Byte.SIZE_BITS) return false
@@ -575,25 +576,18 @@ internal class EvdevDevice(
         private val Int.hasRead: Boolean
             get() = this and 2 != 0
 
-        private fun UserMemory.readInt(): Int? = copyFromUser(Int.SIZE_BYTES)
-            ?.let { LittleEndianBuffer(it).readU32(0).toInt() }
-
-        private fun UserMemory.copyResult(bytes: ByteArray, fixedSize: Boolean): Long {
-            if (!copyToUser(bytes)) return -Errno.EFAULT.toLong()
-            return if (fixedSize) 0L else bytes.size.toLong()
-        }
-
         private fun UserMemory.copyCString(value: String, requested: Int): Long {
             if (requested == 0) return 0L
             val encoded = value.encodeToByteArray()
-            val bytes = ByteArray(minOf(requested, encoded.size + 1))
-            encoded.copyInto(bytes, endIndex = minOf(encoded.size, bytes.size))
-            return copyResult(bytes, fixedSize = false)
+            val length = minOf(requested, encoded.size)
+            if (!copyToUser(encoded, size = length)) return -Errno.EFAULT.toLong()
+            if (length == requested) return length.toLong()
+            return if (writeWord(0uL, Byte.SIZE_BYTES, length)) length + 1L else -Errno.EFAULT.toLong()
         }
 
         private fun UserMemory.copyBitmap(bitmap: ByteArray, requested: Int): Long {
-            val bytes = bitmap.copyOf(minOf(requested, bitmap.size))
-            return copyResult(bytes, fixedSize = false)
+            val length = minOf(requested, bitmap.size)
+            return if (copyToUser(bitmap, size = length)) length.toLong() else -Errno.EFAULT.toLong()
         }
     }
 }

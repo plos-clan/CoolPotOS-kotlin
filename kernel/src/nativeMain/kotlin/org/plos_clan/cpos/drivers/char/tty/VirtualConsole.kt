@@ -6,7 +6,6 @@ import org.plos_clan.cpos.tasks.Signal
 import org.plos_clan.cpos.tasks.SignalInfo
 import org.plos_clan.cpos.tasks.SignalRouter
 import org.plos_clan.cpos.utils.Errno
-import org.plos_clan.cpos.utils.LittleEndianBuffer
 
 internal class VirtualConsole(val number: Int, val session: TtySession) {
     private class Controller(
@@ -31,31 +30,26 @@ internal class VirtualConsole(val number: Int, val session: TtySession) {
         return true
     }
 
-    fun modeBytes(): ByteArray {
-        val bytes = ByteArray(8)
-        val owner = controller ?: return bytes
-        val data = LittleEndianBuffer(bytes)
-        bytes[0] = 1
-        bytes[1] = owner.wait
+    fun writeMode(args: UserMemory): Boolean = args.writeRecord(8) { data ->
+        val owner = controller ?: return@writeRecord
+        data.writeU8(0, 1u)
+        data.writeU8(1, owner.wait.toUByte())
         data.writeU16(2, owner.release.number.toUShort())
         data.writeU16(4, owner.acquire.number.toUShort())
-        return bytes
     }
 
-    fun setMode(args: UserMemory, process: Process): Int {
-        val bytes = ByteArray(8)
-        if (!args.copyFromUser(bytes)) return -Errno.EFAULT
-        if (bytes[0] == 0.toByte()) {
-            controller = null
-            return 0
+    fun setMode(args: UserMemory, process: Process): Int = args.readRecord(8) { data ->
+        when (data.readU8(0).toInt()) {
+            0 -> controller = null
+            1 -> {
+                val release = Signal.from(data.readU16(2).toInt()) ?: return -Errno.EINVAL
+                val acquire = Signal.from(data.readU16(4).toInt()) ?: return -Errno.EINVAL
+                controller = Controller(process, release, acquire, data.readU8(1).toByte())
+            }
+            else -> return -Errno.EINVAL
         }
-        if (bytes[0] != 1.toByte()) return -Errno.EINVAL
-        val data = LittleEndianBuffer(bytes)
-        val release = Signal.from(data.readU16(2).toInt()) ?: return -Errno.EINVAL
-        val acquire = Signal.from(data.readU16(4).toInt()) ?: return -Errno.EINVAL
-        controller = Controller(process, release, acquire, bytes[1])
-        return 0
-    }
+        0
+    } ?: -Errno.EFAULT
 
     fun requestRelease(target: Int): Boolean {
         val owner = controller ?: return false

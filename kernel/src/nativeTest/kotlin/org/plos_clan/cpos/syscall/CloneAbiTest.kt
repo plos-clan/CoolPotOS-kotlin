@@ -15,6 +15,9 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
 class CloneAbiTest {
+    private fun decode(bytes: ByteArray): CloneRequest? =
+        CloneRequest.decode(LittleEndianBuffer(bytes), bytes.size)
+
     @Test
     fun pidfdAndTidOutputsRemainIndependentAcrossArgumentVersions() {
         for (size in listOf(64, 80, 88)) {
@@ -29,7 +32,7 @@ class CloneAbiTest {
                 writeU64(48, 0x2000uL)
                 writeU64(56, 0x7000uL)
             }
-            val request = assertNotNull(CloneRequest.decode(bytes))
+            val request = assertNotNull(decode(bytes))
             assertNull(request.validate())
             assertEquals(0x1_0000_1000uL, request.pidfd)
             assertEquals(0x1_0000_2000uL, request.childTid)
@@ -47,7 +50,7 @@ class CloneAbiTest {
         input.writeU64(24, 0x1000uL)
         for (flags in listOf(0uL, 0x1000uL, 0x10_0000uL, 0x10_1000uL)) {
             input.writeU64(0, flags)
-            val request = assertNotNull(CloneRequest.decode(bytes))
+            val request = assertNotNull(decode(bytes))
             assertEquals(if (flags == 0x10_1000uL) Errno.EINVAL else null, request.validate())
         }
     }
@@ -57,11 +60,11 @@ class CloneAbiTest {
         val bytes = ByteArray(64)
         val input = LittleEndianBuffer(bytes)
         input.writeU64(0, 0x1_1f00uL) // THREAD | PIDFD | SIGHAND | FILES | FS | VM
-        assertNull(assertNotNull(CloneRequest.decode(bytes)).validate())
+        assertNull(assertNotNull(decode(bytes)).validate())
         input.writeU64(32, 17uL)
-        assertEquals(Errno.EINVAL, assertNotNull(CloneRequest.decode(bytes)).validate())
+        assertEquals(Errno.EINVAL, assertNotNull(decode(bytes)).validate())
         input.writeU64(0, 0x40_1000uL) // DETACHED | PIDFD
-        assertEquals(Errno.EINVAL, assertNotNull(CloneRequest.decode(bytes)).validate())
+        assertEquals(Errno.EINVAL, assertNotNull(decode(bytes)).validate())
     }
 
     @Test
@@ -81,25 +84,25 @@ class CloneAbiTest {
 
     @Test
     fun decodingStillValidatesStackBoundsAndPartialExtensions() {
-        assertNull(CloneRequest.decode(ByteArray(63)))
+        assertNull(decode(ByteArray(63)))
         val bytes = ByteArray(88)
         val input = LittleEndianBuffer(bytes)
         input.writeU64(0, 0x1000uL)
         input.writeU64(40, 0x1000uL)
-        assertNull(CloneRequest.decode(bytes))
+        assertNull(decode(bytes))
         input.writeU64(48, ULong.MAX_VALUE)
-        assertNull(CloneRequest.decode(bytes))
+        assertNull(decode(bytes))
         input.writeU64(40, 0uL)
         input.writeU64(48, 0uL)
         input.writeU64(72, 1uL)
-        for (size in 73..88) assertNull(CloneRequest.decode(bytes.copyOf(size)))
+        for (size in 73..88) assertNull(decode(bytes.copyOf(size)))
         input.writeU64(72, 0uL)
         input.writeU64(0, 0x2_0000_1000uL) // INTO_CGROUP | PIDFD
         for (size in 64..87) {
-            assertEquals(Errno.EINVAL, assertNotNull(CloneRequest.decode(bytes.copyOf(size))).validate())
+            assertEquals(Errno.EINVAL, assertNotNull(decode(bytes.copyOf(size))).validate())
         }
         input.writeU64(80, 7uL)
-        val request = assertNotNull(CloneRequest.decode(bytes))
+        val request = assertNotNull(decode(bytes))
         assertNull(request.validate())
         assertEquals(7uL, request.cgroup)
     }

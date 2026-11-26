@@ -54,7 +54,7 @@ internal object ProcessExit {
         val address = thread.clearChildTid
         thread.clearChildTid = 0uL
         if (address != 0uL &&
-            UserMemory(thread.process.addressSpace, address).copyToUser(ByteArray(Int.SIZE_BYTES))
+            UserMemory(thread.process.addressSpace, address).writeUInt(0u)
         ) {
             Futex.wake(thread.process, address)
         }

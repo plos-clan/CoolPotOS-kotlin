@@ -7,6 +7,7 @@ import org.plos_clan.cpos.fs.vfs.Inode
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsOperationContext
 import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.mem.IoScratch
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.CapEnum
 import org.plos_clan.cpos.tasks.ProcessManager
@@ -42,28 +43,29 @@ internal abstract class NetworkSocket(
         val control = InterfaceControl.entries.firstOrNull { it.command == command }
             ?: return super.ioctl(caller, inode, command, args)
         if (control == InterfaceControl.LIST) return listInterfaces(args)
-        val bytes = args.copyFromUser(IFREQ_SIZE) ?: return -VfsError.FAULT.errno.toLong()
+        return IoScratch.use(IFREQ_SIZE) { bytes ->
+            if (!args.readInto(bytes, IFREQ_SIZE)) return -VfsError.FAULT.errno.toLong()
+            interfaceRequest(control, args, bytes)
+        }
+    }
+
+    private fun interfaceRequest(control: InterfaceControl, args: UserMemory, bytes: ByteArray): Long {
         val data = LittleEndianBuffer(bytes)
-        val terminator = bytes.indexOf(0)
-        val end = if (terminator < 0) IFNAMSIZ else minOf(terminator, IFNAMSIZ)
-        val name = bytes.decodeToString(0, end)
         val intfc = if (control == InterfaceControl.NAME) {
             network.interfaceByIndex(data.readU32(IFNAMSIZ).toInt())
         } else {
-            network.interfaceByName(name)
+            var end = 0
+            while (end < IFNAMSIZ && bytes[end] != 0.toByte()) end++
+            network.interfaceByName(bytes.decodeToString(0, end))
         } ?: return -VfsError.NO_DEVICE.errno.toLong()
         if (control.writes) return configureInterface(control, intfc, data)
         when (control) {
-            InterfaceControl.NAME -> {
-                bytes.fill(0, 0, IFNAMSIZ)
-                val encodedName = intfc.name.encodeToByteArray()
-                encodedName.copyInto(bytes, endIndex = minOf(encodedName.size, IFNAMSIZ - 1))
-            }
+            InterfaceControl.NAME -> intfc.copyName(bytes, 0, IFNAMSIZ)
             InterfaceControl.GET_FLAGS -> data.writeU16(IFNAMSIZ, intfc.flags.toUShort())
             InterfaceControl.GET_MTU -> data.writeU32(IFNAMSIZ, intfc.mtu.toUInt())
             InterfaceControl.INDEX -> data.writeU32(IFNAMSIZ, intfc.index.toUInt())
             InterfaceControl.GET_HARDWARE_ADDRESS -> {
-                bytes.fill(0, IFNAMSIZ)
+                bytes.fill(0, IFNAMSIZ, IFREQ_SIZE)
                 data.writeU16(IFNAMSIZ, intfc.kind.hardwareType)
                 intfc.hardwareAddress.copyTo(bytes, IFNAMSIZ + UShort.SIZE_BYTES)
             }
@@ -81,40 +83,46 @@ internal abstract class NetworkSocket(
                     } else assigned.prefix.broadcast
                     else -> assigned.address
                 }
-                val socketAddress = Ipv4SocketAddress(address, 0u)
-                SocketAddressAbi.encode(socketAddress).copyInto(bytes, IFNAMSIZ)
+                SocketAddressAbi.writeIpv4(bytes, IFNAMSIZ, address)
             }
             else -> return -VfsError.INVALID_ARGUMENT.errno.toLong()
         }
-        return if (args.copyToUser(bytes)) 0L else -VfsError.FAULT.errno.toLong()
+        return if (args.writeFrom(bytes, IFREQ_SIZE)) 0L else -VfsError.FAULT.errno.toLong()
     }
 
     private fun listInterfaces(args: UserMemory): Long {
-        val bytes = args.copyFromUser(IFCONF_SIZE) ?: return -VfsError.FAULT.errno.toLong()
-        val data = LittleEndianBuffer(bytes)
-        val length = data.readU32(0).toInt().coerceAtLeast(0)
-        val address = data.readU64(8)
-        val entries = network.snapshotInterfaces().flatMap { intfc ->
-            network.interfaceAddresses(intfc.index).map { intfc.name to it.address }
-        }
-        val count = if (address == 0uL) entries.size else minOf(entries.size, length / IFREQ_SIZE)
-        if (address != 0uL && count != 0) {
-            val output = ByteArray(count * IFREQ_SIZE)
-            for (index in 0 until count) {
-                val (name, local) = entries[index]
-                val offset = index * IFREQ_SIZE
-                val encodedName = name.encodeToByteArray()
-                encodedName.copyInto(output, offset, endIndex = minOf(encodedName.size, IFNAMSIZ - 1))
-                val socketAddress = Ipv4SocketAddress(local, 0u)
-                SocketAddressAbi.encode(socketAddress).copyInto(output, offset + IFNAMSIZ)
+        val address = args.readULongLE(8) ?: return -VfsError.FAULT.errno.toLong()
+        val length = args.readUIntLE()?.toInt() ?: return -VfsError.FAULT.errno.toLong()
+        val capacity = length.coerceAtLeast(0) / IFREQ_SIZE
+        return IoScratch.borrow { scratch ->
+            val interfaces = network.snapshotInterfaces()
+            val count = if (address == 0uL) interfaces.sumOf { network.interfaceAddresses(it.index).size }
+            else encodeInterfaces(interfaces, capacity, scratch)
+            val size = count * IFREQ_SIZE
+            if (address != 0uL && !args.at(address).writeFrom(scratch.bytes, size)) {
+                return -VfsError.FAULT.errno.toLong()
             }
-            val process = ProcessManager.currentProcess()
-                ?: return -VfsError.NO_SUCH_PROCESS.errno.toLong()
-            val target = UserMemory(process.addressSpace, address)
-            if (!target.copyToUser(output)) return -VfsError.FAULT.errno.toLong()
+            if (args.writeUInt(size.toUInt())) 0L else -VfsError.FAULT.errno.toLong()
         }
-        data.writeU32(0, (count * IFREQ_SIZE).toUInt())
-        return if (args.copyToUser(bytes)) 0L else -VfsError.FAULT.errno.toLong()
+    }
+
+    private fun encodeInterfaces(interfaces: List<NetworkInterface>, capacity: Int, scratch: IoScratch): Int {
+        var count = 0
+        for (intfc in interfaces) {
+            if (count == capacity) break
+            val addresses = network.interfaceAddresses(intfc.index)
+            val entries = minOf(addresses.size, capacity - count)
+            val bytes = scratch.reserve((count + entries) * IFREQ_SIZE)
+            for (index in 0 until entries) {
+                val offset = count * IFREQ_SIZE
+                val end = offset + IFREQ_SIZE
+                bytes.fill(0, offset, end)
+                intfc.copyName(bytes, offset, IFNAMSIZ)
+                SocketAddressAbi.writeIpv4(bytes, offset + IFNAMSIZ, addresses[index].address)
+                count++
+            }
+        }
+        return count
     }
 
     private fun configureInterface(
@@ -142,6 +150,5 @@ internal abstract class NetworkSocket(
     companion object {
         private const val IFNAMSIZ = 16
         private const val IFREQ_SIZE = 40
-        private const val IFCONF_SIZE = 16
     }
 }

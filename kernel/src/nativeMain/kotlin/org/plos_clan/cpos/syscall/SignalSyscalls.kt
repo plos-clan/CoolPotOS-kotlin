@@ -111,8 +111,7 @@ internal object SignalAbi {
     private const val STACK_FLAGS_OFFSET = 8
     private const val STACK_SIZE_OFFSET = 16
 
-    fun readAction(bytes: ByteArray): SignalAction {
-        val input = LittleEndianBuffer(bytes)
+    fun readAction(input: LittleEndianBuffer): SignalAction {
         val flags = input.readU64(ACTION_FLAGS_OFFSET) and supportedActionFlags
         return SignalAction(
             handler = input.readU64(ACTION_HANDLER_OFFSET),
@@ -122,30 +121,29 @@ internal object SignalAbi {
         )
     }
 
-    fun actionBytes(action: SignalAction): ByteArray = ByteArray(SIGNAL_ACTION_SIZE).also { bytes ->
-        LittleEndianBuffer(bytes).apply {
-            writeU64(ACTION_HANDLER_OFFSET, action.handler)
-            writeU64(ACTION_FLAGS_OFFSET, action.flags)
-            writeU64(ACTION_RESTORER_OFFSET, action.restorer)
-            writeU64(ACTION_MASK_OFFSET, action.mask)
-        }
+    fun writeAction(output: LittleEndianBuffer, action: SignalAction) {
+        output.writeU64(ACTION_HANDLER_OFFSET, action.handler)
+        output.writeU64(ACTION_FLAGS_OFFSET, action.flags)
+        output.writeU64(ACTION_RESTORER_OFFSET, action.restorer)
+        output.writeU64(ACTION_MASK_OFFSET, action.mask)
     }
 
-    fun readQueuedInfo(bytes: ByteArray): QueuedSignalInfo {
-        val input = LittleEndianBuffer(bytes)
+    fun readQueuedInfo(input: LittleEndianBuffer): QueuedSignalInfo {
+        val payload = ByteArray(SIGNAL_INFO_SIZE - INFO_PAYLOAD_OFFSET)
+        input.copyTo(INFO_PAYLOAD_OFFSET, payload)
         return QueuedSignalInfo(
             number = input.readU32(INFO_SIGNAL_OFFSET).toInt(),
             error = input.readU32(INFO_ERROR_OFFSET).toInt(),
             code = input.readU32(INFO_CODE_OFFSET).toInt(),
-            payload = bytes.copyOfRange(INFO_PAYLOAD_OFFSET, SIGNAL_INFO_SIZE),
+            payload = payload,
         )
     }
 
-    fun infoBytes(info: SignalInfo): ByteArray =
-        ByteArray(SIGNAL_INFO_SIZE).also { writeInfo(it, 0, info) }
+    fun writeInfo(memory: UserMemory, info: SignalInfo): Boolean =
+        memory.writeRecord(SIGNAL_INFO_SIZE) { writeInfo(it, 0, info) }
 
-    fun writeInfo(destination: ByteArray, offset: Int, info: SignalInfo) {
-        LittleEndianBuffer(destination).apply {
+    fun writeInfo(output: LittleEndianBuffer, offset: Int, info: SignalInfo) {
+        with(output) {
             writeU32(offset + INFO_SIGNAL_OFFSET, info.signal.number.toUInt())
             writeU32(offset + INFO_ERROR_OFFSET, info.error.toUInt())
             writeU32(offset + INFO_CODE_OFFSET, info.code.toUInt())
@@ -166,23 +164,20 @@ internal object SignalAbi {
 
                 is SignalPayload.Fault ->
                     writeU64(offset + INFO_PAYLOAD_OFFSET, payload.address)
-                is SignalPayload.Raw -> payload.bytes.copyInto(
-                    destination = destination,
-                    destinationOffset = offset + INFO_PAYLOAD_OFFSET,
-                    endIndex = minOf(payload.bytes.size, SIGNAL_INFO_SIZE - INFO_PAYLOAD_OFFSET),
-                )
+                is SignalPayload.Raw -> {
+                    val count = minOf(payload.bytes.size, SIGNAL_INFO_SIZE - INFO_PAYLOAD_OFFSET)
+                    copyFrom(offset + INFO_PAYLOAD_OFFSET, payload.bytes, count)
+                }
                 SignalPayload.None -> Unit
             }
         }
     }
 
     fun readStack(
-        bytes: ByteArray,
+        input: LittleEndianBuffer,
         offset: Int = 0,
         allowStatusFlag: Boolean = false,
     ): SignalStack? {
-        if (offset < 0 || offset > bytes.size - SIGNAL_STACK_SIZE) return null
-        val input = LittleEndianBuffer(bytes)
         val flags = input.readU32(offset + STACK_FLAGS_OFFSET)
         val configuration = if (allowStatusFlag) flags and STACK_ON_STACK.inv() else flags
         if (configuration != 0u && configuration != STACK_DISABLED &&
@@ -202,11 +197,8 @@ internal object SignalAbi {
         return SignalStack(base, size, configuration == STACK_AUTO_DISABLE)
     }
 
-    fun stackBytes(stack: SignalStack, stackPointer: ULong): ByteArray =
-        ByteArray(SIGNAL_STACK_SIZE).also { writeStack(it, 0, stack, stackPointer) }
-
     fun writeStack(
-        destination: ByteArray,
+        output: LittleEndianBuffer,
         offset: Int,
         stack: SignalStack,
         stackPointer: ULong,
@@ -216,7 +208,7 @@ internal object SignalAbi {
             stack.contains(stackPointer) -> STACK_ON_STACK
             else -> 0u
         } or if (stack.autoDisable) STACK_AUTO_DISABLE else 0u
-        LittleEndianBuffer(destination).apply {
+        with(output) {
             writeU64(offset + STACK_POINTER_OFFSET, stack.base)
             writeU32(offset + STACK_FLAGS_OFFSET, flags)
             writeU64(offset + STACK_SIZE_OFFSET, stack.size)
@@ -242,19 +234,18 @@ internal object SignalSyscalls {
         val action = if (actionAddress == 0uL) {
             null
         } else {
-            val bytes = UserMemory(process.addressSpace, actionAddress)
-                .copyFromUser(SIGNAL_ACTION_SIZE) ?: return errno(Errno.EFAULT)
-            SignalAbi.readAction(bytes)
+            val memory = UserMemory(process.addressSpace, actionAddress)
+            memory.readRecord(SIGNAL_ACTION_SIZE, decode = SignalAbi::readAction)
+                ?: return errno(Errno.EFAULT)
         }
 
         val previous = action?.let { SignalRouter.installAction(process, signal, it) }
             ?: process.signals.action(signal)
         val previousAddress = regs[PtraceRegisters.IDX_RDX]
-        if (previousAddress != 0uL &&
-            !UserMemory(process.addressSpace, previousAddress)
-                .copyToUser(SignalAbi.actionBytes(previous))
-        ) {
-            return errno(Errno.EFAULT)
+        if (previousAddress != 0uL) {
+            val memory = UserMemory(process.addressSpace, previousAddress)
+            val written = memory.writeRecord(SIGNAL_ACTION_SIZE) { SignalAbi.writeAction(it, previous) }
+            if (!written) return errno(Errno.EFAULT)
         }
         return 0L
     }
@@ -364,11 +355,9 @@ internal object SignalSyscalls {
                 val sequence = Scheduler.preparePark()
                 val info = thread.takePendingSignal(accepted)
                 if (info != null) {
-                    if (infoAddress != 0uL &&
-                        !UserMemory(process.addressSpace, infoAddress)
-                            .copyToUser(SignalAbi.infoBytes(info))
-                    ) {
-                        return errno(Errno.EFAULT)
+                    if (infoAddress != 0uL) {
+                        val target = UserMemory(process.addressSpace, infoAddress)
+                        if (!SignalAbi.writeInfo(target, info)) return errno(Errno.EFAULT)
                     }
                     return info.signal.number.toLong()
                 }
@@ -409,16 +398,17 @@ internal object SignalSyscalls {
 
         if (replacementAddress != 0uL) {
             if (previous.contains(regs[PtraceRegisters.IDX_RSP])) return errno(Errno.EPERM)
-            val bytes = UserMemory(process.addressSpace, replacementAddress)
-                .copyFromUser(SIGNAL_STACK_SIZE) ?: return errno(Errno.EFAULT)
-            val replacement = SignalAbi.readStack(bytes) ?: return errno(Errno.EINVAL)
+            val memory = UserMemory(process.addressSpace, replacementAddress)
+            val replacement = memory.readRecord(SIGNAL_STACK_SIZE) {
+                SignalAbi.readStack(it) ?: return errno(Errno.EINVAL)
+            } ?: return errno(Errno.EFAULT)
             thread.signals.replaceStack(replacement)
         }
-        if (previousAddress != 0uL &&
-            !UserMemory(process.addressSpace, previousAddress)
-                .copyToUser(SignalAbi.stackBytes(previous, regs[PtraceRegisters.IDX_RSP]))
-        ) {
-            return errno(Errno.EFAULT)
+        if (previousAddress != 0uL) {
+            val memory = UserMemory(process.addressSpace, previousAddress)
+            val pointer = regs[PtraceRegisters.IDX_RSP]
+            val written = memory.writeRecord(SIGNAL_STACK_SIZE) { SignalAbi.writeStack(it, 0, previous, pointer) }
+            if (!written) return errno(Errno.EFAULT)
         }
         return 0L
     }
@@ -584,8 +574,7 @@ internal object SignalSyscalls {
     }
 
     private fun readQueuedInfo(process: Process, address: ULong): QueuedSignalInfo? =
-        UserMemory(process.addressSpace, address).copyFromUser(SIGNAL_INFO_SIZE)
-            ?.let(SignalAbi::readQueuedInfo)
+        UserMemory(process.addressSpace, address).readRecord(SIGNAL_INFO_SIZE, decode = SignalAbi::readQueuedInfo)
 
     private fun signalOrZero(raw: ULong): RequestedSignal? = when {
         raw == 0uL -> RequestedSignal(null)
@@ -596,21 +585,19 @@ internal object SignalSyscalls {
         raw.takeIf { it in 1uL..Int.MAX_VALUE.toULong() }?.toInt()
 
     private fun readMask(process: Process, address: ULong): ULong? =
-        UserMemory(process.addressSpace, address).copyFromUser(SIGNAL_SET_SIZE)
-            ?.let { LittleEndianBuffer(it).readU64(0) }
+        UserMemory(process.addressSpace, address).readULongLE()
 
     private fun writeMask(process: Process, address: ULong, mask: ULong): Boolean {
         if (address == 0uL) return false
-        val bytes = ByteArray(SIGNAL_SET_SIZE).also { LittleEndianBuffer(it).writeU64(0, mask) }
-        return UserMemory(process.addressSpace, address).copyToUser(bytes)
+        return UserMemory(process.addressSpace, address).writeULong(mask)
     }
 
     private fun readTimeout(process: Process, address: ULong): SignalTimeout {
         if (address == 0uL) return SignalTimeout.Infinite
-        val bytes = UserMemory(process.addressSpace, address).copyFromUser(TimeSpec.NATIVE_SIZE)
+        val timeout = UserMemory(process.addressSpace, address)
+            .readRecord(TimeSpec.NATIVE_SIZE, decode = TimeSpec::readFrom)
             ?: return SignalTimeout.Invalid(Errno.EFAULT)
-        val timeout = TimeSpec(0, 0)
-        return if (timeout.updateFromNativeBytes(bytes) && timeout.isValidDuration) {
+        return if (timeout.isValidDuration) {
             SignalTimeout.Finite(timeout)
         } else {
             SignalTimeout.Invalid(Errno.EINVAL)
@@ -857,12 +844,12 @@ private object SignalFrame {
         val output = LittleEndianBuffer(frame)
         output.writeU64(RETURN_ADDRESS_OFFSET, action.restorer)
         output.writeU64(CONTEXT_FLAGS_OFFSET, USER_CONTEXT_FLAGS)
-        SignalAbi.writeStack(frame, CONTEXT_STACK_OFFSET, alternativeStack, oldStackPointer)
+        SignalAbi.writeStack(output, CONTEXT_STACK_OFFSET, alternativeStack, oldStackPointer)
         writeRegisters(output, registers, action, returnMask, synchronous)
         output.writeU64(CONTEXT_FPSTATE_POINTER_OFFSET, xstateAddress)
         output.writeU64(CONTEXT_SIGNAL_MASK_OFFSET, returnMask)
         if (action.has(SignalActionFlag.SIGNAL_INFO)) {
-            SignalAbi.writeInfo(frame, INFO_OFFSET, info)
+            SignalAbi.writeInfo(output, INFO_OFFSET, info)
         }
 
         val xstateOffset = (xstateAddress - frameAddress).toInt()
@@ -916,7 +903,7 @@ private object SignalFrame {
             .copyFromUser(CONTEXT_SIZE) ?: return null
         val input = LittleEndianBuffer(bytes)
         val restoredStack = SignalAbi.readStack(
-            bytes,
+            input,
             offset = CONTEXT_STACK_OFFSET - CONTEXT_OFFSET,
             allowStatusFlag = true,
         ) ?: return null

@@ -28,7 +28,7 @@ enum class SeekOrigin {
 }
 
 private data object PathOnlyHandle : OpenFileBackend
-private const val FIONBIO = 0x5421
+private const val MUTABLE_FLAGS = OpenFlags.O_APPEND or OpenFlags.O_NONBLOCK or OpenFlags.O_NOATIME
 private const val TIOCGPTPEER = 0x5441
 
 class OpenFileDescription private constructor(
@@ -130,12 +130,12 @@ class OpenFileDescription private constructor(
 
     fun getStatusFlags(): Int = statusFlags.load()
 
-    fun setStatusFlags(flags: Int) {
-        val mutable = OpenFlags.O_APPEND or OpenFlags.O_NONBLOCK or OpenFlags.O_NOATIME
+    fun setStatusFlags(flags: Int, mask: Int = MUTABLE_FLAGS) {
+        val mutable = mask and MUTABLE_FLAGS
         while (true) {
             val observed = statusFlags.load()
             val updated = observed and mutable.inv() or (flags and mutable)
-            if (statusFlags.compareAndSet(observed, updated)) return
+            if (observed == updated || statusFlags.compareAndSet(observed, updated)) return
         }
     }
 
@@ -527,25 +527,9 @@ class OpenFileDescription private constructor(
     }
 
     fun ioctl(caller: VfsOperationContext, command: Int, args: UserMemory): Long {
-        if (references.load() == 0) {
-            return -VfsError.BAD_DESCRIPTOR.errno.toLong()
-        } else if (command == TIOCGPTPEER) {
-            return openPeer(caller, args.address)
-        } else if (command == FIONBIO) {
-            val enabled = args.readUIntLE() ?: return -VfsError.FAULT.errno.toLong()
-            while (true) {
-                val observed = statusFlags.load()
-                val updated = if (enabled == 0u) {
-                    observed and OpenFlags.O_NONBLOCK.inv()
-                } else {
-                    observed or OpenFlags.O_NONBLOCK
-                }
-                if (statusFlags.compareAndSet(observed, updated)) break
-            }
-            return 0L
-        } else {
-            return backend.ioctl(caller, inode, command, args)
-        }
+        if (references.load() == 0) return -VfsError.BAD_DESCRIPTOR.errno.toLong()
+        if (command == TIOCGPTPEER) return openPeer(caller, args.address)
+        return backend.ioctl(caller, inode, command, args)
     }
 
     private fun openPeer(caller: VfsOperationContext, flags: ULong): Long {

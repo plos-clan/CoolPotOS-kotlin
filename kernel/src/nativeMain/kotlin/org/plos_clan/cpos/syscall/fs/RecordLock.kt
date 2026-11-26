@@ -6,80 +6,96 @@ import org.plos_clan.cpos.fs.vfs.FileLockDomain
 import org.plos_clan.cpos.fs.vfs.FileLockMode
 import org.plos_clan.cpos.fs.vfs.FileLockRange
 import org.plos_clan.cpos.fs.vfs.VfsResult
+import org.plos_clan.cpos.mem.IoScratch
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.fs.vfs.OpenFileDescription
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 
 internal object RecordLock {
+    private const val SIZE = 32
+
     fun execute(process: Process, descriptor: Int, command: Int, address: ULong): Long {
         val file = process.fdTable.acquire(descriptor) ?: return errno(Errno.EBADF)
         return try {
             if (file.access == AccessMode.PATH) return errno(Errno.EBADF)
             val memory = UserMemory(process.addressSpace, address)
-            val bytes = memory.copyFromUser(32) ?: return errno(Errno.EFAULT)
-            val input = LittleEndianBuffer(bytes)
-            val type = input.readU16(0).toInt()
-            val ofd = command >= 36
-            val owner = if (ofd) null else process.id
-            if (type !in 0..2 || ofd && input.readU32(24) != 0u) return errno(Errno.EINVAL)
-            val mode = when (type) {
-                0 -> FileLockMode.SHARED
-                1 -> FileLockMode.EXCLUSIVE
-                else -> null
-            }
-            val base = when (input.readU16(2).toInt()) {
-                0 -> 0L
-                1 -> file.offset
-                2 -> when (val result = file.inode.attributes(process.vfsOperationContext)) {
-                    is VfsResult.Ok -> {
-                        val size = result.value.metadata.size
-                        if (size > Long.MAX_VALUE.toULong()) return errno(Errno.EOVERFLOW)
-                        size.toLong()
-                    }
-                    is VfsResult.Err -> return errno(result.error.errno)
-                }
-                else -> return errno(Errno.EINVAL)
-            }
-            val offset = input.readU64(8).toLong()
-            if (offset > 0 && base > Long.MAX_VALUE - offset) return errno(Errno.EOVERFLOW)
-            val anchor = base + offset
-            if (anchor < 0) return errno(Errno.EINVAL)
-            val length = input.readU64(16).toLong()
-            if (length > 0 && anchor > Long.MAX_VALUE - (length - 1)) return errno(Errno.EOVERFLOW)
-            val start = if (length < 0) anchor + length else anchor
-            val end = when {
-                length < 0 -> anchor - 1
-                length == 0L -> Long.MAX_VALUE
-                else -> anchor + (length - 1)
-            }
-            if (start < 0 || end < start) return errno(Errno.EINVAL)
-            val range = FileLockRange(start, end)
-            if (command == 5 || command == 36) {
-                if (mode == null) return errno(Errno.EINVAL)
-                val requested = FileLock(mode, range)
-                val conflict = file.inode.superBlock.fileLocks.query(file, requested, owner)
-                input.writeU16(0, when (conflict?.mode) {
-                    FileLockMode.SHARED -> 0u
-                    FileLockMode.EXCLUSIVE -> 1u
-                    null -> 2u
-                })
-                if (conflict != null) encodeConflict(input, conflict)
-                return if (memory.copyToUser(bytes)) 0L else errno(Errno.EFAULT)
-            }
-            if (mode == FileLockMode.SHARED && !file.access.canRead ||
-                mode == FileLockMode.EXCLUSIVE && !file.access.canWrite
-            ) return errno(Errno.EBADF)
-            val result = file.inode.superBlock.fileLocks.acquire(
-                file, mode, command == 6 || command == 37, FileLockDomain.RECORD, range, owner,
-            )
-            when (result) {
-                is VfsResult.Ok -> 0L
-                is VfsResult.Err -> errno(result.error.errno)
+            IoScratch.use(SIZE) { bytes ->
+                if (!memory.readInto(bytes, SIZE)) return errno(Errno.EFAULT)
+                apply(process, file, command, memory, bytes)
             }
         } finally {
             file.release()
+        }
+    }
+
+    private fun apply(
+        process: Process,
+        file: OpenFileDescription,
+        command: Int,
+        memory: UserMemory,
+        bytes: ByteArray,
+    ): Long {
+        val input = LittleEndianBuffer(bytes)
+        val type = input.readU16(0).toInt()
+        val ofd = command >= 36
+        val owner = if (ofd) null else process.id
+        if (type !in 0..2 || ofd && input.readU32(24) != 0u) return errno(Errno.EINVAL)
+        val mode = when (type) {
+            0 -> FileLockMode.SHARED
+            1 -> FileLockMode.EXCLUSIVE
+            else -> null
+        }
+        val base = when (input.readU16(2).toInt()) {
+            0 -> 0L
+            1 -> file.offset
+            2 -> when (val result = file.inode.attributes(process.vfsOperationContext)) {
+                is VfsResult.Ok -> {
+                    val size = result.value.metadata.size
+                    if (size > Long.MAX_VALUE.toULong()) return errno(Errno.EOVERFLOW)
+                    size.toLong()
+                }
+                is VfsResult.Err -> return errno(result.error.errno)
+            }
+            else -> return errno(Errno.EINVAL)
+        }
+        val offset = input.readU64(8).toLong()
+        if (offset > 0 && base > Long.MAX_VALUE - offset) return errno(Errno.EOVERFLOW)
+        val anchor = base + offset
+        if (anchor < 0) return errno(Errno.EINVAL)
+        val length = input.readU64(16).toLong()
+        if (length > 0 && anchor > Long.MAX_VALUE - (length - 1)) return errno(Errno.EOVERFLOW)
+        val start = if (length < 0) anchor + length else anchor
+        val end = when {
+            length < 0 -> anchor - 1
+            length == 0L -> Long.MAX_VALUE
+            else -> anchor + (length - 1)
+        }
+        if (start < 0 || end < start) return errno(Errno.EINVAL)
+        val range = FileLockRange(start, end)
+        if (command == 5 || command == 36) {
+            if (mode == null) return errno(Errno.EINVAL)
+            val requested = FileLock(mode, range)
+            val conflict = file.inode.superBlock.fileLocks.query(file, requested, owner)
+            input.writeU16(0, when (conflict?.mode) {
+                FileLockMode.SHARED -> 0u
+                FileLockMode.EXCLUSIVE -> 1u
+                null -> 2u
+            })
+            if (conflict != null) encodeConflict(input, conflict)
+            return if (memory.writeFrom(bytes, SIZE)) 0L else errno(Errno.EFAULT)
+        }
+        if (mode == FileLockMode.SHARED && !file.access.canRead ||
+            mode == FileLockMode.EXCLUSIVE && !file.access.canWrite
+        ) return errno(Errno.EBADF)
+        val result = file.inode.superBlock.fileLocks.acquire(
+            file, mode, command == 6 || command == 37, FileLockDomain.RECORD, range, owner,
+        )
+        return when (result) {
+            is VfsResult.Ok -> 0L
+            is VfsResult.Err -> errno(result.error.errno)
         }
     }
 

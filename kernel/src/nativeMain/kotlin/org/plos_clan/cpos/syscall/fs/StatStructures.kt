@@ -83,26 +83,26 @@ internal data class LinuxFileStatus(
 }
 
 internal class LinuxStat(private val status: LinuxFileStatus) : NativeStruct {
-    override fun toNativeBytes(): ByteArray = ByteArray(STAT_SIZE).also { buffer ->
-        LittleEndianBuffer(buffer).apply {
-            writeU64(0, status.fileSystemDevice.value)
-            writeU64(8, status.inodeId)
-            writeU64(16, status.metadata.linkCount.toULong())
-            writeU32(24, status.mode)
-            writeU32(28, status.metadata.uid)
-            writeU32(32, status.metadata.gid)
-            writeU32(36, 0u) // __pad0
-            writeU64(40, status.metadata.deviceNumber)
-            writeU64(48, status.metadata.size)
-            writeU64(56, status.blockSize)
-            writeU64(64, status.blocks)
-            writeU64(72, status.metadata.timestamps.accessTime.seconds.toULong())
-            writeU64(80, status.metadata.timestamps.accessTime.nanoseconds.toULong())
-            writeU64(88, status.metadata.timestamps.modificationTime.seconds.toULong())
-            writeU64(96, status.metadata.timestamps.modificationTime.nanoseconds.toULong())
-            writeU64(104, status.metadata.timestamps.changeTime.seconds.toULong())
-            writeU64(112, status.metadata.timestamps.changeTime.nanoseconds.toULong())
-        }
+    override val nativeSize: Int get() = STAT_SIZE
+
+    override fun writeTo(output: LittleEndianBuffer) {
+        output.writeU64(0, status.fileSystemDevice.value)
+        output.writeU64(8, status.inodeId)
+        output.writeU64(16, status.metadata.linkCount.toULong())
+        output.writeU32(24, status.mode)
+        output.writeU32(28, status.metadata.uid)
+        output.writeU32(32, status.metadata.gid)
+        output.writeU32(36, 0u)
+        output.writeU64(40, status.metadata.deviceNumber)
+        output.writeU64(48, status.metadata.size)
+        output.writeU64(56, status.blockSize)
+        output.writeU64(64, status.blocks)
+        output.writeU64(72, status.metadata.timestamps.accessTime.seconds.toULong())
+        output.writeU64(80, status.metadata.timestamps.accessTime.nanoseconds.toULong())
+        output.writeU64(88, status.metadata.timestamps.modificationTime.seconds.toULong())
+        output.writeU64(96, status.metadata.timestamps.modificationTime.nanoseconds.toULong())
+        output.writeU64(104, status.metadata.timestamps.changeTime.seconds.toULong())
+        output.writeU64(112, status.metadata.timestamps.changeTime.nanoseconds.toULong())
     }
 }
 
@@ -111,30 +111,30 @@ internal class LinuxStatx(
     private val isMountRoot: Boolean,
     private val mountId: ULong,
 ) : NativeStruct {
-    override fun toNativeBytes(): ByteArray = ByteArray(STATX_SIZE).also { buffer ->
-        LittleEndianBuffer(buffer).apply {
-            val birthTime = status.metadata.timestamps.birthTime
-            writeU32(0, STATX_SUPPORTED_FIELDS or if (birthTime == null) 0u else STATX_BTIME)
-            writeU32(4, status.blockSize.toUInt())
-            writeU64(8, if (isMountRoot) STATX_ATTR_MOUNT_ROOT else 0uL)
-            writeU32(16, status.metadata.linkCount)
-            writeU32(20, status.metadata.uid)
-            writeU32(24, status.metadata.gid)
-            writeU16(28, status.mode.toUShort())
-            writeU64(32, status.inodeId)
-            writeU64(40, status.metadata.size)
-            writeU64(48, status.blocks)
-            writeU64(56, STATX_ATTR_MOUNT_ROOT)
-            writeTimestamp(64, status.metadata.timestamps.accessTime)
-            birthTime?.let { writeTimestamp(80, it) }
-            writeTimestamp(96, status.metadata.timestamps.changeTime)
-            writeTimestamp(112, status.metadata.timestamps.modificationTime)
-            writeU32(128, status.specialDeviceMajor)
-            writeU32(132, status.specialDeviceMinor)
-            writeU32(136, status.fileSystemDevice.major)
-            writeU32(140, status.fileSystemDevice.minor)
-            writeU64(144, mountId)
-        }
+    override val nativeSize: Int get() = STATX_SIZE
+
+    override fun writeTo(output: LittleEndianBuffer) {
+        val birthTime = status.metadata.timestamps.birthTime
+        output.writeU32(0, STATX_SUPPORTED_FIELDS or if (birthTime == null) 0u else STATX_BTIME)
+        output.writeU32(4, status.blockSize.toUInt())
+        output.writeU64(8, if (isMountRoot) STATX_ATTR_MOUNT_ROOT else 0uL)
+        output.writeU32(16, status.metadata.linkCount)
+        output.writeU32(20, status.metadata.uid)
+        output.writeU32(24, status.metadata.gid)
+        output.writeU16(28, status.mode.toUShort())
+        output.writeU64(32, status.inodeId)
+        output.writeU64(40, status.metadata.size)
+        output.writeU64(48, status.blocks)
+        output.writeU64(56, STATX_ATTR_MOUNT_ROOT)
+        output.writeTimestamp(64, status.metadata.timestamps.accessTime)
+        birthTime?.let { output.writeTimestamp(80, it) }
+        output.writeTimestamp(96, status.metadata.timestamps.changeTime)
+        output.writeTimestamp(112, status.metadata.timestamps.modificationTime)
+        output.writeU32(128, status.specialDeviceMajor)
+        output.writeU32(132, status.specialDeviceMinor)
+        output.writeU32(136, status.fileSystemDevice.major)
+        output.writeU32(140, status.fileSystemDevice.minor)
+        output.writeU64(144, mountId)
     }
 
     private fun LittleEndianBuffer.writeTimestamp(offset: Int, timestamp: Instant) {
@@ -148,19 +148,19 @@ internal class LinuxStatFs(
     private val mountFlags: MountFlags,
     private val statistics: FileSystemStatistics,
 ) : NativeStruct {
-    override fun toNativeBytes(): ByteArray = ByteArray(STATFS_SIZE).also { buffer ->
-        LittleEndianBuffer(buffer).apply {
-            writeU64(0, fileSystemMagic)
-            writeU64(8, statistics.blockSize)
-            writeU64(16, statistics.blocks)
-            writeU64(24, statistics.freeBlocks)
-            writeU64(32, statistics.availableBlocks)
-            writeU64(40, statistics.files)
-            writeU64(48, statistics.freeFiles)
-            writeU64(64, statistics.maximumNameLength)
-            writeU64(72, statistics.fragmentSize)
-            writeU64(80, mountFlags.toStatFsFlags())
-        }
+    override val nativeSize: Int get() = STATFS_SIZE
+
+    override fun writeTo(output: LittleEndianBuffer) {
+        output.writeU64(0, fileSystemMagic)
+        output.writeU64(8, statistics.blockSize)
+        output.writeU64(16, statistics.blocks)
+        output.writeU64(24, statistics.freeBlocks)
+        output.writeU64(32, statistics.availableBlocks)
+        output.writeU64(40, statistics.files)
+        output.writeU64(48, statistics.freeFiles)
+        output.writeU64(64, statistics.maximumNameLength)
+        output.writeU64(72, statistics.fragmentSize)
+        output.writeU64(80, mountFlags.toStatFsFlags())
     }
 
     private fun MountFlags.toStatFsFlags(): ULong = StatFlag.entries.fold(0uL) { bits, flag ->

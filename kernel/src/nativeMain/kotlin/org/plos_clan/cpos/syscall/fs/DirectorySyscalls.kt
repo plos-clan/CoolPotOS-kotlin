@@ -5,9 +5,9 @@ package org.plos_clan.cpos.syscall.fs
 import kotlinx.cinterop.ExperimentalForeignApi
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.UserMemory
+import org.plos_clan.cpos.mem.IoScratch
 import org.plos_clan.cpos.syscall.Syscall.errno
 import org.plos_clan.cpos.syscall.Syscall.fileDescriptor
-import org.plos_clan.cpos.syscall.Syscall.partialOrError
 import org.plos_clan.cpos.syscall.fs.FsConstants.DIRENT64_MIN_SIZE
 import org.plos_clan.cpos.syscall.fs.FsConstants.IO_CHUNK_SIZE
 import org.plos_clan.cpos.tasks.Process
@@ -25,7 +25,12 @@ internal fun getdents64(regs: PtraceRegisters, process: Process): Long {
     val user = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI])
     if (!user.isWritable(capacity)) return errno(Errno.EFAULT)
 
-    val output = ByteArray(capacity)
+    return IoScratch.use(capacity) { output ->
+        readDirectory(process, fd, user, output, capacity)
+    }
+}
+
+private fun readDirectory(process: Process, fd: Int, user: UserMemory, output: ByteArray, capacity: Int): Long {
     var written = 0
     var encountered = false
     val file = process.fdTable.acquire(fd) ?: return errno(Errno.EBADF)
@@ -36,7 +41,7 @@ internal fun getdents64(regs: PtraceRegisters, process: Process): Long {
             if (record.recordSize > capacity - written) {
                 false
             } else {
-                record.toNativeBytes().copyInto(output, written)
+                record.writeTo(output, written)
                 written += record.recordSize
                 true
             }
@@ -48,7 +53,7 @@ internal fun getdents64(regs: PtraceRegisters, process: Process): Long {
 
     if (written == 0 && encountered) return errno(Errno.EINVAL)
     if (written != 0 && !user.copyToUser(output, size = written)) {
-        return partialOrError(0uL, Errno.EFAULT)
+        return errno(Errno.EFAULT)
     }
     return written.toLong()
 }

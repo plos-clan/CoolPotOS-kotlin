@@ -56,9 +56,9 @@ internal object TimerFdSyscalls {
         val flags = regs[PtraceRegisters.IDX_RSI]
         if (flags and SETTIME_FLAGS.inv() != 0uL) return errno(Errno.EINVAL)
 
-        val bytes = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDX])
-            .copyFromUser(IntervalTimerSpec.NATIVE_SIZE) ?: return errno(Errno.EFAULT)
-        val requested = IntervalTimerSpec.fromNativeBytes(bytes) ?: return errno(Errno.EFAULT)
+        val source = UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RDX])
+        val requested = source.readRecord(IntervalTimerSpec.NATIVE_SIZE, decode = IntervalTimerSpec::readFrom)
+            ?: return errno(Errno.EFAULT)
         if (!requested.interval.isValidDuration || !requested.value.isValidDuration) {
             return errno(Errno.EINVAL)
         }
@@ -75,11 +75,11 @@ internal object TimerFdSyscalls {
             val previousAddress = regs[PtraceRegisters.IDX_R10]
             if (previousAddress == 0uL) return 0L
 
-            val previousBytes = IntervalTimerSpec(
+            val previousTime = IntervalTimerSpec(
                 previous.intervalNanos,
                 previous.valueNanos,
-            ).toNativeBytes()
-            if (UserMemory(process.addressSpace, previousAddress).copyToUser(previousBytes)) 0L
+            )
+            if (UserMemory(process.addressSpace, previousAddress).writeStruct(previousTime)) 0L
             else errno(Errno.EFAULT)
         } finally {
             file.release()
@@ -93,11 +93,11 @@ internal object TimerFdSyscalls {
         return try {
             val timer = file.backend as? TimerFd ?: return errno(Errno.EINVAL)
             val setting = timer.getTime()
-            val bytes = IntervalTimerSpec(
+            val time = IntervalTimerSpec(
                 setting.intervalNanos,
                 setting.valueNanos,
-            ).toNativeBytes()
-            if (UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI]).copyToUser(bytes)) {
+            )
+            if (UserMemory(process.addressSpace, regs[PtraceRegisters.IDX_RSI]).writeStruct(time)) {
                 0L
             } else {
                 errno(Errno.EFAULT)

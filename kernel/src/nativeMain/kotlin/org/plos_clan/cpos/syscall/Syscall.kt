@@ -107,6 +107,7 @@ import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.keys.Keys
 import org.plos_clan.cpos.utils.CpuID
+import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
 import kotlin.native.internal.ExportForCppRuntime
@@ -401,15 +402,22 @@ object Syscall {
         number < definitions.size.toULong() && definitions[number.toInt()]?.restartable == true
 
     fun copyWordToUser(process: Process, address: ULong, value: ULong): Long {
-        val bytes = ByteArray(ULong.SIZE_BYTES) { index ->
-            (value shr (index * Byte.SIZE_BITS)).toByte()
-        }
-        return if (UserMemory(process.addressSpace, address).copyToUser(bytes)) {
-            0L
-        } else {
-            errno(Errno.EFAULT)
-        }
+        val memory = UserMemory(process.addressSpace, address)
+        return if (memory.writeULong(value)) 0L else errno(Errno.EFAULT)
     }
+
+    internal inline fun <T> readArguments(
+        memory: UserMemory,
+        size: Int,
+        knownSize: Int,
+        fail: (Int) -> Nothing,
+        decode: (LittleEndianBuffer) -> T?,
+    ): T = memory.readRecord(size) { input ->
+        for (index in knownSize until size) {
+            if (input.readU8(index) != 0.toUByte()) fail(Errno.E2BIG)
+        }
+        decode(input) ?: fail(Errno.EINVAL)
+    } ?: fail(Errno.EFAULT)
 
     fun copyPath(process: Process, address: ULong): ByteArray? {
         val memory = UserMemory(process.addressSpace, address)

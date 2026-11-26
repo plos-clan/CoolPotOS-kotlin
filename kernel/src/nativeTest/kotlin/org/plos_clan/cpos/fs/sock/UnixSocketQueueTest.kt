@@ -84,7 +84,9 @@ class UnixSocketQueueTest {
         val sender = files.first.backend as UnixSocket
         val receiver = files.second.backend as UnixSocket
         val epoll = Epoll()
-        val events = mutableListOf<EpollEvent>()
+        fun collect() = buildList {
+            epoll.collect(caller, 1) { _, flags, data -> add(EpollEvent(flags, data)) }
+        }
         val bytes = ByteArray(8)
         val source = checkNotNull(ByteArrayBuffer(bytes).prepareRead(0, bytes.size))
         val destination = checkNotNull(ByteArrayBuffer(bytes).prepareWrite(0, bytes.size))
@@ -95,10 +97,8 @@ class UnixSocketQueueTest {
             ))
             repeat(2) {
                 assertEquals(bytes.size, sender.send(UnixSendRequest(source, 0, bytes.size, credentials)).bytesTransferred)
-                epoll.collect(caller, 1, events)
-                assertEquals(listOf(EpollEvent(PollEvents.POLLIN.toUInt(), 42uL)), events)
-                epoll.collect(caller, 1, events)
-                assertEquals(emptyList(), events)
+                assertEquals(listOf(EpollEvent(PollEvents.POLLIN.toUInt(), 42uL)), collect())
+                assertEquals(emptyList(), collect())
                 assertIs<VfsResult.Ok<UnixReceiveResult>>(
                     receiver.receive(UnixReceiveRequest(destination, 0, bytes.size, nonBlocking = true)),
                 )

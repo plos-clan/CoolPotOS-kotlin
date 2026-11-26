@@ -14,6 +14,7 @@ import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import org.plos_clan.cpos.utils.Errno
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
@@ -39,6 +40,41 @@ class UserMemoryTest {
         }
 
         override fun close() = space.release()
+    }
+
+    @Test
+    fun wordsCrossEveryUnalignedPageSplit() = Fixture().use { fixture ->
+        val end = USER_MMAP_START + PAGE_SIZE_BYTES
+        val pattern = 0xfedcba9876543210uL
+        for (split in 0..Long.SIZE_BYTES) {
+            val word = UserMemory(fixture.space, end - split.toULong())
+            assertTrue(word.writeULong(pattern))
+            assertEquals(pattern, word.readULongLE())
+            assertEquals(pattern.toUInt(), word.readUIntLE())
+            assertTrue(word.writeUInt(0x81234567u))
+            assertEquals(0xfedcba9881234567uL, word.readULongLE())
+        }
+        val hole = UserMemory(fixture.space, end + 2uL * PAGE_SIZE_BYTES - 1uL)
+        assertNull(hole.readULongLE())
+        assertFalse(hole.writeUInt(1u))
+        val wrapped = UserMemory(fixture.space, ULong.MAX_VALUE)
+        assertNull(wrapped.readUIntLE(1))
+        assertFalse(wrapped.writeULong(42uL, 1))
+    }
+
+    @Test
+    fun nestedRecordCopiesPreserveSnapshotsAndClearPadding() = Fixture().use { fixture ->
+        val first = fixture.memory
+        val second = UserMemory(fixture.space, fixture.address + 64uL)
+        assertTrue(first.writeRecord(31) { it.writeU64(15, ULong.MAX_VALUE) })
+        val result = first.readRecord(31) { source ->
+            assertTrue(second.writeRecord(31) { it.writeU32(1, 42u) })
+            source.readU64(15)
+        }
+        assertEquals(ULong.MAX_VALUE, result)
+        val expected = ByteArray(31)
+        expected[1] = 42
+        assertContentEquals(expected, second.copyFromUser(31))
     }
 
     @Test
@@ -117,6 +153,7 @@ class UserMemoryTest {
         Fixture(writable = false).use { fixture ->
             val bytes = ByteArray(64)
             assertContentEquals(bytes, fixture.memory.copyFromUser(bytes.size))
+            assertFalse(fixture.memory.writeUInt(UInt.MAX_VALUE))
             assertNull(fixture.memory.prepareWrite(0, bytes.size))
             assertEquals(0, fixture.memory.fill(0, bytes.size, 1))
             val unmapped = UserMemory(fixture.space, USER_MMAP_START - PAGE_SIZE_BYTES)
@@ -152,6 +189,9 @@ class UserMemoryTest {
             try {
                 val memory = UserMemory(child, fixture.address)
                 val expected = ByteArray(original.size) { 42 }
+                assertTrue(memory.writeULong(0uL))
+                assertContentEquals(original, fixture.memory.copyFromUser(original.size))
+                assertTrue(memory.copyToUser(original))
                 assertContentEquals(original, memory.copyFromUser(original.size))
                 assertEquals(original.size, memory.fill(0, original.size, 42))
                 assertContentEquals(expected, memory.copyFromUser(original.size))

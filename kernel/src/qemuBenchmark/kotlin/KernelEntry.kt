@@ -35,6 +35,12 @@ fun main() {
         val benchmarks = listOf(
             Snapshot("boot.toBenchmarkService", "ns") { boot.toDouble() },
             Snapshot("boot.usedMemory", "bytes", Snapshot::usedMemory),
+            IoctlNonblockBenchmark,
+            PollReadyBenchmark(1),
+            PollReadyBenchmark(64),
+            SparseSelectBenchmark(1023),
+            EpollReadyBenchmark,
+            ClockSyscallBenchmark,
             ParallelSyscallBenchmark(PidLookupBenchmark, 4),
             ParallelSyscallBenchmark(TidLookupBenchmark, 4),
             ParallelSyscallBenchmark(CachedReadBenchmark, 4),

@@ -300,10 +300,10 @@ object Futex {
         fail: (Int) -> Nothing,
     ): ULong? {
         if (address == 0uL) return null
-        val bytes = UserMemory(process.addressSpace, address).copyFromUser(TimeSpec.NATIVE_SIZE)
+        val time = UserMemory(process.addressSpace, address)
+            .readRecord(TimeSpec.NATIVE_SIZE, decode = TimeSpec::readFrom)
             ?: fail(Errno.EFAULT)
-        val time = TimeSpec(0, 0)
-        if (!time.updateFromNativeBytes(bytes) || !time.isValidDuration) {
+        if (!time.isValidDuration) {
             fail(Errno.EINVAL)
         }
         if (absolute && realtime) {

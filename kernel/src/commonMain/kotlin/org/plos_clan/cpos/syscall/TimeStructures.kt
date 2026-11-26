@@ -1,19 +1,17 @@
 package org.plos_clan.cpos.syscall
 
 import org.plos_clan.cpos.utils.LittleEndianBuffer
+import org.plos_clan.cpos.utils.MutableNativeStruct
 import org.plos_clan.cpos.utils.NativeStruct
 
-internal data class TimeSpec(var sec: Long, var nsec: Long) : NativeStruct {
-    override fun toNativeBytes(): ByteArray = ByteArray(NATIVE_SIZE).also { bytes ->
-        writeTo(LittleEndianBuffer(bytes), 0)
-    }
+internal data class TimeSpec(var sec: Long, var nsec: Long) : MutableNativeStruct {
+    override val nativeSize: Int get() = NATIVE_SIZE
 
-    override fun updateFromNativeBytes(buffer: ByteArray): Boolean {
-        if (buffer.size != NATIVE_SIZE) return false
-        val input = LittleEndianBuffer(buffer)
+    override fun writeTo(output: LittleEndianBuffer) = writeTo(output, 0)
+
+    override fun readFrom(input: LittleEndianBuffer) {
         sec = input.readU64(SEC_OFFSET).toLong()
         nsec = input.readU64(NSEC_OFFSET).toLong()
-        return true
     }
 
     val isValidDuration: Boolean
@@ -56,7 +54,7 @@ internal data class TimeSpec(var sec: Long, var nsec: Long) : NativeStruct {
             nsec = (nanoseconds % NANOSECONDS_PER_SECOND).toLong(),
         )
 
-        internal fun readFrom(input: LittleEndianBuffer, offset: Int): TimeSpec = TimeSpec(
+        internal fun readFrom(input: LittleEndianBuffer, offset: Int = 0): TimeSpec = TimeSpec(
             sec = input.readU64(offset + SEC_OFFSET).toLong(),
             nsec = input.readU64(offset + NSEC_OFFSET).toLong(),
         )
@@ -72,8 +70,9 @@ internal data class IntervalTimerSpec(
         TimeSpec.fromDurationNanos(valueNanos),
     )
 
-    override fun toNativeBytes(): ByteArray = ByteArray(NATIVE_SIZE).also { bytes ->
-        val output = LittleEndianBuffer(bytes)
+    override val nativeSize: Int get() = NATIVE_SIZE
+
+    override fun writeTo(output: LittleEndianBuffer) {
         interval.writeTo(output, 0)
         value.writeTo(output, TimeSpec.NATIVE_SIZE)
     }
@@ -83,11 +82,12 @@ internal data class IntervalTimerSpec(
 
         fun fromNativeBytes(bytes: ByteArray): IntervalTimerSpec? {
             if (bytes.size != NATIVE_SIZE) return null
-            val input = LittleEndianBuffer(bytes)
-            return IntervalTimerSpec(
-                TimeSpec.readFrom(input, 0),
-                TimeSpec.readFrom(input, TimeSpec.NATIVE_SIZE),
-            )
+            return readFrom(LittleEndianBuffer(bytes))
         }
+
+        fun readFrom(input: LittleEndianBuffer) = IntervalTimerSpec(
+            TimeSpec.readFrom(input, 0),
+            TimeSpec.readFrom(input, TimeSpec.NATIVE_SIZE),
+        )
     }
 }

@@ -26,7 +26,6 @@ import org.plos_clan.cpos.utils.ByteRingBuffer
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.KernelMutex
-import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.PollEvents
 import org.plos_clan.cpos.utils.TermiosConstants
 
@@ -105,7 +104,7 @@ abstract class TerminalBackend : TtySessionBackend {
             val session = file.session
             when (command) {
                 IoctlConstants.TIOCGWINSZ ->
-                    if (args.copyToUser((resizedWindow ?: windowSize()).toNativeBytes())) Errno.EOK else -Errno.EFAULT
+                    if (args.writeStruct(resizedWindow ?: windowSize())) Errno.EOK else -Errno.EFAULT
 
                 IoctlConstants.TIOCSCTTY ->
                     if (!file.isMaster && session.attachCurrentProcess(args.address == 1uL)) Errno.EOK else -Errno.EPERM
@@ -137,11 +136,13 @@ abstract class TerminalBackend : TtySessionBackend {
                 IoctlConstants.TIOCNOTTY ->
                     if (session.detachCurrentProcess()) Errno.EOK else -Errno.ENOTTY
 
-                IoctlConstants.TCGETS ->
-                    if (args.copyToUser(session.termios.toNativeBytes().copyOf(Termios.NATIVE_SIZE))) Errno.EOK else -Errno.EFAULT
+                IoctlConstants.TCGETS -> {
+                    val written = args.writeRecord(Termios.NATIVE_SIZE, encode = session.termios::writeTermios)
+                    if (written) Errno.EOK else -Errno.EFAULT
+                }
 
                 IoctlConstants.TCGETS2.toInt() ->
-                    if (args.copyToUser(session.termios2.toNativeBytes())) Errno.EOK else -Errno.EFAULT
+                    if (args.writeStruct(session.termios2)) Errno.EOK else -Errno.EFAULT
 
                 IoctlConstants.TCSETS,
                 IoctlConstants.TCSETSW -> updateTermiosFromUser(file, args)
@@ -187,9 +188,8 @@ abstract class TerminalBackend : TtySessionBackend {
                 IoctlConstants.TIOCNXCL -> { session.exclusive = false; Errno.EOK }
                 IoctlConstants.TIOCGEXCL.toInt() -> copyIntToUser(args, if (session.exclusive) 1 else 0)
                 IoctlConstants.TIOCSWINSZ -> {
-                    val bytes = args.copyFromUser(8) ?: return@control -Errno.EFAULT
                     val size = WinSize(0, 0, 0, 0)
-                    size.updateFromNativeBytes(bytes)
+                    if (!args.readStruct(size)) return@control -Errno.EFAULT
                     if (size != (resizedWindow ?: windowSize())) {
                         resizedWindow = size
                         session.signalForeground(Signal.WINDOW_CHANGE)
@@ -365,17 +365,17 @@ abstract class TerminalBackend : TtySessionBackend {
     }
 
     private fun updateTermiosFromUser(file: TtySession.OpenFile, args: UserMemory): Int {
-        val bytes = args.copyFromUser(Termios.NATIVE_SIZE) ?: return -Errno.EFAULT
-        val value = Termios.defaults()
-        value.updateFromNativeBytes(bytes)
-        return updateTermios(file, Termios2(value, file.session.termios2.cIspeed, file.session.termios2.cOspeed))
+        val previous = file.session.termios2
+        val value = Termios2(previous.cIspeed, previous.cOspeed)
+        val read = args.readRecord(Termios.NATIVE_SIZE) { value.readTermios(it) }
+        if (read == null) return -Errno.EFAULT
+        return updateTermios(file, value)
     }
 
     private fun updateTermios2FromUser(file: TtySession.OpenFile, args: UserMemory): Int {
-        val bytes = args.copyFromUser(Termios2.NATIVE_SIZE) ?: return -Errno.EFAULT
-        val extended = Termios2(Termios.defaults())
-        extended.updateFromNativeBytes(bytes)
-        return updateTermios(file, extended)
+        val value = Termios2()
+        if (!args.readStruct(value)) return -Errno.EFAULT
+        return updateTermios(file, value)
     }
 
     private fun updateTermios(file: TtySession.OpenFile, value: Termios2): Int {
@@ -393,11 +393,8 @@ abstract class TerminalBackend : TtySessionBackend {
         return Errno.EOK
     }
 
-    protected fun copyIntToUser(args: UserMemory, value: Int): Int {
-        val data = ByteArray(Int.SIZE_BYTES)
-        LittleEndianBuffer(data).writeU32(0, value.toUInt())
-        return if (args.copyToUser(data)) Errno.EOK else -Errno.EFAULT
-    }
+    protected fun copyIntToUser(args: UserMemory, value: Int): Int =
+        if (args.writeUInt(value.toUInt())) Errno.EOK else -Errno.EFAULT
 
     private companion object {
         const val OUTPUT_CHUNK_SIZE = 4096

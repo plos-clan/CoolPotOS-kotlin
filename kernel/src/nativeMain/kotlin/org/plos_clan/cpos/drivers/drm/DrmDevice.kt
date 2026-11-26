@@ -26,6 +26,7 @@ import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
+import org.plos_clan.cpos.mem.IoScratch
 import org.plos_clan.cpos.mem.UserMemory
 import org.plos_clan.cpos.tasks.CapEnum
 import org.plos_clan.cpos.tasks.PollSubscription
@@ -186,11 +187,19 @@ internal class DrmDevice(
 
         override fun ioctl(device: Device, command: Int, args: UserMemory): Long {
             val operation = DrmCommand.from(command) ?: return -Errno.ENOTTY.toLong()
-            val bytes = args.copyFromUser(operation.size) ?: return -Errno.EFAULT.toLong()
-            val argument = DrmArgument(bytes, args)
-            if (operation.direction and 2 != 0 && !args.isWritable(operation.size)) return -Errno.EFAULT.toLong()
-            val process = ProcessManager.currentProcess() ?: return -Errno.ESRCH.toLong()
+            return IoScratch.use(operation.size) { bytes ->
+                if (!args.readInto(bytes, operation.size)) return -Errno.EFAULT.toLong()
+                val argument = DrmArgument(bytes, args, operation.size)
+                if (operation.direction and 2 != 0 && !args.isWritable(operation.size)) {
+                    return -Errno.EFAULT.toLong()
+                }
+                execute(operation, argument)
+            }
+        }
+
+        private fun execute(operation: DrmCommand, argument: DrmArgument): Long {
             val imported = if (operation == DrmCommand.PRIME_FD_TO_HANDLE) {
+                val process = ProcessManager.currentProcess() ?: return -Errno.ESRCH.toLong()
                 val descriptor = argument.data.readU32(8).toInt()
                 process.fdTable.acquire(descriptor) ?: return -Errno.EBADF.toLong()
             } else null
@@ -288,8 +297,8 @@ internal class DrmDevice(
                 }
                 DrmCommand.GET_CONNECTOR -> connector(argument)
                 DrmCommand.GET_PLANE_RESOURCES -> {
-                    val planes = if (universalPlanes) listOf(PLANE) else emptyList()
-                    if (argument.array(0, 8, planes)) 0 else -Errno.EFAULT.toLong()
+                    val plane = if (universalPlanes) PLANE else null
+                    if (argument.array(0, 8, plane)) 0 else -Errno.EFAULT.toLong()
                 }
                 DrmCommand.GET_PLANE -> plane(argument)
                 DrmCommand.GET_OBJECT_PROPERTIES -> properties(argument)
@@ -317,7 +326,7 @@ internal class DrmDevice(
         private fun crtc(argument: DrmArgument): Long {
             val data = argument.data
             if (data.readU32(12) != CRTC) return -Errno.ENOENT.toLong()
-            argument.bytes.fill(0, 16)
+            argument.bytes.fill(0, 16, argument.size)
             val current = scanout ?: return 0
             data.writeU32(16, current.framebufferId)
             data.writeU32(20, current.viewport.left)
@@ -341,8 +350,10 @@ internal class DrmDevice(
             val connectorMemory = UserMemory(process.addressSpace, data.readU64(0))
             val connector = connectorMemory.readUIntLE() ?: return -Errno.EFAULT.toLong()
             if (connector != CONNECTOR) return -Errno.ENOENT.toLong()
-            val mode = argument.bytes.copyOfRange(36, 68)
-            if (!mode.contentEquals(output.mode.bytes.copyOfRange(0, 32))) return -Errno.EINVAL.toLong()
+            val mode = output.mode.bytes
+            for (index in 0 until 32) {
+                if (argument.bytes[36 + index] != mode[index]) return -Errno.EINVAL.toLong()
+            }
             val id = data.readU32(16)
             val framebuffer = framebuffer(id) ?: return -Errno.ENOENT.toLong()
             val viewport = DrmClip(data.readU32(20), data.readU32(24), output.mode)
@@ -477,9 +488,9 @@ internal class DrmDevice(
             data.writeU32(0, 1u)
             data.writeU32(4, 0u)
             data.writeU32(8, 0u)
-            val copied = argument.string(16, "cpos-boot") &&
-                argument.string(32, "20261009") &&
-                argument.string(48, "Boot framebuffer KMS")
+            val copied = argument.string(16, driverName) &&
+                argument.string(32, driverDate) &&
+                argument.string(48, driverDescription)
             return if (copied) 0 else -Errno.EFAULT.toLong()
         }
 
@@ -510,8 +521,10 @@ internal class DrmDevice(
         }
 
         private fun resources(argument: DrmArgument): Long {
-            val copied = argument.array(0, 32, ownedFramebuffers.toList()) && argument.array(8, 36, listOf(CRTC)) &&
-                argument.array(16, 40, listOf(CONNECTOR)) && argument.array(24, 44, listOf(ENCODER))
+            val copied = argument.array(0, 32, ownedFramebuffers) { it } &&
+                argument.array(8, 36, CRTC) &&
+                argument.array(16, 40, CONNECTOR) &&
+                argument.array(24, 44, ENCODER)
             val data = argument.data
             data.writeU32(48, 1u)
             data.writeU32(52, output.mode.width.toUInt())
@@ -523,24 +536,23 @@ internal class DrmDevice(
         private fun connector(argument: DrmArgument): Long {
             val data = argument.data
             if (data.readU32(48) != CONNECTOR) return -Errno.ENOENT.toLong()
-            if (!argument.array(0, 40, listOf(ENCODER))) return -Errno.EFAULT.toLong()
+            if (!argument.array(0, 40, ENCODER)) return -Errno.EFAULT.toLong()
             val copyMode = data.readU32(32) >= 1u
             if (copyMode && !argument.copy(data.readU64(8), output.mode.bytes)) return -Errno.EFAULT.toLong()
             data.writeU32(32, 1u)
-            val properties = listOf(DrmProperty.DPMS to power.value)
-            if (!argument.properties(16, 36, properties)) return -Errno.EFAULT.toLong()
+            if (!argument.property(16, 36, DrmProperty.DPMS, power.value)) return -Errno.EFAULT.toLong()
             data.writeU32(44, if (scanout == null) 0u else ENCODER)
             data.writeU32(52, 0u)
             data.writeU32(56, 1u)
             data.writeU32(60, 1u)
-            argument.bytes.fill(0, 64)
+            argument.bytes.fill(0, 64, argument.size)
             return 0
         }
 
         private fun plane(argument: DrmArgument): Long {
             val data = argument.data
             if (data.readU32(0) != PLANE) return -Errno.ENOENT.toLong()
-            val copied = argument.array(24, 20, output.formats.map { it.fourcc })
+            val copied = argument.array(24, 20, output.formats) { it.fourcc }
             data.writeU32(4, if (scanout == null) 0u else CRTC)
             data.writeU32(8, scanout?.framebufferId ?: 0u)
             data.writeU32(12, 1u)
@@ -559,12 +571,12 @@ internal class DrmDevice(
                 else -> return -Errno.ENOENT.toLong()
             }
             if (type != 0u && type != expected) return -Errno.ENOENT.toLong()
-            val properties = when (id) {
-                CONNECTOR -> listOf(DrmProperty.DPMS to power.value)
-                PLANE -> listOf(DrmProperty.TYPE to 1uL)
-                else -> emptyList()
+            val copied = when (id) {
+                CONNECTOR -> argument.property(0, 16, DrmProperty.DPMS, power.value)
+                PLANE -> argument.property(0, 16, DrmProperty.TYPE, 1uL)
+                else -> argument.property(0, 16, null)
             }
-            return if (argument.properties(0, 16, properties)) 0 else -Errno.EFAULT.toLong()
+            return if (copied) 0 else -Errno.EFAULT.toLong()
         }
 
         private fun setProperty(id: UInt, type: UInt, property: UInt, value: ULong): Long {
@@ -611,5 +623,8 @@ internal class DrmDevice(
         const val ENCODER = 2u
         const val CONNECTOR = 3u
         const val PLANE = 4u
+        private val driverName = "cpos-boot".encodeToByteArray()
+        private val driverDate = "20261009".encodeToByteArray()
+        private val driverDescription = "Boot framebuffer KMS".encodeToByteArray()
     }
 }

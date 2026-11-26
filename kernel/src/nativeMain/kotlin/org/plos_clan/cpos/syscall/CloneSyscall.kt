@@ -141,17 +141,14 @@ internal data class CloneRequest(
                     placement = placement,
                     pidHandle = target,
                     prepare = { id ->
-                        val bytes = ByteArray(Int.SIZE_BYTES)
-                        val output = LittleEndianBuffer(bytes)
                         if (descriptor != null) {
-                            output.writeU32(0, descriptor.fd.toUInt())
-                            if (pidfdMemory?.copyToUser(bytes) != true) {
+                            if (pidfdMemory?.writeUInt(descriptor.fd.toUInt()) != true) {
                                 return@createUserThread VfsResult.Err(VfsError.FAULT)
                             }
                         }
-                        output.writeU32(0, id.toUInt())
-                        if (parentTidMemory?.copyToUser(bytes) == false ||
-                            childTidMemory?.copyToUser(bytes) == false
+                        val tid = id.toUInt()
+                        if (parentTidMemory?.writeUInt(tid) == false ||
+                            childTidMemory?.writeUInt(tid) == false
                         ) VfsResult.Err(VfsError.FAULT) else VfsResult.Ok(Unit)
                     },
                 )) {
@@ -207,13 +204,12 @@ internal data class CloneRequest(
             )
         }
 
-        fun decode(bytes: ByteArray): CloneRequest? {
-            if (bytes.size < MIN_SIZE) return null
-            val input = LittleEndianBuffer(bytes)
+        fun decode(input: LittleEndianBuffer, size: Int): CloneRequest? {
+            if (size < MIN_SIZE) return null
             val flags = input.readU64(0)
             val stack = input.readU64(40)
             val stackSize = input.readU64(48)
-            val setTidBytes = minOf(ULong.SIZE_BYTES, maxOf(0, bytes.size - 72))
+            val setTidBytes = minOf(ULong.SIZE_BYTES, maxOf(0, size - 72))
             if (flags and EXIT_SIGNAL_MASK != 0uL ||
                 setTidBytes != 0 && input.readUnsigned(72, setTidBytes) != 0uL ||
                 (stack == 0uL) != (stackSize == 0uL) ||
@@ -228,7 +224,7 @@ internal data class CloneRequest(
                 exitSignal = input.readU64(32),
                 stackPointer = stack + stackSize,
                 tls = input.readU64(56),
-                cgroup = if (bytes.size >= NATIVE_SIZE) input.readU64(80) else null,
+                cgroup = if (size >= NATIVE_SIZE) input.readU64(80) else null,
             )
         }
     }
@@ -242,11 +238,9 @@ fun clone3(registers: PtraceRegisters, process: Process): Long {
     if (size < CloneRequest.MIN_SIZE.toULong()) return errno(Errno.EINVAL)
     if (size > PAGE_SIZE_BYTES) return errno(Errno.E2BIG)
 
-    val bytes = UserMemory(process.addressSpace, registers[PtraceRegisters.IDX_RDI])
-        .copyFromUser(size.toInt()) ?: return errno(Errno.EFAULT)
-    for (index in CloneRequest.NATIVE_SIZE until bytes.size) {
-        if (bytes[index] != 0.toByte()) return errno(Errno.E2BIG)
-    }
-    val request = CloneRequest.decode(bytes) ?: return errno(Errno.EINVAL)
+    val memory = UserMemory(process.addressSpace, registers[PtraceRegisters.IDX_RDI])
+    val length = size.toInt()
+    val request = Syscall.readArguments(memory, length, CloneRequest.NATIVE_SIZE,
+        fail = { return errno(it) }) { CloneRequest.decode(it, length) }
     return request.execute(registers, process)
 }

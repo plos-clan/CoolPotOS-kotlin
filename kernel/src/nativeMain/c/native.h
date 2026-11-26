@@ -68,6 +68,7 @@ static inline void enter_kernel_xstate(xstate_t *state) {
 
 void setup_xstate(void);
 void idt_load(void);
+void exception_handler(void *frame, uint64_t error, uint64_t rbp, uint64_t address, int32_t vector);
 void kt_ap_start(void);
 bool fast_handoff_irq(pt_regs_t *regs, uint64_t irq_num);
 bool runtime_thread_registered(void);

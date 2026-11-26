@@ -19,7 +19,6 @@ import org.plos_clan.cpos.tasks.ProcessManager
 import org.plos_clan.cpos.tasks.PollWait
 import org.plos_clan.cpos.tasks.CapEnum
 import org.plos_clan.cpos.mem.UserMemory
-import org.plos_clan.cpos.utils.LittleEndianBuffer
 import org.plos_clan.cpos.utils.Cmdline
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.KernelMutex
@@ -84,24 +83,21 @@ object TtyManager {
             val result = when (command) {
                 VTModeConstants.VT_OPENQRY -> {
                     val available = virtualTerminals.values.firstOrNull { !it.session.isInUse }
-                    val bytes = ByteArray(4)
-                    LittleEndianBuffer(bytes).writeU32(0, available?.number?.toUInt() ?: UInt.MAX_VALUE)
-                    bytes
+                    args.writeUInt(available?.number?.toUInt() ?: UInt.MAX_VALUE)
                 }
                 VTModeConstants.VT_GETSTATE -> {
-                    val bytes = ByteArray(6)
-                    val data = LittleEndianBuffer(bytes)
-                    data.writeU16(0, (activeVirtualTerminal?.number ?: 0).toUShort())
                     val state = virtualTerminals.values.fold(1) { bits, vt ->
                         if (vt.number < 16 && vt.session.isAllocated) bits or (1 shl vt.number) else bits
                     }
-                    data.writeU16(4, state.toUShort())
-                    bytes
+                    args.writeRecord(6) { data ->
+                        data.writeU16(0, (activeVirtualTerminal?.number ?: 0).toUShort())
+                        data.writeU16(4, state.toUShort())
+                    }
                 }
-                VTModeConstants.VT_GETMODE -> console.modeBytes()
+                VTModeConstants.VT_GETMODE -> console.writeMode(args)
                 else -> null
             }
-            if (result != null) return@withLock if (args.copyToUser(result)) 0 else -Errno.EFAULT
+            if (result != null) return@withLock if (result) 0 else -Errno.EFAULT
             val thread = ProcessManager.currentThread() ?: return@withLock -Errno.EPERM
             val ownsTerminal = thread.process.controllingTerminal === file.session
             if (!ownsTerminal && !thread.capabilities.hasEffective(CapEnum.SYS_TTY_CONFIG)) {

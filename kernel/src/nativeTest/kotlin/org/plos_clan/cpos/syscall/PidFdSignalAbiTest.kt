@@ -56,7 +56,7 @@ class PidFdSignalAbiTest {
             writeU32(4, (-7).toUInt())
             writeU32(8, SignalInfo.QUEUED.toUInt())
         }
-        val supplied = SignalAbi.readQueuedInfo(bytes)
+        val supplied = SignalAbi.readQueuedInfo(LittleEndianBuffer(bytes))
         assertEquals(35, supplied.number)
         assertEquals(-7, supplied.error)
         assertFalse(supplied.requiresSelf)
@@ -65,7 +65,8 @@ class PidFdSignalAbiTest {
         assertEquals(SignalInfo.QUEUED, info.code)
         assertEquals(-7, info.error)
         assertContentEquals(bytes.copyOfRange(16, bytes.size), (info.payload as SignalPayload.Raw).bytes)
-        val encoded = SignalAbi.infoBytes(info)
+        val encoded = ByteArray(SignalAbi.INFO_SIZE)
+        SignalAbi.writeInfo(LittleEndianBuffer(encoded), 0, info)
         assertContentEquals(bytes.copyOfRange(0, 12), encoded.copyOfRange(0, 12))
         assertTrue(encoded.copyOfRange(12, 16).all { it == 0.toByte() })
         assertContentEquals(bytes.copyOfRange(16, bytes.size), encoded.copyOfRange(16, encoded.size))
@@ -76,7 +77,7 @@ class PidFdSignalAbiTest {
         for (number in listOf(0, -1, Signal.MAX + 1, Int.MIN_VALUE)) {
             val bytes = ByteArray(SignalAbi.INFO_SIZE)
             LittleEndianBuffer(bytes).writeU32(0, number.toUInt())
-            assertEquals(number, SignalAbi.readQueuedInfo(bytes).number)
+            assertEquals(number, SignalAbi.readQueuedInfo(LittleEndianBuffer(bytes)).number)
         }
     }
 
@@ -86,11 +87,11 @@ class PidFdSignalAbiTest {
         val input = LittleEndianBuffer(bytes)
         for (code in listOf(SignalInfo.USER, SignalInfo.THREAD, SignalInfo.KERNEL, Int.MAX_VALUE)) {
             input.writeU32(8, code.toUInt())
-            assertTrue(SignalAbi.readQueuedInfo(bytes).requiresSelf)
+            assertTrue(SignalAbi.readQueuedInfo(LittleEndianBuffer(bytes)).requiresSelf)
         }
         for (code in listOf(SignalInfo.QUEUED, -2, -3, Int.MIN_VALUE)) {
             input.writeU32(8, code.toUInt())
-            assertFalse(SignalAbi.readQueuedInfo(bytes).requiresSelf)
+            assertFalse(SignalAbi.readQueuedInfo(LittleEndianBuffer(bytes)).requiresSelf)
         }
     }
 }

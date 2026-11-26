@@ -30,24 +30,20 @@ internal data class AbsoluteAxisInfo(
         return true
     }
 
-    fun encode(): ByteArray {
-        val bytes = ByteArray(SIZE_BYTES)
-        val data = LittleEndianBuffer(bytes)
+    fun writeTo(data: LittleEndianBuffer) {
         data.writeU32(0, value.toUInt())
         data.writeU32(4, minimum.toUInt())
         data.writeU32(8, maximum.toUInt())
         data.writeU32(12, fuzz.toUInt())
         data.writeU32(16, flat.toUInt())
         data.writeU32(20, resolution.toUInt())
-        return bytes
     }
 
     companion object {
         const val SIZE_BYTES = 24
 
-        fun decode(bytes: ByteArray): AbsoluteAxisInfo {
-            val data = LittleEndianBuffer(bytes.copyOf(SIZE_BYTES))
-            val resolution = if (bytes.size < SIZE_BYTES) 0 else data.readU32(20).toInt()
+        fun decode(data: LittleEndianBuffer, size: Int): AbsoluteAxisInfo {
+            val resolution = if (size < SIZE_BYTES) 0 else data.readU32(20).toInt()
             return AbsoluteAxisInfo(
                 data.readU32(0).toInt(), data.readU32(4).toInt(), data.readU32(8).toInt(),
                 data.readU32(12).toInt(), data.readU32(16).toInt(), resolution,

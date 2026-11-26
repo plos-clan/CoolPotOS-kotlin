@@ -27,7 +27,6 @@ import org.plos_clan.cpos.tasks.Signal
 import org.plos_clan.cpos.tasks.SignalInfo
 import org.plos_clan.cpos.tasks.SignalRouter
 import org.plos_clan.cpos.utils.IrqSpinLock
-import org.plos_clan.cpos.utils.LittleEndianBuffer
 
 internal data class SocketSendRequest(
     val process: Process,
@@ -193,9 +192,7 @@ internal abstract class AbstractSocket(
             else -> return -VfsError.NOT_SUPPORTED.errno.toLong()
         }
         if (count < 0) return count.toLong()
-        val bytes = ByteArray(Int.SIZE_BYTES)
-        LittleEndianBuffer(bytes).writeU32(0, count.toUInt())
-        return if (args.copyToUser(bytes)) 0L else -VfsError.FAULT.errno.toLong()
+        return if (args.writeUInt(count.toUInt())) 0L else -VfsError.FAULT.errno.toLong()
     }
 
     final override fun poll(
