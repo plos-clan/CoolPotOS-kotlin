@@ -39,16 +39,18 @@ internal class MemoryRegionMap(
     fun sharedRegions(): List<MemoryRegion> = entries.filter(MemoryRegion::shared)
 
     fun copyRetainedInto(target: MemoryRegionMap) {
-        val retained = mutableListOf<MemoryRegionBacking>()
-        for (region in entries) {
-            val backing = region.backing ?: continue
-            if (!backing.retain(target.owner)) {
-                retained.asReversed().forEach { it.release(target.owner) }
-                error("Memory region backing is unavailable")
+        val copies = entries.map { it.copy(memoryLock = MemoryLock.NONE) }
+        var retained = 0
+        try {
+            for (copy in copies) {
+                check(copy.backing?.retain(target.owner) != false) { "Memory region backing is unavailable" }
+                retained++
             }
-            retained += backing
+            target.entries.addAll(copies)
+        } catch (failure: Throwable) {
+            for (index in retained - 1 downTo 0) copies[index].backing?.release(target.owner)
+            throw failure
         }
-        target.entries += entries.map { it.copy(memoryLock = MemoryLock.NONE) }
     }
 
     fun removeAll(): List<MemoryRegionBacking> {

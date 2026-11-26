@@ -134,9 +134,11 @@ typedef struct {
 } switch_frame_t;
 _Static_assert(sizeof(switch_frame_t) == 56, "invalid switch frame layout");
 
+typedef struct { uint64_t root, active[]; } vm_space_t;
+
 struct fast_task {
     uint64_t rsp;
-    uint64_t cr3;
+    vm_space_t *vm;
     uint64_t kernel_rsp;
     uint64_t kernel_fs_base;
     uint64_t user_gs_base;

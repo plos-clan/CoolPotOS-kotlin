@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/mman.h>
+#include <time.h>
 #include "bridge.h"
 #include "native.h"
 #include "syscall.h"
@@ -11,18 +13,8 @@
 
 #define PAGE_SIZE 0x1000u
 #define BOOTSTRAP_VM_ARENA_SIZE (32u * 1024u * 1024u)
-#define MAP_SHARED 0x01
-#define MAP_PRIVATE 0x02
-#define MAP_FIXED 0x10
-#define MAP_ANONYMOUS 0x20
 #define MAP_FIXED_NOREPLACE 0x100000
 #define NS_PER_SEC ((uint64_t)1000000000)
-#define CLOCK_REALTIME 0
-#define CLOCK_MONOTONIC 1
-#define CLOCK_MONOTONIC_RAW 4
-#define CLOCK_REALTIME_COARSE 5
-#define CLOCK_MONOTONIC_COARSE 6
-#define CLOCK_BOOTTIME 7
 
 enum {
     futex_command_mask = 0x7f,
@@ -35,11 +27,6 @@ enum futex_waiter_state {
     futex_waiting,
     futex_waking,
     futex_woken,
-};
-
-struct timespec_arg {
-    int64_t tv_sec;
-    int64_t tv_nsec;
 };
 
 struct vm_block {
@@ -61,13 +48,10 @@ struct futex_bucket {
     uint8_t lock;
 };
 
-typedef void *(*vm_allocate_fn)(size_t);
-
 static uint8_t bootstrap_vm_arena[BOOTSTRAP_VM_ARENA_SIZE]
     __attribute__((aligned(PAGE_SIZE)));
-static size_t bootstrap_vm_used;
-static struct vm_block *bootstrap_vm_free_list;
-static vm_allocate_fn runtime_vm_allocate;
+static uint8_t bootstrap_pages[BOOTSTRAP_VM_ARENA_SIZE / PAGE_SIZE];
+static bool runtime_vm_online;
 static struct vm_block *runtime_vm_released;
 static uint8_t vm_lock;
 static struct futex_bucket futex_buckets[futex_bucket_count];
@@ -84,81 +68,50 @@ static inline size_t align_up(size_t n) {
     return (n + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 }
 
-static bool bootstrap_vm_contains(uintptr_t address, size_t size) {
-    const uintptr_t start = (uintptr_t)bootstrap_vm_arena;
-    return size <= sizeof(bootstrap_vm_arena) && address >= start &&
-        address - start <= sizeof(bootstrap_vm_arena) - size;
-}
-
-static void *bootstrap_vm_alloc_locked(size_t size) {
-    for (struct vm_block **link = &bootstrap_vm_free_list; *link; link = &(*link)->next) {
-        struct vm_block *block = *link;
-        if (block->size < size) continue;
-
-        const size_t remaining = block->size - size;
-        struct vm_block *next = block->next;
-        if (remaining >= PAGE_SIZE) {
-            next = (struct vm_block *)((uintptr_t)block + size);
-            next->size = remaining;
-            next->next = block->next;
+static int bootstrap_map(void **mapping, size_t size, int flags) {
+    const size_t pages = size / PAGE_SIZE;
+    const size_t capacity = sizeof(bootstrap_pages);
+    if (pages > capacity) return -ENOMEM;
+    size_t first = 0;
+    if (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) {
+        const uintptr_t address = (uintptr_t)*mapping;
+        if (address % PAGE_SIZE) return -EINVAL;
+        if (__atomic_load_n(&runtime_vm_online, __ATOMIC_ACQUIRE)) return -ENOMEM;
+        first = (address - (uintptr_t)bootstrap_vm_arena) / PAGE_SIZE;
+        if (first > capacity - pages) return -ENOMEM;
+        if ((flags & MAP_FIXED_NOREPLACE) && __builtin_memchr(bootstrap_pages + first, 1, pages))
+            return -EEXIST;
+    } else {
+        while (first <= capacity - pages) {
+            const uint8_t *available = __builtin_memchr(bootstrap_pages + first, 0, capacity - first);
+            if (!available) return -ENOMEM;
+            first = available - bootstrap_pages;
+            if (first > capacity - pages) return -ENOMEM;
+            const uint8_t *used = __builtin_memchr(available, 1, pages);
+            if (!used) break;
+            first = used - bootstrap_pages + 1;
         }
-        *link = next;
-        return block;
+        if (first > capacity - pages) return -ENOMEM;
     }
-
-    if (size > sizeof(bootstrap_vm_arena) - bootstrap_vm_used) return NULL;
-    void *result = bootstrap_vm_arena + bootstrap_vm_used;
-    bootstrap_vm_used += size;
-    return result;
+    __builtin_memset(bootstrap_pages + first, 1, pages);
+    *mapping = bootstrap_vm_arena + first * PAGE_SIZE;
+    return 0;
 }
 
-static void bootstrap_vm_free_locked(void *pointer, size_t size) {
-    struct vm_block *block = (struct vm_block *)pointer;
-    struct vm_block *previous = NULL;
-    struct vm_block **link = &bootstrap_vm_free_list;
-
-    while (*link && (uintptr_t)*link < (uintptr_t)block) {
-        previous = *link;
-        link = &(*link)->next;
-    }
-
-    block->size = size;
-    block->next = *link;
-    *link = block;
-
-    if (block->next && (uintptr_t)block + block->size == (uintptr_t)block->next) {
-        block->size += block->next->size;
-        block->next = block->next->next;
-    }
-
-    if (previous && (uintptr_t)previous + previous->size == (uintptr_t)block) {
-        previous->size += block->size;
-        previous->next = block->next;
-    }
-}
-
-bool runtime_vm_install(vm_allocate_fn allocate) {
-    if (!allocate) return false;
-
-    spin_lock(&vm_lock);
-    if (runtime_vm_allocate) {
-        spin_unlock(&vm_lock);
-        return false;
-    }
-    runtime_vm_allocate = allocate;
-    spin_unlock(&vm_lock);
-    return true;
+void runtime_vm_enable(void) {
+    __atomic_store_n(&runtime_vm_online, true, __ATOMIC_RELEASE);
 }
 
 void *runtime_vm_take_released(void) {
+    if (!__atomic_load_n(&runtime_vm_released, __ATOMIC_ACQUIRE)) return NULL;
     spin_lock(&vm_lock);
     struct vm_block *block = runtime_vm_released;
-    if (block) runtime_vm_released = block->next;
+    if (block) __atomic_store_n(&runtime_vm_released, block->next, __ATOMIC_RELEASE);
     spin_unlock(&vm_lock);
     return block;
 }
 
-static long futex_deadline(const struct timespec_arg *time, uint64_t *deadline) {
+static long futex_deadline(const struct timespec *time, uint64_t *deadline) {
     if (time->tv_sec < 0 || time->tv_nsec < 0 || time->tv_nsec >= (int64_t)NS_PER_SEC)
         return -EINVAL;
 
@@ -194,7 +147,7 @@ static void futex_remove_locked(
 static long futex_wait(
     int *pointer,
     int expected,
-    const struct timespec_arg *time
+    const struct timespec *time
 ) {
     uint64_t deadline = 0;
     if (time) {
@@ -282,7 +235,7 @@ static long futex_wake(int *pointer, int requested) {
     return count;
 }
 
-static long futex_call(int *pointer, int operation, int expected, const struct timespec_arg *time) {
+static long futex_call(int *pointer, int operation, int expected, const struct timespec *time) {
     if (!pointer || (uintptr_t)pointer % _Alignof(int)) return -EINVAL;
 
     const unsigned int flags = (unsigned int)operation & ~futex_command_mask;
@@ -309,73 +262,43 @@ static long mmap_call(void *hint, size_t size, int prot, int flags, int fd, int6
     if (map_type != MAP_SHARED && map_type != MAP_PRIVATE)
         return -EINVAL;
 
-    const bool fixed_noreplace = (flags & MAP_FIXED_NOREPLACE) != 0;
-    const bool fixed = (flags & MAP_FIXED) || fixed_noreplace;
-    if (!(flags & MAP_ANONYMOUS)) {
-        if (fd < 0) return -EBADF;
-        return -ENOSYS;
-    }
+    if (!(flags & MAP_ANONYMOUS)) return fd < 0 ? -EBADF : -ENOSYS;
 
     size = align_up(size);
-    if (!size) return -ENOMEM;
 
-    void *result;
-    if (!fixed) {
-        const bool use_runtime = can_use_runtime();
-
-        spin_lock(&vm_lock);
-        vm_allocate_fn allocate = use_runtime ? runtime_vm_allocate : NULL;
-        result = allocate ? NULL : bootstrap_vm_alloc_locked(size);
-        spin_unlock(&vm_lock);
-
-        if (allocate) result = allocate(size);
+    const bool fixed = flags & (MAP_FIXED | MAP_FIXED_NOREPLACE);
+    void *result = hint;
+    if (!fixed && __atomic_load_n(&runtime_vm_online, __ATOMIC_ACQUIRE) && can_use_runtime()) {
+        result = runtime_allocate(size);
+        if (!result) return -ENOMEM;
     } else {
-        const uintptr_t address = (uintptr_t)hint;
-        if (address & (PAGE_SIZE - 1)) return -EINVAL;
-
         spin_lock(&vm_lock);
-        if (runtime_vm_allocate || !bootstrap_vm_contains(address, size)) {
-            spin_unlock(&vm_lock);
-            return -ENOMEM;
-        }
-        const size_t region_offset = address - (uintptr_t)bootstrap_vm_arena;
-        if (fixed_noreplace && region_offset < bootstrap_vm_used) {
-            spin_unlock(&vm_lock);
-            return -EEXIST;
-        }
-        const size_t map_end = region_offset + size;
-        if (map_end > bootstrap_vm_used) bootstrap_vm_used = map_end;
-        result = (void *)address;
+        const int error = bootstrap_map(&result, size, flags);
         spin_unlock(&vm_lock);
+        if (error) return error;
     }
-
-    if (!result) return -ENOMEM;
     __builtin_memset(result, 0, size);
-    return (long)(uintptr_t)result;
+    return (long)result;
 }
 
 static long munmap_call(void *pointer, size_t size) {
     if (!pointer) return 0;
-    if (!(size = align_up(size))) return -EINVAL;
-
     const uintptr_t address = (uintptr_t)pointer;
-
-    if (address & (PAGE_SIZE - 1)) return -EINVAL;
-
-    spin_lock(&vm_lock);
-    if (bootstrap_vm_contains(address, size)) {
-        bootstrap_vm_free_locked(pointer, size);
-        spin_unlock(&vm_lock);
-        return 0;
+    size = align_up(size);
+    if (!size || address % PAGE_SIZE) return -EINVAL;
+    const size_t offset = address - (uintptr_t)bootstrap_vm_arena;
+    if (offset < sizeof(bootstrap_vm_arena)) {
+        if (size > sizeof(bootstrap_vm_arena) - offset) return -EINVAL;
+        spin_lock(&vm_lock);
+        __builtin_memset(bootstrap_pages + offset / PAGE_SIZE, 0, size / PAGE_SIZE);
+    } else {
+        if (!__atomic_load_n(&runtime_vm_online, __ATOMIC_ACQUIRE)) return -EINVAL;
+        struct vm_block *block = pointer;
+        block->size = size;
+        spin_lock(&vm_lock);
+        block->next = runtime_vm_released;
+        __atomic_store_n(&runtime_vm_released, block, __ATOMIC_RELEASE);
     }
-    if (!runtime_vm_allocate) {
-        spin_unlock(&vm_lock);
-        return -EINVAL;
-    }
-    struct vm_block *block = (struct vm_block *)pointer;
-    block->size = size;
-    block->next = runtime_vm_released;
-    runtime_vm_released = block;
     spin_unlock(&vm_lock);
     return 0;
 }
@@ -393,7 +316,7 @@ static long arch_prctl_call(int code, uint64_t pointer) {
     return 0;
 }
 
-static long clock_gettime_call(int clock_id, struct timespec_arg *tp) {
+static long clock_gettime_call(int clock_id, struct timespec *tp) {
     if (!tp) return -EINVAL;
     if (clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC &&
         clock_id != CLOCK_MONOTONIC_RAW && clock_id != CLOCK_REALTIME_COARSE &&
@@ -454,7 +377,7 @@ long syscall(long number, ...) {
         int *futex_ptr = ARG(int *);
         int operation = ARG(int);
         int expected = ARG(int);
-        const struct timespec_arg *time = ARG(const struct timespec_arg *);
+        const struct timespec *time = ARG(const struct timespec *);
         ret = futex_call(futex_ptr, operation, expected, time);
         break;
     }
@@ -475,7 +398,7 @@ long syscall(long number, ...) {
     }
     case SYS_clock_gettime: {
         int clock_id = ARG(int);
-        ret = clock_gettime_call(clock_id, ARG(struct timespec_arg *));
+        ret = clock_gettime_call(clock_id, ARG(struct timespec *));
         break;
     }
     }

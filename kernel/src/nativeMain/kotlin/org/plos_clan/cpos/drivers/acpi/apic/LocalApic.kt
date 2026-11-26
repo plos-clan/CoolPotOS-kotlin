@@ -18,7 +18,6 @@ private const val LIMINE_MP_RESPONSE_X86_64_X2APIC = 1u
 private const val LAPIC_MMIO_SIZE = 0x1000uL
 private const val X2APIC_MSR_BASE = 0x800u
 
-private const val LAPIC_REG_ID = 0x20u
 private const val LAPIC_REG_SPURIOUS = 0xF0u
 private const val LAPIC_SPURIOUS_VECTOR = 0xFFu
 private const val LAPIC_SPURIOUS_ENABLE_BIT = 0x100uL
@@ -29,7 +28,6 @@ private const val LAPIC_REG_EOI = 0xb0u
 private const val ISR_STRIDE = 0x10u
 private const val DEVICE_SERVICE_BUDGET = 64
 private const val LAPIC_ID_MASK = 0xFFu
-private const val LAPIC_ID_MASK_LONG = 0xFFuL
 
 object LocalApic {
     private var x2ApicMode = false
@@ -43,10 +41,7 @@ object LocalApic {
         get() = bspDeadlineTimerReady
 
     val localApicId: UInt
-        get() {
-            val rawId = read(LAPIC_REG_ID)
-            return if (x2ApicMode) rawId.toUInt() else ((rawId shr 24) and LAPIC_ID_MASK_LONG).toUInt()
-        }
+        get() = bridge.lapic_id()
 
     val destinationApicId: UInt
         get() = localApicId and LAPIC_ID_MASK

@@ -35,6 +35,10 @@ fun main() {
         val benchmarks = listOf(
             Snapshot("boot.toBenchmarkService", "ns") { boot.toDouble() },
             Snapshot("boot.usedMemory", "bytes", Snapshot::usedMemory),
+            VirtualMemoryBenchmark(1),
+            VirtualMemoryBenchmark(2),
+            VirtualMemoryBenchmark(4),
+            SharedRemapBenchmark(),
             GetPidBenchmark,
             PathLookupBenchmark,
             ParallelSyscallBenchmark(PathLookupBenchmark, 4),

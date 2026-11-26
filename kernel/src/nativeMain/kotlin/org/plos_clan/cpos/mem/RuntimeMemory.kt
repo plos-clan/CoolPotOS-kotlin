@@ -7,8 +7,7 @@
 
 package org.plos_clan.cpos.mem
 
-import bridge.runtime_allocate_callback
-import bridge.runtime_vm_install
+import bridge.runtime_vm_enable
 import bridge.runtime_vm_take_released
 import kotlinx.cinterop.COpaquePointer
 import kotlinx.cinterop.ExperimentalForeignApi
@@ -45,11 +44,8 @@ internal object RuntimeMemory : FrameReclaimer {
             return false
         }
 
-        if (!runtime_vm_install(runtime_allocate_callback)) {
-            println("Runtime memory: failed to install the physical-memory provider")
-            return false
-        }
         BuddyFrameAllocator.register(this)
+        runtime_vm_enable()
         initialized = true
         return true
     }
@@ -71,23 +67,14 @@ internal object RuntimeMemory : FrameReclaimer {
         var reclaimed = 0uL
         while (reclaimed < target) {
             val pointer = runtime_vm_take_released() ?: return reclaimed
-            val byteLength = pointer.reinterpret<ULongVar>()[0]
-            check(release(pointer, byteLength)) {
+            val frames = pointer.reinterpret<ULongVar>()[0] / PAGE_SIZE_BYTES
+            val address = pointer.rawValue.toLong().toULong()
+            check(address >= Hhdm.offset && BuddyFrameAllocator.free(address - Hhdm.offset, frames)) {
                 "Runtime memory provider received an invalid released block"
             }
-            reclaimed += requiredFrames(byteLength)
+            reclaimed += frames
         }
         return reclaimed
-    }
-
-    private fun release(pointer: COpaquePointer, byteLength: ULong): Boolean {
-        val virtualAddress = pointer.rawValue.toLong().toULong()
-        val frameCount = requiredFrames(byteLength)
-        if (frameCount == 0uL || virtualAddress < Hhdm.offset) {
-            return false
-        }
-
-        return BuddyFrameAllocator.free(virtualAddress - Hhdm.offset, frameCount)
     }
 
     internal fun lastCollectionStatistics(): GarbageCollectionStatistics? {

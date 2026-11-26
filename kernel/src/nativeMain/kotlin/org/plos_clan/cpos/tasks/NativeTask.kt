@@ -6,6 +6,7 @@ package org.plos_clan.cpos.tasks
 import kotlinx.cinterop.*
 import org.plos_clan.cpos.tasks.cgroup.CpuTime
 import org.plos_clan.cpos.mem.BuddyFrameAllocator
+import org.plos_clan.cpos.mem.page.PageDirectory
 import org.plos_clan.cpos.mem.Hhdm
 import org.plos_clan.cpos.mem.INVALID_FRAME
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -201,7 +202,7 @@ internal class NativeTask private constructor(
             return NativeTask(handle, stack, runtime)
         }
 
-        fun allocate(id: Int, cr3: ULong, stackPages: ULong = 0uL, nice: Int = 0): NativeTask? {
+        fun allocate(id: Int, directory: PageDirectory, stackPages: ULong = 0uL, nice: Int = 0): NativeTask? {
             val stack = if (stackPages == 0uL) null else KernelStack.allocate(stackPages) ?: return null
             var runtime: Runtime? = null
             var handle = 0uL
@@ -212,7 +213,7 @@ internal class NativeTask private constructor(
                 val policy = Scheduler.policy
                 val rank = policy.rank(nice).toUInt()
                 handle = bridge.fast_handoff_create_task(
-                    id.toUInt(), cr3, stackTop, fsBase, rank,
+                    id.toUInt(), directory.translations.handle, stackTop, fsBase, rank,
                 )
                 if (handle == 0uL) return null
                 return NativeTask(handle, stack, runtime)

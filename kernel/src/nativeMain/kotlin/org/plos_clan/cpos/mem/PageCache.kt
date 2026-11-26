@@ -7,7 +7,6 @@ import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.plus
 import kotlinx.cinterop.usePinned
-import org.plos_clan.cpos.mem.page.FrameReleaseResult
 import org.plos_clan.cpos.mem.page.UserFrameReferences
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
@@ -229,7 +228,7 @@ internal object PageCache : FrameReclaimer {
         lock.withLock {
             cachedFrames = clock.size.toULong()
             bufferFrames = clock.count { it.key.kind == PageCacheKind.BLOCK }.toULong()
-            reclaimableFrames = UserFrameReferences.countExclusive(clock) { it.frame }.toULong()
+            reclaimableFrames = clock.count { UserFrameReferences.isExclusive(it.frame) }.toULong()
         }
         return PageCacheStatistics(
             cachedBytes = (cachedFrames - bufferFrames) * PAGE_SIZE_BYTES,
@@ -437,15 +436,13 @@ internal object PageCache : FrameReclaimer {
                 continue
             }
 
-            val release = UserFrameReferences.releaseExclusive(page.frame)
-            if (release == FrameReleaseResult.RELEASED) {
+            if (UserFrameReferences.releaseExclusive(page.frame)) {
                 val source = sources.getValue(page.key.identity)
                 check(source.pages.remove(page.key) === page)
                 removeEmptySource(page.key.identity, source)
                 return ClockScanResult.RECLAIMED
             }
             clock.add(page)
-            if (release == FrameReleaseResult.CONTENDED) return ClockScanResult.CONTENDED
         }
         return ClockScanResult.UNAVAILABLE
     }

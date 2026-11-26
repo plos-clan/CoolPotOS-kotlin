@@ -6,9 +6,7 @@ import kotlinx.cinterop.CPointed
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
-import kotlinx.cinterop.ULongVar
 import kotlinx.cinterop.get
-import kotlinx.cinterop.set
 import kotlinx.cinterop.toCPointer
 import org.plos_clan.cpos.mem.Hhdm
 import kotlin.experimental.ExperimentalNativeApi
@@ -48,9 +46,3 @@ fun CPointer<UByteVar>.checksumOk(length: Int): Boolean {
 fun ULong.isPageAligned(): Boolean = isAligned(PAGE_SIZE_BYTES)
 
 inline fun <T : CPointed> ULong.toVirtualPointer(): CPointer<T>? = Hhdm.toVirtualPointer(this)
-
-fun CPointer<ULongVar>.clear() {
-    repeat(PTE_COUNT) { index ->
-        this[index] = 0uL
-    }
-}

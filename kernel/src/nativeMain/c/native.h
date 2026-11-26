@@ -39,6 +39,7 @@ _Static_assert(offsetof(syscall_cpu_state_t, kernel_rsp) == 0, "invalid syscall 
 _Static_assert(offsetof(syscall_cpu_state_t, user_rsp) == 8, "invalid syscall user RSP offset");
 
 typedef struct cpu_local {
+    struct tlb_request *shootdown;
     gdt_entries_t gdt_entries;
     tss_t tss0;
     tss_stack_t tss_stack __attribute__((aligned(16)));
@@ -80,7 +81,8 @@ void set_kernel_runtime_fs_base(uint64_t pointer);
 void serial_print(const char *buffer, size_t size);
 uint64_t irq_save(void);
 void irq_restore(uint64_t flags);
-bool runtime_vm_install(void *(*allocate)(size_t));
+void *runtime_allocate(size_t size);
+void runtime_vm_enable(void);
 void *runtime_vm_take_released(void);
 uint64_t read_tsc(void);
 uint64_t runtime_clock_initialize(uint64_t frequency);

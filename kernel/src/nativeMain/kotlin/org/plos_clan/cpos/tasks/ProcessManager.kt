@@ -320,7 +320,7 @@ class Thread internal constructor(
 
     internal fun replaceAddressSpace(addressSpace: AddressSpace): Boolean =
         nativeTask.access {
-            bridge.fast_handoff_replace_address_space(it, addressSpace.pageDirectory.pml4PhysicalAddress)
+            bridge.fast_handoff_replace_address_space(it, addressSpace.pageDirectory.translations.handle)
         }
 
     internal val pendingSignalMask: ULong
@@ -717,7 +717,7 @@ object ProcessManager {
             val preparation = prepare(cgroup.id)
             if (preparation is VfsResult.Err) return preparation
             nativeTask = NativeTask.allocate(
-                cgroup.id, process.addressSpace.pageDirectory.pml4PhysicalAddress, kernelStackPages, nice,
+                cgroup.id, process.addressSpace.pageDirectory, kernelStackPages, nice,
             ) ?: return VfsResult.Err(VfsError.NO_MEMORY)
             if (creator != null) {
                 val affinity = checkNotNull(creator.nativeTask.affinity())
@@ -1040,7 +1040,7 @@ object ProcessManager {
     ): Thread? {
         val id = cgroup?.id ?: if (process.threads.isEmpty()) process.id else nextTaskId.fetchAndAdd(1)
         val task = nativeTask ?: checkNotNull(NativeTask.allocate(
-            id, process.addressSpace.pageDirectory.pml4PhysicalAddress, nice = nice,
+            id, process.addressSpace.pageDirectory, nice = nice,
         ))
         try {
             val thread = Thread(

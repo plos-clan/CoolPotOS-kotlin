@@ -2,7 +2,6 @@
 
 #include <limine.h>
 #include "os_terminal.h"
-#include "vdso.h"
 #include "native.h"
 
 #ifdef __cplusplus
@@ -26,9 +25,10 @@ uint64_t read_cr3(void);
 uint64_t read_cr2(void);
 void write_cr3(uint64_t value);
 void invlpg(uint64_t address);
-void tlb_invalidate_remote(uint64_t directory, uint64_t lapic_id);
+uint32_t lapic_id(void);
+void tlb_invalidate(vm_space_t *vm, uint64_t address, uint64_t pages, const int64_t *ids, size_t count);
+int current_cpu_index(void);
 uint64_t rdmsr(uint32_t msr);
-void wrmsr(uint32_t msr, uint64_t value);
 extern bool fs_base_instructions;
 void enable_cr4(uint64_t flags);
 void open_smap();
@@ -41,7 +41,6 @@ void io_out16(uint16_t port, uint16_t value);
 void io_out32(uint16_t port, uint32_t value);
 void enable_interrupt(void);
 void disable_interrupt(void);
-bool can_use_runtime(void);
 void set_runtime_use_mask(bool enabled);
 extern void (*const syscall_entry)(void);
 void wait_for_interrupt(void);
@@ -66,7 +65,7 @@ fast_task_t *fast_handoff_open_runtime(fast_cpu_t **cpus, size_t count);
 void fast_handoff_park_kotlin(uint64_t deadline_ns, uint64_t wake_sequence, bool may_sleep);
 uint64_t fast_handoff_create_task(
     uint32_t id,
-    uint64_t cr3,
+    vm_space_t *vm,
     uint64_t kernel_rsp,
     uint64_t kernel_fs_base,
     uint32_t priority
@@ -77,14 +76,7 @@ bool fast_handoff_enqueue(uint64_t task, fast_cpu_t *cpu);
 uint8_t fast_handoff_task_state(uint64_t task);
 void fast_handoff_set_task_state(uint64_t task, uint8_t state);
 uint64_t fast_handoff_current_task_handle(void);
-bool fast_handoff_replace_address_space(uint64_t task, uint64_t cr3);
-bool runtime_vm_install(void *(*allocate)(size_t));
-extern void *(*const runtime_allocate_callback)(size_t);
-void *runtime_vm_take_released(void);
-uint64_t runtime_clock_initialize(uint64_t frequency);
-uint64_t runtime_clock_frequency(void);
-uint64_t runtime_clock_nanos(void);
-bool runtime_vdso_initialize(vdso_image_t *image);
+bool fast_handoff_replace_address_space(uint64_t task, vm_space_t *vm);
 extern void (*ap_start_ptr)(struct limine_mp_info *);
 void *__rtld_allocateTcb(void);
 typedef struct {

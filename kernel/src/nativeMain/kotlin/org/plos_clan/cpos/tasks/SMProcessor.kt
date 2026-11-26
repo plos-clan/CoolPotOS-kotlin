@@ -12,6 +12,7 @@ import kotlinx.cinterop.pointed
 import kotlinx.cinterop.toLong
 import org.plos_clan.cpos.coroutines.KernelCoroutines
 import org.plos_clan.cpos.drivers.acpi.apic.LocalApic
+import org.plos_clan.cpos.mem.page.TranslationCache
 import org.plos_clan.cpos.syscall.Syscall
 import org.plos_clan.cpos.utils.CpuID
 import org.plos_clan.cpos.utils.CpuFeature
@@ -43,13 +44,14 @@ fun apStart() {
     bridge.ap_gdt_setup(lapicId.toULong())
     Syscall.initialize(lapicId.toULong(), false)
     LocalApic.enableController()
+    val local = SMProcessor.currentLocal()
+    TranslationCache.join(local.cpuid.toInt(), lapicId)
     if (!LocalApic.configureDeadlineTimer()) {
         println("APIC: failed to configure AP $lapicId TSC-deadline timer")
         return
     }
-    CpuID.apInit(SMProcessor.currentLocal())
+    CpuID.apInit(local)
     SMProcessor.load_done.incrementAndFetch()
-    val local = SMProcessor.currentLocal()
     val scheduler = local.scheduler
     scheduler.waitForBindRequest()
     val initialized = Scheduler.apInitialize()
@@ -95,6 +97,8 @@ object SMProcessor {
             locals[entry.lapic_id] =
                 CpuLocal(nextCpuId++, entry.lapic_id.toLong(), entry.lapic_id == smp.bsp_lapic_id)
         }
+
+        TranslationCache.join(currentLocal().cpuid.toInt(), smp.bsp_lapic_id)
 
         for (index in 0 until cpu_count.toLong()) {
             val entry = (cpus[index] ?: continue).pointed

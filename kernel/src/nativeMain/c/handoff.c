@@ -132,43 +132,95 @@ static void lapic_write(uint32_t reg, uint64_t value) {
     }
 }
 
-static void lapic_send_interrupt(uint64_t lapic_id, uint32_t command) {
-    if (lapic_x2apic) {
-        lapic_write(lapic_icr_register, lapic_id << 32 | command);
-        return;
+static void lapic_send_interrupt(uint64_t id, uint32_t command) {
+    if (!lapic_x2apic) {
+        uint32_t status = lapic_read(lapic_icr_register);
+        while (status & lapic_delivery_pending) {
+            asm_pause();
+            status = lapic_read(lapic_icr_register);
+        }
+        lapic_write(lapic_icr_high_register, id << 24);
     }
-
-    uint32_t pending = lapic_read(lapic_icr_register) & lapic_delivery_pending;
-    while (pending) {
-        __asm__ volatile("pause");
-        pending = lapic_read(lapic_icr_register) & lapic_delivery_pending;
-    }
-    lapic_write(lapic_icr_high_register, (lapic_id & 0xffu) << 24);
-    lapic_write(lapic_icr_register, command);
+    lapic_write(lapic_icr_register, id << 32 | command);
 }
 
-static uint64_t tlb_directory, tlb_target;
+uint32_t lapic_id(void) {
+    const uint32_t id = lapic_read(lapic_id_register);
+    return lapic_x2apic ? id : id >> 24;
+}
 
-void tlb_invalidate_remote(uint64_t directory, uint64_t lapic_id) {
-    tlb_directory = directory;
-    __atomic_store_n(&tlb_target, lapic_id + 1, __ATOMIC_RELEASE);
-    lapic_send_interrupt(lapic_id, 4u << 8);
-    uint64_t pending = __atomic_load_n(&tlb_target, __ATOMIC_ACQUIRE);
-    while (pending) {
-        __asm__ volatile("pause");
-        pending = __atomic_load_n(&tlb_target, __ATOMIC_ACQUIRE);
+struct tlb_request {
+    uint64_t root, address, pages;
+    size_t completed;
+};
+
+static void tlb_flush(const struct tlb_request *request) {
+    const uint64_t current = read_cr3();
+    if ((int64_t)request->address >= 0 && request->root != current) return;
+    if (!request->pages) write_cr3(current);
+    for (uint64_t i = 0; i < request->pages; ++i) invlpg(request->address + i * 4096);
+}
+
+int current_cpu_index(void) {
+    fast_cpu_t *cpu = bound_cpu();
+    return cpu ? (int)cpu->logical_id : -1;
+}
+
+static void tlb_send(uint32_t id, struct tlb_request *request) {
+    struct tlb_request **box = &locals[id % cpu_slot_count].shootdown;
+    for (;;) {
+        struct tlb_request *empty = NULL;
+        const bool queued = __atomic_compare_exchange_n(
+            box, &empty, request, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+        if (queued) break;
+        asm_pause();
     }
+    lapic_send_interrupt(id, 4u << 8);
+}
+
+void tlb_invalidate(vm_space_t *vm, uint64_t address, uint64_t pages, const int64_t *ids, size_t count) {
+    struct tlb_request request = {.root = vm->root, .address = address, .pages = pages};
+    const uint64_t flags = irq_save();
+    const int self = current_cpu_index();
+    size_t sent = 0;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    for (size_t base = 0; base < count; base += 64) {
+        uint64_t mask = (int64_t)address < 0 ? UINT64_MAX :
+            __atomic_load_n(&vm->active[base / 64], __ATOMIC_ACQUIRE);
+        while (mask) {
+            const size_t cpu = base + __builtin_ctzll(mask);
+            mask &= mask - 1;
+            if (cpu >= count) break;
+            if (cpu == (size_t)self) continue;
+            const int64_t id = __atomic_load_n(&ids[cpu], __ATOMIC_ACQUIRE);
+            if (id < 0 || (self < 0 && id == lapic_id())) continue;
+            tlb_send((uint32_t)id, &request);
+            ++sent;
+        }
+    }
+    tlb_flush(&request);
+    for (;;) {
+        const size_t completed = __atomic_load_n(&request.completed, __ATOMIC_ACQUIRE);
+        if (completed == sent) break;
+        asm_pause();
+    }
+    irq_restore(flags);
 }
 
 bool tlb_handle_nmi(void) {
-    const uint64_t target = __atomic_load_n(&tlb_target, __ATOMIC_ACQUIRE);
-    uint32_t id = lapic_read(lapic_id_register);
-    if (!lapic_x2apic) id >>= 24;
-    if (target != (uint64_t)id + 1) return false;
-    const uint64_t current = read_cr3();
-    if (!tlb_directory || current == tlb_directory) write_cr3(current);
-    __atomic_store_n(&tlb_target, 0, __ATOMIC_RELEASE);
+    struct tlb_request **box = &locals[lapic_id() % cpu_slot_count].shootdown;
+    struct tlb_request *request = __atomic_exchange_n(box, NULL, __ATOMIC_ACQUIRE);
+    if (!request) return false;
+    tlb_flush(request);
+    __atomic_fetch_add(&request->completed, 1, __ATOMIC_RELEASE);
     return true;
+}
+
+static void switch_vm(uint32_t index, vm_space_t *previous, vm_space_t *next) {
+    const uint64_t bit = UINT64_C(1) << (index % 64);
+    __atomic_fetch_or(&next->active[index / 64], bit, __ATOMIC_SEQ_CST);
+    write_cr3(next->root);
+    if (previous) __atomic_fetch_and(&previous->active[index / 64], ~bit, __ATOMIC_RELEASE);
 }
 
 static fast_task_t *heap_meld(fast_task_t *first, fast_task_t *second) {
@@ -457,7 +509,7 @@ static enum fast_schedule_result fast_handoff_schedule(
 
     if (next == previous) return block ? schedule_rejected : schedule_same_task;
     if (interrupted_xstate) enter_kernel_xstate(interrupted_xstate);
-    if (previous->cr3 != next->cr3) write_cr3(next->cr3);
+    if (previous->vm != next->vm) switch_vm(cpu->logical_id, previous->vm, next->vm);
     const size_t slot = cpu->lapic_id % cpu_slot_count;
     syscall_cpu_state_t *syscall = &locals[slot].syscall;
     if (next->kernel_rsp) {
@@ -615,14 +667,14 @@ bool fast_handoff_needs_balance(void) {
 
 uint64_t fast_handoff_create_task(
     uint32_t id,
-    uint64_t cr3,
+    vm_space_t *vm,
     uint64_t kernel_rsp,
     uint64_t kernel_fs_base,
     uint32_t priority
 ) {
     fast_task_t *task = malloc(sizeof(*task));
     if (!task) return 0;
-    *task = (fast_task_t){.id = id, .cr3 = cr3, .kernel_rsp = kernel_rsp,
+    *task = (fast_task_t){.id = id, .vm = vm, .kernel_rsp = kernel_rsp,
         .kernel_fs_base = kernel_fs_base, .priority = priority};
     return (uintptr_t)task;
 }
@@ -685,7 +737,7 @@ _Noreturn void fast_handoff_exit_current(void) {
 void fast_handoff_publish_runtime(uint64_t handle) {
     fast_task_t *task = task_from_handle(handle);
     if (publish_runtime(&boot_tasks, task)) return;
-    task->cr3 = runtime_defaults.cr3;
+    task->vm = runtime_defaults.vm;
     task->priority = runtime_defaults.priority;
     const size_t ticket = __atomic_fetch_add(&runtime_cursor, 1, __ATOMIC_RELAXED);
     fast_cpu_t *target = runtime_cpus[ticket % runtime_count];
@@ -695,7 +747,7 @@ void fast_handoff_publish_runtime(uint64_t handle) {
 fast_task_t *fast_handoff_open_runtime(fast_cpu_t **cpus, size_t count) {
     runtime_cpus = cpus;
     __atomic_store_n(&runtime_count, count, __ATOMIC_RELEASE);
-    runtime_defaults = (fast_task_t){.cr3 = bsp_cpu->idle->cr3, .priority = bsp_cpu->idle->priority};
+    runtime_defaults = (fast_task_t){.vm = bsp_cpu->idle->vm, .priority = bsp_cpu->idle->priority};
     return __atomic_exchange_n(&boot_tasks, &runtime_defaults, __ATOMIC_ACQ_REL);
 }
 
@@ -703,6 +755,7 @@ bool fast_handoff_bind_current(uint64_t handle, fast_cpu_t *cpu) {
     fast_task_t *task = task_from_handle(handle);
     if (!task || current_cpu() || task->priority >= cpu->levels) return false;
     const uint64_t flags = irq_save();
+    switch_vm(cpu->logical_id, NULL, task->vm);
     cpu->idle = task;
     __atomic_store_n(&cpu->current, task, __ATOMIC_RELEASE);
     cpu->worker_pending = true;
@@ -777,17 +830,15 @@ uint64_t fast_handoff_current_task_handle(void) {
     return handle;
 }
 
-bool fast_handoff_replace_address_space(uint64_t handle, uint64_t cr3) {
-    fast_task_t *task = task_from_handle(handle);
-    if (!task || !cr3) return false;
-
+bool fast_handoff_replace_address_space(uint64_t handle, vm_space_t *vm) {
     const uint64_t flags = irq_save();
     fast_cpu_t *cpu = current_cpu();
-    lock_cpu(cpu);
-    const bool current = cpu->current == task;
-    if (current) task->cr3 = cr3;
-    unlock_cpu(cpu);
-    if (current) write_cr3(cr3);
+    fast_task_t *task = cpu->current;
+    const bool current = (uintptr_t)task == handle;
+    if (current && task->vm != vm) {
+        switch_vm(cpu->logical_id, task->vm, vm);
+        task->vm = vm;
+    }
     irq_restore(flags);
     return current;
 }
