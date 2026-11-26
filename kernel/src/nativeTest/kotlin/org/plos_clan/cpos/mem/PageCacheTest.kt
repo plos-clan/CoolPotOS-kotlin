@@ -1,7 +1,9 @@
 package org.plos_clan.cpos.mem
 
+import org.plos_clan.cpos.mem.page.UserFrameReferences
 import org.plos_clan.cpos.utils.PAGE_SIZE_BYTES
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -185,6 +187,43 @@ class PageCacheTest {
             val read = PageCache.read(backing, 0uL, output, 0, 1)
             assertEquals(1, read.bytes)
             assertEquals(1.toByte(), bytes.single())
+        } finally {
+            PageCache.invalidate(backing.identity)
+        }
+    }
+
+    @Test
+    fun competingLoadBorrowsTheAlreadyInstalledPage() {
+        val source = Source()
+        source.duringRead = {
+            source.duringRead = null
+            assertEquals(1.toByte(), source.byte(0uL))
+        }
+        val scratch = ByteArray(PAGE_SIZE_BYTES.toInt())
+        val acquired = PageCache.acquire(source, 0uL, scratch)
+        assertTrue(acquired.isSuccess)
+        try {
+            assertFalse(UserFrameReferences.isExclusive(acquired.frame))
+        } finally {
+            PageCache.release(acquired.frame)
+            PageCache.invalidate(source.identity)
+        }
+    }
+
+    @Test
+    fun windowPinsUnalignedPagesAcrossInvalidationAndReload() {
+        val backing = Source()
+        val start = PAGE_SIZE_BYTES - 1uL
+        val bytes = ByteArray(PAGE_SIZE_BYTES.toInt() + 2)
+        try {
+            PageCache.withPages(backing, start, bytes.size) { pages, read ->
+                assertEquals(bytes.size, read.bytes)
+                PageCache.invalidate(backing.identity)
+                backing.value = 2
+                assertEquals(2.toByte(), backing.byte(PAGE_SIZE_BYTES))
+                assertEquals(bytes.size, pages.copyTo(0, bytes, 0, bytes.size))
+            }
+            assertContentEquals(ByteArray(bytes.size) { 1 }, bytes)
         } finally {
             PageCache.invalidate(backing.identity)
         }

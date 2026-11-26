@@ -51,6 +51,7 @@ internal data class SocketOptions(
     val sendTimeoutNanos: ULong? = null,
     val receiveTimeoutNanos: ULong? = null,
     val reuseAddress: Boolean = false,
+    val reusePort: Boolean = false,
     val broadcast: Boolean = false,
     val keepAlive: Boolean = false,
     val linger: SocketLinger = SocketLinger(),

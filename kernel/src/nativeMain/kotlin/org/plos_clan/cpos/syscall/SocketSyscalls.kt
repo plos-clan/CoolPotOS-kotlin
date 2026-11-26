@@ -75,6 +75,7 @@ internal object SocketSyscalls {
         RECEIVE_LOW_WATERMARK(SocketConstants.SO_RCVLOWAT, Int.SIZE_BYTES),
         RECEIVE_TIMEOUT(SocketConstants.SO_RCVTIMEO, Long.SIZE_BYTES * 2),
         SEND_TIMEOUT(SocketConstants.SO_SNDTIMEO, Long.SIZE_BYTES * 2),
+        REUSE_PORT(SocketConstants.SO_REUSEPORT, Int.SIZE_BYTES),
         REUSE_ADDRESS(SocketConstants.SO_REUSEADDR, Int.SIZE_BYTES),
         BROADCAST(SocketConstants.SO_BROADCAST, Int.SIZE_BYTES),
         KEEP_ALIVE(SocketConstants.SO_KEEPALIVE, Int.SIZE_BYTES),
@@ -111,13 +112,14 @@ internal object SocketSyscalls {
                 network.unix,
             )
             SocketDomain.IPV4 -> {
+                val owner = process.credentials.userIds.effective
                 val socket = when (options.protocol) {
                     IpProtocol.ICMP.number.toInt() -> {
                         if (!hasRawNetworkAccess(process)) return errno(Errno.EPERM)
                         network.icmp.createSocket()
                     }
-                    IpProtocol.TCP.number.toInt() -> network.tcp.createSocket()
-                    IpProtocol.UDP.number.toInt() -> network.udp.createSocket()
+                    IpProtocol.TCP.number.toInt() -> network.tcp.createSocket(owner)
+                    IpProtocol.UDP.number.toInt() -> network.udp.createSocket(owner)
                     else -> error("validated IPv4 protocol ${options.protocol}")
                 }
                 FileSystemManager.vfs.openSocket(caller, context, socket, options.nonBlocking)
@@ -552,6 +554,7 @@ internal object SocketSyscalls {
                 is VfsResult.Ok -> socket.setSendTimeout(timeout.value)
                 is VfsResult.Err -> timeout
             }
+            SetSocketOption.REUSE_PORT -> socket.setReusePort(value != 0)
             SetSocketOption.REUSE_ADDRESS -> socket.setReuseAddress(value != 0)
             SetSocketOption.BROADCAST -> socket.setBroadcast(value != 0)
             SetSocketOption.KEEP_ALIVE -> socket.setKeepAlive(value != 0)
@@ -598,6 +601,7 @@ internal object SocketSyscalls {
             SocketConstants.SO_ACCEPTCONN -> target.integer(if (socket.isListening()) 1 else 0)
             SocketConstants.SO_PROTOCOL -> target.integer(socket.protocol)
             SocketConstants.SO_DOMAIN -> target.integer(socket.domain.abiValue)
+            SocketConstants.SO_REUSEPORT -> target.integer(if (options.reusePort) 1 else 0)
             SocketConstants.SO_REUSEADDR -> target.integer(if (options.reuseAddress) 1 else 0)
             SocketConstants.SO_BROADCAST -> target.integer(if (options.broadcast) 1 else 0)
             SocketConstants.SO_KEEPALIVE -> target.integer(if (options.keepAlive) 1 else 0)

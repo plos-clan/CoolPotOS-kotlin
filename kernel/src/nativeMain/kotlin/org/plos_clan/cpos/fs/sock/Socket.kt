@@ -288,6 +288,11 @@ internal abstract class AbstractSocket(
     fun setReuseAddress(enabled: Boolean): VfsResult<Unit> =
         updateOptions { copy(reuseAddress = enabled) }
 
+    fun setReusePort(enabled: Boolean): VfsResult<Unit> {
+        if (domain != SocketDomain.IPV4) return VfsResult.Err(VfsError.NOT_SUPPORTED)
+        return updateOptions { copy(reusePort = enabled) }
+    }
+
     fun setBroadcast(enabled: Boolean): VfsResult<Unit> =
         updateOptions { copy(broadcast = enabled) }
 
@@ -316,10 +321,6 @@ internal abstract class AbstractSocket(
         }
         filter = program
         VfsResult.Ok(Unit)
-    }
-
-    fun filterPacket(bytes: ByteArray, offset: Int, length: Int): Int = lock.withLock {
-        filterPacketLocked(bytes, offset, length)
     }
 
     open fun setProtocolOption(

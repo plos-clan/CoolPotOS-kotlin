@@ -27,7 +27,7 @@ class IpOutputTest {
         }
 
         fun socket(icmp: Boolean = false): AbstractSocket {
-            val socket = if (icmp) network.icmp.createSocket() else network.udp.createSocket()
+            val socket = if (icmp) network.icmp.createSocket() else network.udp.createSocket(0)
             sockets.add(socket)
             assertIs<VfsResult.Ok<Unit>>(socket.bindSocket(process, address))
             return socket

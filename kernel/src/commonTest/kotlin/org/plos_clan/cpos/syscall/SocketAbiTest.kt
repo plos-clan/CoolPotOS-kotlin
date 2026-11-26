@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.syscall
 
+import org.plos_clan.cpos.utils.BigEndianBuffer
 import org.plos_clan.cpos.fs.sock.SocketAddress
 import org.plos_clan.cpos.fs.sock.SocketControlMessage
 import org.plos_clan.cpos.fs.sock.UnspecifiedSocketAddress
@@ -8,7 +9,6 @@ import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.network.Ipv4Address
 import org.plos_clan.cpos.network.Ipv4SocketAddress
 import org.plos_clan.cpos.network.NetlinkSocketAddress
-import org.plos_clan.cpos.network.NetworkOrderBuffer
 import org.plos_clan.cpos.network.SocketAddressAbi
 import org.plos_clan.cpos.network.SocketConstants
 import org.plos_clan.cpos.utils.LittleEndianBuffer
@@ -66,7 +66,7 @@ class SocketAbiTest {
         val encoded = SocketAddressAbi.encode(address)
 
         assertEquals(SocketConstants.AF_INET.toUShort(), LittleEndianBuffer(encoded).readU16(0))
-        assertEquals(8080u.toUShort(), NetworkOrderBuffer(encoded).readU16(2))
+        assertEquals(8080u.toUShort(), BigEndianBuffer(encoded).readU16(2))
         assertEquals(address, assertIs<VfsResult.Ok<SocketAddress>>(
             SocketAddressAbi.decode(encoded),
         ).value)

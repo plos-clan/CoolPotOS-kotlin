@@ -98,8 +98,7 @@ void asm_syscall_handle(void);
 void *malloc(size_t size);
 void free(void *ptr);
 
-int cp_zstd_decompress(void *destination, size_t capacity,
-                       const void *source, size_t size);
+size_t ZSTD_decompress(void *destination, size_t capacity, const void *source, size_t size);
 
 typedef struct {
     uint32_t eax;

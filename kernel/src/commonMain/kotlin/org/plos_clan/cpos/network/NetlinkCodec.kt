@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.network
 
+import org.plos_clan.cpos.utils.BigEndianBuffer
 import org.plos_clan.cpos.utils.LittleEndianBuffer
 
 internal class NetlinkBuffer internal constructor(
@@ -67,13 +68,13 @@ internal class NetlinkAttributeView internal constructor(
 
     fun u16(): UShort? {
         if (payload.size != UShort.SIZE_BYTES) return null
-        return if (networkByteOrder) NetworkOrderBuffer(payload.bytes).readU16(payload.offset)
+        return if (networkByteOrder) BigEndianBuffer(payload.bytes).readU16(payload.offset)
         else payload.readU16(0)
     }
 
     fun u32(): UInt? {
         if (payload.size != UInt.SIZE_BYTES) return null
-        return if (networkByteOrder) NetworkOrderBuffer(payload.bytes).readU32(payload.offset)
+        return if (networkByteOrder) BigEndianBuffer(payload.bytes).readU32(payload.offset)
         else payload.readU32(0)
     }
 

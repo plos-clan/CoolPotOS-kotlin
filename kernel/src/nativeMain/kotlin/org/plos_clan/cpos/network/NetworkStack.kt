@@ -6,6 +6,7 @@
 
 package org.plos_clan.cpos.network
 
+import org.plos_clan.cpos.utils.BigEndianBuffer
 import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.readBytes
@@ -21,6 +22,7 @@ import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.utils.IrqSpinLock
 import org.plos_clan.cpos.utils.SnapshotSet
+import kotlin.native.concurrent.ThreadLocal
 import kotlin.native.ref.WeakReference
 import org.plos_clan.cpos.fs.sock.UnixSocketNamespace
 import kotlin.concurrent.atomics.AtomicBoolean
@@ -59,11 +61,6 @@ internal data class NetworkNeighbor(
     val reachable: Boolean,
 )
 
-internal data class NetworkPath(
-    val source: Ipv4Address,
-    val mtu: Int,
-)
-
 internal interface NetworkConfigurationListener {
     fun linkChanged(intfc: NetworkInterface, removed: Boolean) {}
 
@@ -87,15 +84,16 @@ internal data class IpPacketContext(
     val payloadOffset: Int,
     val payloadLength: Int,
     val packetOffset: Int,
+    val checksumVerified: Boolean = false,
 )
 
-internal enum class IpTransportError {
-    NETWORK_UNREACHABLE,
-    HOST_UNREACHABLE,
-    PROTOCOL_UNREACHABLE,
-    PORT_UNREACHABLE,
-    FRAGMENTATION_NEEDED,
-    TIME_EXCEEDED,
+internal enum class IpTransportError(val error: VfsError, val datagramError: VfsError = error) {
+    NETWORK_UNREACHABLE(VfsError.NETWORK_UNREACHABLE),
+    HOST_UNREACHABLE(VfsError.HOST_UNREACHABLE),
+    PROTOCOL_UNREACHABLE(VfsError.PROTOCOL_NOT_SUPPORTED),
+    PORT_UNREACHABLE(VfsError.CONNECTION_REFUSED),
+    FRAGMENTATION_NEEDED(VfsError.MESSAGE_TOO_LONG),
+    TIME_EXCEEDED(VfsError.TIMED_OUT, VfsError.HOST_UNREACHABLE),
 }
 
 internal interface IpProtocolHandler {
@@ -252,12 +250,6 @@ internal class NetworkStack : EthernetProtocol {
         val frames = ArrayDeque<ByteArray>()
     }
 
-    private data class SelectedRoute(
-        val intfc: NetworkInterface,
-        val source: Ipv4Address,
-        val nextHop: Ipv4Address,
-    )
-
     private data class FragmentKey(
         val interfaceIndex: Int,
         val source: Ipv4Address,
@@ -322,11 +314,10 @@ internal class NetworkStack : EthernetProtocol {
     private val lock = IrqSpinLock()
     private val fragmentLock = IrqSpinLock()
     private val interfaces = mutableMapOf<Int, NetworkInterface>()
-    private var interfaceSnapshot: List<NetworkInterface>? = null
     private val deviceInterfaces = mutableMapOf<EthernetDevice, NetworkInterface>()
     private val addresses = mutableMapOf<Int, List<NetworkInterfaceAddress>>()
     private val routes = mutableListOf<NetworkRoute>()
-    private var routingTable: List<NetworkRoute>? = null
+    private val routing = AtomicReference(Ipv4RoutingTable(interfaces, addresses, routes))
     private val neighbors = mutableMapOf<NeighborKey, NeighborEntry>()
     private val pendingNeighbors = mutableMapOf<NeighborKey, PendingNeighbor>()
     private val handlers = AtomicReference(emptyMap<UByte, IpProtocolHandler>())
@@ -344,6 +335,7 @@ internal class NetworkStack : EthernetProtocol {
     init {
         val loopback = NetworkInterface(LOOPBACK_INDEX, "lo", NetworkInterfaceKind.LOOPBACK, null)
         interfaces[loopback.index] = loopback
+        publishRoutes()
         val reference = WeakReference(this)
         namespaces.update { it + reference }
     }
@@ -362,20 +354,22 @@ internal class NetworkStack : EthernetProtocol {
         listeners.add(listener)
     }
 
-    fun snapshotInterfaces(): List<NetworkInterface> = lock.withLock {
-        interfaceSnapshot ?: interfaces.values.sortedBy(NetworkInterface::index).also { interfaceSnapshot = it }
+    private fun publishRoutes() {
+        val table = Ipv4RoutingTable(interfaces, addresses, routes)
+        routing.store(table)
     }
 
-    fun interfaceByIndex(index: Int): NetworkInterface? = lock.withLock { interfaces[index] }
+    fun snapshotInterfaces(): List<NetworkInterface> = routing.load().links
 
-    fun interfaceByName(name: String): NetworkInterface? = lock.withLock {
-        interfaces.values.firstOrNull { it.name == name }
-    }
+    fun interfaceByIndex(index: Int): NetworkInterface? = routing.load().interfaces[index]
+
+    fun interfaceByName(name: String): NetworkInterface? =
+        snapshotInterfaces().firstOrNull { it.name == name }
 
     fun interfaceAddresses(index: Int): List<NetworkInterfaceAddress> =
-        lock.withLock { addresses[index].orEmpty() }
+        routing.load().addresses[index].orEmpty()
 
-    fun snapshotRoutes(): List<NetworkRoute> = lock.withLock { allRoutesLocked() }
+    fun snapshotRoutes(): List<NetworkRoute> = routing.load().routes
 
     fun snapshotNeighbors(): List<NetworkNeighbor> {
         val now = TscClock.nanoTime()
@@ -454,7 +448,7 @@ internal class NetworkStack : EthernetProtocol {
             }
             if (existing != null && !replace) return VfsResult.Err(VfsError.ALREADY_EXISTS)
             if (existing == null) addresses[index] = assigned + address
-            routingTable = null
+            publishRoutes()
             selected to existing
         }
         val configured = existing ?: address
@@ -477,9 +471,9 @@ internal class NetworkStack : EthernetProtocol {
                 it.address == address && (prefixLength == null || it.prefixLength == prefixLength)
             }
             if (position < 0) return VfsResult.Err(VfsError.ADDRESS_NOT_AVAILABLE)
-            routingTable = null
             val removed = assigned[position]
             addresses[index] = assigned - removed
+            publishRoutes()
             selected to removed
         }
         notifyListeners { it.addressChanged(intfc, removed, removed = true) }
@@ -494,7 +488,7 @@ internal class NetworkStack : EthernetProtocol {
             if (interfaces[normalized.interfaceIndex] == null) return@withLock false
             if (routes.contains(normalized)) return VfsResult.Err(VfsError.ALREADY_EXISTS)
             routes += normalized
-            routingTable = null
+            publishRoutes()
             true
         }
         if (!added) return VfsResult.Err(VfsError.NO_DEVICE)
@@ -515,8 +509,7 @@ internal class NetworkStack : EthernetProtocol {
                     (route.protocol == 0.toUByte() || existing.protocol == route.protocol)
             }
             if (index < 0) return@withLock null
-            routingTable = null
-            routes.removeAt(index)
+            routes.removeAt(index).also { publishRoutes() }
         } ?: return VfsResult.Err(VfsError.NOT_FOUND)
         notifyListeners { it.routeChanged(removed, removed = true) }
         return VfsResult.Ok(Unit)
@@ -535,7 +528,7 @@ internal class NetworkStack : EthernetProtocol {
             }
             if (index >= 0) replaced = routes.removeAt(index)
             routes += normalized
-            routingTable = null
+            publishRoutes()
             true
         }
         if (!added) return VfsResult.Err(VfsError.NO_DEVICE)
@@ -544,110 +537,62 @@ internal class NetworkStack : EthernetProtocol {
         return VfsResult.Ok(Unit)
     }
 
-    fun isLocalAddress(address: Ipv4Address): Boolean = lock.withLock {
-        addresses.values.any { assigned -> assigned.any { it.address == address } }
-    }
+    fun isLocalAddress(address: Ipv4Address): Boolean = address in routing.load().localAddresses
 
     fun path(
         source: Ipv4Address,
         destination: Ipv4Address,
         interfaceIndex: Int? = null,
-    ): VfsResult<NetworkPath> =
-        lock.withLock { selectRouteLocked(source, destination, interfaceIndex) }?.let {
-            VfsResult.Ok(NetworkPath(it.source, it.intfc.mtu))
-        } ?: VfsResult.Err(
-            if (source.isAny) VfsError.NETWORK_UNREACHABLE else VfsError.ADDRESS_NOT_AVAILABLE,
-        )
-
-    fun isBroadcast(address: Ipv4Address): Boolean = lock.withLock {
-        address.isLimitedBroadcast || addresses.values.any { assigned ->
-            assigned.any { it.prefixLength < 31 && it.prefix.broadcast == address }
-        }
+    ): VfsResult<NetworkPath> {
+        val route = routing.load().select(source, destination, interfaceIndex)
+        if (route != null) return VfsResult.Ok(route)
+        val error = if (source.isAny) VfsError.NETWORK_UNREACHABLE
+        else VfsError.ADDRESS_NOT_AVAILABLE
+        return VfsResult.Err(error)
     }
 
+    fun isBroadcast(address: Ipv4Address): Boolean = routing.load().isBroadcast(address)
+
     fun sendIpv4(
-        source: Ipv4Address,
-        destination: Ipv4Address,
+        route: NetworkPath,
         protocol: IpProtocol,
         packet: Ipv4OutputPacket,
         dontFragment: Boolean = false,
         ttl: UByte = 64u,
         typeOfService: UByte = 0u,
-        interfaceIndex: Int? = null,
-    ): VfsResult<Ipv4Address> {
+    ): VfsResult<Unit> {
         val payloadLength = packet.payloadLength
-        val route = lock.withLock { selectRouteLocked(source, destination, interfaceIndex) }
-            ?: return VfsResult.Err(
-                if (source.isAny) VfsError.NETWORK_UNREACHABLE else VfsError.ADDRESS_NOT_AVAILABLE,
-            )
-        val identification = nextIdentification.fetchAndAdd(1).toUShort()
-        if (route.intfc.kind == NetworkInterfaceKind.LOOPBACK) {
-            Ipv4Codec.writeHeader(
-                packet.bytes,
-                EthernetHeader.SIZE,
-                payloadLength,
-                route.source,
-                destination,
-                protocol.number,
-                identification,
-                ttl,
-                typeOfService = typeOfService,
-            )
-            val context = IpPacketContext(
-                route.intfc,
-                packet.bytes,
-                route.source,
-                destination,
-                protocol.number,
-                Ipv4OutputPacket.PAYLOAD_OFFSET,
-                payloadLength,
-                EthernetHeader.SIZE,
-            )
-            dispatchIpv4(context, protocol.number)
-            return VfsResult.Ok(route.source)
-        }
+        val destination = route.destination
         if (!route.intfc.running) return VfsResult.Err(VfsError.NETWORK_UNREACHABLE)
-        val maximumPayload = route.intfc.mtu - Ipv4Codec.MIN_HEADER_SIZE
-        if (maximumPayload <= 0 || dontFragment && payloadLength > maximumPayload) {
+        val maximumPayload = route.mtu - Ipv4Codec.MIN_HEADER_SIZE
+        val limit = if (route.local && !dontFragment) payloadLength else maximumPayload
+        val fragmentSize = limit and 7.inv()
+        if (payloadLength > limit && (dontFragment || fragmentSize <= 0)) {
             return VfsResult.Err(VfsError.MESSAGE_TOO_LONG)
         }
-        val fragmentPayload = maximumPayload and 7.inv()
-        if (payloadLength > maximumPayload && fragmentPayload == 0) {
-            return VfsResult.Err(VfsError.MESSAGE_TOO_LONG)
-        }
+        val identification = if (dontFragment) 0u else nextIdentification.fetchAndAdd(1).toUShort()
         var position = 0
-        var firstFragment = true
-        while (firstFragment || position < payloadLength) {
-            firstFragment = false
+        do {
             val remaining = payloadLength - position
-            val currentLength = if (remaining > maximumPayload) fragmentPayload else remaining
-            val moreFragments = position + currentLength < payloadLength
-            val frame = if (currentLength == payloadLength) packet.bytes else {
-                val fragment = Ipv4OutputPacket(currentLength)
-                val start = Ipv4OutputPacket.PAYLOAD_OFFSET + position
-                packet.bytes.copyInto(fragment.bytes, Ipv4OutputPacket.PAYLOAD_OFFSET, start, start + currentLength)
-                fragment.bytes
-            }
+            val length = if (remaining > limit) fragmentSize else remaining
+            val frame = packet.fragment(position, length).bytes
             Ipv4Codec.writeHeader(
-                frame,
-                EthernetHeader.SIZE,
-                currentLength,
-                route.source,
-                destination,
-                protocol.number,
-                identification,
-                ttl,
-                position,
-                moreFragments,
-                dontFragment,
-                typeOfService,
+                frame, EthernetHeader.SIZE, length, route.source, destination, protocol.number,
+                identification, ttl, position, length < remaining, dontFragment, typeOfService,
             )
-            if (!routeFrame(route, destination, frame)) {
+            if (route.local) {
+                val context = IpPacketContext(
+                    route.intfc, frame, route.source, destination, protocol.number,
+                    Ipv4OutputPacket.PAYLOAD_OFFSET, length, EthernetHeader.SIZE,
+                    checksumVerified = true,
+                )
+                Loopback.deliver(this, context)
+            } else if (!routeFrame(route, frame)) {
                 return VfsResult.Err(VfsError.NO_MEMORY)
             }
-            position += currentLength
-        }
-        return VfsResult.Ok(route.source)
+            position += length
+        } while (position < payloadLength)
+        return VfsResult.Ok(Unit)
     }
 
     fun sendPortUnreachable(packet: IpPacketContext) {
@@ -655,16 +600,17 @@ internal class NetworkStack : EthernetProtocol {
     }
 
     override fun attach(device: EthernetDevice) {
+        val index = nextInterfaceIndex.fetchAndAdd(1)
         val intfc = NetworkInterface(
-            nextInterfaceIndex.fetchAndAdd(1),
-            "eth${nextInterfaceIndex.load() - 3}",
+            index,
+            "eth${index - 2}",
             NetworkInterfaceKind.ETHERNET,
             device,
         )
         lock.withLock {
             interfaces[intfc.index] = intfc
             deviceInterfaces[device] = intfc
-            interfaceSnapshot = null
+            publishRoutes()
         }
         notifyListeners { it.linkChanged(intfc, removed = false) }
     }
@@ -674,12 +620,11 @@ internal class NetworkStack : EthernetProtocol {
         val intfc = lock.withLock {
             val selected = deviceInterfaces.remove(device) ?: return
             interfaces.remove(selected.index)
-            interfaceSnapshot = null
             addresses.remove(selected.index)
-            routingTable = null
             routes.removeAll { route ->
                 (route.interfaceIndex == selected.index).also { if (it) removedRoutes += route }
             }
+            publishRoutes()
             neighbors.keys.removeAll { it.interfaceIndex == selected.index }
             pendingNeighbors.keys.removeAll { it.interfaceIndex == selected.index }
             selected
@@ -776,19 +721,17 @@ internal class NetworkStack : EthernetProtocol {
         ) ?: return
         if (packet.ttl == 0.toUByte() || !acceptsDestination(intfc, packet.destination)) return
         if (packet.fragmentOffset == 0 && !packet.moreFragments) {
-            dispatchIpv4(
-                IpPacketContext(
-                    intfc,
-                    frame,
-                    packet.source,
-                    packet.destination,
-                    packet.protocol,
-                    packet.payloadOffset,
-                    packet.payloadLength,
-                    EthernetHeader.SIZE,
-                ),
+            val context = IpPacketContext(
+                intfc,
+                frame,
+                packet.source,
+                packet.destination,
                 packet.protocol,
+                packet.payloadOffset,
+                packet.payloadLength,
+                EthernetHeader.SIZE,
             )
+            dispatchIpv4(context)
             return
         }
         val payload = frame.copyOfRange(
@@ -824,22 +767,21 @@ internal class NetworkStack : EthernetProtocol {
             packet.identification,
             packet.ttl,
         )
-        dispatchIpv4(
-            IpPacketContext(
-                intfc,
-                reassembledPacket,
-                packet.source,
-                packet.destination,
-                packet.protocol,
-                Ipv4Codec.MIN_HEADER_SIZE,
-                reassembled.size,
-                0,
-            ),
+        val context = IpPacketContext(
+            intfc,
+            reassembledPacket,
+            packet.source,
+            packet.destination,
             packet.protocol,
+            Ipv4Codec.MIN_HEADER_SIZE,
+            reassembled.size,
+            0,
         )
+        dispatchIpv4(context)
     }
 
-    private fun dispatchIpv4(packet: IpPacketContext, protocol: UByte) {
+    private fun dispatchIpv4(packet: IpPacketContext) {
+        val protocol = packet.protocol
         if (protocol == IpProtocol.ICMP.number) {
             receiveIcmp(packet)
             return
@@ -853,13 +795,11 @@ internal class NetworkStack : EthernetProtocol {
     }
 
     private fun receiveIcmp(packet: IpPacketContext) {
-        if (packet.payloadLength < ICMP_HEADER_SIZE || !InternetChecksum.valid(
-                packet.bytes,
-                packet.payloadOffset,
-                packet.payloadLength,
-            )
-        ) return
-        val input = NetworkOrderBuffer(packet.bytes)
+        if (packet.payloadLength < ICMP_HEADER_SIZE) return
+        val valid = packet.checksumVerified ||
+            InternetChecksum.valid(packet.bytes, packet.payloadOffset, packet.payloadLength)
+        if (!valid) return
+        val input = BigEndianBuffer(packet.bytes)
         val type = input.readU8(packet.payloadOffset).toInt()
         val code = input.readU8(packet.payloadOffset + 1).toInt()
         icmp.receive(packet, type, code)
@@ -871,11 +811,11 @@ internal class NetworkStack : EthernetProtocol {
             packet.bytes.copyInto(
                 reply.bytes, offset, packet.payloadOffset, packet.payloadOffset + packet.payloadLength,
             )
-            val output = NetworkOrderBuffer(reply.bytes)
+            val output = BigEndianBuffer(reply.bytes)
             output.writeU8(offset, ICMP_ECHO_REPLY.toUByte())
             output.writeU16(offset + 2, 0u)
             output.writeU16(offset + 2, InternetChecksum.compute(reply.bytes, offset))
-            sendIpv4(packet.destination, packet.source, IpProtocol.ICMP, reply)
+            replyIcmp(packet, reply)
             return
         }
         val error = when {
@@ -935,22 +875,27 @@ internal class NetworkStack : EthernetProtocol {
             packet.protocol,
             0u,
         )
-        val output = NetworkOrderBuffer(message)
+        val output = BigEndianBuffer(message)
         output.writeU8(offset, type.toUByte())
         output.writeU8(offset + 1, code.toUByte())
         output.writeU16(offset + 2, 0u)
         output.writeU32(offset + 4, 0u)
         output.writeU16(offset + 2, InternetChecksum.compute(message, offset))
-        sendIpv4(packet.destination, packet.source, IpProtocol.ICMP, reply)
+        replyIcmp(packet, reply)
+    }
+
+    private fun replyIcmp(packet: IpPacketContext, reply: Ipv4OutputPacket) {
+        val route = path(packet.destination, packet.source)
+        if (route is VfsResult.Ok) sendIpv4(route.value, IpProtocol.ICMP, reply)
     }
 
     private fun routeFrame(
-        route: SelectedRoute,
-        destination: Ipv4Address,
+        route: NetworkPath,
         frame: ByteArray,
     ): Boolean {
+        val destination = route.destination
         val directHardware = when {
-            destination.isLimitedBroadcast || isDirectedBroadcast(route.intfc, destination) ->
+            routing.load().isBroadcast(destination, route.intfc.index) ->
                 MacAddress.BROADCAST
             destination.isMulticast -> multicastHardwareAddress(destination)
             else -> null
@@ -1038,123 +983,10 @@ internal class NetworkStack : EthernetProtocol {
         intfc.transmit(frame)
     }
 
-    private fun selectRouteLocked(
-        requestedSource: Ipv4Address,
-        destination: Ipv4Address,
-        interfaceIndex: Int? = null,
-    ): SelectedRoute? {
-        val local = addresses.entries.firstNotNullOfOrNull { (index, assigned) ->
-            assigned.firstOrNull { it.address == destination }?.let { index to it }
-        }
-        if (local != null) {
-            if (interfaceIndex != null && interfaceIndex != LOOPBACK_INDEX) return null
-            val loopback = interfaces[LOOPBACK_INDEX] ?: return null
-            val source = if (requestedSource.isAny) local.second.address else requestedSource
-            if (!hasAddressLocked(source)) return null
-            return SelectedRoute(loopback, source, destination)
-        }
-        if (destination.isLimitedBroadcast) {
-            val intfc = interfaces.values.firstOrNull {
-                (interfaceIndex == null || it.index == interfaceIndex) &&
-                    it.kind == NetworkInterfaceKind.ETHERNET && it.running &&
-                    !addresses[it.index].isNullOrEmpty()
-            } ?: return null
-            val source = selectSourceLocked(intfc, requestedSource, destination) ?: return null
-            return SelectedRoute(intfc, source, destination)
-        }
-        var route: NetworkRoute? = null
-        for (candidate in allRoutesLocked()) {
-            if (candidate.kind != NetworkRouteKind.UNICAST) continue
-            if (!candidate.destination.contains(destination)) continue
-            if (interfaceIndex != null && candidate.interfaceIndex != interfaceIndex) continue
-            if (interfaces[candidate.interfaceIndex]?.running != true) continue
-            val previous = route
-            if (previous != null) {
-                val prefix = candidate.destination.length.compareTo(previous.destination.length)
-                if (prefix < 0 || prefix == 0 && candidate.metric >= previous.metric) continue
-            }
-            route = candidate
-        }
-        val selected = route ?: return null
-        val intfc = interfaces[selected.interfaceIndex] ?: return null
-        val assigned = addresses[intfc.index].orEmpty()
-        val source = if (!requestedSource.isAny) {
-            requestedSource.takeIf { address -> assigned.any { it.address == address } }
-        } else {
-            selected.preferredSource?.takeIf { address -> assigned.any { it.address == address } }
-                ?: selectSourceLocked(intfc, Ipv4Address.ANY, destination)
-        } ?: return null
-        return SelectedRoute(intfc, source, selected.gateway ?: destination)
-    }
-
-    private fun selectSourceLocked(
-        intfc: NetworkInterface,
-        requested: Ipv4Address,
-        destination: Ipv4Address,
-    ): Ipv4Address? {
-        if (!requested.isAny) return requested.takeIf(::hasAddressLocked)
-        val assigned = addresses[intfc.index].orEmpty()
-        return assigned.firstOrNull { it.prefix.contains(destination) }?.address
-            ?: assigned.firstOrNull()?.address
-    }
-
-    private fun allRoutesLocked(): List<NetworkRoute> {
-        routingTable?.let { return it }
-        val result = ArrayList<NetworkRoute>(routes.size + addresses.values.sumOf(List<*>::size) * 3)
-        result += routes
-        for ((index, assigned) in addresses) {
-            for (address in assigned) {
-                if (address.automaticPrefixRoute) {
-                    result += NetworkRoute(
-                        address.prefix,
-                        interfaceIndex = index,
-                        preferredSource = address.address,
-                        kind = NetworkRouteKind.UNICAST,
-                        protocol = ROUTE_PROTOCOL_KERNEL,
-                    )
-                }
-                result += NetworkRoute(
-                    Ipv4Prefix(address.address, 32),
-                    interfaceIndex = LOOPBACK_INDEX,
-                    preferredSource = address.address,
-                    kind = NetworkRouteKind.LOCAL,
-                    protocol = ROUTE_PROTOCOL_KERNEL,
-                )
-                if (address.prefixLength < 31) {
-                    result += NetworkRoute(
-                        Ipv4Prefix(address.prefix.broadcast, 32),
-                        interfaceIndex = index,
-                        preferredSource = address.address,
-                        kind = NetworkRouteKind.BROADCAST,
-                        protocol = ROUTE_PROTOCOL_KERNEL,
-                    )
-                }
-            }
-        }
-        return result.distinct().also { routingTable = it }
-    }
-
-    private fun hasAddressLocked(address: Ipv4Address): Boolean =
-        addresses.values.any { assigned -> assigned.any { it.address == address } }
-
-    private fun acceptsDestination(
-        intfc: NetworkInterface,
-        destination: Ipv4Address,
-    ): Boolean = lock.withLock {
-        destination.isLimitedBroadcast || destination.isMulticast ||
-            hasAddressLocked(destination) ||
-            addresses[intfc.index].orEmpty().any { address ->
-                address.prefixLength < 31 && address.prefix.broadcast == destination
-            }
-    }
-
-    private fun isDirectedBroadcast(
-        intfc: NetworkInterface,
-        destination: Ipv4Address,
-    ): Boolean = lock.withLock {
-        addresses[intfc.index].orEmpty().any {
-            it.prefixLength < 31 && it.prefix.broadcast == destination
-        }
+    private fun acceptsDestination(intfc: NetworkInterface, destination: Ipv4Address): Boolean {
+        val table = routing.load()
+        return destination.isMulticast || destination in table.localAddresses ||
+            table.isBroadcast(destination, intfc.index)
     }
 
     private fun multicastHardwareAddress(address: Ipv4Address): MacAddress =
@@ -1192,6 +1024,30 @@ internal class NetworkStack : EthernetProtocol {
 
     private inline fun notifyListeners(notification: (NetworkConfigurationListener) -> Unit) {
         listeners.snapshot.forEach(notification)
+    }
+
+    @ThreadLocal
+    private object Loopback {
+        private val pending = ArrayDeque<Pair<NetworkStack, IpPacketContext>>()
+        private var draining = false
+
+        fun deliver(network: NetworkStack, packet: IpPacketContext) {
+            if (draining) {
+                pending.addLast(network to packet)
+                return
+            }
+            draining = true
+            try {
+                network.dispatchIpv4(packet)
+                while (true) {
+                    val (next, frame) = pending.removeFirstOrNull() ?: break
+                    next.dispatchIpv4(frame)
+                }
+            } finally {
+                pending.clear()
+                draining = false
+            }
+        }
     }
 
     companion object {
@@ -1250,6 +1106,5 @@ internal class NetworkStack : EthernetProtocol {
         private const val ICMP_TIME_EXCEEDED = 11
         private const val ICMP_PROTOCOL_UNREACHABLE = 2
         private const val ICMP_PORT_UNREACHABLE = 3
-        private val ROUTE_PROTOCOL_KERNEL = 2u.toUByte()
     }
 }

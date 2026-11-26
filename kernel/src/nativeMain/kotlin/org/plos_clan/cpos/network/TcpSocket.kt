@@ -15,11 +15,9 @@ import org.plos_clan.cpos.fs.sock.SocketSendRequest
 import org.plos_clan.cpos.fs.sock.SocketShutdownMode
 import org.plos_clan.cpos.fs.sock.SocketTimestampQueue
 import org.plos_clan.cpos.fs.sock.SocketType
-import org.plos_clan.cpos.fs.vfs.ByteCircularBuffer
 import org.plos_clan.cpos.fs.vfs.IoResult
 import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
-import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.tasks.IoWaitQueue
 import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.tasks.ProcessManager
@@ -28,6 +26,7 @@ import org.plos_clan.cpos.utils.PollEvents
 
 internal class TcpSocket internal constructor(
     private val subsystem: TcpProtocol,
+    private val owner: Int,
 ) : NetworkSocket(
     subsystem.network,
     SocketDomain.IPV4,
@@ -65,7 +64,7 @@ internal class TcpSocket internal constructor(
     private class Outstanding(
         var sequence: UInt,
         var flags: Int,
-        var payload: ByteArray,
+        var payload: PacketSlice,
         val options: ByteArray,
         var sentAt: ULong,
     ) {
@@ -87,9 +86,9 @@ internal class TcpSocket internal constructor(
                 sequence++
                 consumed--
             }
-            if (consumed > 0 && payload.isNotEmpty()) {
+            if (consumed > 0 && payload.size != 0) {
                 val bytes = minOf(consumed, payload.size)
-                payload = payload.copyOfRange(bytes, payload.size)
+                payload = payload.drop(bytes)
                 sequence += bytes.toUInt()
                 consumed -= bytes
             }
@@ -105,6 +104,7 @@ internal class TcpSocket internal constructor(
             acknowledgment: UInt,
             window: UShort,
             ttl: UByte,
+            frame: Ipv4OutputPacket? = null,
         ) = TcpTransmission(
             source,
             destination,
@@ -115,12 +115,13 @@ internal class TcpSocket internal constructor(
             options,
             payload,
             ttl,
+            frame,
         )
     }
 
     private data class OutOfOrder(
         val sequence: UInt,
-        val payload: ByteArray,
+        val payload: PacketSlice,
         val fin: Boolean,
         val receivedAtNanos: ULong?,
     )
@@ -139,9 +140,9 @@ internal class TcpSocket internal constructor(
     private var backlog = 0
     private var children = mutableSetOf<TcpSocket>()
     private var accepted = ArrayDeque<TcpSocket>()
-    private val receiveBuffer = ByteCircularBuffer(DEFAULT_BUFFER_SIZE)
+    private val receiveBuffer = TcpPacketQueue()
     private var receiveTimestamps: SocketTimestampQueue? = null
-    private val sendBuffer = ByteCircularBuffer(DEFAULT_BUFFER_SIZE)
+    private val sendBuffer = TcpPacketQueue()
     private val outstanding = ArrayDeque<Outstanding>()
     private val outOfOrder = mutableListOf<OutOfOrder>()
     private val readWaiters = IoWaitQueue()
@@ -181,7 +182,7 @@ internal class TcpSocket internal constructor(
         return lock.withLock {
             if (closed) return@withLock VfsResult.Err(VfsError.BAD_DESCRIPTOR)
             if (state != State.IDLE) return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
-            when (val result = subsystem.bind(this, requested, optionsLocked().reuseAddress)) {
+            when (val result = subsystem.ports.bind(this, requested, optionsLocked(), owner)) {
                 is VfsResult.Ok -> {
                     binding = result.value
                     local = result.value
@@ -248,7 +249,7 @@ internal class TcpSocket internal constructor(
             val segment = Outstanding(
                 iss,
                 TcpFlags.SYN,
-                TcpCodec.EMPTY,
+                PacketSlice.EMPTY,
                 options,
                 TscClock.nanoTime(),
             )
@@ -294,19 +295,18 @@ internal class TcpSocket internal constructor(
     }
 
     override fun listenSocket(process: Process, backlog: Int): VfsResult<Unit> {
-        val registered = lock.withLock {
+        return lock.withLock {
             if (state != State.IDLE && state != State.BOUND && state != State.LISTEN) {
                 return@withLock VfsResult.Err(VfsError.INVALID_ARGUMENT)
             }
             val bound = ensureBoundLocked()
             if (bound is VfsResult.Err) return@withLock bound
+            val address = (bound as VfsResult.Ok).value
+            val registered = subsystem.ports.listen(address.port, this)
+            if (registered is VfsResult.Err) return@withLock registered
             this.backlog = backlog.coerceIn(1, MAX_BACKLOG)
             state = State.LISTEN
-            VfsResult.Ok((bound as VfsResult.Ok).value)
-        }
-        return when (registered) {
-            is VfsResult.Ok -> subsystem.listen(this, registered.value)
-            is VfsResult.Err -> registered
+            VfsResult.Ok(Unit)
         }
     }
 
@@ -386,7 +386,9 @@ internal class TcpSocket internal constructor(
                 val capacity = optionsLocked().sendBufferSize - queuedSendBytesLocked()
                 if (capacity > 0) {
                     val count = minOf(request.count - transferred, capacity)
-                    val written = sendBuffer.write(request.source, request.offset + transferred, count)
+                    val offset = request.offset + transferred
+                    val mss = minOf(peerMss, localMss)
+                    val written = sendBuffer.write(request.source, offset, count, mss)
                     if (written == 0 && count != 0) return@withLock IoResult.failure(VfsError.FAULT)
                     transferred += written
                     corkUntil = if (request.more) {
@@ -542,10 +544,6 @@ internal class TcpSocket internal constructor(
         })
     }
 
-    internal fun boundAddress(): Ipv4SocketAddress = lock.withLock {
-        binding ?: Ipv4SocketAddress(Ipv4Address.ANY, 0u)
-    }
-
     internal fun receiveSyn(
         packet: IpPacketContext,
         segment: TcpSegment,
@@ -559,7 +557,7 @@ internal class TcpSocket internal constructor(
             true
         }
         if (!reserved) return
-        val child = TcpSocket(subsystem)
+        val child = TcpSocket(subsystem, owner)
         child.inheritOptions(socketOptions())
         val transmission = child.initializePassive(
             this,
@@ -684,15 +682,11 @@ internal class TcpSocket internal constructor(
     }
 
     override fun sendBufferSizeChangedLocked(size: Int) {
-        sendBuffer.ensureCapacity(size)
         writeWaiters.wakeAll()
     }
 
-    override fun receiveBufferSizeChangedLocked(size: Int) {
-        receiveBuffer.ensureCapacity(size)
-    }
-
     override fun optionsChangedLocked(options: SocketOptions) {
+        binding?.let { subsystem.ports.configure(it.port, this, options, owner) }
         if (state.configurable) {
             localWindowScale = windowScale(options.receiveBufferSize)
         }
@@ -780,7 +774,7 @@ internal class TcpSocket internal constructor(
         val response = Outstanding(
             iss,
             TcpFlags.SYN or TcpFlags.ACK,
-            TcpCodec.EMPTY,
+            PacketSlice.EMPTY,
             options,
             TscClock.nanoTime(),
         )
@@ -1009,7 +1003,7 @@ internal class TcpSocket internal constructor(
                     TcpSequence.before(sequence, existingEnd) && TcpSequence.before(existing.sequence, end)
                 }
             ) return true
-            val payload = packet.bytes.copyOfRange(payloadOffset, payloadOffset + payloadLength)
+            val payload = PacketSlice(packet.bytes, payloadOffset, payloadLength)
             outOfOrder += OutOfOrder(sequence, payload, fin, receivedAtNanos)
             outOfOrder.sortWith { first, second ->
                 when {
@@ -1020,9 +1014,8 @@ internal class TcpSocket internal constructor(
             }
             return true
         }
-        val appended = appendReceivedLocked(
-            packet.bytes, fin, receivedAtNanos, payloadOffset, payloadLength,
-        )
+        val payload = PacketSlice(packet.bytes, payloadOffset, payloadLength)
+        val appended = appendReceivedLocked(payload, fin, receivedAtNanos)
         if (!appended) return true
         while (true) {
             val next = outOfOrder.firstOrNull { it.sequence == rcvNxt } ?: break
@@ -1033,17 +1026,14 @@ internal class TcpSocket internal constructor(
     }
 
     private fun appendReceivedLocked(
-        payload: ByteArray,
+        payload: PacketSlice,
         fin: Boolean,
         receivedAtNanos: ULong?,
-        offset: Int = 0,
-        length: Int = payload.size,
     ): Boolean {
+        val length = payload.size
         if (length > optionsLocked().receiveBufferSize - receiveBuffer.size) return false
         if (length != 0 && readOpen) {
-            val buffer = ByteArrayBuffer(payload)
-            val source = buffer.prepareRead(offset, length) ?: return false
-            if (receiveBuffer.write(source, offset, length) != length) return false
+            receiveBuffer.append(payload)
             val timestamps = receiveTimestamps
             if (timestamps != null) {
                 timestamps.append(length, receivedAtNanos)
@@ -1085,12 +1075,11 @@ internal class TcpSocket internal constructor(
         while (sendBuffer.size != 0 && usable > 0) {
             if (sendBuffer.size < maximumSegment && TscClock.nanoTime() < corkUntil) break
             val length = minOf(sendBuffer.size, maximumSegment, usable)
-            if (!noDelay && outstanding.any { it.payload.isNotEmpty() } &&
+            if (!noDelay && outstanding.any { it.payload.size != 0 } &&
                 length < maximumSegment
             ) break
-            val payload = ByteArray(length)
-            val target = ByteArrayBuffer(payload).prepareWrite(0, length) ?: break
-            if (sendBuffer.read(target, 0, length) != length) break
+            val frame = sendBuffer.takeSegment(length)
+            val payload = PacketSlice(frame.bytes, TcpPacketQueue.TCP_PAYLOAD_OFFSET, length)
             val flags = TcpFlags.ACK or if (sendBuffer.size == 0) TcpFlags.PSH else 0
             val segment = Outstanding(
                 sndNxt,
@@ -1107,6 +1096,7 @@ internal class TcpSocket internal constructor(
                 rcvNxt,
                 advertisedWindowLocked(),
                 ttl.toUByte(),
+                frame,
             )
             usable -= length
         }
@@ -1121,7 +1111,7 @@ internal class TcpSocket internal constructor(
         val segment = Outstanding(
             sndNxt,
             TcpFlags.FIN or TcpFlags.ACK,
-            TcpCodec.EMPTY,
+            PacketSlice.EMPTY,
             TcpCodec.EMPTY,
             TscClock.nanoTime(),
         )
@@ -1191,11 +1181,8 @@ internal class TcpSocket internal constructor(
 
     private fun ensureBoundLocked(): VfsResult<Ipv4SocketAddress> {
         binding?.let { return VfsResult.Ok(it) }
-        return when (val result = subsystem.bind(
-            this,
-            Ipv4SocketAddress(Ipv4Address.ANY, 0u),
-            optionsLocked().reuseAddress,
-        )) {
+        val any = Ipv4SocketAddress(Ipv4Address.ANY, 0u)
+        return when (val result = subsystem.ports.bind(this, any, optionsLocked(), owner)) {
             is VfsResult.Ok -> result.also {
                 binding = it.value
                 local = it.value
@@ -1253,7 +1240,6 @@ internal class TcpSocket internal constructor(
     }
 
     companion object {
-        private const val DEFAULT_BUFFER_SIZE = 212_992
         private const val DEFAULT_TTL = 64
         private const val DEFAULT_MSS = 536
         private const val MINIMUM_MSS = 88

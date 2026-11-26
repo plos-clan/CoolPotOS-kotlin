@@ -1,5 +1,6 @@
 package org.plos_clan.cpos.network
 
+import org.plos_clan.cpos.utils.BigEndianBuffer
 import org.plos_clan.cpos.drivers.net.MacAddress
 import org.plos_clan.cpos.fs.sock.*
 import org.plos_clan.cpos.fs.vfs.VfsError
@@ -24,6 +25,7 @@ internal object SocketConstants {
     const val SCM_CREDENTIALS = 2
     const val SCM_TIMESTAMP = 29
 
+    const val SO_REUSEPORT = 15
     const val SO_REUSEADDR = 2
     const val SO_TYPE = 3
     const val SO_ERROR = 4
@@ -125,7 +127,7 @@ internal object SocketAddressAbi {
                     else MacAddress.SIZE_BYTES.toUByte(),
                 )
             }
-            NetworkOrderBuffer(bytes).writeU16(2, address.protocol)
+            BigEndianBuffer(bytes).writeU16(2, address.protocol)
             address.hardwareAddress?.copyTo(bytes, 12)
         }
         UnspecifiedSocketAddress -> ByteArray(UShort.SIZE_BYTES)
@@ -135,7 +137,7 @@ internal object SocketAddressAbi {
     fun writeIpv4(bytes: ByteArray, offset: Int, address: Ipv4Address, port: UShort = 0u) {
         val family = SocketConstants.AF_INET.toUShort()
         LittleEndianBuffer(bytes).writeU16(offset, family)
-        val network = NetworkOrderBuffer(bytes)
+        val network = BigEndianBuffer(bytes)
         network.writeU16(offset + 2, port)
         network.writeU32(offset + 4, address.value)
         bytes.fill(0, offset + 8, offset + IPV4_ADDRESS_SIZE)
@@ -164,7 +166,7 @@ internal object SocketAddressAbi {
 
     private fun decodeIpv4(bytes: ByteArray): VfsResult<SocketAddress> {
         if (bytes.size < IPV4_ADDRESS_SIZE) return VfsResult.Err(VfsError.INVALID_ARGUMENT)
-        val input = NetworkOrderBuffer(bytes)
+        val input = BigEndianBuffer(bytes)
         return VfsResult.Ok(
             Ipv4SocketAddress(
                 Ipv4Address.fromBits(input.readU32(4)),
@@ -190,7 +192,7 @@ internal object SocketAddressAbi {
         return VfsResult.Ok(
             PacketSocketAddress(
                 interfaceIndex.toInt(),
-                NetworkOrderBuffer(bytes).readU16(2),
+                BigEndianBuffer(bytes).readU16(2),
                 input.readU16(8),
                 input.readU8(10),
                 if (addressLength == 0) null else MacAddress.from(bytes, 12),

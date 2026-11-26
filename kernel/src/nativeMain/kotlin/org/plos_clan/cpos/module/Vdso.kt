@@ -2,16 +2,14 @@
 
 package org.plos_clan.cpos.module
 
-import kotlinx.cinterop.ByteVar
 import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.alloc
-import kotlinx.cinterop.memScoped
-import kotlinx.cinterop.ptr
-import kotlinx.cinterop.plus
+import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.pointed
-import kotlinx.cinterop.sizeOf
-import kotlinx.cinterop.readBytes
 import kotlinx.cinterop.reinterpret
+import kotlinx.cinterop.sizeOf
+import kotlinx.cinterop.toLong
+import kotlinx.cinterop.usePinned
+import platform.posix.memcpy
 import org.plos_clan.cpos.drivers.RealtimeClock
 import org.plos_clan.cpos.drivers.TscClock
 import org.plos_clan.cpos.mem.addressspace.AddressSpace
@@ -26,39 +24,41 @@ import org.plos_clan.cpos.utils.alignUp
 
 object Vdso : CachedRegionBacking() {
     private var image = ByteArray(0)
-    private var signalEntrypoints: SignalEntrypoints? = null
-
-    internal val signalCaptureAddress: ULong
-        get() = signalEntrypoints?.let { USER_MMAP_END + it.capture.toULong() } ?: 0uL
 
     internal val signalTerminateAddress: ULong
-        get() = signalEntrypoints?.let { USER_MMAP_END + it.terminate.toULong() } ?: 0uL
+        get() {
+            if (image.isEmpty()) return 0uL
+            val offset = image.size - SIGNAL_TERMINATE.size
+            return USER_MMAP_END + offset.toULong()
+        }
 
-    fun initialize(): Boolean = memScoped {
-        val embedded = alloc<bridge.vdso_image>()
-        if (!bridge.runtime_vdso_initialize(embedded.ptr)) return@memScoped false
+    internal val signalCaptureAddress: ULong
+        get() = if (image.isEmpty()) 0uL else signalTerminateAddress - SIGNAL_CAPTURE.size.toULong()
 
-        val size = embedded.size
-        val data = embedded.data ?: return@memScoped false
-        if (size == 0uL || size > Int.MAX_VALUE.toULong()) return@memScoped false
-
-        val clockOffset = size.toLong() - sizeOf<bridge.vdso_clock_data_t>()
-        val clockAddress = checkNotNull(data + clockOffset)
-        val clock = clockAddress.reinterpret<bridge.vdso_clock_data_t>().pointed
+    fun initialize(): Boolean {
+        val start = bridge.embedded_vdso_start
+        val size = bridge.embedded_vdso_end.toLong() - start.toLong()
+        val clockSize = sizeOf<bridge.vdso_clock_data_t>()
+        val padding = 15
+        val maxSize = Int.MAX_VALUE - padding - SIGNAL_CAPTURE.size - SIGNAL_TERMINATE.size
+        if (!TscClock.isReady || size !in clockSize..maxSize.toLong()) return false
+        val capture = (size.toInt() + padding) and padding.inv()
+        val terminate = capture + SIGNAL_CAPTURE.size
+        val bytes = ByteArray(terminate + SIGNAL_TERMINATE.size)
         val monotonic = TscClock.nanoTime()
         val realtime = RealtimeClock.atMonotonic(monotonic)
-        clock.realtime_seconds = realtime.seconds
-        clock.realtime_epoch = monotonic - realtime.nanoseconds.toULong()
-
-        val embeddedImage = data.reinterpret<ByteVar>().readBytes(size.toInt())
-        val capture = (embeddedImage.size + 15) and 15.inv()
-        val terminate = capture + SIGNAL_CAPTURE.size
-        signalEntrypoints = SignalEntrypoints(capture, terminate)
-        image = embeddedImage.copyOf(terminate + SIGNAL_TERMINATE.size).also { bytes ->
-            SIGNAL_CAPTURE.copyInto(bytes, destinationOffset = capture)
-            SIGNAL_TERMINATE.copyInto(bytes, destinationOffset = terminate)
+        bytes.usePinned { pinned ->
+            memcpy(pinned.addressOf(0), start, size.toULong())
+            val offset = (size - clockSize).toInt()
+            val clock = pinned.addressOf(offset).reinterpret<bridge.vdso_clock_data_t>()
+            bridge.runtime_clock_snapshot(clock)
+            clock.pointed.realtime_seconds = realtime.seconds
+            clock.pointed.realtime_epoch = monotonic - realtime.nanoseconds.toULong()
         }
-        true
+        SIGNAL_CAPTURE.copyInto(bytes, capture)
+        SIGNAL_TERMINATE.copyInto(bytes, terminate)
+        image = bytes
+        return true
     }
 
     fun install(addressSpace: AddressSpace): Boolean {
@@ -89,11 +89,6 @@ object Vdso : CachedRegionBacking() {
     override fun close() = Unit
 
     internal const val SIGNAL_GATEWAY_SYSCALL = 0x7fff_fffeuL
-
-    private data class SignalEntrypoints(
-        val capture: Int,
-        val terminate: Int,
-    )
 
     private val SIGNAL_CAPTURE = byteArrayOf(
         0x50, // push %rax

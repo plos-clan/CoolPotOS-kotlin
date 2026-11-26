@@ -14,9 +14,6 @@ struct tsc_clock {
 
 static struct tsc_clock tsc;
 
-extern uint8_t _binary_vdso_so_start[];
-extern uint8_t _binary_vdso_so_end[];
-
 uint64_t runtime_clock_duration(uint64_t value) {
     const uint128_t result =
         ((uint128_t)value * tsc.multiplier) >> vdso_tsc_to_ns_shift;
@@ -45,25 +42,9 @@ uint64_t runtime_clock_nanos(void) {
     return runtime_clock_duration(read_tsc() - tsc.epoch);
 }
 
-bool runtime_vdso_initialize(vdso_image_t *image) {
-    const size_t size = (size_t)(
-        _binary_vdso_so_end - _binary_vdso_so_start
-    );
-    if (!image || !runtime_clock_frequency() || size < sizeof(vdso_clock_data_t))
-        return false;
-
-    vdso_clock_data_t *data = (vdso_clock_data_t *)(
-        _binary_vdso_so_end - sizeof(vdso_clock_data_t)
-    );
-    *data = (vdso_clock_data_t){
-        .tsc_epoch = tsc.epoch,
-        .tsc_to_ns_multiplier = tsc.multiplier,
-    };
-    *image = (vdso_image_t){
-        .data = _binary_vdso_so_start,
-        .size = size,
-    };
-    return true;
+void runtime_clock_snapshot(vdso_clock_data_t *data) {
+    data->tsc_epoch = tsc.epoch;
+    data->tsc_to_ns_multiplier = tsc.multiplier;
 }
 
 uint64_t runtime_clock_deadline(uint64_t nanoseconds) {

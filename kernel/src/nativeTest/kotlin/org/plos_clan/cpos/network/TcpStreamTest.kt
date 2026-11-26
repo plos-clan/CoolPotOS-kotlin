@@ -19,8 +19,8 @@ class TcpStreamTest {
     private class Connection(receiveSize: Int) : AutoCloseable {
         val process = checkNotNull(ProcessManager.currentProcess())
         private val network = NetworkStack()
-        val listener = network.tcp.createSocket()
-        val client = network.tcp.createSocket()
+        val listener = network.tcp.createSocket(0)
+        val client = network.tcp.createSocket(0)
         val server: TcpSocket
 
         init {

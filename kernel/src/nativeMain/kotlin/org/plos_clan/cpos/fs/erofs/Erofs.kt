@@ -4,6 +4,7 @@ import org.plos_clan.cpos.fs.DeviceNode
 import org.plos_clan.cpos.fs.sock.SocketNodeBackend
 import org.plos_clan.cpos.fs.vfs.CacheValidity
 import org.plos_clan.cpos.fs.vfs.CachedFileBackend
+import org.plos_clan.cpos.mem.PageCacheSource
 import org.plos_clan.cpos.fs.vfs.DirectoryBackend
 import org.plos_clan.cpos.fs.vfs.DirectoryEntry
 import org.plos_clan.cpos.fs.vfs.DirectoryLookup
@@ -298,7 +299,8 @@ private class ErofsInstance private constructor(
         }
     }
 
-    private class RegularBackend(node: FileNode) : RegularFileBackend(), CachedFileBackend {
+    private class RegularBackend(node: FileNode) :
+        RegularFileBackend(), CachedFileBackend, PageCacheSource {
         private val data = node.data
 
         override fun open(

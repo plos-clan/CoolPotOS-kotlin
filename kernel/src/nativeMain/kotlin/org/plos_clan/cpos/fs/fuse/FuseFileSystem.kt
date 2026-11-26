@@ -61,8 +61,7 @@ import org.plos_clan.cpos.fs.vfs.VfsResult
 import org.plos_clan.cpos.time.Instant
 import org.plos_clan.cpos.mem.ByteArrayBuffer
 import org.plos_clan.cpos.mem.PageCache
-import org.plos_clan.cpos.mem.PageCacheFailure
-import org.plos_clan.cpos.mem.PageCacheProvider
+import org.plos_clan.cpos.fs.vfs.CachedFileBackend
 import org.plos_clan.cpos.mem.PageCacheSource
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
@@ -1520,7 +1519,7 @@ private class FuseFileHandle(
     fileFlags: UInt,
     opener: VfsOperationContext,
 ) : FuseHandle(instance, inode, handle, openFlags, fileFlags, opener, directory = false),
-    AllocatingOpenFileBackend, CopyingOpenFileBackend, PageCacheProvider {
+    AllocatingOpenFileBackend, CopyingOpenFileBackend, CachedFileBackend {
     private val pageSource = object : PageCacheSource {
         override val identity: Any
             get() = fuseInode
@@ -1657,45 +1656,7 @@ private class FuseFileHandle(
         }
     }
 
-    override fun read(
-        caller: VfsOperationContext,
-        inode: Inode,
-        destination: PreparedBufferDestination,
-        destinationOffset: Int,
-        count: Int,
-        position: FilePosition,
-    ): IoResult {
-        val cache = cacheSource ?: return readDirect(
-            caller,
-            destination,
-            destinationOffset,
-            count,
-            position,
-        )
-        if (!stream && (position.value < 0 || count.toLong() > Long.MAX_VALUE - position.value)) {
-            return IoResult.failure(VfsError.FILE_TOO_LARGE)
-        }
-        if (count == 0) return IoResult.success(0)
-        val sourceOffset = position.value.toULong()
-        val fileSize = when (val result = inode.attributes(caller)) {
-            is VfsResult.Ok -> result.value.metadata.size
-            is VfsResult.Err -> return IoResult.failure(result.error)
-        }
-        if (sourceOffset >= fileSize) return IoResult.success(0)
-        val available = minOf(count.toULong(), fileSize - sourceOffset).toInt()
-        val cached = PageCache.read(cache, sourceOffset, destination, destinationOffset, available)
-        if (!cached.isSuccess) {
-            return IoResult.failure(when (cached.failure) {
-                PageCacheFailure.OUT_OF_MEMORY -> VfsError.NO_MEMORY
-                PageCacheFailure.IO_ERROR -> VfsError.IO
-                PageCacheFailure.INTERRUPTED -> VfsError.INTERRUPTED
-            })
-        }
-        position.value += cached.bytes
-        return IoResult.success(cached.bytes)
-    }
-
-    private fun readDirect(
+    override fun readDirect(
         caller: VfsOperationContext,
         destination: PreparedBufferDestination,
         destinationOffset: Int,

@@ -10,6 +10,7 @@ import kotlin.concurrent.atomics.AtomicLong
 class KernelMutex {
     private companion object {
         const val CONTENDED = Long.MIN_VALUE
+        val hashCollision = KernelMutex()
     }
 
     private class Waiter(val thread: Thread) {
@@ -27,6 +28,15 @@ class KernelMutex {
         } finally {
             unlock()
         }
+    }
+
+    internal fun <T> withLock(peer: KernelMutex, block: () -> T): T {
+        if (this === peer) return withLock(block)
+        val order = hashCode().compareTo(peer.hashCode())
+        val first = if (order <= 0) this else peer
+        val second = if (order <= 0) peer else this
+        fun acquireBoth() = first.withLock { second.withLock(block) }
+        return if (order == 0) hashCollision.withLock(::acquireBoth) else acquireBoth()
     }
 
     inline fun <T> tryWithLock(block: () -> T): T? {

@@ -20,115 +20,82 @@ import org.plos_clan.cpos.tasks.Process
 import org.plos_clan.cpos.utils.Errno
 import org.plos_clan.cpos.utils.PtraceRegisters
 
-internal fun splice(regs: PtraceRegisters, process: Process): Long {
-    val rawFlags = regs[PtraceRegisters.IDX_R9]
-    if (rawFlags > UInt.MAX_VALUE.toULong() ||
-        rawFlags.toUInt() and SPLICE_SUPPORTED_FLAGS.inv() != 0u
-    ) {
-        return errno(Errno.EINVAL)
-    }
-    val sourceDescriptor = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
-        ?: return errno(Errno.EBADF)
-    val destinationDescriptor = fileDescriptor(regs[PtraceRegisters.IDX_RDX])
-        ?: return errno(Errno.EBADF)
-    val sourceOffset = when (val result = userFileOffset(
-        process,
-        regs[PtraceRegisters.IDX_RSI],
-    )) {
-        is VfsResult.Ok -> result.value
-        is VfsResult.Err -> return errno(result.error.errno)
-    }
-    val destinationOffset = when (val result = userFileOffset(
-        process,
-        regs[PtraceRegisters.IDX_R10],
-    )) {
-        is VfsResult.Ok -> result.value
-        is VfsResult.Err -> return errno(result.error.errno)
-    }
-    val source = process.fdTable.acquire(sourceDescriptor) ?: return errno(Errno.EBADF)
-    val destination = process.fdTable.acquire(destinationDescriptor) ?: run {
-        source.release()
-        return errno(Errno.EBADF)
-    }
-    return try {
-        val count = minOf(regs[PtraceRegisters.IDX_R8], MAX_RW_COUNT).toInt()
-        val result = try {
-            source.spliceTo(
-                process.vfsOperationContext,
-                destination,
-                sourceOffset?.value,
-                destinationOffset?.value,
-                count,
-                nonBlocking = rawFlags.toUInt() and SPLICE_F_NONBLOCK != 0u,
-            )
-        } catch (_: OutOfMemoryError) {
-            return errno(Errno.ENOMEM)
+internal enum class FileTransfer(
+    private val input: Int = PtraceRegisters.IDX_RDI,
+    private val output: Int = PtraceRegisters.IDX_RDX,
+    private val offset: Int = PtraceRegisters.IDX_RSI,
+    private val size: Int = PtraceRegisters.IDX_R8,
+) {
+    SENDFILE(
+        PtraceRegisters.IDX_RSI, PtraceRegisters.IDX_RDI,
+        PtraceRegisters.IDX_RDX, PtraceRegisters.IDX_R10,
+    ),
+    SPLICE,
+    COPY_FILE_RANGE;
+
+    fun invoke(regs: PtraceRegisters, process: Process): Long {
+        val sendFile = this == SENDFILE
+        val rawFlags = if (sendFile) 0uL else regs[PtraceRegisters.IDX_R9]
+        val allowed = if (this == SPLICE) SPLICE_SUPPORTED_FLAGS else 0u
+        if (rawFlags and allowed.toULong().inv() != 0uL) return errno(Errno.EINVAL)
+        val inputFd = fileDescriptor(regs[input]) ?: return errno(Errno.EBADF)
+        val outputFd = fileDescriptor(regs[output]) ?: return errno(Errno.EBADF)
+        val length = regs[size]
+        if (sendFile && length.toLong() < 0) return errno(Errno.EINVAL)
+        val count = minOf(length, MAX_RW_COUNT).toInt()
+        val from = when (val result = userFileOffset(process, regs[offset])) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return errno(result.error.errno)
         }
-        if (!result.isSuccess) return result.raw
+        val targetOffset = if (sendFile) 0uL else regs[PtraceRegisters.IDX_R10]
+        val to = when (val result = userFileOffset(process, targetOffset)) {
+            is VfsResult.Ok -> result.value
+            is VfsResult.Err -> return errno(result.error.errno)
+        }
+        val source = process.fdTable.acquire(inputFd) ?: return errno(Errno.EBADF)
+        val target = process.fdTable.acquire(outputFd) ?: run {
+            source.release()
+            return errno(Errno.EBADF)
+        }
+        return try {
+            val caller = process.vfsOperationContext
+            val transferred = transfer(caller, source, target, from, to, count, rawFlags.toUInt())
+            if (transferred < 0) return transferred
+            val bytes = transferred.toULong()
+            if (from?.write(bytes) == false || to?.write(bytes) == false) return errno(Errno.EFAULT)
+            transferred
+        } catch (_: OutOfMemoryError) {
+            errno(Errno.ENOMEM)
+        } finally {
+            target.release()
+            source.release()
+        }
+    }
 
-        val transferred = result.bytesTransferred.toULong()
-        if (sourceOffset?.write(transferred) == false ||
-            destinationOffset?.write(transferred) == false
-        ) errno(Errno.EFAULT) else result.raw
-    } finally {
-        destination.release()
-        source.release()
-    }
-}
-
-internal fun copyFileRange(regs: PtraceRegisters, process: Process): Long {
-    val rawFlags = regs[PtraceRegisters.IDX_R9]
-    if (rawFlags > UInt.MAX_VALUE.toULong() || rawFlags != 0uL) {
-        return errno(Errno.EINVAL)
-    }
-    val sourceDescriptor = fileDescriptor(regs[PtraceRegisters.IDX_RDI])
-        ?: return errno(Errno.EBADF)
-    val destinationDescriptor = fileDescriptor(regs[PtraceRegisters.IDX_RDX])
-        ?: return errno(Errno.EBADF)
-    val sourceOffset = when (val result = userFileOffset(
-        process,
-        regs[PtraceRegisters.IDX_RSI],
-    )) {
-        is VfsResult.Ok -> result.value
-        is VfsResult.Err -> return errno(result.error.errno)
-    }
-    val destinationOffset = when (val result = userFileOffset(
-        process,
-        regs[PtraceRegisters.IDX_R10],
-    )) {
-        is VfsResult.Ok -> result.value
-        is VfsResult.Err -> return errno(result.error.errno)
-    }
-    val source = process.fdTable.acquire(sourceDescriptor) ?: return errno(Errno.EBADF)
-    val destination = process.fdTable.acquire(destinationDescriptor) ?: run {
-        source.release()
-        return errno(Errno.EBADF)
-    }
-    return try {
-        val length = minOf(regs[PtraceRegisters.IDX_R8], MAX_RW_COUNT)
-        when (val result = source.copyFileRange(
-            process.vfsOperationContext,
-            destination,
-            sourceOffset?.value,
-            destinationOffset?.value,
-            length,
-            rawFlags.toUInt(),
-        )) {
-            is VfsResult.Err -> errno(result.error.errno)
-            is VfsResult.Ok -> {
-                val copied = result.value
-                if (sourceOffset?.write(copied) == false ||
-                    destinationOffset?.write(copied) == false
-                ) {
-                    errno(Errno.EFAULT)
-                } else {
-                    copied.toLong()
-                }
+    private fun transfer(
+        caller: VfsOperationContext,
+        source: OpenFileDescription,
+        target: OpenFileDescription,
+        from: UserFileOffset?,
+        to: UserFileOffset?,
+        count: Int,
+        flags: UInt,
+    ): Long {
+        val result = when (this) {
+            SENDFILE -> source.sendFile(caller, target, from?.value, count)
+            COPY_FILE_RANGE -> source.copyFileRange(
+                caller, target, from?.value, to?.value, count.toULong(), flags,
+            )
+            SPLICE -> {
+                val nonBlocking = flags and SPLICE_F_NONBLOCK != 0u
+                val result = source.spliceTo(caller, target, from?.value, to?.value, count, nonBlocking)
+                return result.raw
             }
         }
-    } finally {
-        destination.release()
-        source.release()
+        return when (result) {
+            is VfsResult.Ok -> result.value.toLong()
+            is VfsResult.Err -> errno(result.error.errno)
+        }
     }
 }
 

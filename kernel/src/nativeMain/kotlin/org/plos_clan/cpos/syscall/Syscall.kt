@@ -27,7 +27,7 @@ import org.plos_clan.cpos.syscall.fs.chown
 import org.plos_clan.cpos.syscall.fs.chroot
 import org.plos_clan.cpos.syscall.fs.close
 import org.plos_clan.cpos.syscall.fs.closeRange
-import org.plos_clan.cpos.syscall.fs.copyFileRange
+import org.plos_clan.cpos.syscall.fs.FileTransfer
 import org.plos_clan.cpos.syscall.fs.dup
 import org.plos_clan.cpos.syscall.fs.dup2
 import org.plos_clan.cpos.syscall.fs.dup3
@@ -94,7 +94,6 @@ import org.plos_clan.cpos.syscall.fs.setxattr
 import org.plos_clan.cpos.syscall.fs.stat
 import org.plos_clan.cpos.syscall.fs.statfs
 import org.plos_clan.cpos.syscall.fs.statx
-import org.plos_clan.cpos.syscall.fs.splice
 import org.plos_clan.cpos.syscall.fs.symlink
 import org.plos_clan.cpos.syscall.fs.symlinkAt
 import org.plos_clan.cpos.syscall.fs.truncate
@@ -164,6 +163,7 @@ private enum class LinuxSyscall(
     NANO_SLEEP(35, ::nanoSleep),
     ALARM(37, { regs, process -> process.alarm.replace(regs[PtraceRegisters.IDX_RDI].toUInt()).toLong() }),
     GETPID(39, ::getPid),
+    SENDFILE(40, FileTransfer.SENDFILE::invoke, restartable = true),
     SOCKET(41, SocketSyscalls::socket),
     CONNECT(42, SocketSyscalls::connect, restartable = true),
     ACCEPT(43, SocketSyscalls::accept, restartable = true),
@@ -307,7 +307,7 @@ private enum class LinuxSyscall(
     PSELECT6(270, ::pselect6),
     PPOLL(271, ::ppoll),
     SET_ROBUST_LIST(273, ::setRobustList),
-    SPLICE(275, ::splice, restartable = true),
+    SPLICE(275, FileTransfer.SPLICE::invoke, restartable = true),
     UTIMENSAT(280, ::utimensAt),
     EPOLL_PWAIT(281, EpollSyscalls::pwait),
     TIMERFD_CREATE(283, TimerFdSyscalls::create),
@@ -334,7 +334,7 @@ private enum class LinuxSyscall(
     GETRANDOM(318, ::getRandom, restartable = true),
     MEMFD_CREATE(319, MemFdSyscalls::create),
     MLOCK2(325, MemoryLockSyscalls::lockOnFault),
-    COPY_FILE_RANGE(326, ::copyFileRange, restartable = true),
+    COPY_FILE_RANGE(326, FileTransfer.COPY_FILE_RANGE::invoke, restartable = true),
     STATX(332, ::statx),
     RSEQ(334, ::rseq),
     PIDFD_SEND_SIGNAL(424, SignalSyscalls::pidfdSendSignal),

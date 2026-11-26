@@ -72,6 +72,22 @@ class PacketCodecTest {
     }
 
     @Test
+    fun checksumMatchesRfc1071AtUnalignedOffsetsAndEveryTailLength() {
+        val data = listOf(0x00, 0x01, 0xf2, 0x03, 0xf4, 0xf5, 0xf6, 0xf7)
+        val expected = listOf(
+            0xffff, 0xffff, 0xfffe, 0x0dfe, 0x0dfb, 0x19fa, 0x1905, 0x2304, 0x220d,
+        )
+        for (offset in 0..3) {
+            val bytes = ByteArray(offset + data.size) { 0x55 }
+            for (i in data.indices) bytes[offset + i] = data[i].toByte()
+            for (length in expected.indices) {
+                val checksum = InternetChecksum.compute(bytes, offset, length)
+                assertEquals(expected[length].toUShort(), checksum)
+            }
+        }
+    }
+
+    @Test
     fun udpChecksumCoversPseudoHeaderAndOddPayload() {
         val payload = "hello".encodeToByteArray()
         val bytes = ByteArray(UdpCodec.HEADER_SIZE + payload.size)

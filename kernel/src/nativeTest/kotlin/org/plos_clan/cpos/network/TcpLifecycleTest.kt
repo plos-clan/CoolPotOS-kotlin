@@ -1,6 +1,7 @@
 package org.plos_clan.cpos.network
 
 import org.plos_clan.cpos.drivers.TscClock
+import org.plos_clan.cpos.fs.sock.SocketOptions
 import org.plos_clan.cpos.fs.sock.AcceptedSocket
 import org.plos_clan.cpos.fs.sock.SocketReceiveRequest
 import org.plos_clan.cpos.fs.sock.SocketReceiveResult
@@ -19,13 +20,14 @@ class TcpLifecycleTest {
     private class Retained : AutoCloseable {
         val network = NetworkStack()
         val protocol = network.tcp
-        val owner = protocol.createSocket()
-        val replacement = protocol.createSocket()
+        val owner = protocol.createSocket(0)
+        val replacement = protocol.createSocket(0)
         val local = Ipv4SocketAddress(Ipv4Address.fromBits(0xc0000201u), 8080u)
         val remote = Ipv4SocketAddress(Ipv4Address.fromBits(0xc0000202u), 40000u)
 
         init {
-            assertIs<VfsResult.Ok<Ipv4SocketAddress>>(protocol.bind(owner, local, false))
+            val bound = protocol.ports.bind(owner, local, SocketOptions(), 0)
+            assertIs<VfsResult.Ok<Ipv4SocketAddress>>(bound)
             assertIs<VfsResult.Ok<Unit>>(protocol.registerConnection(owner, local, remote))
             val acknowledgment = TcpTransmission(local, remote, 100u, 200u, TcpFlags.ACK, 0u)
             protocol.timeWait(owner, acknowledgment)
@@ -42,12 +44,13 @@ class TcpLifecycleTest {
         }
 
         fun assertReserved() {
-            val result = protocol.bind(replacement, local, false)
+            val result = protocol.ports.bind(replacement, local, SocketOptions(), 0)
             assertEquals(VfsError.ADDRESS_IN_USE, assertIs<VfsResult.Err>(result).error)
         }
 
         fun assertExpired() {
-            assertIs<VfsResult.Ok<Ipv4SocketAddress>>(protocol.bind(replacement, local, false))
+            val bound = protocol.ports.bind(replacement, local, SocketOptions(), 0)
+            assertIs<VfsResult.Ok<Ipv4SocketAddress>>(bound)
             assertIs<VfsResult.Ok<Unit>>(protocol.registerConnection(replacement, local, remote))
         }
 
@@ -99,9 +102,9 @@ class TcpLifecycleTest {
         val process = checkNotNull(ProcessManager.currentProcess())
         val network = NetworkStack()
         val protocol = network.tcp
-        val listener = protocol.createSocket()
-        val owner = protocol.createSocket()
-        val probe = protocol.createSocket()
+        val listener = protocol.createSocket(0)
+        val owner = protocol.createSocket(0)
+        val probe = protocol.createSocket(0)
         val local = Ipv4SocketAddress(Ipv4Address.ANY, 8080u)
         val remote = Ipv4SocketAddress(Ipv4Address.fromBits(0xc0000202u), 40000u)
         assertIs<VfsResult.Ok<Unit>>(listener.bindSocket(process, local))
@@ -148,7 +151,7 @@ class TcpLifecycleTest {
         val network = NetworkStack()
         val intfc = checkNotNull(network.interfaceByName("lo"))
         assertIs<VfsResult.Ok<Unit>>(network.setLink(intfc.index, true))
-        val listener = network.tcp.createSocket()
+        val listener = network.tcp.createSocket(0)
         val address = Ipv4SocketAddress(Ipv4Address.fromBits(0x7f000001u), 8080u)
         assertIs<VfsResult.Ok<Unit>>(listener.bindSocket(process, address))
         assertIs<VfsResult.Ok<Unit>>(listener.listenSocket(process, 4))
@@ -161,7 +164,7 @@ class TcpLifecycleTest {
                     val now = TscClock.nanoTime()
                     if (now >= deadline) break
                 }
-                val client = network.tcp.createSocket()
+                val client = network.tcp.createSocket(0)
                 val bound = client.bindSocket(process, local)
                 assertEquals(VfsResult.Ok(Unit), bound, "bind $iteration")
                 val connected = client.connectSocket(process, address, false)

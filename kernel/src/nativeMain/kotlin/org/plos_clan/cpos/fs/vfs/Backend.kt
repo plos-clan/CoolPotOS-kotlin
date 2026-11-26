@@ -7,7 +7,9 @@ import kotlin.concurrent.atomics.AtomicInt
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import org.plos_clan.cpos.mem.PageCache
 import org.plos_clan.cpos.mem.PageCacheFailure
-import org.plos_clan.cpos.mem.PageCacheSource
+import org.plos_clan.cpos.mem.BufferSource
+import org.plos_clan.cpos.mem.PageCacheReadResult
+import org.plos_clan.cpos.mem.PageCacheProvider
 import org.plos_clan.cpos.mem.BufferFaultPolicy
 import org.plos_clan.cpos.mem.PreparedBufferDestination
 import org.plos_clan.cpos.mem.PreparedBufferSource
@@ -679,35 +681,62 @@ interface CopyingOpenFileBackend : OpenFileBackend {
     ): VfsResult<ULong>
 }
 
-internal interface CachedFileBackend : OpenFileBackend, PageCacheSource {
-    override fun read(
-        caller: VfsOperationContext,
-        inode: Inode,
-        destination: PreparedBufferDestination,
-        destinationOffset: Int,
-        count: Int,
-        position: FilePosition,
-    ): IoResult {
-        if (count == 0 || position.value < 0) return IoResult.success(0)
-        val sourceOffset = position.value.toULong()
-        val fileSize = when (val result = inode.attributes(caller)) {
-            is VfsResult.Ok -> result.value.metadata.size
-            is VfsResult.Err -> return IoResult.failure(result.error)
-        }
-        if (sourceOffset >= fileSize) return IoResult.success(0)
+internal interface CachedFileBackend : OpenFileBackend, PageCacheProvider {
+    fun readDirect(
+        caller: VfsOperationContext, destination: PreparedBufferDestination,
+        destinationOffset: Int, count: Int, position: FilePosition,
+    ): IoResult = IoResult.failure(VfsError.NOT_SUPPORTED)
 
-        val available = minOf(count.toULong(), fileSize - sourceOffset).toInt()
-        val result = PageCache.read(this, sourceOffset, destination, destinationOffset, available)
-        if (!result.isSuccess) {
-            val error = when (result.failure) {
-                PageCacheFailure.OUT_OF_MEMORY -> VfsError.NO_MEMORY
-                PageCacheFailure.IO_ERROR -> VfsError.IO
-                PageCacheFailure.INTERRUPTED -> VfsError.INTERRUPTED
-            }
-            return IoResult.failure(error)
+    override fun read(
+        caller: VfsOperationContext, inode: Inode, destination: PreparedBufferDestination,
+        destinationOffset: Int, count: Int, position: FilePosition,
+    ): IoResult {
+        val source = cacheSource
+            ?: return readDirect(caller, destination, destinationOffset, count, position)
+        if (position.value < 0 || count.toLong() > Long.MAX_VALUE - position.value) {
+            return IoResult.failure(VfsError.FILE_TOO_LARGE)
         }
-        position.value += result.bytes
-        return IoResult.success(result.bytes)
+        val offset = position.value.toULong()
+        val result = inRange(caller, inode, offset, count) { available ->
+            PageCache.read(source, offset, destination, destinationOffset, available).asFileIo()
+        }
+        position.value += result.bytesTransferred
+        return result
+    }
+
+    fun readWindow(
+        caller: VfsOperationContext, inode: Inode, offset: ULong, count: Int,
+        consume: (BufferSource, Int) -> IoResult,
+    ): IoResult? {
+        val source = cacheSource ?: return null
+        return inRange(caller, inode, offset, count) { available ->
+            PageCache.withPages(source, offset, available) { pages, read ->
+                if (read.bytes == 0) read.asFileIo() else consume(pages, read.bytes)
+            }
+        }
+    }
+
+    private inline fun inRange(
+        caller: VfsOperationContext, inode: Inode, offset: ULong, count: Int,
+        operation: (Int) -> IoResult,
+    ): IoResult {
+        if (count == 0) return IoResult.success(0)
+        val attributes = inode.attributes(caller)
+        if (attributes is VfsResult.Err) return IoResult.failure(attributes.error)
+        val size = (attributes as VfsResult.Ok).value.metadata.size
+        if (offset >= size) return IoResult.success(0)
+        val available = minOf(size - offset, count.toULong()).toInt()
+        return operation(available)
+    }
+
+    private fun PageCacheReadResult.asFileIo(): IoResult {
+        if (isSuccess) return IoResult.success(bytes)
+        val error = when (failure) {
+            PageCacheFailure.OUT_OF_MEMORY -> VfsError.NO_MEMORY
+            PageCacheFailure.IO_ERROR -> VfsError.IO
+            PageCacheFailure.INTERRUPTED -> VfsError.INTERRUPTED
+        }
+        return IoResult.failure(error)
     }
 }
 

@@ -7,6 +7,8 @@ import kotlinx.cinterop.CPointer
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.UByteVar
 import kotlinx.cinterop.addressOf
+import kotlinx.cinterop.plus
+import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.usePinned
 import kotlinx.collections.immutable.persistentHashMapOf
 import org.plos_clan.cpos.mem.page.UserFrameReferences
@@ -98,6 +100,60 @@ private class CachedPage private constructor(
             }
         }
     }
+}
+
+private class PinnedPages(private val start: Int, count: Int) : NativeBuffer(), AutoCloseable {
+    private val pages: ArrayList<CachedPage>
+
+    init {
+        val pageSize = PAGE_SIZE_BYTES.toLong()
+        val pageCount = (start + count.toLong() + pageSize - 1) / pageSize
+        pages = ArrayList(pageCount.toInt())
+    }
+    var size = 0
+        private set
+
+    fun append(page: CachedPage, length: Int) {
+        pages.add(page)
+        size += length
+    }
+
+    override fun prepareRead(offset: Int, count: Int): PreparedBufferSource? {
+        if (offset < 0 || count < 0 || offset > size - count) return null
+        return PreparedBufferSource(this)
+    }
+
+    override fun copyTo(
+        sourceOffset: Int,
+        destination: ByteArray,
+        destinationOffset: Int,
+        count: Int,
+    ): Int {
+        require(destinationOffset >= 0 && count >= 0)
+        require(destinationOffset <= destination.size - count)
+        if (count == 0) return 0
+        return destination.usePinned {
+            val pointer = it.addressOf(destinationOffset).reinterpret<UByteVar>()
+            copyToNative(sourceOffset, pointer, count)
+        }
+    }
+
+    override fun copyToNative(sourceOffset: Int, destination: CPointer<UByteVar>, count: Int): Int {
+        require(sourceOffset >= 0 && count >= 0 && sourceOffset <= size - count)
+        val pageSize = PAGE_SIZE_BYTES.toInt()
+        var copied = 0
+        while (copied < count) {
+            val position = start + sourceOffset + copied
+            val offset = position % pageSize
+            val length = minOf(count - copied, pageSize - offset)
+            val target = checkNotNull(destination + copied)
+            pages[position / pageSize].copyToNative(offset, target, length)
+            copied += length
+        }
+        return copied
+    }
+
+    override fun close() = pages.forEach(CachedPage::unpin)
 }
 
 private class CachedSource {
@@ -219,7 +275,39 @@ internal object PageCache : FrameReclaimer {
         destinationOffset: Int,
         count: Int,
     ): PageCacheReadResult {
-        require(destinationOffset >= 0 && count >= 0)
+        require(destinationOffset >= 0)
+        return consumePages(source, sourceOffset, count) { page, offset, copied, length ->
+            try {
+                destination.copyFrom(destinationOffset + copied, page, offset, length)
+            } finally {
+                page.unpin()
+            }
+        }
+    }
+
+    fun <T> withPages(
+        source: PageCacheSource,
+        offset: ULong,
+        count: Int,
+        consume: (BufferSource, PageCacheReadResult) -> T,
+    ): T {
+        val start = (offset % PAGE_SIZE_BYTES).toInt()
+        return PinnedPages(start, count).use { pages ->
+            val read = consumePages(source, offset, count) { page, _, _, length ->
+                pages.append(page, length)
+                length
+            }
+            consume(pages, read)
+        }
+    }
+
+    private inline fun consumePages(
+        source: PageCacheSource,
+        sourceOffset: ULong,
+        count: Int,
+        consume: (CachedPage, Int, Int, Int) -> Int,
+    ): PageCacheReadResult {
+        require(count >= 0)
         if (count == 0) return PageCacheReadResult.completed(0)
         if (sourceOffset > ULong.MAX_VALUE - count.toULong()) {
             return PageCacheReadResult.failed(PageCacheFailure.IO_ERROR)
@@ -243,14 +331,13 @@ internal object PageCache : FrameReclaimer {
             }
             val pageIndex = (position - pageOffset).toInt()
             val chunk = minOf(count - copied, page.size - pageIndex)
-            val transferred = try {
-                if (chunk <= 0) break
-                destination.copyFrom(destinationOffset + copied, page, pageIndex, chunk)
-            } finally {
+            if (chunk <= 0) {
                 page.unpin()
+                break
             }
+            val transferred = consume(page, pageIndex, copied, chunk)
             copied += transferred
-            if (transferred < chunk) break
+            if (transferred < chunk || pageIndex + chunk < PAGE_SIZE_BYTES.toInt()) break
         }
         return PageCacheReadResult.completed(copied)
     }

@@ -379,7 +379,7 @@ private class KernelConfig(
 ) {
     val sources = listOf(
         "boot.c", "shim.c", "clock.c", "syscall.c", "gdt.c",
-        "idt.c", "handoff.c", "smp.c", "tls.c", "zstd_bridge.c",
+        "idt.c", "handoff.c", "smp.c", "tls.c",
     ).map(paths.kernelC::resolve)
     val objects = sources.map { paths.cObjects.resolve("${it.nameWithoutExtension}.o") }
     val kotlinBitcode = paths.root.resolve("kernel.bc")

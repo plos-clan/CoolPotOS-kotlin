@@ -1,61 +1,11 @@
 package org.plos_clan.cpos.network
 
+import org.plos_clan.cpos.utils.BigEndianBuffer
 import kotlin.jvm.JvmInline
 
 import org.plos_clan.cpos.drivers.net.MacAddress
 import org.plos_clan.cpos.fs.sock.SocketAddress
 import org.plos_clan.cpos.fs.sock.SocketDomain
-
-@JvmInline
-internal value class NetworkOrderBuffer(private val bytes: ByteArray) {
-    val size: Int
-        get() = bytes.size
-
-    fun readU8(offset: Int): UByte {
-        requireRange(offset, UByte.SIZE_BYTES)
-        return bytes[offset].toUByte()
-    }
-
-    fun readU16(offset: Int): UShort {
-        requireRange(offset, UShort.SIZE_BYTES)
-        return (
-            (bytes[offset].toUByte().toUInt() shl 8) or
-                bytes[offset + 1].toUByte().toUInt()
-            ).toUShort()
-    }
-
-    fun readU32(offset: Int): UInt {
-        requireRange(offset, UInt.SIZE_BYTES)
-        return (bytes[offset].toUByte().toUInt() shl 24) or
-            (bytes[offset + 1].toUByte().toUInt() shl 16) or
-            (bytes[offset + 2].toUByte().toUInt() shl 8) or
-            bytes[offset + 3].toUByte().toUInt()
-    }
-
-    fun writeU8(offset: Int, value: UByte) {
-        requireRange(offset, UByte.SIZE_BYTES)
-        bytes[offset] = value.toByte()
-    }
-
-    fun writeU16(offset: Int, value: UShort) {
-        requireRange(offset, UShort.SIZE_BYTES)
-        val bits = value.toUInt()
-        bytes[offset] = (bits shr 8).toByte()
-        bytes[offset + 1] = bits.toByte()
-    }
-
-    fun writeU32(offset: Int, value: UInt) {
-        requireRange(offset, UInt.SIZE_BYTES)
-        bytes[offset] = (value shr 24).toByte()
-        bytes[offset + 1] = (value shr 16).toByte()
-        bytes[offset + 2] = (value shr 8).toByte()
-        bytes[offset + 3] = value.toByte()
-    }
-
-    private fun requireRange(offset: Int, length: Int) {
-        require(offset >= 0 && offset <= bytes.size - length)
-    }
-}
 
 @JvmInline
 internal value class Ipv4Address private constructor(val value: UInt) {
@@ -74,7 +24,7 @@ internal value class Ipv4Address private constructor(val value: UInt) {
     }
 
     fun writeTo(bytes: ByteArray, offset: Int = 0) {
-        NetworkOrderBuffer(bytes).writeU32(offset, value)
+        BigEndianBuffer(bytes).writeU32(offset, value)
     }
 
     override fun toString(): String = (0 until SIZE_BYTES).joinToString(".") { this[it].toString() }
@@ -88,7 +38,7 @@ internal value class Ipv4Address private constructor(val value: UInt) {
 
         fun from(bytes: ByteArray, offset: Int = 0): Ipv4Address? {
             if (offset < 0 || offset > bytes.size - SIZE_BYTES) return null
-            return Ipv4Address(NetworkOrderBuffer(bytes).readU32(offset))
+            return Ipv4Address(BigEndianBuffer(bytes).readU32(offset))
         }
 
         fun parse(text: String): Ipv4Address? {
@@ -153,8 +103,16 @@ internal enum class IpProtocol(val number: UByte) {
 }
 
 @JvmInline
-internal value class Ipv4OutputPacket private constructor(val bytes: ByteArray) {
+internal value class Ipv4OutputPacket(val bytes: ByteArray) {
     val payloadLength: Int get() = bytes.size - PAYLOAD_OFFSET
+
+    fun fragment(offset: Int, length: Int): Ipv4OutputPacket {
+        if (length == payloadLength && offset == 0) return this
+        val fragment = Ipv4OutputPacket(length)
+        val start = PAYLOAD_OFFSET + offset
+        bytes.copyInto(fragment.bytes, PAYLOAD_OFFSET, start, start + length)
+        return fragment
+    }
 
     companion object {
         const val PAYLOAD_OFFSET = EthernetHeader.SIZE + Ipv4Codec.MIN_HEADER_SIZE
@@ -169,7 +127,7 @@ internal value class Ipv4OutputPacket private constructor(val bytes: ByteArray) 
 
 internal object InternetChecksum {
     fun compute(bytes: ByteArray, offset: Int = 0, length: Int = bytes.size - offset): UShort =
-        finalize(sum(bytes, offset, length))
+        fold(sum(bytes, offset, length))
 
     fun transport(
         source: Ipv4Address,
@@ -180,14 +138,9 @@ internal object InternetChecksum {
         length: Int,
     ): UShort {
         require(length <= UShort.MAX_VALUE.toInt())
-        var accumulator = source.value.toULong().let {
-            (it shr 16) + (it and 0xFFFFuL)
-        }
-        accumulator += destination.value.toULong().let {
-            (it shr 16) + (it and 0xFFFFuL)
-        }
-        accumulator += protocol.toULong() + length.toULong()
-        return finalize(sum(bytes, offset, length, accumulator))
+        val addresses = source.value.toULong() + destination.value
+        val accumulator = addresses + protocol + length.toUInt()
+        return fold(sum(bytes, offset, length, accumulator))
     }
 
     fun valid(bytes: ByteArray, offset: Int, length: Int): Boolean =
@@ -212,18 +165,21 @@ internal object InternetChecksum {
         var accumulator = initial
         var cursor = offset
         val end = offset + length
-        while (cursor + 1 < end) {
-            accumulator += (
-                (bytes[cursor].toUByte().toUInt() shl 8) or
-                    bytes[cursor + 1].toUByte().toUInt()
-                ).toULong()
-            cursor += 2
+        val input = BigEndianBuffer(bytes)
+        val wordEnd = end - length % UInt.SIZE_BYTES
+        while (cursor < wordEnd) {
+            accumulator += input.readU32(cursor)
+            cursor += UInt.SIZE_BYTES
+        }
+        if (end - cursor >= UShort.SIZE_BYTES) {
+            accumulator += input.readU16(cursor)
+            cursor += UShort.SIZE_BYTES
         }
         if (cursor < end) accumulator += bytes[cursor].toUByte().toULong() shl 8
         return accumulator
     }
 
-    private fun finalize(sum: ULong): UShort {
+    fun fold(sum: ULong): UShort {
         var folded = sum
         while (folded shr 16 != 0uL) folded = (folded and 0xFFFFuL) + (folded shr 16)
         return folded.inv().toUShort()
@@ -244,7 +200,7 @@ internal data class EthernetHeader(
         require(offset >= 0 && offset <= frame.size - SIZE)
         destination.copyTo(frame, offset)
         source.copyTo(frame, offset + MacAddress.SIZE_BYTES)
-        NetworkOrderBuffer(frame).writeU16(offset + 12, type)
+        BigEndianBuffer(frame).writeU16(offset + 12, type)
     }
 
     companion object {
@@ -255,7 +211,7 @@ internal data class EthernetHeader(
             return EthernetHeader(
                 MacAddress.from(frame, offset) ?: return null,
                 MacAddress.from(frame, offset + MacAddress.SIZE_BYTES) ?: return null,
-                NetworkOrderBuffer(frame).readU16(offset + 12),
+                BigEndianBuffer(frame).readU16(offset + 12),
             )
         }
     }
@@ -280,7 +236,7 @@ internal data class ArpPacket(
 ) {
     fun writeTo(bytes: ByteArray, offset: Int = 0) {
         require(offset >= 0 && offset <= bytes.size - SIZE)
-        val output = NetworkOrderBuffer(bytes)
+        val output = BigEndianBuffer(bytes)
         output.writeU16(offset, ETHERNET_HARDWARE_TYPE)
         output.writeU16(offset + 2, EthernetType.IPV4.value)
         output.writeU8(offset + 4, MacAddress.SIZE_BYTES.toUByte())
@@ -298,7 +254,7 @@ internal data class ArpPacket(
 
         fun decode(bytes: ByteArray, offset: Int = 0, length: Int = bytes.size - offset): ArpPacket? {
             if (offset < 0 || length < SIZE || offset > bytes.size - length) return null
-            val input = NetworkOrderBuffer(bytes)
+            val input = BigEndianBuffer(bytes)
             if (input.readU16(offset) != ETHERNET_HARDWARE_TYPE ||
                 input.readU16(offset + 2) != EthernetType.IPV4.value ||
                 input.readU8(offset + 4).toInt() != MacAddress.SIZE_BYTES ||
@@ -334,7 +290,7 @@ internal object Ipv4Codec {
 
     fun decode(bytes: ByteArray, offset: Int = 0, length: Int = bytes.size - offset): Ipv4Packet? {
         if (offset < 0 || length < MIN_HEADER_SIZE || offset > bytes.size - length) return null
-        val input = NetworkOrderBuffer(bytes)
+        val input = BigEndianBuffer(bytes)
         val versionAndLength = input.readU8(offset).toInt()
         if (versionAndLength ushr 4 != 4) return null
         val headerLength = (versionAndLength and 0xF) * UInt.SIZE_BYTES
@@ -381,21 +337,20 @@ internal object Ipv4Codec {
         require(payloadLength >= 0 && payloadLength <= MAX_PACKET_SIZE - MIN_HEADER_SIZE)
         require(fragmentOffset >= 0 && fragmentOffset and 7 == 0 && fragmentOffset / 8 <= 0x1FFF)
         require(offset >= 0 && offset <= bytes.size - MIN_HEADER_SIZE - payloadLength)
-        val output = NetworkOrderBuffer(bytes)
-        output.writeU8(offset, 0x45u)
-        output.writeU8(offset + 1, typeOfService)
-        output.writeU16(offset + 2, (MIN_HEADER_SIZE + payloadLength).toUShort())
-        output.writeU16(offset + 4, identification)
-        val fragmentation = (fragmentOffset / 8) or
-            (if (moreFragments) 0x2000 else 0) or
-            (if (dontFragment) 0x4000 else 0)
-        output.writeU16(offset + 6, fragmentation.toUShort())
-        output.writeU8(offset + 8, ttl)
-        output.writeU8(offset + 9, protocol)
-        output.writeU16(offset + 10, 0u)
+        val total = (MIN_HEADER_SIZE + payloadLength).toUInt()
+        val versionAndLength = 0x4500_0000u or (typeOfService.toUInt() shl 16) or total
+        val flags = (if (moreFragments) 0x2000u else 0u) or (if (dontFragment) 0x4000u else 0u)
+        val fragment = (identification.toUInt() shl 16) or flags or (fragmentOffset / 8).toUInt()
+        val transport = (ttl.toUInt() shl 8) or protocol.toUInt()
+        val addresses = source.value.toULong() + destination.value
+        val sum = addresses + versionAndLength + fragment + transport
+        val checksum = InternetChecksum.fold(sum).toUInt()
+        val output = BigEndianBuffer(bytes)
+        output.writeU32(offset, versionAndLength)
+        output.writeU32(offset + 4, fragment)
+        output.writeU32(offset + 8, (transport shl 16) or checksum)
         output.writeU32(offset + 12, source.value)
         output.writeU32(offset + 16, destination.value)
-        output.writeU16(offset + 10, InternetChecksum.compute(bytes, offset, MIN_HEADER_SIZE))
     }
 }
 
@@ -415,13 +370,14 @@ internal object UdpCodec {
         length: Int,
         source: Ipv4Address,
         destination: Ipv4Address,
+        checksumVerified: Boolean = false,
     ): UdpSegment? {
         if (offset < 0 || length < HEADER_SIZE || offset > bytes.size - length) return null
-        val input = NetworkOrderBuffer(bytes)
+        val input = BigEndianBuffer(bytes)
         val segmentLength = input.readU16(offset + 4).toInt()
         if (segmentLength < HEADER_SIZE || segmentLength > length) return null
         val checksum = input.readU16(offset + 6)
-        if (checksum != 0.toUShort() && !InternetChecksum.validTransport(
+        if (!checksumVerified && checksum != 0.toUShort() && !InternetChecksum.validTransport(
                 source,
                 destination,
                 IpProtocol.UDP.number,
@@ -444,15 +400,17 @@ internal object UdpCodec {
         payloadLength: Int,
         source: Ipv4SocketAddress,
         destination: Ipv4SocketAddress,
+        checksumRequired: Boolean = true,
     ) {
         val length = HEADER_SIZE + payloadLength
         require(payloadLength >= 0 && length <= UShort.MAX_VALUE.toInt())
         require(offset >= 0 && offset <= bytes.size - length)
-        val output = NetworkOrderBuffer(bytes)
+        val output = BigEndianBuffer(bytes)
         output.writeU16(offset, source.port)
         output.writeU16(offset + 2, destination.port)
         output.writeU16(offset + 4, length.toUShort())
         output.writeU16(offset + 6, 0u)
+        if (!checksumRequired) return
         val checksum = InternetChecksum.transport(
             source.address,
             destination.address,
@@ -507,12 +465,13 @@ internal object TcpCodec {
         length: Int,
         source: Ipv4Address,
         destination: Ipv4Address,
+        checksumVerified: Boolean = false,
     ): TcpSegment? {
         if (offset < 0 || length < MIN_HEADER_SIZE || offset > bytes.size - length) return null
-        val input = NetworkOrderBuffer(bytes)
+        val input = BigEndianBuffer(bytes)
         val headerLength = (input.readU8(offset + 12).toInt() ushr 4) * UInt.SIZE_BYTES
         if (headerLength !in MIN_HEADER_SIZE..minOf(MAX_HEADER_SIZE, length) ||
-            !InternetChecksum.validTransport(
+            !checksumVerified && !InternetChecksum.validTransport(
                 source,
                 destination,
                 IpProtocol.TCP.number,
@@ -546,12 +505,13 @@ internal object TcpCodec {
         flags: Int,
         window: UShort,
         options: ByteArray = EMPTY,
+        checksumRequired: Boolean = true,
     ) {
         require(options.size and 3 == 0 && options.size <= MAX_HEADER_SIZE - MIN_HEADER_SIZE)
         val headerLength = MIN_HEADER_SIZE + options.size
         val length = headerLength + payloadLength
         require(offset >= 0 && payloadLength >= 0 && offset <= bytes.size - length)
-        val output = NetworkOrderBuffer(bytes)
+        val output = BigEndianBuffer(bytes)
         output.writeU16(offset, source.port)
         output.writeU16(offset + 2, destination.port)
         output.writeU32(offset + 4, sequenceNumber)
@@ -562,6 +522,7 @@ internal object TcpCodec {
         output.writeU16(offset + 16, 0u)
         output.writeU16(offset + 18, 0u)
         options.copyInto(bytes, offset + MIN_HEADER_SIZE)
+        if (!checksumRequired) return
         output.writeU16(
             offset + 16,
             InternetChecksum.transport(
@@ -599,7 +560,7 @@ internal object TcpCodec {
                     if (optionLength < 2 || cursor > end - optionLength) return null
                     when {
                         kind == 2 && optionLength == 4 -> maximumSegmentSize =
-                            NetworkOrderBuffer(bytes).readU16(cursor + 2)
+                            BigEndianBuffer(bytes).readU16(cursor + 2)
                         kind == 3 && optionLength == 3 -> windowScale =
                             minOf(bytes[cursor + 2].toUByte().toInt(), 14).toUByte()
                         kind == 4 && optionLength == 2 -> sackPermitted = true

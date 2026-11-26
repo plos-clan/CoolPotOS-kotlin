@@ -2,18 +2,38 @@ package org.plos_clan.cpos.network
 
 import org.plos_clan.cpos.drivers.net.EthernetDevice
 import org.plos_clan.cpos.drivers.net.MacAddress
+import org.plos_clan.cpos.fs.vfs.VfsError
 import org.plos_clan.cpos.fs.vfs.VfsResult
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 
 class RouteSelectionTest {
-    private class Device : EthernetDevice() {
+    private class Device(override val maximumFrameSize: UInt = 1514u) : EthernetDevice() {
         override val macAddress = MacAddress.ZERO
-        override val maximumFrameSize = 1514u
         override val linkSpeedBitsPerSecond = 100_000_000uL
         override val linkUp = true
         override suspend fun transmit(frame: ByteArray) = true
+    }
+
+    @Test
+    fun oversizedDatagramRequiresRoomForAnAlignedFragment() {
+        val network = NetworkStack()
+        val capacity = EthernetHeader.SIZE + Ipv4Codec.MIN_HEADER_SIZE + 7
+        val device = Device(capacity.toUInt())
+        network.attach(device)
+        try {
+            val link = checkNotNull(network.interfaceByName("eth0"))
+            network.setLink(link.index, true)
+            val local = Ipv4Address.fromBits(0x0a000001u)
+            val remote = Ipv4Address.fromBits(0x0a000002u)
+            val route = NetworkPath(link, local, remote)
+            val packet = Ipv4OutputPacket(UdpCodec.HEADER_SIZE)
+            val result = network.sendIpv4(route, IpProtocol.UDP, packet)
+            assertEquals(VfsResult.Err(VfsError.MESSAGE_TOO_LONG), result)
+        } finally {
+            network.detach(device)
+        }
     }
 
     @Test

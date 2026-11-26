@@ -2,7 +2,7 @@
 
 package org.plos_clan.cpos.fs.erofs
 
-import bridge.cp_zstd_decompress
+import bridge.ZSTD_decompress
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
@@ -249,15 +249,16 @@ internal sealed class Extent(val logicalStart: ULong, val logicalEnd: ULong) {
             val source = input.indexOfFirst { it != 0.toByte() }
             if (source < 0 || source > input.size - 4) return null
             val destination = ByteArray(logicalSize.toInt())
+            val capacity = destination.size.toULong()
             return input.usePinned { compressed ->
                 destination.usePinned { output ->
-                    val result = cp_zstd_decompress(
+                    val result = ZSTD_decompress(
                         output.addressOf(0),
-                        destination.size.toULong(),
+                        capacity,
                         compressed.addressOf(source),
                         (input.size - source).toULong(),
                     )
-                    destination.takeIf { result == destination.size }
+                    destination.takeIf { result == capacity }
                 }
             }
         }

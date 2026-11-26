@@ -14,11 +14,6 @@ typedef struct vdso_clock_data {
     uint64_t realtime_epoch;
 } vdso_clock_data_t;
 
-typedef struct vdso_image {
-    const uint8_t *data;
-    size_t size;
-} vdso_image_t;
-
 static inline uint64_t read_tsc(void) {
     uint32_t low;
     uint32_t high;
