@@ -47,24 +47,22 @@ static void dispatch_exception(
     uint64_t rbp,
     uint64_t fault_address
 ) {
-    xstate_t xstate;
-    enter_kernel_xstate(&xstate);
-
     const bool from_user = (frame->cs & 3u) != 0;
     uint64_t user_fs_base = 0;
-
+    xstate_t xstate;
+    enter_kernel_xstate(&xstate);
     if (from_user) {
         __asm__ volatile("swapgs" : : : "memory");
         user_fs_base = enter_kernel_tls();
     }
 
+    irq_restore(frame->rflags);
     exception_handler(frame, error_code, rbp, fault_address, vector);
-
+    disable_interrupt();
     if (from_user) {
         leave_kernel_tls(user_fs_base);
         __asm__ volatile("swapgs" : : : "memory");
     }
-
     restore_xstate(&xstate);
 }
 
